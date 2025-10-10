@@ -11,6 +11,7 @@ members = [
     "crates/types/torii-types-introspect",
     "crates/types/torii-types-erc20",
     "crates/types/torii-types-erc721",
+    "crates/types/dojo-types-manager",
     "bins/*",
 ]
 resolver = "2"
@@ -20,6 +21,7 @@ edition = "2021"
 version = "0.1.0"
 license = "Apache-2.0"
 authors = ["Torii Runtime <dev@torii.rs>"]
+repository = "https://github.com/dojoengine/torii-core"
 publish = false
 
 [workspace.dependencies]
@@ -27,11 +29,26 @@ anyhow = "1"
 async-trait = "0.1"
 bytes = "1"
 starknet = "0.17"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "time",
+    "sync",
+] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 config = "0.14"
-sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.7", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+] }
 url = "2"
+introspect-value = { git = "https://github.com/cartridge-gg/introspect", branch = "next" }
+introspect-types = { git = "https://github.com/cartridge-gg/introspect", branch = "next" }
+introspect-events = { git = "https://github.com/cartridge-gg/introspect", branch = "next" }
+dojo-introspect-types = { git = "https://github.com/dojoengine/dojo-introspect", branch = "next" }
+dojo-introspect-utils = { git = "https://github.com/dojoengine/dojo-introspect", branch = "next" }
+dojo-introspect-events = { git = "https://github.com/dojoengine/dojo-introspect", branch = "next" }
+starknet-types-core = "0.2.0"

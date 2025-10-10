@@ -217,6 +217,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 
 [[package]]
+name = "cainome-cairo-serde"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95ae2d4c21db23c7730a85187c2e9d73fe00c123171839185fb13f31550f3240"
+dependencies = [
+ "num-bigint",
+ "serde",
+ "serde_with",
+ "starknet",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -492,6 +505,57 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "442039f5147480ba31067cb00ada1adae6892028e40e45fc5de7b7df6dcc1b5f"
 dependencies = [
  "const-random",
+]
+
+[[package]]
+name = "dojo-introspect-events"
+version = "0.1.0"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#526d62e49c486bb6b828057c4aa5b98fade31fd9"
+dependencies = [
+ "introspect-types",
+ "introspect-value",
+ "starknet",
+ "starknet-types-core",
+]
+
+[[package]]
+name = "dojo-introspect-types"
+version = "0.1.0"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#526d62e49c486bb6b828057c4aa5b98fade31fd9"
+dependencies = [
+ "cainome-cairo-serde",
+ "dojo-introspect-utils",
+ "introspect-events",
+ "introspect-types",
+ "introspect-value",
+ "num-traits",
+ "serde",
+ "starknet",
+ "starknet-types-core",
+]
+
+[[package]]
+name = "dojo-introspect-utils"
+version = "0.1.0"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#526d62e49c486bb6b828057c4aa5b98fade31fd9"
+dependencies = [
+ "anyhow",
+ "cainome-cairo-serde",
+ "starknet-crypto",
+ "starknet-types-core",
+]
+
+[[package]]
+name = "dojo-types-manager"
+version = "0.1.0"
+dependencies = [
+ "dojo-introspect-utils",
+ "introspect-events",
+ "introspect-types",
+ "serde",
+ "serde_json",
+ "starknet-types-core",
+ "torii-core",
 ]
 
 [[package]]
@@ -1144,6 +1208,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "introspect-events"
+version = "0.1.2"
+source = "git+https://github.com/cartridge-gg/introspect?branch=next#5203d874245034fa0f4b0d7c311e3a2de5a4abc3"
+dependencies = [
+ "cainome-cairo-serde",
+ "introspect-types",
+ "introspect-value",
+ "serde",
+ "starknet-types-core",
+]
+
+[[package]]
+name = "introspect-types"
+version = "0.1.2"
+source = "git+https://github.com/cartridge-gg/introspect?branch=next#5203d874245034fa0f4b0d7c311e3a2de5a4abc3"
+dependencies = [
+ "cainome-cairo-serde",
+ "introspect-value",
+ "num-traits",
+ "serde",
+ "starknet-types-core",
+]
+
+[[package]]
+name = "introspect-value"
+version = "0.1.2"
+source = "git+https://github.com/cartridge-gg/introspect?branch=next#5203d874245034fa0f4b0d7c311e3a2de5a4abc3"
+dependencies = [
+ "cainome-cairo-serde",
+ "serde",
+ "starknet-types-core",
 ]
 
 [[package]]
@@ -2867,6 +2965,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "dojo-introspect-events",
+ "dojo-introspect-types",
+ "dojo-introspect-utils",
  "serde",
  "serde_json",
  "starknet",
