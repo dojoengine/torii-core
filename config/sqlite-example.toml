@@ -8,16 +8,12 @@
 
 [decoders.introspect]
 contracts = ["0x777"]
-declare_key = "0xdead"
-set_key = "0xbeef"
 
 [decoders.erc20]
 contracts = ["0x42"]
-transfer_key = "0x100"
 
 [decoders.erc721]
 contracts = ["0x99"]
-transfer_key = "0x200"
 
 [sinks.log]
 type = "log"
