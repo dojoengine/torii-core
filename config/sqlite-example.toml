@@ -1,0 +1,29 @@
+# Uncomment the block below and update the RPC URL to use the JSON-RPC fetcher.
+# WIP, may not work with real data yet.
+#[fetchers]
+#type = "jsonrpc"
+#rpc_url = "http://127.0.0.1:5050"
+#page_size = 512
+#max_pages = 32
+
+[decoders.introspect]
+contracts = ["0x777"]
+declare_key = "0xdead"
+set_key = "0xbeef"
+
+[decoders.erc20]
+contracts = ["0x42"]
+transfer_key = "0x100"
+
+[decoders.erc721]
+contracts = ["0x99"]
+transfer_key = "0x200"
+
+[sinks.log]
+type = "log"
+label = "log-sink"
+
+[sinks.sqlite]
+type = "sqlite"
+label = "sqlite"
+database_url = "sqlite://torii.sqlite"

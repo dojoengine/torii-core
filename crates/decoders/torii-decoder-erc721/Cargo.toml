@@ -1,0 +1,17 @@
+[package]
+name = "torii-decoder-erc721"
+version = "0.1.0"
+edition = "2021"
+description = "ERC721 decoder for Torii runtime"
+authors = ["Torii Runtime <dev@torii.rs>"]
+license = "Apache-2.0"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+starknet.workspace = true
+torii-core = { path = "../../core/torii-core" }
+torii-types-erc721 = { path = "../../types/torii-types-erc721" }
+tracing.workspace = true

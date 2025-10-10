@@ -1,0 +1,21 @@
+[package]
+name = "torii-core"
+version = "0.1.0"
+edition = "2021"
+description = "Runtime primitives for Torii Starknet indexer"
+authors = ["Torii Runtime <dev@torii.rs>"]
+license = "Apache-2.0"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+starknet.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+config.workspace = true
+
+[features]
+default = []

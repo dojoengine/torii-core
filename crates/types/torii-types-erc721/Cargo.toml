@@ -1,0 +1,11 @@
+[package]
+name = "torii-types-erc721"
+version = "0.1.0"
+edition = "2021"
+description = "ERC721 protocol event types for Torii"
+authors = ["Torii Runtime <dev@torii.rs>"]
+license = "Apache-2.0"
+
+[dependencies]
+serde.workspace = true
+torii-core = { path = "../../core/torii-core" }

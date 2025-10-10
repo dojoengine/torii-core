@@ -1,0 +1,37 @@
+[workspace]
+members = [
+    "crates/core/torii-core",
+    "crates/core/torii-registry",
+    "crates/fetchers/torii-fetcher-jsonrpc",
+    "crates/decoders/torii-decoder-introspect",
+    "crates/decoders/torii-decoder-erc20",
+    "crates/decoders/torii-decoder-erc721",
+    "crates/sinks/torii-sink-log",
+    "crates/sinks/torii-sink-sqlite",
+    "crates/types/torii-types-introspect",
+    "crates/types/torii-types-erc20",
+    "crates/types/torii-types-erc721",
+    "bins/*",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "Apache-2.0"
+authors = ["Torii Runtime <dev@torii.rs>"]
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+bytes = "1"
+starknet = "0.17"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+config = "0.14"
+sqlx = { version = "0.7", default-features = false, features = ["runtime-tokio", "sqlite"] }
+url = "2"

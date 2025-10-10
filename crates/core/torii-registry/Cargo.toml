@@ -1,0 +1,21 @@
+[package]
+name = "torii-registry"
+version = "0.1.0"
+edition = "2021"
+description = "Helper utilities to register Torii decoders and sinks"
+authors = ["Torii Runtime <dev@torii.rs>"]
+license = "Apache-2.0"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+torii-core = { path = "../torii-core" }
+torii-decoder-introspect = { path = "../../decoders/torii-decoder-introspect" }
+torii-decoder-erc20 = { path = "../../decoders/torii-decoder-erc20" }
+torii-decoder-erc721 = { path = "../../decoders/torii-decoder-erc721" }
+torii-sink-log = { path = "../../sinks/torii-sink-log" }
+torii-sink-sqlite = { path = "../../sinks/torii-sink-sqlite" }
+torii-fetcher-jsonrpc = { path = "../../fetchers/torii-fetcher-jsonrpc" }
