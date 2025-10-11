@@ -230,7 +230,7 @@ where
         Ok(schema)
     }
 
-    pub fn update_table(&mut self, id: Felt, fields: Vec<ColumnDef>) -> Result<TableSchema> {
+    pub fn update_table(&mut self, id: Felt, fields: Vec<FieldDef>) -> Result<TableSchema> {
         if !self.tables.contains_key(&id) {
             return Err(anyhow!("Table not found"));
         }
@@ -238,11 +238,26 @@ where
             Some(t) => t,
             None => return Err(anyhow!("Table not found")),
         };
-        let mut record_order = Vec::new();
+        let mut key_fields = Vec::new();
+        let mut value_fields = Vec::new();
         for field in fields {
-            record_order.push(field.selector);
-            table.fields.insert(field.selector, field);
+            let selector = get_selector_from_name(&field.name)?;
+            match field.attrs.contains(&KEY_ATTR.to_string()) {
+                true => key_fields.push(selector),
+                false => value_fields.push(selector),
+            }
+            table.fields.insert(
+                selector,
+                ColumnDef {
+                    selector,
+                    name: field.name,
+                    attrs: field.attrs,
+                    type_def: field.type_def,
+                },
+            );
         }
+        table.key_fields = key_fields;
+        table.value_fields = value_fields;
         self.store.dump(id, &table)?;
         Ok(table.schema())
     }

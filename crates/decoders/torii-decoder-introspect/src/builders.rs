@@ -8,6 +8,8 @@ use dojo_introspect_types::DojoSchemaFetcher;
 use introspect_value::{Field, Value};
 use starknet::{core::types::EmittedEvent, providers::Provider};
 use starknet_types_core::felt::Felt;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use torii_core::StaticEvent;
 use torii_core::{Body, Envelope, Event};
@@ -20,6 +22,13 @@ fn make_entity_id_field(entity_id: Felt) -> Field {
         name: DOJO_ID_FIELD_NAME.to_string(),
         value: Value::Felt252(entity_id),
     }
+}
+
+fn make_entity_id_for_event(keys: Vec<Felt>) -> Field {
+    let mut hasher = DefaultHasher::new();
+    keys.hash(&mut hasher);
+    let entity_id = hasher.finish();
+    make_entity_id_field(entity_id.into())
 }
 
 pub trait DojoEventBuilder {
@@ -68,17 +77,54 @@ where
 
     async fn build_model_upgraded(&mut self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<ModelUpgraded>(raw)?;
-        unimplemented!()
+        let struct_def = self.provider.schema(event.address).await?;
+        let schema = self
+            .manager
+            .update_table(event.selector, struct_def.fields)?;
+        let data = DeclareTableV1 {
+            id: schema.table_id,
+            name: schema.table_name,
+            attrs: schema.attrs,
+            id_field: DOJO_ID_FIELD_NAME.to_string(),
+            fields: schema.fields,
+        };
+        Ok(data.to_envelope(raw))
     }
 
     async fn build_event_registered(&mut self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<EventRegistered>(raw)?;
-        unimplemented!()
+        let struct_def = self.provider.schema(event.address).await?;
+
+        let schema = self.manager.register_table(
+            event.namespace,
+            event.name,
+            struct_def.attrs,
+            struct_def.fields,
+        )?;
+        let data = DeclareTableV1 {
+            id: schema.table_id,
+            name: schema.table_name,
+            attrs: schema.attrs,
+            id_field: DOJO_ID_FIELD_NAME.to_string(),
+            fields: schema.fields,
+        };
+        Ok(data.to_envelope(raw))
     }
 
     async fn build_event_upgraded(&mut self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<EventUpgraded>(raw)?;
-        unimplemented!()
+        let struct_def = self.provider.schema(event.address).await?;
+        let schema = self
+            .manager
+            .update_table(event.selector, struct_def.fields)?;
+        let data = DeclareTableV1 {
+            id: schema.table_id,
+            name: schema.table_name,
+            attrs: schema.attrs,
+            id_field: DOJO_ID_FIELD_NAME.to_string(),
+            fields: schema.fields,
+        };
+        Ok(data.to_envelope(raw))
     }
 
     fn build_set_record(&self, raw: &EmittedEvent) -> Result<Envelope> {
@@ -145,6 +191,15 @@ where
 
     fn build_emit_event(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<EventEmitted>(raw)?;
-        unimplemented!()
+        let table = self
+            .manager
+            .get_table(event.selector)
+            .ok_or_else(|| anyhow!("no table found for selector {}", event.selector.to_string()))?;
+        let fields = table
+            .parse_values(event.values)
+            .ok_or_else(|| anyhow!("failed to parse values for table {}", table.name.clone()))?;
+        let id_field = make_entity_id_for_event(event.keys);
+        let data = UpdateRecordFieldsV1::new(table.id, table.name.clone(), id_field, fields);
+        Ok(data.to_envelope(raw))
     }
 }
