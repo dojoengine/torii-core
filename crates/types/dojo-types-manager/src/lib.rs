@@ -1,4 +1,6 @@
-use introspect_types::FieldDef;
+use dojo_introspect_utils::selector::compute_selector_from_namespace_and_name;
+use introspect_events::types::TableSchema;
+use introspect_types::ColumnDef;
 use introspect_value::{FeltIterator, Field, ToValue};
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
@@ -17,12 +19,26 @@ pub struct DojoTable {
     pub id: Felt,
     pub name: String,
     pub attrs: Vec<String>,
-    pub fields: HashMap<Felt, FieldDef>,
+    pub fields: HashMap<Felt, ColumnDef>,
     pub key_fields: Vec<Felt>,
     pub value_fields: Vec<Felt>,
 }
 
 impl DojoTable {
+    pub fn schema(&self) -> TableSchema {
+        TableSchema {
+            table_id: self.id,
+            table_name: self.name.clone(),
+            attrs: self.attrs.clone(),
+            fields: self
+                .key_fields
+                .iter()
+                .chain(self.value_fields.iter())
+                .map(|selector| self.fields.get(selector).cloned().unwrap())
+                .collect(),
+        }
+    }
+
     pub fn parse_keys(&self, keys: Vec<Felt>) -> Option<Vec<Field>> {
         let mut keys = keys.into_iter();
         let values = self
@@ -166,14 +182,16 @@ where
 {
     pub fn register_table(
         &mut self,
-        id: Felt,
-        name: &str,
+        namespace: String,
+        name: String,
         attrs: Vec<String>,
-        fields: Vec<FieldDef>,
-    ) -> bool {
+        fields: Vec<ColumnDef>,
+    ) -> Option<TableSchema> {
+        let id = compute_selector_from_namespace_and_name(&namespace, &name);
         if self.tables.contains_key(&id) {
-            return false;
+            return None;
         }
+
         let mut field_map = HashMap::new();
         let mut value_fields = Vec::new();
         let mut key_fields = Vec::new();
@@ -192,18 +210,14 @@ where
             value_fields,
             key_fields,
         };
+
+        let schema = table.schema();
         self.store.dump(id, &table);
         self.tables.insert(id, table);
-        true
+        Some(schema)
     }
 
-    pub fn update_table(
-        &mut self,
-        id: Felt,
-        name: &str,
-        _attrs: Vec<String>,
-        fields: Vec<FieldDef>,
-    ) -> bool {
+    pub fn update_table(&mut self, id: Felt, fields: Vec<ColumnDef>) -> bool {
         if !self.tables.contains_key(&id) {
             return false;
         }
@@ -211,7 +225,6 @@ where
             Some(t) => t,
             None => return false,
         };
-        table.name = name.to_string();
         let mut record_order = Vec::new();
         for field in fields {
             record_order.push(field.selector);

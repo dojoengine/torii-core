@@ -12,4 +12,4 @@ pub struct TransferV1 {
     pub token_id: FieldElement,
 }
 
-impl_event!(TransferV1, TRANSFER_ID);
+impl_event!(TransferV1, TRANSFER_URL);

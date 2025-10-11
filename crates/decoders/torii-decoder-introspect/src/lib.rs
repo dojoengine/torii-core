@@ -1,29 +1,25 @@
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use dojo_introspect_events::{
-    selectors, DojoEvent, EventEmitted, EventRegistered, EventUpgraded, ModelUpgraded,
+    DojoEvent, EventEmitted, EventRegistered, EventUpgraded, ModelRegistered, ModelUpgraded,
     StoreDelRecord, StoreSetRecord, StoreUpdateMember, StoreUpdateRecord,
 };
 use dojo_types_manager::{DojoManager, JsonStore};
-use introspect_value::ToValue;
+use introspect_value::{Field, Value};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use starknet::{core::types::EmittedEvent, macros::selector};
+use starknet::{core::types::EmittedEvent, providers::Provider};
+use starknet_types_core::felt::Felt;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use torii_core::{Body, Decoder, DecoderFactory, DecoderFilter, Envelope, Event, FieldElement};
-use torii_types_introspect::{
-    DeclareTableV1, UpdateRecordFieldsV1, DECLARE_TABLE_ID, SET_RECORD_ID, UPDATE_RECORD_FIELDS_ID,
-};
+use torii_core::{Decoder, DecoderFactory, DecoderFilter, Envelope, FieldElement};
+use torii_types_introspect::DECLARE_TABLE_ID;
+mod builders;
+use builders::DojoEventBuilder;
 
 const DECODER_NAME: &str = "introspect";
 
 /// Cairo selectors of the events to be processed by this decoder.
-const DECLARE_TABLE_SELECTOR: FieldElement = selector!("DeclareTable");
-const SET_RECORD_SELECTOR: FieldElement = selector!("SetRecord");
-
-const CAIRO_EVENT_SELECTORS: [FieldElement; 2] = [DECLARE_TABLE_SELECTOR, SET_RECORD_SELECTOR];
 
 /// Configuration for the introspect decoder.
 ///
@@ -39,12 +35,19 @@ pub struct IntrospectDecoderConfig {
 }
 
 /// Implementation of the introspect decoder.
-struct IntrospectDecoder {
-    filter: Option<DecoderFilter>,
-    manager: DojoManager<JsonStore>,
+struct IntrospectDecoder<P>
+where
+    P: Provider,
+{
+    pub filter: Option<DecoderFilter>,
+    pub manager: DojoManager<JsonStore>,
+    pub provider: P,
 }
 
-impl IntrospectDecoder {
+impl<P> IntrospectDecoder<P>
+where
+    P: Provider,
+{
     /// Builds the decoder from a configuration.
     fn from_config(cfg: &IntrospectDecoderConfig) -> Result<Self> {
         if cfg.contracts.is_empty() {
@@ -80,7 +83,10 @@ impl IntrospectDecoder {
 }
 
 #[async_trait]
-impl Decoder for IntrospectDecoder {
+impl<P> Decoder for IntrospectDecoder<P>
+where
+    P: Provider + Sync + Send,
+{
     fn name(&self) -> &'static str {
         DECODER_NAME
     }
@@ -111,7 +117,7 @@ impl Decoder for IntrospectDecoder {
         let selector = *event.keys.first().expect("event selector is required");
         // Felts are non structural types, so we can't use a match statement directly.
         // TODO: check if using hashmap would be better.
-        if selector == selectors::ModelRegistered {
+        if selector == ModelRegistered::SELECTOR {
             self.build_model_registered(event)
         } else if selector == ModelUpgraded::SELECTOR {
             self.build_model_upgraded(event)
@@ -143,107 +149,9 @@ impl DecoderFactory for IntrospectDecoderFactory {
         DECODER_NAME
     }
 
-    async fn create(&self, config: Value) -> Result<Arc<dyn Decoder>> {
+    async fn create(&self, config: serde_json::Value) -> Result<Arc<dyn Decoder>> {
         let cfg: IntrospectDecoderConfig = serde_json::from_value(config)?;
         let decoder = IntrospectDecoder::from_config(&cfg)?;
         Ok(Arc::new(decoder))
     }
-}
-
-// @ben: The functions below must be organized in other files/modules to keep this lib.rs clean.
-// Also, here I am using placeholder types, but this is where we want the `TypeDef` and parsing to happen.
-
-/// Builds a declare table event.
-fn build_declare_table(raw: &EmittedEvent) -> Envelope {
-    let event = DeclareTableV1 {
-        name: "erc20_balances".to_string(),
-        fields: vec![
-            ("contract".into(), "felt252".into()),
-            ("owner".into(), "felt252".into()),
-            ("balance".into(), "u128".into()),
-        ],
-        primary_key: vec!["contract".into(), "owner".into()],
-    };
-
-    Envelope {
-        type_id: DECLARE_TABLE_ID,
-        raw: Arc::new(raw.clone()),
-        body: Body::Typed(Arc::new(event) as Arc<dyn Event>),
-    }
-}
-
-trait DojoEventBuilder {
-    fn build_model_registered(&self, raw: &EmittedEvent) -> Result<Envelope>;
-    fn build_model_upgraded(&self, raw: &EmittedEvent) -> Result<Envelope>;
-    fn build_event_registered(&self, raw: &EmittedEvent) -> Result<Envelope>;
-    fn build_event_upgraded(&self, raw: &EmittedEvent) -> Result<Envelope>;
-    fn build_set_record(&self, raw: &EmittedEvent) -> Result<Envelope>;
-    fn build_update_record(&self, raw: &EmittedEvent) -> Result<Envelope>;
-    fn build_update_member(&self, raw: &EmittedEvent) -> Result<Envelope>;
-    fn build_del_record(&self, raw: &EmittedEvent) -> Result<Envelope>;
-    fn build_emit_event(&self, raw: &EmittedEvent) -> Result<Envelope>;
-}
-
-impl DojoEventBuilder for IntrospectDecoder {
-    fn build_set_record(&self, raw: &EmittedEvent) -> Result<Envelope> {
-        let event = StoreSetRecord::new(raw.keys[1..].to_vec(), raw.data.clone())
-            .ok_or_else(|| anyhow!("failed to decode StoreSetRecord event"))?;
-        let table = self
-            .manager
-            .get_table(event.selector)
-            .ok_or_else(|| anyhow!("no table found for selector {}", event.selector.to_string()))?;
-        let fields = table
-            .parse_key_values(event.keys, event.values)
-            .ok_or_else(|| {
-                anyhow!(
-                    "failed to parse key/values for table {}",
-                    table.name.clone()
-                )
-            })?;
-        let data = UpdateRecordFieldsV1::new(table.id, table.name.clone(), event.entity_id, fields);
-        Ok(Envelope {
-            type_id: UPDATE_RECORD_FIELDS_ID,
-            raw: Arc::new(raw.clone()),
-            body: Body::Typed(Arc::new(data) as Arc<dyn Event>),
-        })
-    }
-
-    fn build_update_record(&self, raw: &EmittedEvent) -> Result<Envelope> {
-        let event = StoreUpdateRecord::new(raw.keys[1..].to_vec(), raw.data.clone())
-            .ok_or_else(|| anyhow!("failed to decode StoreUpdateRecord event"))?;
-        let table = self
-            .manager
-            .get_table(event.selector)
-            .ok_or_else(|| anyhow!("no table found for selector {}", event.selector.to_string()))?;
-        let fields = table
-            .parse_values(event.values)
-            .ok_or_else(|| anyhow!("failed to parse values for table {}", table.name.clone()))?;
-        let data = UpdateRecordFieldsV1::new(table.id, table.name.clone(), event.entity_id, fields);
-        Ok(Envelope {
-            type_id: UPDATE_RECORD_FIELDS_ID,
-            raw: Arc::new(raw.clone()),
-            body: Body::Typed(Arc::new(data) as Arc<dyn Event>),
-        })
-    }
-
-    fn build_update_member(&self, raw: &EmittedEvent) -> Result<Envelope> {
-        let event = StoreUpdateMember::new(raw.keys[1..].to_vec(), raw.data.clone())
-            .ok_or_else(|| anyhow!("failed to decode StoreUpdateMember event"))?;
-        let table = self
-            .manager
-            .get_table(event.selector)
-            .ok_or_else(|| anyhow!("no table found for selector {}", event.selector.to_string()))?;
-        let value = table
-            .parse_field(event.selector, event.values)
-            .ok_or_else(|| anyhow!("failed to parse field for table {}", table.name.clone()))?;
-        let data =
-            UpdateRecordFieldsV1::new(table.id, table.name.clone(), event.entity_id, vec![value]);
-        Ok(Envelope {
-            type_id: UPDATE_RECORD_FIELDS_ID,
-            raw: Arc::new(raw.clone()),
-            body: Body::Typed(Arc::new(data) as Arc<dyn Event>),
-        })
-    }
-
-    fn build_del_record(&self, raw: &EmittedEvent) -> Result<Envelope> {}
 }

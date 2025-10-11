@@ -2,50 +2,72 @@
 //! taken from introspect crate. We may not need it, or only the URL declaration and the ID
 //! and then using the new type pattern, using the `impl_event!` on the struct.
 
-use introspect_types::{FieldDef, TypeDef};
+use introspect_types::ColumnDef;
 use introspect_value::Field;
 use serde::{Deserialize, Serialize};
+use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
-use torii_core::{impl_event, type_id_from_url};
+use torii_core::{impl_event, type_id_from_url, Envelope};
 pub const DECLARE_TABLE_URL: &str = "torii.introspect/DeclareTable@1";
 pub const DECLARE_TABLE_ID: u64 = type_id_from_url(DECLARE_TABLE_URL);
 
-pub const SET_RECORD_URL: &str = "torii.introspect/SetRecord@1";
-pub const SET_RECORD_ID: u64 = type_id_from_url(SET_RECORD_URL);
 pub const UPDATE_RECORD_FIELDS_URL: &str = "torii.introspect/UpdateRecordFields@1";
 pub const UPDATE_RECORD_FIELDS_ID: u64 = type_id_from_url(UPDATE_RECORD_FIELDS_URL);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeclareTableV1 {
-    pub name: String,
-    pub fields: Vec<FieldDef>,
-    pub primary_key: (String, TypeDef),
+pub const DELETE_RECORDS_URL: &str = "torii.introspect/DeleteRecords@1";
+pub const DELETE_RECORDS_ID: u64 = type_id_from_url(DELETE_RECORDS_URL);
+
+pub trait MethodTrait {
+    const SELECTOR: &str;
+    const ID: u64 = type_id_from_url(Self::SELECTOR);
+    fn to_envelope(self, raw: &EmittedEvent) -> Envelope;
 }
 
-impl_event!(DeclareTableV1, DECLARE_TABLE_ID);
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeclareTableV1 {
+    pub id: Felt,
+    pub name: String,
+    pub attrs: Vec<String>,
+    pub id_field: Field,
+    pub fields: Vec<ColumnDef>,
+}
+
+impl_event!(DeclareTableV1, DECLARE_TABLE_URL);
 
 pub struct UpdateRecordFieldsV1 {
     pub table_id: Felt,
     pub table_name: String,
-    pub row_id: Felt,
+    pub id_field: Field,
     pub fields: Vec<Field>,
 }
 
 impl UpdateRecordFieldsV1 {
-    pub fn new(table_id: Felt, table_name: String, row_id: Felt, fields: Vec<Field>) -> Self {
+    pub fn new(table_id: Felt, table_name: String, id_field: Field, fields: Vec<Field>) -> Self {
         Self {
             table_id,
             table_name,
-            row_id,
+            id_field,
             fields,
         }
     }
 }
 
-impl_event!(UpdateRecordFieldsV1, UPDATE_RECORD_FIELDS_ID);
+impl_event!(UpdateRecordFieldsV1, UPDATE_RECORD_FIELDS_URL);
 
 pub struct DeleteRecordsV1 {
     pub table_id: Felt,
     pub table_name: String,
-    pub row_ids: Vec<Felt>,
+    pub id_fields: Vec<Field>,
 }
+
+impl DeleteRecordsV1 {
+    pub fn new(table_id: Felt, table_name: String, id_fields: Vec<Field>) -> Self {
+        Self {
+            table_id,
+            table_name,
+            id_fields,
+        }
+    }
+}
+
+impl_event!(DeleteRecordsV1, DELETE_RECORDS_URL);

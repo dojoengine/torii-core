@@ -510,7 +510,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-events"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#9eef8a8a5a537f8963691ad066c260e6c9979475"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#10e4c08c48407ca0867a487a10b7041f74b9de33"
 dependencies = [
  "introspect-types",
  "introspect-value",
@@ -521,7 +521,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-types"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#9eef8a8a5a537f8963691ad066c260e6c9979475"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#10e4c08c48407ca0867a487a10b7041f74b9de33"
 dependencies = [
  "cainome-cairo-serde",
  "dojo-introspect-utils",
@@ -537,7 +537,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-utils"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#9eef8a8a5a537f8963691ad066c260e6c9979475"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#10e4c08c48407ca0867a487a10b7041f74b9de33"
 dependencies = [
  "anyhow",
  "cainome-cairo-serde",
@@ -1214,7 +1214,7 @@ dependencies = [
 [[package]]
 name = "introspect-events"
 version = "0.1.2"
-source = "git+https://github.com/cartridge-gg/introspect?branch=next#5203d874245034fa0f4b0d7c311e3a2de5a4abc3"
+source = "git+https://github.com/cartridge-gg/introspect?branch=next#e451cb7b76390281cbf4bcc822a51e3e14e5eb0e"
 dependencies = [
  "cainome-cairo-serde",
  "introspect-types",
@@ -1226,7 +1226,7 @@ dependencies = [
 [[package]]
 name = "introspect-types"
 version = "0.1.2"
-source = "git+https://github.com/cartridge-gg/introspect?branch=next#5203d874245034fa0f4b0d7c311e3a2de5a4abc3"
+source = "git+https://github.com/cartridge-gg/introspect?branch=next#e451cb7b76390281cbf4bcc822a51e3e14e5eb0e"
 dependencies = [
  "cainome-cairo-serde",
  "introspect-value",
@@ -1238,7 +1238,7 @@ dependencies = [
 [[package]]
 name = "introspect-value"
 version = "0.1.2"
-source = "git+https://github.com/cartridge-gg/introspect?branch=next#5203d874245034fa0f4b0d7c311e3a2de5a4abc3"
+source = "git+https://github.com/cartridge-gg/introspect?branch=next#e451cb7b76390281cbf4bcc822a51e3e14e5eb0e"
 dependencies = [
  "cainome-cairo-serde",
  "serde",
@@ -2976,6 +2976,7 @@ dependencies = [
  "serde",
  "serde_json",
  "starknet",
+ "starknet-types-core",
  "torii-core",
  "torii-types-introspect",
  "tracing",
@@ -3048,6 +3049,7 @@ name = "torii-types-erc20"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "starknet",
  "torii-core",
 ]
 
@@ -3067,6 +3069,7 @@ dependencies = [
  "introspect-types",
  "introspect-value",
  "serde",
+ "starknet",
  "starknet-types-core",
  "torii-core",
 ]

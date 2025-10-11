@@ -1,5 +1,9 @@
 //! Traits and macros for working with typed domain events that Torii understands.
 
+use starknet::core::types::EmittedEvent;
+
+use crate::type_id_from_url;
+
 /// Canonical domain event trait implemented by typed payloads.
 pub trait Event: Send + Sync + 'static {
     fn as_any(&self) -> &dyn std::any::Any;
@@ -7,22 +11,25 @@ pub trait Event: Send + Sync + 'static {
 
 /// Trait providing static metadata for events.
 pub trait StaticEvent: Event {
-    fn static_type_id() -> u64;
+    const SELECTOR: &str;
+    const TYPE_ID: u64 = type_id_from_url(Self::SELECTOR);
+    fn to_envelope(self, raw: &EmittedEvent) -> crate::Envelope;
 }
 
 /// Helper macro to implement [`Event`] and [`StaticEvent`] for a struct with the provided metadata.
 #[macro_export]
 macro_rules! impl_event {
-    ($t:ty, $id:expr) => {
-        impl $t {
-            pub fn type_id() -> u64 {
-                $id
-            }
-        }
-
+    ($t:ty, $url:expr) => {
         impl $crate::StaticEvent for $t {
-            fn static_type_id() -> u64 {
-                $id
+            const SELECTOR: &str = $url;
+            fn to_envelope(self, raw: &starknet::core::types::EmittedEvent) -> $crate::Envelope {
+                $crate::Envelope {
+                    type_id: Self::TYPE_ID,
+                    raw: std::sync::Arc::new(raw.clone()),
+                    body: $crate::Body::Typed(
+                        std::sync::Arc::new(self) as std::sync::Arc<dyn $crate::Event>
+                    ),
+                }
             }
         }
 

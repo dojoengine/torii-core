@@ -13,3 +13,4 @@ introspect-value.workspace = true
 introspect-events.workspace = true
 introspect-types.workspace = true
 starknet-types-core.workspace = true
+starknet.workspace = true

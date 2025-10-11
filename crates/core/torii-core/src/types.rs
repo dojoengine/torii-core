@@ -56,9 +56,7 @@ impl Envelope {
     /// Attempt to view the body as a typed event of `E`.
     pub fn downcast<E: crate::StaticEvent>(&self) -> Option<&E> {
         match &self.body {
-            Body::Typed(ev) if E::static_type_id() == self.type_id => {
-                ev.as_any().downcast_ref::<E>()
-            }
+            Body::Typed(ev) if E::TYPE_ID == self.type_id => ev.as_any().downcast_ref::<E>(),
             _ => None,
         }
     }
