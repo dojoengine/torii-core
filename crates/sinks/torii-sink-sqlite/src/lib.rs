@@ -12,8 +12,9 @@ use sqlx::SqlitePool;
 use torii_core::{Batch, Envelope, Sink, SinkFactory, SinkRegistry};
 use torii_types_erc20::TransferV1 as Erc20Transfer;
 use torii_types_erc721::TransferV1 as Erc721Transfer;
-use torii_types_introspect::DeclareTableV1;
-
+use torii_types_introspect::{DeclareTableV1, UpdateRecordFieldsV1};
+use tracing::field::Field;
+mod types;
 #[derive(Clone)]
 pub struct SqliteSink {
     label: String,

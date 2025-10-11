@@ -14,6 +14,7 @@ serde_json.workspace = true
 sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+introspect-types.workspace = true
 
 # Local crates
 torii-core = { path = "../../core/torii-core" }
