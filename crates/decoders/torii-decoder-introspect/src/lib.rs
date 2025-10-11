@@ -5,19 +5,36 @@ use dojo_introspect_events::{
     StoreDelRecord, StoreSetRecord, StoreUpdateMember, StoreUpdateRecord,
 };
 use dojo_types_manager::{DojoManager, JsonStore};
-use introspect_value::{Field, Value};
 use serde::{Deserialize, Serialize};
-use starknet::{core::types::EmittedEvent, providers::Provider};
-use starknet_types_core::felt::Felt;
+use starknet::{
+    core::types::EmittedEvent,
+    providers::{jsonrpc::HttpTransport, JsonRpcClient, Provider, Url},
+};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use torii_core::{Decoder, DecoderFactory, DecoderFilter, Envelope, FieldElement};
-use torii_types_introspect::DECLARE_TABLE_ID;
+use torii_core::{Decoder, DecoderFactory, DecoderFilter, Envelope, FieldElement, StaticEvent};
+use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1};
 mod builders;
 use builders::DojoEventBuilder;
 
 const DECODER_NAME: &str = "introspect";
+const DOJO_CAIRO_EVENT_SELECTORS: [FieldElement; 8] = [
+    ModelRegistered::SELECTOR,
+    ModelUpgraded::SELECTOR,
+    EventRegistered::SELECTOR,
+    EventUpgraded::SELECTOR,
+    StoreSetRecord::SELECTOR,
+    StoreUpdateRecord::SELECTOR,
+    StoreUpdateMember::SELECTOR,
+    StoreDelRecord::SELECTOR,
+];
+
+const DOJO_EVENT_IDS: [u64; 3] = [
+    DeclareTableV1::TYPE_ID,
+    DeleteRecordsV1::TYPE_ID,
+    UpdateRecordFieldsV1::TYPE_ID,
+];
 
 /// Cairo selectors of the events to be processed by this decoder.
 
@@ -32,6 +49,7 @@ pub struct IntrospectDecoderConfig {
     #[serde(default)]
     pub contracts: Vec<String>,
     pub store_path: PathBuf,
+    pub rpc_url: Url,
 }
 
 /// Implementation of the introspect decoder.
@@ -39,17 +57,14 @@ struct IntrospectDecoder<P>
 where
     P: Provider,
 {
-    pub filter: Option<DecoderFilter>,
+    pub filter: DecoderFilter,
     pub manager: DojoManager<JsonStore>,
     pub provider: P,
 }
 
-impl<P> IntrospectDecoder<P>
-where
-    P: Provider,
-{
+impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
     /// Builds the decoder from a configuration.
-    fn from_config(cfg: &IntrospectDecoderConfig) -> Result<Self> {
+    fn from_config(cfg: IntrospectDecoderConfig) -> Result<Self> {
         if cfg.contracts.is_empty() {
             return Err(anyhow!(
                 "introspect decoder requires at least one contract address in config"
@@ -68,16 +83,17 @@ where
         // As mentioned in the comment in the `IntrospectDecoderConfig`, we may have all of this
         // in the config. But this is IMHO too heavy for the user to actually configure (at least for now).
         let mut selectors = HashSet::default();
-        for selector in CAIRO_EVENT_SELECTORS {
+        for selector in DOJO_CAIRO_EVENT_SELECTORS {
             selectors.insert(selector);
         }
-
+        let provider = JsonRpcClient::new(HttpTransport::new(cfg.rpc_url));
         Ok(Self {
             filter: DecoderFilter {
                 contract_addresses,
                 selectors,
             },
-            manager: DojoManager::new(cfg.store_path),
+            manager: DojoManager::new(cfg.store_path.as_path()),
+            provider,
         })
     }
 }
@@ -109,22 +125,21 @@ where
     }
 
     fn type_ids(&self) -> &'static [u64] {
-        const IDS: [u64; 2] = [DECLARE_TABLE_ID, SET_RECORD_ID];
-        &IDS
+        &DOJO_EVENT_IDS
     }
 
-    async fn decode(&self, event: &EmittedEvent) -> Result<Envelope> {
+    async fn decode(&mut self, event: &EmittedEvent) -> Result<Envelope> {
         let selector = *event.keys.first().expect("event selector is required");
         // Felts are non structural types, so we can't use a match statement directly.
         // TODO: check if using hashmap would be better.
         if selector == ModelRegistered::SELECTOR {
-            self.build_model_registered(event)
+            self.build_model_registered(event).await
         } else if selector == ModelUpgraded::SELECTOR {
-            self.build_model_upgraded(event)
+            self.build_model_upgraded(event).await
         } else if selector == EventRegistered::SELECTOR {
-            self.build_event_registered(event)
+            self.build_event_registered(event).await
         } else if selector == EventUpgraded::SELECTOR {
-            self.build_event_upgraded(event)
+            self.build_event_upgraded(event).await
         } else if selector == StoreSetRecord::SELECTOR {
             self.build_set_record(event)
         } else if selector == StoreUpdateRecord::SELECTOR {
@@ -151,7 +166,7 @@ impl DecoderFactory for IntrospectDecoderFactory {
 
     async fn create(&self, config: serde_json::Value) -> Result<Arc<dyn Decoder>> {
         let cfg: IntrospectDecoderConfig = serde_json::from_value(config)?;
-        let decoder = IntrospectDecoder::from_config(&cfg)?;
+        let decoder = IntrospectDecoder::from_config(cfg)?;
         Ok(Arc::new(decoder))
     }
 }

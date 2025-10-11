@@ -1,8 +1,10 @@
+use anyhow::{anyhow, Ok, Result};
 use dojo_introspect_utils::selector::compute_selector_from_namespace_and_name;
 use introspect_events::types::TableSchema;
-use introspect_types::ColumnDef;
+use introspect_types::{ColumnDef, FieldDef};
 use introspect_value::{FeltIterator, Field, ToValue};
 use serde::{Deserialize, Serialize};
+use starknet::core::utils::get_selector_from_name;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::fs;
@@ -143,8 +145,8 @@ impl JsonStore {
 
 pub trait StoreTrait {
     type Table;
-    fn dump(&self, table_id: Felt, data: &Self::Table) -> bool;
-    fn load(&self, table_id: Felt) -> Option<Self::Table>;
+    fn dump(&self, table_id: Felt, data: &Self::Table) -> Result<()>;
+    fn load(&self, table_id: Felt) -> Result<Self::Table>;
 }
 
 fn felt_to_fixed_hex_string(felt: &Felt) -> String {
@@ -162,17 +164,17 @@ fn json_file_name_to_felt(file_name: &str) -> Option<Felt> {
 impl StoreTrait for JsonStore {
     type Table = DojoTable;
 
-    fn dump(&self, table_id: Felt, data: &Self::Table) -> bool {
+    fn dump(&self, table_id: Felt, data: &Self::Table) -> Result<()> {
         let file_path = self.path.join(felt_to_json_file_name(&table_id));
         std::fs::write(file_path, serde_json::to_string(data).unwrap())
             .expect("Unable to write file");
-        true
+        Ok(())
     }
 
-    fn load(&self, table_id: Felt) -> Option<Self::Table> {
+    fn load(&self, table_id: Felt) -> Result<Self::Table> {
         let file_path = self.path.join(felt_to_json_file_name(&table_id));
         let data = std::fs::read_to_string(file_path).expect("Unable to read file");
-        serde_json::from_str(&data).ok()
+        serde_json::from_str(&data).map_err(|e| anyhow!("Failed to parse JSON: {}", e))
     }
 }
 
@@ -185,26 +187,37 @@ where
         namespace: String,
         name: String,
         attrs: Vec<String>,
-        fields: Vec<ColumnDef>,
-    ) -> Option<TableSchema> {
+        fields: Vec<FieldDef>,
+    ) -> Result<TableSchema> {
         let id = compute_selector_from_namespace_and_name(&namespace, &name);
+        let table_name = format!("{namespace}-{name}");
         if self.tables.contains_key(&id) {
-            return None;
+            return Err(anyhow!("Table already exists"));
         }
 
         let mut field_map = HashMap::new();
         let mut value_fields = Vec::new();
         let mut key_fields = Vec::new();
         for field in fields {
+            let selector = get_selector_from_name(&field.name)?;
             match field.attrs.contains(&KEY_ATTR.to_string()) {
-                true => key_fields.push(field.selector),
-                false => value_fields.push(field.selector),
+                true => key_fields.push(selector),
+                false => value_fields.push(selector),
             }
-            field_map.insert(field.selector, field);
+
+            field_map.insert(
+                selector,
+                ColumnDef {
+                    selector,
+                    name: field.name,
+                    attrs: field.attrs,
+                    type_def: field.type_def,
+                },
+            );
         }
         let table = DojoTable {
             id,
-            name: name.to_string(),
+            name: table_name,
             attrs,
             fields: field_map,
             value_fields,
@@ -212,26 +225,26 @@ where
         };
 
         let schema = table.schema();
-        self.store.dump(id, &table);
+        self.store.dump(id, &table)?;
         self.tables.insert(id, table);
-        Some(schema)
+        Ok(schema)
     }
 
-    pub fn update_table(&mut self, id: Felt, fields: Vec<ColumnDef>) -> bool {
+    pub fn update_table(&mut self, id: Felt, fields: Vec<ColumnDef>) -> Result<TableSchema> {
         if !self.tables.contains_key(&id) {
-            return false;
+            return Err(anyhow!("Table not found"));
         }
         let table = match self.tables.get_mut(&id) {
             Some(t) => t,
-            None => return false,
+            None => return Err(anyhow!("Table not found")),
         };
         let mut record_order = Vec::new();
         for field in fields {
             record_order.push(field.selector);
             table.fields.insert(field.selector, field);
         }
-        self.store.dump(id, &table);
-        true
+        self.store.dump(id, &table)?;
+        Ok(table.schema())
     }
 
     pub fn get_table(&self, id: Felt) -> Option<&DojoTable> {

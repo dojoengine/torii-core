@@ -28,7 +28,7 @@ pub trait Decoder: Send + Sync {
     ///
     /// The decoder can expect the event to be valid, since the `matches` method is called before the `decode` method
     /// in the torii runtime.
-    async fn decode(&self, raw: &EmittedEvent) -> Result<Envelope>;
+    async fn decode(&mut self, raw: &EmittedEvent) -> Result<Envelope>;
 }
 
 /// Allows registering decoder implementations from configuration.

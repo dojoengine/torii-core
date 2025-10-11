@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use starknet::{core::types::EmittedEvent, macros::selector};
-use torii_core::{Body, Decoder, DecoderFactory, DecoderFilter, Envelope, Event, FieldElement};
-use torii_types_erc20::{TransferV1, TRANSFER_ID};
+use torii_core::{Decoder, DecoderFactory, DecoderFilter, Envelope, FieldElement, StaticEvent};
+use torii_types_erc20::TransferV1;
 
 const DECODER_NAME: &str = "erc20";
 
@@ -76,11 +76,11 @@ impl Decoder for Erc20Decoder {
     }
 
     fn type_ids(&self) -> &'static [u64] {
-        const IDS: [u64; 1] = [TRANSFER_ID];
+        const IDS: [u64; 1] = [TransferV1::TYPE_ID];
         &IDS
     }
 
-    async fn decode(&self, event: &EmittedEvent) -> Result<Envelope> {
+    async fn decode(&mut self, event: &EmittedEvent) -> Result<Envelope> {
         let selector = event.keys.first().expect("event selector is required");
 
         if *selector != TRANSFER_KEY {
@@ -123,10 +123,5 @@ fn build_transfer(raw: &EmittedEvent) -> Envelope {
             })
             .unwrap_or(0),
     };
-
-    Envelope {
-        type_id: TRANSFER_ID,
-        raw: Arc::new(raw.clone()),
-        body: Body::Typed(Arc::new(event) as Arc<dyn Event>),
-    }
+    event.to_envelope(raw)
 }

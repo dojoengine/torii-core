@@ -6,15 +6,12 @@ use dojo_introspect_events::{
 };
 use dojo_introspect_types::DojoSchemaFetcher;
 use introspect_value::{Field, Value};
-use starknet::core::types::EmittedEvent;
+use starknet::{core::types::EmittedEvent, providers::Provider};
 use starknet_types_core::felt::Felt;
 use std::sync::Arc;
+use torii_core::StaticEvent;
 use torii_core::{Body, Envelope, Event};
-use torii_types_introspect::{
-    DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, DECLARE_TABLE_ID,
-    UPDATE_RECORD_FIELDS_ID,
-};
-
+use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1};
 const DOJO_ID_FIELD_NAME: &str = "entity_id";
 
 fn make_entity_id_field(entity_id: Felt) -> Field {
@@ -45,7 +42,10 @@ where
         .ok_or_else(|| anyhow!("failed to decode DojoEvent"))
 }
 
-impl DojoEventBuilder for IntrospectDecoder {
+impl<P> DojoEventBuilder for IntrospectDecoder<P>
+where
+    P: Provider,
+{
     async fn build_model_registered(&mut self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<ModelRegistered>(raw)?;
         let struct_def = self.provider.schema(event.address).await?;
@@ -55,12 +55,12 @@ impl DojoEventBuilder for IntrospectDecoder {
             event.name,
             struct_def.attrs,
             struct_def.fields,
-        );
+        )?;
         let data = DeclareTableV1 {
-            id: schema.id,
-            name: schema.name,
+            id: schema.table_id,
+            name: schema.table_name,
             attrs: schema.attrs,
-            id_field: make_entity_id_field(schema.id),
+            id_field: DOJO_ID_FIELD_NAME.to_string(),
             fields: schema.fields,
         };
         Ok(data.to_envelope(raw))

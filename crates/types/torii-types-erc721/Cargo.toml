@@ -9,3 +9,4 @@ license = "Apache-2.0"
 [dependencies]
 serde.workspace = true
 torii-core = { path = "../../core/torii-core" }
+starknet.workspace = true

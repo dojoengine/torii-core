@@ -5,9 +5,8 @@
 use introspect_types::ColumnDef;
 use introspect_value::Field;
 use serde::{Deserialize, Serialize};
-use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
-use torii_core::{impl_event, type_id_from_url, Envelope};
+use torii_core::{impl_event, type_id_from_url};
 pub const DECLARE_TABLE_URL: &str = "torii.introspect/DeclareTable@1";
 pub const DECLARE_TABLE_ID: u64 = type_id_from_url(DECLARE_TABLE_URL);
 
@@ -17,18 +16,12 @@ pub const UPDATE_RECORD_FIELDS_ID: u64 = type_id_from_url(UPDATE_RECORD_FIELDS_U
 pub const DELETE_RECORDS_URL: &str = "torii.introspect/DeleteRecords@1";
 pub const DELETE_RECORDS_ID: u64 = type_id_from_url(DELETE_RECORDS_URL);
 
-pub trait MethodTrait {
-    const SELECTOR: &str;
-    const ID: u64 = type_id_from_url(Self::SELECTOR);
-    fn to_envelope(self, raw: &EmittedEvent) -> Envelope;
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeclareTableV1 {
     pub id: Felt,
     pub name: String,
     pub attrs: Vec<String>,
-    pub id_field: Field,
+    pub id_field: String,
     pub fields: Vec<ColumnDef>,
 }
 

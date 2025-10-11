@@ -59,9 +59,19 @@ pub async fn run_once_batch(
     // Creating a map of decoders by selector may be a better approach as it was done in the older
     // Torii implementation, but this must be adapted to the new architecture.
     for ev in &raw_events {
-        for decoder in registry.decoders() {
-            if decoder.matches(ev) {
-                envelopes.push(decoder.decode(ev).await?);
+        for decoder_arc in registry.decoders() {
+            if decoder_arc.matches(ev) {
+                // Clone the Arc to get owned access, then try to get mutable reference
+                let mut decoder_owned = decoder_arc.clone();
+                if let Some(decoder) = Arc::get_mut(&mut decoder_owned) {
+                    envelopes.push(decoder.decode(&ev).await?);
+                } else {
+                    // If Arc has multiple references, we can't get exclusive access
+                    // This shouldn't happen in normal single-threaded iteration
+                    anyhow::bail!(
+                        "Cannot get exclusive access to decoder: multiple references exist"
+                    );
+                }
                 break;
             }
         }

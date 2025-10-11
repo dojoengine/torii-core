@@ -80,7 +80,7 @@ impl Decoder for Erc721Decoder {
         &IDS
     }
 
-    async fn decode(&self, event: &EmittedEvent) -> Result<Envelope> {
+    async fn decode(&mut self, event: &EmittedEvent) -> Result<Envelope> {
         let selector = event.keys.first().expect("event selector is required");
 
         if *selector != TRANSFER_KEY {
