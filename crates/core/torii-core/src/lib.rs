@@ -34,6 +34,8 @@ pub struct ToriiConfig {
     pub decoders: HashMap<String, JsonValue>,
     #[serde(default)]
     pub sinks: HashMap<String, JsonValue>,
+    #[serde(default)]
+    pub contracts: HashMap<String, ContractConfig>,
 }
 
 impl ToriiConfig {
@@ -44,4 +46,12 @@ impl ToriiConfig {
             .build()?;
         Ok(config.try_deserialize()?)
     }
+}
+
+/// Declares which decoders should observe a Starknet contract.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContractConfig {
+    pub address: String,
+    #[serde(default)]
+    pub decoders: Vec<String>,
 }
