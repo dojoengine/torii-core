@@ -22,6 +22,9 @@ pub enum ContentType {
 #[derive(Clone)]
 pub enum Body {
     /// Zero-copy typed payload (preferred for in-process sinks).
+    ///
+    /// `dyn` is preferred over an enum since `Arc`is required to
+    /// be shared across threads (hence allocated on the heap).
     Typed(Arc<dyn crate::Event>),
     /// Serialized payload (for plugins/archives).
     Bytes {

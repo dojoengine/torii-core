@@ -8,9 +8,7 @@ use starknet::core::types::EmittedEvent;
 use starknet::macros::selector;
 use tokio::time::{sleep, Duration};
 use torii_core::{run_once_batch, FetchPlan, Fetcher, FieldElement, Sink, ToriiConfig};
-use torii_registry::decoders::{
-    self, Erc20DecoderConfig, Erc721DecoderConfig, IntrospectDecoderConfig,
-};
+use torii_registry::decoders;
 use torii_registry::{fetchers, sinks};
 use tracing_subscriber::EnvFilter;
 
@@ -31,7 +29,7 @@ async fn main() -> Result<()> {
         "Loading Torii configuration"
     );
 
-    let decoder_registry = decoders::from_config(&config.decoders).await?;
+    let decoder_registry = decoders::from_config(&config.decoders, &config.contracts).await?;
 
     let fetcher: Arc<dyn Fetcher> = if let Some(value) = config.fetcher.as_ref() {
         fetchers::from_config(value).await?
@@ -40,7 +38,7 @@ async fn main() -> Result<()> {
             target: "torii_fetcher_jsonrpc",
             "no fetcher configured, falling back to mock events"
         );
-        let events = sample_events();
+        let events = sample_events(&config)?;
         Arc::new(MockFetcher::new(events))
     };
 
@@ -94,61 +92,59 @@ impl Fetcher for MockFetcher {
     }
 }
 
-fn sample_events() -> Vec<EmittedEvent> {
-    let introspect_cfg = IntrospectDecoderConfig {
-        contracts: vec!["0x777".into()],
-    };
-    let erc20_cfg = Erc20DecoderConfig {
-        contracts: vec!["0x42".into()],
-    };
-    let erc721_cfg = Erc721DecoderConfig {
-        contracts: vec!["0x99".into()],
-    };
+fn sample_events(config: &ToriiConfig) -> Result<Vec<EmittedEvent>> {
+    use std::collections::HashMap;
 
-    let select_contract = |contracts: &[String], label: &str| -> FieldElement {
-        let hex = contracts
-            .first()
-            .unwrap_or_else(|| panic!("{label} decoder requires at least one contract"));
-        FieldElement::from_hex(hex).unwrap()
-    };
+    let mut addresses: HashMap<String, FieldElement> = HashMap::new();
+    for (name, binding) in &config.contracts {
+        let address = FieldElement::from_hex(&binding.address)
+            .with_context(|| format!("invalid contract address '{name}': {}", binding.address))?;
+        for decoder in &binding.decoders {
+            addresses.entry(decoder.clone()).or_insert(address);
+        }
+    }
 
-    let contract_introspect = select_contract(&introspect_cfg.contracts, "introspect");
-
-    let contract_erc20 = select_contract(&erc20_cfg.contracts, "erc20");
-    let erc20_selector = selector!("Transfer");
-
-    let contract_erc721 = select_contract(&erc721_cfg.contracts, "erc721");
-    let erc721_selector = selector!("Transfer");
-
+    let mut events = Vec::new();
     let block_number = Some(1234);
 
-    vec![
-        EmittedEvent {
-            from_address: contract_introspect,
+    if let Some(contract) = addresses.get("introspect") {
+        let contract = *contract;
+        events.push(EmittedEvent {
+            from_address: contract,
             keys: vec![selector!("DeclareTable")],
             data: vec![],
             block_hash: None,
             block_number,
             transaction_hash: FieldElement::from_hex("0xa11ce").unwrap(),
-        },
-        EmittedEvent {
-            from_address: contract_introspect,
+        });
+        events.push(EmittedEvent {
+            from_address: contract,
             keys: vec![selector!("SetRecord")],
             data: vec![],
             block_hash: None,
             block_number,
             transaction_hash: FieldElement::from_hex("0xb0b").unwrap(),
-        },
-        EmittedEvent {
-            from_address: contract_erc20,
+        });
+    }
+
+    if let Some(contract) = addresses.get("erc20") {
+        let contract = *contract;
+        let erc20_selector = selector!("Transfer");
+        events.push(EmittedEvent {
+            from_address: contract,
             keys: vec![erc20_selector, FieldElement::from_hex("0xf00").unwrap()],
             data: vec![FieldElement::from_hex("0x64").unwrap()],
             block_hash: None,
             block_number,
             transaction_hash: FieldElement::from_hex("0xdeadbeef").unwrap(),
-        },
-        EmittedEvent {
-            from_address: contract_erc721,
+        });
+    }
+
+    if let Some(contract) = addresses.get("erc721") {
+        let contract = *contract;
+        let erc721_selector = selector!("Transfer");
+        events.push(EmittedEvent {
+            from_address: contract,
             keys: vec![
                 erc721_selector,
                 FieldElement::from_hex("0xca11").unwrap(),
@@ -158,6 +154,8 @@ fn sample_events() -> Vec<EmittedEvent> {
             block_hash: None,
             block_number,
             transaction_hash: FieldElement::from_hex("0x600d").unwrap(),
-        },
-    ]
+        });
+    }
+
+    Ok(events)
 }
