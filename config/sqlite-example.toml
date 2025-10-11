@@ -7,13 +7,22 @@
 #max_pages = 32
 
 [decoders.introspect]
-contracts = ["0x777"]
 
 [decoders.erc20]
-contracts = ["0x42"]
 
 [decoders.erc721]
-contracts = ["0x99"]
+
+[contracts.contract_1]
+address = "0x777"
+decoders = ["introspect"]
+
+[contracts.my_token]
+address = "0x42"
+decoders = ["erc20"]
+
+[contracts.my_collection]
+address = "0x99"
+decoders = ["erc721"]
 
 [sinks.log]
 type = "log"
