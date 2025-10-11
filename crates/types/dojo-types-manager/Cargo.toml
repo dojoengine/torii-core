@@ -13,4 +13,5 @@ starknet-types-core.workspace = true
 dojo-introspect-utils.workspace = true
 introspect-types.workspace = true
 introspect-events.workspace = true
+introspect-value.workspace = true
 serde_json.workspace = true

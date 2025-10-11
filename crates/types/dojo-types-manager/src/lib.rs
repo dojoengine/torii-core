@@ -1,5 +1,5 @@
-use introspect_events::types::TableFieldsDef;
 use introspect_types::FieldDef;
+use introspect_value::{FeltIterator, Field, ToValue};
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
@@ -22,59 +22,61 @@ pub struct DojoTable {
     pub value_fields: Vec<Felt>,
 }
 
-pub struct DojoModel {
-    pub id: Felt,
-    pub name: String,
-    pub attrs: Vec<String>,
-    pub keys: Vec<FieldDef>,
-    pub values: Vec<FieldDef>,
-}
 impl DojoTable {
-    pub fn get_entity(&self) -> TableFieldsDef {
-        let fields = self
+    pub fn parse_keys(&self, keys: Vec<Felt>) -> Option<Vec<Field>> {
+        let mut keys = keys.into_iter();
+        let values = self
+            .key_fields
+            .iter()
+            .map(|selector| self.fields.get(selector)?.to_value(&mut keys))
+            .collect::<Option<Vec<_>>>();
+        match keys.next() {
+            None => values,
+            _ => None,
+        }
+    }
+
+    pub fn parse_values(&self, values: Vec<Felt>) -> Option<Vec<Field>> {
+        let mut values = values.into_iter();
+        let vals = self
             .value_fields
             .iter()
-            .filter_map(|selector| self.fields.get(selector).cloned())
-            .collect();
-
-        TableFieldsDef {
-            id: self.id,
-            name: self.name.clone(),
-            attrs: self.attrs.clone(),
-            fields,
-        }
-    }
-    pub fn get_model(&self) -> DojoModel {
-        DojoModel {
-            id: self.id,
-            name: self.name.clone(),
-            attrs: vec![],
-            keys: self
-                .key_fields
-                .iter()
-                .filter_map(|selector| self.fields.get(selector).cloned())
-                .collect(),
-            values: self
-                .value_fields
-                .iter()
-                .filter_map(|selector| self.fields.get(selector).cloned())
-                .collect(),
+            .map(|selector| self.fields.get(selector)?.to_value(&mut values))
+            .collect::<Option<Vec<_>>>();
+        match values.next() {
+            None => vals,
+            _ => None,
         }
     }
 
-    pub fn get_schema(&self) -> Option<TableFieldsDef> {
-        Some(TableFieldsDef {
-            id: self.id,
-            name: self.name.clone(),
-            attrs: vec![],
-            fields: self
-                .key_fields
-                .iter()
-                .chain(self.value_fields.iter())
-                .map(|selector| self.fields.get(selector).cloned())
-                .collect::<Option<Vec<_>>>()?
-                .into(),
-        })
+    pub fn parse_key_values(&self, keys: Vec<Felt>, values: Vec<Felt>) -> Option<Vec<Field>> {
+        match (self.parse_keys(keys), self.parse_values(values)) {
+            (Some(mut k), Some(mut v)) => {
+                k.append(&mut v);
+                Some(k)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn parse_field(&self, selector: Felt, data: Vec<Felt>) -> Option<Field> {
+        let mut data = data.into_iter();
+        let field = self.fields.get(&selector)?.to_value(&mut data);
+        match data.next() {
+            None => field,
+            _ => None,
+        }
+    }
+
+    pub fn parse_fields(&self, selectors: &[Felt], data: &mut FeltIterator) -> Option<Vec<Field>> {
+        let fields = selectors
+            .iter()
+            .map(|selector| self.fields.get(selector)?.to_value(data))
+            .collect::<Option<Vec<_>>>();
+        match data.next() {
+            None => fields,
+            _ => None,
+        }
     }
 }
 
@@ -158,42 +160,16 @@ impl StoreTrait for JsonStore {
     }
 }
 
-pub trait IntrospectManager {
-    type Field;
-    type Table;
-    fn register_table(
-        &mut self,
-        id: Felt,
-        name: &str,
-        attrs: Vec<String>,
-        fields: Vec<Self::Field>,
-    ) -> bool;
-    fn update_table(
-        &mut self,
-        id: Felt,
-        name: &str,
-        attrs: Vec<String>,
-        fields: Vec<Self::Field>,
-    ) -> bool;
-    fn get_model(&self, id: Felt) -> Option<DojoModel>;
-    fn get_entity(&self, id: Felt) -> Option<TableFieldsDef>;
-    fn get_table_name(&self, table_id: Felt) -> Option<String>;
-    fn get_table_field(&self, table_id: Felt, field_selector: Felt) -> Option<Self::Field>;
-    fn get_table_fields(&self, table_id: Felt) -> Option<Vec<Self::Field>>;
-}
-
-impl<Store> IntrospectManager for DojoManager<Store>
+impl<Store> DojoManager<Store>
 where
     Store: StoreTrait<Table = DojoTable>,
 {
-    type Field = FieldDef;
-    type Table = DojoTable;
-    fn register_table(
+    pub fn register_table(
         &mut self,
         id: Felt,
         name: &str,
         attrs: Vec<String>,
-        fields: Vec<Self::Field>,
+        fields: Vec<FieldDef>,
     ) -> bool {
         if self.tables.contains_key(&id) {
             return false;
@@ -221,12 +197,12 @@ where
         true
     }
 
-    fn update_table(
+    pub fn update_table(
         &mut self,
         id: Felt,
         name: &str,
         _attrs: Vec<String>,
-        fields: Vec<Self::Field>,
+        fields: Vec<FieldDef>,
     ) -> bool {
         if !self.tables.contains_key(&id) {
             return false;
@@ -245,28 +221,7 @@ where
         true
     }
 
-    fn get_model(&self, id: Felt) -> Option<DojoModel> {
-        let table = self.tables.get(&id)?;
-        Some(table.get_model())
-    }
-
-    fn get_entity(&self, id: Felt) -> Option<TableFieldsDef> {
-        let table = self.tables.get(&id)?;
-        Some(table.get_entity())
-    }
-
-    fn get_table_name(&self, table_id: Felt) -> Option<String> {
-        self.tables.get(&table_id).map(|table| table.name.clone())
-    }
-
-    fn get_table_field(&self, table_id: Felt, field_selector: Felt) -> Option<Self::Field> {
-        self.tables
-            .get(&table_id)
-            .and_then(|table| table.fields.get(&field_selector).cloned())
-    }
-    fn get_table_fields(&self, table_id: Felt) -> Option<Vec<Self::Field>> {
-        self.tables
-            .get(&table_id)
-            .map(|table| table.fields.values().cloned().collect::<Vec<_>>())
+    pub fn get_table(&self, id: Felt) -> Option<&DojoTable> {
+        self.tables.get(&id)
     }
 }

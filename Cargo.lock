@@ -510,7 +510,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-events"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#526d62e49c486bb6b828057c4aa5b98fade31fd9"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#9eef8a8a5a537f8963691ad066c260e6c9979475"
 dependencies = [
  "introspect-types",
  "introspect-value",
@@ -521,7 +521,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-types"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#526d62e49c486bb6b828057c4aa5b98fade31fd9"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#9eef8a8a5a537f8963691ad066c260e6c9979475"
 dependencies = [
  "cainome-cairo-serde",
  "dojo-introspect-utils",
@@ -537,7 +537,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-utils"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#526d62e49c486bb6b828057c4aa5b98fade31fd9"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#9eef8a8a5a537f8963691ad066c260e6c9979475"
 dependencies = [
  "anyhow",
  "cainome-cairo-serde",
@@ -552,6 +552,7 @@ dependencies = [
  "dojo-introspect-utils",
  "introspect-events",
  "introspect-types",
+ "introspect-value",
  "serde",
  "serde_json",
  "starknet-types-core",
@@ -2968,6 +2969,10 @@ dependencies = [
  "dojo-introspect-events",
  "dojo-introspect-types",
  "dojo-introspect-utils",
+ "dojo-types-manager",
+ "introspect-events",
+ "introspect-types",
+ "introspect-value",
  "serde",
  "serde_json",
  "starknet",
@@ -3058,7 +3063,11 @@ dependencies = [
 name = "torii-types-introspect"
 version = "0.1.0"
 dependencies = [
+ "introspect-events",
+ "introspect-types",
+ "introspect-value",
  "serde",
+ "starknet-types-core",
  "torii-core",
 ]
 
