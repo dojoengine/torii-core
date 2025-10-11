@@ -15,3 +15,10 @@ starknet.workspace = true
 torii-core = { path = "../../core/torii-core" }
 torii-types-introspect = { path = "../../types/torii-types-introspect" }
 tracing.workspace = true
+dojo-introspect-events.workspace = true
+dojo-introspect-types.workspace = true
+dojo-introspect-utils.workspace = true
+dojo-types-manager.workspace = true
+introspect-types.workspace = true
+introspect-events.workspace = true
+introspect-value.workspace = true
