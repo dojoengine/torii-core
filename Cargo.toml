@@ -53,3 +53,4 @@ dojo-introspect-utils = { git = "https://github.com/dojoengine/dojo-introspect",
 dojo-introspect-events = { git = "https://github.com/dojoengine/dojo-introspect", branch = "next" }
 dojo-types-manager = { path = "crates/types/dojo-types-manager" }
 starknet-types-core = "0.2.0"
+thiserror = "2.0.17"
