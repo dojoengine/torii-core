@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use dojo_introspect_events::{
     DojoEvent, EventEmitted, EventRegistered, EventUpgraded, ModelRegistered, ModelUpgraded,
@@ -13,7 +13,7 @@ use starknet::{
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use torii_core::{Decoder, DecoderFactory, DecoderFilter, Envelope, FieldElement, StaticEvent};
+use torii_core::{Decoder, DecoderFactory, DecoderFilter, Envelope, Event, FieldElement};
 use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1};
 mod builders;
 use builders::DojoEventBuilder;
@@ -73,8 +73,10 @@ impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
 
         let mut contract_addresses = HashSet::default();
         for (idx, contract_hex) in cfg.contracts.iter().enumerate() {
-            let address = FieldElement::from_hex(contract_hex).with_context(|| {
-                format!("invalid introspect contract address hex at index {idx}: {contract_hex}")
+            let address = FieldElement::from_hex(contract_hex).map_err(|e| {
+                anyhow!(
+                    "invalid introspect contract hex at index {idx}: {contract_hex}, error: {e}"
+                )
             })?;
             contract_addresses.insert(address);
         }
@@ -87,12 +89,15 @@ impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
             selectors.insert(selector);
         }
         let provider = JsonRpcClient::new(HttpTransport::new(cfg.rpc_url));
+        let store = JsonStore::new(cfg.store_path.as_path());
+        let manager = DojoManager::new(store)?;
+        let filter = DecoderFilter {
+            contract_addresses,
+            selectors,
+        };
         Ok(Self {
-            filter: DecoderFilter {
-                contract_addresses,
-                selectors,
-            },
-            manager: DojoManager::new(cfg.store_path.as_path()),
+            filter,
+            manager,
             provider,
         })
     }
@@ -128,11 +133,11 @@ where
         &DOJO_EVENT_IDS
     }
 
-    async fn decode(&mut self, event: &EmittedEvent) -> Result<Envelope> {
+    async fn decode(&self, event: &EmittedEvent) -> Result<Envelope> {
         let selector = *event.keys.first().expect("event selector is required");
         // Felts are non structural types, so we can't use a match statement directly.
         // TODO: check if using hashmap would be better.
-        if selector == ModelRegistered::SELECTOR {
+        let result = if selector == ModelRegistered::SELECTOR {
             self.build_model_registered(event).await
         } else if selector == ModelUpgraded::SELECTOR {
             self.build_model_upgraded(event).await
@@ -151,7 +156,11 @@ where
         } else if selector == EventEmitted::SELECTOR {
             self.build_emit_event(event)
         } else {
-            Err(anyhow!("invalid event selector: {selector}"))
+            return Err(anyhow!("invalid event selector: {selector}"));
+        };
+        match result {
+            Ok(envelope) => Ok(envelope),
+            Err(e) => Err(anyhow!("introspect decoder failed to decode event: {e}")),
         }
     }
 }

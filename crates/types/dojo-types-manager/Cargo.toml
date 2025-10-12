@@ -17,3 +17,4 @@ introspect-value.workspace = true
 serde_json.workspace = true
 starknet.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true

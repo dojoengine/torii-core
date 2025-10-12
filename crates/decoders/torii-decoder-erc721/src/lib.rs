@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use starknet::{core::types::EmittedEvent, macros::selector};
-use torii_core::{Body, Decoder, DecoderFactory, DecoderFilter, Envelope, Event, FieldElement};
+use torii_core::{Body, Decoder, DecoderFactory, DecoderFilter, DynEvent, Envelope, FieldElement};
 use torii_types_erc721::{TransferV1, TRANSFER_ID};
 
 const DECODER_NAME: &str = "erc721";
@@ -80,7 +80,7 @@ impl Decoder for Erc721Decoder {
         &IDS
     }
 
-    async fn decode(&mut self, event: &EmittedEvent) -> Result<Envelope> {
+    async fn decode(&self, event: &EmittedEvent) -> Result<Envelope> {
         let selector = event.keys.first().expect("event selector is required");
 
         if *selector != TRANSFER_KEY {
@@ -117,6 +117,6 @@ fn build_transfer(raw: &EmittedEvent) -> Envelope {
     Envelope {
         type_id: TRANSFER_ID,
         raw: Arc::new(raw.clone()),
-        body: Body::Typed(Arc::new(event) as Arc<dyn Event>),
+        body: Body::Typed(Arc::new(event) as Arc<dyn DynEvent>),
     }
 }
