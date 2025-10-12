@@ -18,7 +18,7 @@ mod types;
 pub use starknet::core::types::Felt as FieldElement;
 
 pub use decoder::{Decoder, DecoderFactory};
-pub use event::{Event, StaticEvent};
+pub use event::{DynEvent, Event};
 pub use fetcher::Fetcher;
 pub use registry::DecoderRegistry;
 pub use runtime::run_once_batch;

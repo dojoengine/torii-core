@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use starknet::{core::types::EmittedEvent, macros::selector};
-use torii_core::{Decoder, DecoderFactory, DecoderFilter, Envelope, FieldElement, StaticEvent};
+use torii_core::{Decoder, DecoderFactory, DecoderFilter, Envelope, Event, FieldElement};
 use torii_types_erc20::TransferV1;
 
 const DECODER_NAME: &str = "erc20";
@@ -80,7 +80,7 @@ impl Decoder for Erc20Decoder {
         &IDS
     }
 
-    async fn decode(&mut self, event: &EmittedEvent) -> Result<Envelope> {
+    async fn decode(&self, event: &EmittedEvent) -> Result<Envelope> {
         let selector = event.keys.first().expect("event selector is required");
 
         if *selector != TRANSFER_KEY {

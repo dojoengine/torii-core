@@ -25,7 +25,7 @@ pub enum Body {
     ///
     /// `dyn` is preferred over an enum since `Arc`is required to
     /// be shared across threads (hence allocated on the heap).
-    Typed(Arc<dyn crate::Event>),
+    Typed(Arc<dyn crate::DynEvent>),
     /// Serialized payload (for plugins/archives).
     Bytes {
         /// Format for the serialized bytes.
@@ -54,7 +54,7 @@ pub struct Envelope {
 
 impl Envelope {
     /// Attempt to view the body as a typed event of `E`.
-    pub fn downcast<E: crate::StaticEvent>(&self) -> Option<&E> {
+    pub fn downcast<E: crate::Event>(&self) -> Option<&E> {
         match &self.body {
             Body::Typed(ev) if E::TYPE_ID == self.type_id => ev.as_any().downcast_ref::<E>(),
             _ => None,
