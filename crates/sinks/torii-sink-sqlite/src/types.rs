@@ -1,4 +1,4 @@
-use introspect_types::TypeDef;
+use introspect_types::{EnumDef, TypeDef};
 
 pub enum SqlLiteTypes {
     Null,
@@ -39,6 +39,23 @@ fn flatten_tuple(types: &Vec<TypeDef>, prefixes: Vec<String>) -> Vec<SqlLiteColu
     columns
 }
 
+impl SqlLiteFlatten for EnumDef {
+    type Output = SqlLiteColumn;
+
+    fn sql_flatten(&self, prefixes: Vec<String>) -> Vec<Self::Output> {
+        let mut columns = vec![];
+        let mut new_prefixes = prefixes.clone();
+        new_prefixes.push("variant".to_string());
+        columns.push(SqlLiteColumn::new(new_prefixes, SqlLiteTypes::Integer));
+        for variant in &self.variants {
+            let mut variant_prefixes = prefixes.clone();
+            variant_prefixes.push(variant.name.clone());
+            columns.extend(variant.type_def.sql_flatten(variant_prefixes));
+        }
+        columns
+    }
+}
+
 impl SqlLiteFlatten for TypeDef {
     type Output = SqlLiteColumn;
 
@@ -63,8 +80,7 @@ impl SqlLiteFlatten for TypeDef {
             | TypeDef::U128
             | TypeDef::U256
             | TypeDef::I128 => SqlLiteColumn::new_vec(prefixes, SqlLiteTypes::Text),
-            TypeDef::Array(_) |  => SqlLiteColumn::new_vec(prefixes, SqlLiteTypes::Blob),
-             => 
+            TypeDef::Tuple(types) => flatten_tuple(types, prefixes),
             _ => unimplemented!(), // Default to Blob for unsupported types
         }
     }
