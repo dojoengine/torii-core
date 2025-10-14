@@ -1,6 +1,10 @@
-use std::{collections::HashSet, convert::TryInto, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    convert::TryInto,
+    sync::Arc,
+};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,29 +19,23 @@ const TRANSFER_KEY: FieldElement = selector!("Transfer");
 
 const CAIRO_EVENT_SELECTORS: [FieldElement; 1] = [TRANSFER_KEY];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Erc20DecoderConfig {
-    #[serde(default)]
-    pub contracts: Vec<String>,
-}
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Erc20DecoderConfig {}
 
 struct Erc20Decoder {
     filter: DecoderFilter,
 }
 
 impl Erc20Decoder {
-    fn from_config(cfg: Erc20DecoderConfig) -> Result<Self> {
-        if cfg.contracts.is_empty() {
+    fn from_config(_cfg: Erc20DecoderConfig, contracts: Vec<FieldElement>) -> Result<Self> {
+        if contracts.is_empty() {
             return Err(anyhow!(
-                "erc20 decoder requires at least one contract address in config"
+                "erc20 decoder requires at least one contract binding"
             ));
         }
 
         let mut contract_addresses = HashSet::default();
-        for (idx, contract_hex) in cfg.contracts.into_iter().enumerate() {
-            let address = FieldElement::from_hex(&contract_hex).with_context(|| {
-                format!("invalid erc20 contract hex at index {idx}: {contract_hex}")
-            })?;
+        for address in contracts {
             contract_addresses.insert(address);
         }
 
@@ -46,10 +44,19 @@ impl Erc20Decoder {
             selectors.insert(selector);
         }
 
+        let mut address_selectors = HashMap::new();
+        for address in &contract_addresses {
+            address_selectors
+                .entry(*address)
+                .or_insert_with(HashSet::new)
+                .extend(selectors.iter().copied());
+        }
+
         Ok(Self {
             filter: DecoderFilter {
                 contract_addresses,
                 selectors,
+                address_selectors,
             },
         })
     }
@@ -99,9 +106,13 @@ impl DecoderFactory for Erc20DecoderFactory {
         DECODER_NAME
     }
 
-    async fn create(&self, config: Value) -> Result<Arc<dyn Decoder>> {
+    async fn create(
+        &self,
+        config: Value,
+        contracts: Vec<FieldElement>,
+    ) -> Result<Arc<dyn Decoder>> {
         let cfg: Erc20DecoderConfig = serde_json::from_value(config)?;
-        let decoder = Erc20Decoder::from_config(cfg)?;
+        let decoder = Erc20Decoder::from_config(cfg, contracts)?;
         Ok(Arc::new(decoder))
     }
 }

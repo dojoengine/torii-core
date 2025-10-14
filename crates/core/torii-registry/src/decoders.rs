@@ -55,25 +55,34 @@ pub async fn from_config(
             "registering decoder entry"
         );
 
-        let merged_cfg = merge_contracts(cfg_value, contracts_by_decoder.get(kind.as_str()))
-            .with_context(|| format!("failed to build config for decoder '{name}'"))?;
-
-        dbg!(&merged_cfg);
+        let contracts = contracts_by_decoder
+            .get(kind.as_str())
+            .cloned()
+            .unwrap_or_default();
 
         match kind.as_str() {
             KIND_INTROSPECT => {
                 let factory = IntrospectDecoderFactory;
-                let decoder = factory.create(merged_cfg).await?;
+                let decoder = factory
+                    .create(cfg_value.clone(), contracts)
+                    .await
+                    .with_context(|| format!("failed to build config for decoder '{name}'"))?;
                 registry.register(decoder)?;
             }
             KIND_ERC20 => {
                 let factory = Erc20DecoderFactory;
-                let decoder = factory.create(merged_cfg).await?;
+                let decoder = factory
+                    .create(cfg_value.clone(), contracts)
+                    .await
+                    .with_context(|| format!("failed to build config for decoder '{name}'"))?;
                 registry.register(decoder)?;
             }
             KIND_ERC721 => {
                 let factory = Erc721DecoderFactory;
-                let decoder = factory.create(merged_cfg).await?;
+                let decoder = factory
+                    .create(cfg_value.clone(), contracts)
+                    .await
+                    .with_context(|| format!("failed to build config for decoder '{name}'"))?;
                 registry.register(decoder)?;
             }
             other => return Err(anyhow!("unknown decoder kind: {other}")),
@@ -86,8 +95,8 @@ pub async fn from_config(
 fn build_contract_index(
     contracts: &HashMap<String, ContractConfig>,
     enabled_kinds: &HashSet<String>,
-) -> Result<HashMap<String, Vec<String>>> {
-    let mut by_decoder: HashMap<String, Vec<String>> = HashMap::new();
+) -> Result<HashMap<String, Vec<FieldElement>>> {
+    let mut by_decoder: HashMap<String, Vec<FieldElement>> = HashMap::new();
 
     for (name, binding) in contracts {
         if binding.decoders.is_empty() {
@@ -97,7 +106,6 @@ fn build_contract_index(
         let felt = FieldElement::from_hex(&binding.address).with_context(|| {
             format!("contract '{name}' has invalid address: {}", binding.address)
         })?;
-        let canonical = format!("{:#066x}", felt);
 
         for decoder in &binding.decoders {
             if !enabled_kinds.contains(decoder) {
@@ -107,57 +115,11 @@ fn build_contract_index(
             }
 
             let entry = by_decoder.entry(decoder.clone()).or_default();
-            if !entry.iter().any(|existing| existing == &canonical) {
-                entry.push(canonical.clone());
+            if !entry.iter().any(|existing| existing == &felt) {
+                entry.push(felt);
             }
         }
     }
 
     Ok(by_decoder)
-}
-
-fn merge_contracts(cfg_value: Value, contracts: Option<&Vec<String>>) -> Result<Value> {
-    if let Some(addresses) = contracts {
-        let mut map = cfg_value
-            .as_object()
-            .cloned()
-            .ok_or_else(|| anyhow!("decoder config must be a table"))?;
-
-        if addresses.is_empty() {
-            return Ok(Value::Object(map));
-        }
-
-        match map.get_mut("contracts") {
-            Some(Value::Array(existing)) => {
-                let mut known = existing
-                    .iter()
-                    .filter_map(|value| value.as_str().map(str::to_owned))
-                    .collect::<HashSet<_>>();
-                for addr in addresses {
-                    if known.insert(addr.clone()) {
-                        existing.push(Value::String(addr.clone()));
-                    }
-                }
-            }
-            Some(_) => {
-                anyhow::bail!("decoder contracts config must be an array of strings");
-            }
-            None => {
-                map.insert(
-                    "contracts".to_string(),
-                    Value::Array(
-                        addresses
-                            .iter()
-                            .cloned()
-                            .map(Value::String)
-                            .collect::<Vec<_>>(),
-                    ),
-                );
-            }
-        }
-
-        Ok(Value::Object(map))
-    } else {
-        Ok(cfg_value)
-    }
 }

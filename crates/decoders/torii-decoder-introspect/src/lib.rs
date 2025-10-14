@@ -10,7 +10,7 @@ use starknet::{
     core::types::EmittedEvent,
     providers::{jsonrpc::HttpTransport, JsonRpcClient, Provider, Url},
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use torii_core::{Decoder, DecoderFactory, DecoderFilter, Envelope, Event, FieldElement};
@@ -39,15 +39,8 @@ const DOJO_EVENT_IDS: [u64; 3] = [
 /// Cairo selectors of the events to be processed by this decoder.
 
 /// Configuration for the introspect decoder.
-///
-/// Currently, the only configuration is the list of contract addresses
-/// to monitor.
-/// We could potentially add all the selector configurable, to finely tune
-/// which events to capture. But this may come later.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntrospectDecoderConfig {
-    #[serde(default)]
-    pub contracts: Vec<String>,
     pub store_path: PathBuf,
     pub rpc_url: Url,
 }
@@ -64,37 +57,40 @@ where
 
 impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
     /// Builds the decoder from a configuration.
-    fn from_config(cfg: IntrospectDecoderConfig) -> Result<Self> {
-        if cfg.contracts.is_empty() {
+    fn from_config(cfg: IntrospectDecoderConfig, contracts: Vec<FieldElement>) -> Result<Self> {
+        if contracts.is_empty() {
             return Err(anyhow!(
-                "introspect decoder requires at least one contract address in config"
+                "introspect decoder requires at least one contract binding"
             ));
         }
 
         let mut contract_addresses = HashSet::default();
-        for (idx, contract_hex) in cfg.contracts.iter().enumerate() {
-            let address = FieldElement::from_hex(contract_hex).map_err(|e| {
-                anyhow!(
-                    "invalid introspect contract hex at index {idx}: {contract_hex}, error: {e}"
-                )
-            })?;
+        for address in contracts {
             contract_addresses.insert(address);
         }
 
-        // @ben: here, you can hardcode all the selectors to be processed by this decoder.
-        // As mentioned in the comment in the `IntrospectDecoderConfig`, we may have all of this
-        // in the config. But this is IMHO too heavy for the user to actually configure (at least for now).
         let mut selectors = HashSet::default();
         for selector in DOJO_CAIRO_EVENT_SELECTORS {
             selectors.insert(selector);
         }
+        let mut address_selectors = HashMap::new();
+        for address in &contract_addresses {
+            address_selectors
+                .entry(*address)
+                .or_insert_with(HashSet::new)
+                .extend(selectors.iter().copied());
+        }
         let provider = JsonRpcClient::new(HttpTransport::new(cfg.rpc_url));
+
         let store = JsonStore::new(cfg.store_path.as_path());
+
         let manager = DojoManager::new(store)?;
         let filter = DecoderFilter {
             contract_addresses,
             selectors,
+            address_selectors,
         };
+
         Ok(Self {
             filter,
             manager,
@@ -173,9 +169,13 @@ impl DecoderFactory for IntrospectDecoderFactory {
         DECODER_NAME
     }
 
-    async fn create(&self, config: serde_json::Value) -> Result<Arc<dyn Decoder>> {
+    async fn create(
+        &self,
+        config: serde_json::Value,
+        contracts: Vec<FieldElement>,
+    ) -> Result<Arc<dyn Decoder>> {
         let cfg: IntrospectDecoderConfig = serde_json::from_value(config)?;
-        let decoder = IntrospectDecoder::from_config(cfg)?;
+        let decoder = IntrospectDecoder::from_config(cfg, contracts)?;
         Ok(Arc::new(decoder))
     }
 }

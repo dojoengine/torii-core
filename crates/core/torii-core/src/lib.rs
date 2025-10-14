@@ -10,6 +10,7 @@ use serde_json::Value as JsonValue;
 mod decoder;
 mod event;
 mod fetcher;
+pub mod format;
 mod registry;
 mod runtime;
 mod sink;

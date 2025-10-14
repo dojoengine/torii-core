@@ -49,10 +49,8 @@ async fn main() -> Result<()> {
         anyhow::bail!("no sinks configured");
     }
 
-    for _ in 0..2 {
-        run_once_batch(fetcher.as_ref(), &decoder_registry, &sinks).await?;
-        sleep(Duration::from_millis(250)).await;
-    }
+    run_once_batch(fetcher.as_ref(), &decoder_registry, &sinks).await?;
+    sleep(Duration::from_millis(250)).await;
 
     Ok(())
 }

@@ -519,7 +519,6 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-events"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#eb8b4ff870e3f7b8fc792af1abdb35ee11e93a94"
 dependencies = [
  "introspect-types",
  "introspect-value",
@@ -530,7 +529,6 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-types"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#eb8b4ff870e3f7b8fc792af1abdb35ee11e93a94"
 dependencies = [
  "cainome-cairo-serde",
  "dojo-introspect-utils",
@@ -547,7 +545,6 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-utils"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#eb8b4ff870e3f7b8fc792af1abdb35ee11e93a94"
 dependencies = [
  "anyhow",
  "cainome-cairo-serde",
@@ -2975,7 +2972,6 @@ dependencies = [
  "serde",
  "serde_json",
  "starknet",
- "thiserror 2.0.17",
  "tokio",
  "tracing",
 ]
@@ -3097,9 +3093,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "introspect-types",
+ "introspect-value",
+ "primitive-types 0.14.0",
  "serde",
  "serde_json",
  "sqlx",
+ "starknet-types-core",
  "tokio",
  "torii-core",
  "torii-types-erc20",

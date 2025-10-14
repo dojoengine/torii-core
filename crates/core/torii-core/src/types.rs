@@ -1,6 +1,9 @@
 //! Fundamental data structures shared by decoders, sinks, and the runtime.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -101,6 +104,7 @@ pub const fn type_id_from_url(url: &str) -> u64 {
 pub struct DecoderFilter {
     pub contract_addresses: HashSet<FieldElement>,
     pub selectors: HashSet<FieldElement>,
+    pub address_selectors: HashMap<FieldElement, HashSet<FieldElement>>,
 }
 
 /// Union of all active decoder filters.
@@ -108,6 +112,7 @@ pub struct DecoderFilter {
 pub struct FetchPlan {
     pub contract_addresses: HashSet<FieldElement>,
     pub selectors: HashSet<FieldElement>,
+    pub address_selectors: HashMap<FieldElement, HashSet<FieldElement>>,
 }
 
 impl FetchPlan {
@@ -118,6 +123,12 @@ impl FetchPlan {
             plan.contract_addresses
                 .extend(filter.contract_addresses.into_iter());
             plan.selectors.extend(filter.selectors.into_iter());
+            for (address, selectors) in filter.address_selectors.into_iter() {
+                plan.address_selectors
+                    .entry(address)
+                    .or_default()
+                    .extend(selectors.into_iter());
+            }
         }
         plan
     }

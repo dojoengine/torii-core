@@ -1,7 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -16,28 +16,23 @@ const TRANSFER_KEY: FieldElement = selector!("Transfer");
 
 const CAIRO_EVENT_SELECTORS: [FieldElement; 1] = [TRANSFER_KEY];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Erc721DecoderConfig {
-    pub contracts: Vec<String>,
-}
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Erc721DecoderConfig {}
 
 struct Erc721Decoder {
     filter: DecoderFilter,
 }
 
 impl Erc721Decoder {
-    fn from_config(cfg: Erc721DecoderConfig) -> Result<Self> {
-        if cfg.contracts.is_empty() {
+    fn from_config(_cfg: Erc721DecoderConfig, contracts: Vec<FieldElement>) -> Result<Self> {
+        if contracts.is_empty() {
             return Err(anyhow!(
-                "erc721 decoder requires at least one contract address in config"
+                "erc721 decoder requires at least one contract binding"
             ));
         }
 
         let mut contract_addresses = HashSet::default();
-        for (idx, contract_hex) in cfg.contracts.into_iter().enumerate() {
-            let address = FieldElement::from_hex(&contract_hex).with_context(|| {
-                format!("invalid erc721 contract hex at index {idx}: {contract_hex}")
-            })?;
+        for address in contracts {
             contract_addresses.insert(address);
         }
 
@@ -46,10 +41,19 @@ impl Erc721Decoder {
             selectors.insert(selector);
         }
 
+        let mut address_selectors = HashMap::new();
+        for address in contract_addresses.iter() {
+            address_selectors
+                .entry(*address)
+                .or_insert_with(HashSet::new)
+                .extend(selectors.iter().copied());
+        }
+
         Ok(Self {
             filter: DecoderFilter {
                 contract_addresses,
                 selectors,
+                address_selectors,
             },
         })
     }
@@ -99,9 +103,13 @@ impl DecoderFactory for Erc721DecoderFactory {
         DECODER_NAME
     }
 
-    async fn create(&self, config: Value) -> Result<Arc<dyn Decoder>> {
+    async fn create(
+        &self,
+        config: Value,
+        contracts: Vec<FieldElement>,
+    ) -> Result<Arc<dyn Decoder>> {
         let cfg: Erc721DecoderConfig = serde_json::from_value(config)?;
-        let decoder = Erc721Decoder::from_config(cfg)?;
+        let decoder = Erc721Decoder::from_config(cfg, contracts)?;
         Ok(Arc::new(decoder))
     }
 }

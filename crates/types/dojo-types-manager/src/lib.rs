@@ -4,6 +4,7 @@ use introspect_types::{ColumnDef, FieldDef};
 use introspect_value::{FeltIterator, Field, ToValue};
 use serde::{Deserialize, Serialize};
 use starknet::core::utils::{get_selector_from_name, NonAsciiNameError};
+use starknet::macros::short_string;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::fs;
@@ -13,7 +14,11 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use thiserror::Error;
 
-const KEY_ATTR: &str = "key";
+// TODO: @bengineer42 we should modify the introspect crate to get the
+// short string correctly instead of the raw value.
+// As currently, using "key" will not match the short string.
+// const KEY_ATTR: &str = "key";
+const KEY_ATTR_FELT: Felt = short_string!("key");
 
 #[derive(Debug, Error)]
 pub enum DojoTableErrors {
@@ -199,6 +204,16 @@ impl JsonStore {
         if !path.exists() {
             std::fs::create_dir_all(path).expect("Unable to create directory");
         }
+
+        // A temporary flag to clean the store on start, useful when debugging
+        // to avoid existing table error.
+        // TODO: @bengineer42 can be removed or kept being configurable.
+        let clean_on_start = true;
+        if clean_on_start {
+            std::fs::remove_dir_all(path).expect("Unable to clean directory");
+            std::fs::create_dir_all(path).expect("Unable to create directory");
+        }
+
         Self {
             path: path.to_path_buf(),
         }
@@ -297,7 +312,7 @@ where
 
         for field in fields {
             let selector = get_selector_from_name(&field.name)?;
-            match field.attrs.contains(&KEY_ATTR.to_string()) {
+            match field.attrs.contains(&KEY_ATTR_FELT.to_string()) {
                 true => key_fields.push(selector),
                 false => value_fields.push(selector),
             }
@@ -347,7 +362,7 @@ where
         let mut value_fields = Vec::new();
         for field in fields {
             let selector = get_selector_from_name(&field.name)?;
-            match field.attrs.contains(&KEY_ATTR.to_string()) {
+            match field.attrs.contains(&KEY_ATTR_FELT.to_string()) {
                 true => key_fields.push(selector),
                 false => value_fields.push(selector),
             }

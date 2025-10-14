@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
-use starknet::core::types::{EmittedEvent, EventFilter, EventsPage, Felt};
+use starknet::core::types::{BlockId, BlockTag, EmittedEvent, EventFilter, EventsPage, Felt};
 use starknet::providers::{jsonrpc::HttpTransport, JsonRpcClient, Provider};
 use tokio::time::sleep;
 use torii_core::{FetchPlan, Fetcher};
@@ -14,9 +14,7 @@ use url::Url;
 pub struct JsonRpcFetcherConfig {
     pub rpc_url: String,
     #[serde(default)]
-    pub page_size: Option<u64>,
-    #[serde(default)]
-    pub max_pages: Option<u32>,
+    pub chunk_size: Option<u64>,
     #[serde(default)]
     pub request_retry: Option<usize>,
     #[serde(default)]
@@ -27,8 +25,7 @@ pub struct JsonRpcFetcherConfig {
 
 pub struct JsonRpcFetcher {
     provider: JsonRpcClient<HttpTransport>,
-    page_size: u64,
-    max_pages: u32,
+    chunk_size: u64,
     request_retry: usize,
     request_backoff: Duration,
     address_backoff: Duration,
@@ -39,16 +36,14 @@ impl JsonRpcFetcher {
         let url = Url::parse(&config.rpc_url)?;
         let provider = JsonRpcClient::new(HttpTransport::new(url));
 
-        let page_size = config.page_size.unwrap_or(512).max(1);
-        let max_pages = config.max_pages.unwrap_or(32);
+        let chunk_size = config.chunk_size.unwrap_or(512).max(1);
         let request_retry = config.request_retry.unwrap_or(0);
         let request_backoff = Duration::from_millis(config.request_backoff_ms.unwrap_or(250));
         let address_backoff = Duration::from_millis(config.address_backoff_ms.unwrap_or(0));
 
         Ok(Self {
             provider,
-            page_size,
-            max_pages,
+            chunk_size,
             request_retry,
             request_backoff,
             address_backoff,
@@ -64,7 +59,7 @@ impl JsonRpcFetcher {
         loop {
             match self
                 .provider
-                .get_events(filter.clone(), continuation.clone(), self.page_size)
+                .get_events(filter.clone(), continuation.clone(), self.chunk_size)
                 .await
             {
                 Ok(page) => return Ok(page),
@@ -95,8 +90,7 @@ impl Fetcher for JsonRpcFetcher {
             target: "torii_fetcher_jsonrpc",
             addresses = plan.contract_addresses.len(),
             selectors = plan.selectors.len(),
-            page_size = self.page_size,
-            max_pages = self.max_pages,
+            chunk_size = self.chunk_size,
             "starting fetch cycle"
         );
         if tracing::enabled!(tracing::Level::TRACE) {
@@ -118,36 +112,25 @@ impl Fetcher for JsonRpcFetcher {
             );
         }
 
-        let selectors: Vec<Felt> = plan.selectors.iter().copied().collect();
-        let key_patterns = if selectors.is_empty() {
-            None
-        } else {
-            Some(selectors.iter().map(|key| vec![*key]).collect::<Vec<_>>())
-        };
-
         let mut filters = Vec::new();
-        if plan.contract_addresses.is_empty() {
+        for (address, selectors) in plan.address_selectors.iter() {
+            let key_patterns = if selectors.is_empty() {
+                vec![vec![]]
+            } else {
+                vec![selectors.iter().map(|key| *key).collect::<Vec<_>>()]
+            };
+
             filters.push((
                 EventFilter {
+                    //from_block: Some(BlockId::Number(0)),
+                    //to_block: Some(BlockId::Tag(BlockTag::Latest)),
                     from_block: None,
                     to_block: None,
-                    address: None,
-                    keys: key_patterns.clone(),
+                    address: Some(*address),
+                    keys: Some(key_patterns),
                 },
-                false,
+                true,
             ));
-        } else {
-            for address in plan.contract_addresses.iter() {
-                filters.push((
-                    EventFilter {
-                        from_block: None,
-                        to_block: None,
-                        address: Some(*address),
-                        keys: key_patterns.clone(),
-                    },
-                    true,
-                ));
-            }
         }
 
         let mut events = Vec::new();
@@ -157,28 +140,25 @@ impl Fetcher for JsonRpcFetcher {
             debug!(
                 target: "torii_fetcher_jsonrpc",
                 filter_index = index,
-                has_address = filter.address.is_some(),
-                keys = filter.keys.as_ref().map(|k| k.len()).unwrap_or(0),
+                filter = ?filter,
                 "fetching events for filter"
             );
             let mut continuation: Option<String> = None;
             let mut pages = 0;
 
             loop {
-                if pages >= self.max_pages {
-                    warn!(
-                        target: "torii_fetcher_jsonrpc",
-                        filter_index = index,
-                        pages,
-                        "max_pages reached for filter"
-                    );
-                    break;
-                }
-
                 let page = self.get_events_page(&filter, continuation.clone()).await?;
                 pages += 1;
 
+                if page.events.is_empty() {
+                    // Empty pages may be returned even if the continuation token is not None.
+                    // In this case, we want to break the loop since it may be a node
+                    // specific behavior (like Katana does).
+                    break;
+                }
+
                 let continuation_token = page.continuation_token.clone();
+
                 debug!(
                     target: "torii_fetcher_jsonrpc",
                     filter_index = index,

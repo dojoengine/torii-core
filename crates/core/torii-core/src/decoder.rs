@@ -7,7 +7,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 use starknet::core::types::EmittedEvent;
 
-use crate::types::{DecoderFilter, Envelope};
+use crate::{
+    types::{DecoderFilter, Envelope},
+    FieldElement,
+};
 
 /// Runtime abstraction implemented by protocol decoders.
 #[async_trait]
@@ -40,7 +43,7 @@ pub trait Decoder: Send + Sync {
 /// # Example
 /// ```
 /// let factory = IntrospectDecoderFactory;
-/// let decoder = factory.create(cfg_value.clone()).await?;
+/// let decoder = factory.create(cfg_value.clone(), Vec::new()).await?;
 /// ```
 #[async_trait]
 pub trait DecoderFactory: Send + Sync {
@@ -48,5 +51,6 @@ pub trait DecoderFactory: Send + Sync {
     fn kind(&self) -> &'static str;
 
     /// Construct a decoder from a configuration payload.
-    async fn create(&self, config: Value) -> Result<Arc<dyn Decoder>>;
+    async fn create(&self, config: Value, contracts: Vec<FieldElement>)
+        -> Result<Arc<dyn Decoder>>;
 }
