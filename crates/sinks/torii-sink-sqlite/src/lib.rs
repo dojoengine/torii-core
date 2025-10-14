@@ -16,7 +16,9 @@ use serde_json::Value as JsonValue;
 use sqlx::sqlite::{SqliteArguments, SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Arguments, Row, SqlitePool};
 use tokio::sync::RwLock;
-use torii_core::{format::felt_to_padded_hex, Batch, Envelope, Event, Sink, SinkFactory, SinkRegistry};
+use torii_core::{
+    format::felt_to_padded_hex, Batch, Envelope, Event, Sink, SinkFactory, SinkRegistry,
+};
 use torii_types_erc20::TransferV1 as Erc20Transfer;
 use torii_types_erc721::TransferV1 as Erc721Transfer;
 use torii_types_introspect::{DeclareTableV1, UpdateRecordFieldsV1};
@@ -492,6 +494,8 @@ pub struct SqliteSinkConfig {
     pub label: Option<String>,
     #[serde(default)]
     pub max_connections: Option<u32>,
+    #[serde(default)]
+    pub clean_on_start: bool,
 }
 
 pub struct SqliteSinkFactory;
@@ -504,6 +508,13 @@ impl SinkFactory for SqliteSinkFactory {
 
     async fn create(&self, name: &str, config: JsonValue) -> Result<Arc<dyn Sink>> {
         let cfg: SqliteSinkConfig = serde_json::from_value(config)?;
+
+        // Temporary flag to clean the db. On sqlite, currently we are using
+        // a file for the db.
+        if cfg.clean_on_start {
+            std::fs::remove_file(&cfg.database_url)?;
+        }
+
         let label = cfg.label.clone().unwrap_or_else(|| name.to_string());
         let sink = SqliteSink::connect(label, &cfg.database_url, cfg.max_connections).await?;
         Ok(Arc::new(sink) as Arc<dyn Sink>)

@@ -3,8 +3,8 @@ use introspect_types::{ColumnDef, EnumDef, StructDef, TypeDef, VariantDef};
 use introspect_value::{Enum as ValueEnum, Struct as ValueStruct, Value};
 use primitive_types::U256;
 use serde_json::to_string;
-use torii_core::format::felt_to_padded_hex;
 use std::collections::HashMap;
+use torii_core::format::felt_to_padded_hex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SqliteType {
@@ -36,11 +36,13 @@ pub enum ColumnValue {
 
 pub fn sanitize_identifier(name: &str) -> String {
     let mut result = String::with_capacity(name.len());
-    for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            result.push(ch.to_ascii_lowercase());
-        } else {
-            result.push('_');
+    let mut chars = name.chars();
+    while let Some(ch) = chars.next() {
+        // Ensures we don't get the enum with inner types like Some(T).
+        match ch {
+            '(' | '<' => break,
+            ch if ch.is_ascii_alphanumeric() || ch == '_' => result.push(ch.to_ascii_lowercase()),
+            _ => result.push('_'),
         }
     }
     if result.is_empty() {
@@ -50,12 +52,25 @@ pub fn sanitize_identifier(name: &str) -> String {
     }
 }
 
+fn display_variant_name(raw: &str) -> String {
+    let trimmed = raw
+        .split(|c| matches!(c, '(' | '<'))
+        .next()
+        .unwrap_or(raw)
+        .trim();
+    if trimmed.is_empty() {
+        raw.trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn join_identifier(base: &str, segment: &str) -> String {
     let segment = sanitize_identifier(segment);
     if base.is_empty() {
         segment
     } else {
-        format!("{base}__{segment}")
+        format!("{base}.{segment}")
     }
 }
 
@@ -134,7 +149,7 @@ fn collect_struct_columns(base: &str, struct_def: &StructDef) -> Vec<ColumnInfo>
 
 fn collect_enum_columns(base: &str, enum_def: &EnumDef) -> Vec<ColumnInfo> {
     let mut columns = vec![ColumnInfo {
-        name: join_identifier(base, "variant"),
+        name: base.to_string(),
         sql_type: SqliteType::Text,
     }];
     for variant in enum_def.variants.values() {
@@ -310,14 +325,17 @@ fn assign_enum(
     enum_def: &EnumDef,
     enum_value: &ValueEnum,
 ) -> Result<()> {
-    let variant_column = join_identifier(base, "variant");
+    let variant_column = base.to_string();
     map.insert(
         variant_column,
-        ColumnValue::Text(enum_value.variant.clone()),
+        ColumnValue::Text(display_variant_name(&enum_value.variant)),
     );
+
     let variant = find_variant(enum_def, &enum_value.variant)
         .ok_or_else(|| anyhow!("unknown enum variant {}", enum_value.variant))?;
+
     let next_base = join_identifier(base, &variant.name);
+
     assign_values(map, &next_base, &variant.type_def, &enum_value.value)
 }
 
