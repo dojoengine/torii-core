@@ -17,7 +17,8 @@ use sqlx::sqlite::{SqliteArguments, SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Arguments, Row, SqlitePool};
 use tokio::sync::RwLock;
 use torii_core::{
-    format::felt_to_padded_hex, Batch, Envelope, Event, Sink, SinkFactory, SinkRegistry,
+    format::felt_to_padded_hex, Batch, Envelope, Event, FieldElement, Sink, SinkFactory,
+    SinkRegistry,
 };
 use torii_types_erc20::TransferV1 as Erc20Transfer;
 use torii_types_erc721::TransferV1 as Erc721Transfer;
@@ -68,14 +69,14 @@ fn format_id_field(field: &Field) -> Result<String> {
 
 #[derive(Clone)]
 struct TableSchema {
-    name: String,
+    storage_name: String,
     id_column: ColumnInfo,
     fields: HashMap<String, FieldSchema>,
     declare: DeclareTableV1,
 }
 
 impl TableSchema {
-    fn from_declare(event: DeclareTableV1) -> Result<Self> {
+    fn from_declare(event: DeclareTableV1, storage_name: String) -> Result<Self> {
         let id_column = ColumnInfo {
             name: sanitize_identifier(&event.id_field),
             sql_type: SqliteType::Text,
@@ -94,7 +95,7 @@ impl TableSchema {
         }
 
         Ok(Self {
-            name: event.name.clone(),
+            storage_name,
             id_column,
             fields,
             declare: event,
@@ -102,7 +103,7 @@ impl TableSchema {
     }
 
     fn table_name(&self) -> &str {
-        &self.name
+        &self.storage_name
     }
 
     fn id_column(&self) -> &ColumnInfo {
@@ -135,6 +136,7 @@ pub struct SqliteSink {
     label: String,
     pool: SqlitePool,
     schemas: Arc<RwLock<HashMap<String, Arc<TableSchema>>>>,
+    contract_labels: HashMap<FieldElement, String>,
 }
 
 impl SqliteSink {
@@ -142,6 +144,7 @@ impl SqliteSink {
         label: impl Into<String>,
         database_url: &str,
         max_connections: Option<u32>,
+        contract_labels: HashMap<FieldElement, String>,
     ) -> Result<Self> {
         let options = SqliteConnectOptions::from_str(database_url)?.create_if_missing(true);
 
@@ -151,13 +154,38 @@ impl SqliteSink {
             .await
             .with_context(|| format!("failed to connect to sqlite database {database_url}"))?;
 
+        let contract_labels = contract_labels
+            .into_iter()
+            .map(|(address, label)| (address, sanitize_identifier(&label)))
+            .collect();
+
         let sink = Self {
             label: label.into(),
             pool,
             schemas: Arc::new(RwLock::new(HashMap::new())),
+            contract_labels,
         };
         sink.ensure_schema().await?;
         Ok(sink)
+    }
+
+    fn contract_prefix(&self, address: &FieldElement) -> String {
+        self.contract_labels
+            .get(address)
+            .cloned()
+            .unwrap_or_else(|| sanitize_identifier(&felt_to_padded_hex(address)))
+    }
+
+    fn storage_table_name(&self, address: &FieldElement, logical_name: &str) -> String {
+        let prefix = self.contract_prefix(address);
+        let logical = sanitize_identifier(logical_name);
+        if prefix.is_empty() {
+            logical
+        } else if logical.is_empty() {
+            prefix
+        } else {
+            format!("{prefix}__{logical}")
+        }
     }
 
     async fn ensure_schema(&self) -> Result<()> {
@@ -261,8 +289,8 @@ impl SqliteSink {
         Ok(())
     }
 
-    async fn load_schema(&self, name: &str) -> Result<Arc<TableSchema>> {
-        if let Some(schema) = self.schemas.read().await.get(name).cloned() {
+    async fn load_schema(&self, storage_name: &str) -> Result<Arc<TableSchema>> {
+        if let Some(schema) = self.schemas.read().await.get(storage_name).cloned() {
             return Ok(schema);
         }
 
@@ -273,34 +301,42 @@ impl SqliteSink {
             WHERE name = ?1
         "#,
         )
-        .bind(name)
+        .bind(storage_name)
         .fetch_optional(&self.pool)
         .await?;
 
-        let row = row.ok_or_else(|| anyhow!("no schema found for table {}", name))?;
+        let row = row.ok_or_else(|| anyhow!("no schema found for table {}", storage_name))?;
         let schema_json: String = row.try_get("schema_json")?;
         let declare: DeclareTableV1 = serde_json::from_str(&schema_json)?;
-        let schema = Arc::new(TableSchema::from_declare(declare)?);
+        let schema = Arc::new(TableSchema::from_declare(
+            declare,
+            storage_name.to_string(),
+        )?);
         self.ensure_table(&schema).await?;
 
         let mut cache = self.schemas.write().await;
-        cache.insert(name.to_string(), schema.clone());
+        cache.insert(storage_name.to_string(), schema.clone());
         Ok(schema)
     }
 
     async fn handle_declare(&self, env: &Envelope, event: &DeclareTableV1) -> Result<()> {
-        let schema = Arc::new(TableSchema::from_declare(event.clone())?);
+        let storage_name = self.storage_table_name(&env.raw.from_address, event.name.as_str());
+        let schema = Arc::new(TableSchema::from_declare(
+            event.clone(),
+            storage_name.clone(),
+        )?);
         self.persist_schema(&schema).await?;
         self.ensure_table(&schema).await?;
 
         {
             let mut cache = self.schemas.write().await;
-            cache.insert(schema.table_name().to_string(), schema.clone());
+            cache.insert(storage_name, schema.clone());
         }
 
         tracing::info!(
             sink = %self.label,
             table = %event.name,
+            storage_table = %schema.table_name(),
             block = env.raw.block_number.unwrap_or_default(),
             "stored declare_table"
         );
@@ -312,7 +348,9 @@ impl SqliteSink {
         env: &Envelope,
         event: &UpdateRecordFieldsV1,
     ) -> Result<()> {
-        let schema = self.load_schema(&event.table_name).await?;
+        let storage_name =
+            self.storage_table_name(&env.raw.from_address, event.table_name.as_str());
+        let schema = self.load_schema(&storage_name).await?;
         let id_value = format_id_field(&event.id_field)?;
 
         let column_types: HashMap<_, _> = schema
@@ -400,6 +438,7 @@ impl SqliteSink {
         tracing::debug!(
             sink = %self.label,
             table = %event.table_name,
+            storage_table = %schema.table_name(),
             id = %id_value,
             block = env.raw.block_number.unwrap_or_default(),
             "stored update_record",
@@ -516,7 +555,13 @@ impl SinkFactory for SqliteSinkFactory {
         }
 
         let label = cfg.label.clone().unwrap_or_else(|| name.to_string());
-        let sink = SqliteSink::connect(label, &cfg.database_url, cfg.max_connections).await?;
+        let sink = SqliteSink::connect(
+            label,
+            &cfg.database_url,
+            cfg.max_connections,
+            HashMap::new(),
+        )
+        .await?;
         Ok(Arc::new(sink) as Arc<dyn Sink>)
     }
 }

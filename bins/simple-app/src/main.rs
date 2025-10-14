@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
         Arc::new(MockFetcher::new(events))
     };
 
-    let sink_registry = sinks::from_config(&config.sinks).await?;
+    let sink_registry = sinks::from_config(&config.sinks, &config.contracts).await?;
 
     let sinks: Vec<Arc<dyn Sink>> = sink_registry.sinks().to_vec();
     if sinks.is_empty() {

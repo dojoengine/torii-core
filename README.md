@@ -22,7 +22,7 @@ A high-level flow:
 1. Load configuration (TOML → `HashMap<String, Value>` per section).
 2. Use `torii-registry::fetchers::from_config` to build the requested fetcher (only one at a time).
 3. Use `torii-registry::decoders::from_config` to register the decoders that should be active.
-4. Use `torii-registry::sinks::from_config` to instantiate the sinks that should receive batches.
+4. Use `torii-registry::sinks::from_config` (passing both sink and contract maps) to instantiate the sinks that should receive batches.
 5. Run the batch loop: fetch events, decode via the registry, deliver batches to each sink.
 
 ```
@@ -116,7 +116,7 @@ let fetcher = torii_registry::fetchers::from_config(
     app.fetcher.as_ref().expect("fetcher config required"),
 ) .await?;
 let decoder_registry = torii_registry::decoders::from_config(&app.decoders)?;
-let sink_registry = torii_registry::sinks::from_config(&app.sinks).await?;
+let sink_registry = torii_registry::sinks::from_config(&app.sinks, &app.contracts).await?;
 let sinks = sink_registry.sinks().to_vec();
 run_once_batch(fetcher.as_ref(), &decoder_registry, &sinks).await?;
 ```
