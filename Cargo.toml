@@ -46,12 +46,12 @@ sqlx = { version = "0.7", default-features = false, features = [
     "sqlite",
 ] }
 url = "2"
-introspect-value = { git = "https://github.com/cartridge-gg/introspect", branch = "next" }
-introspect-types = { git = "https://github.com/cartridge-gg/introspect", branch = "next" }
-introspect-events = { git = "https://github.com/cartridge-gg/introspect", branch = "next" }
-dojo-introspect-types = { path = "/Users/glihm/cgg/dojo-introspect/crates/types" }
-dojo-introspect-utils = { path = "/Users/glihm/cgg/dojo-introspect/crates/utils" }
-dojo-introspect-events = { path = "/Users/glihm/cgg/dojo-introspect/crates/events" }
+introspect-value = { git = "https://github.com/cartridge-gg/introspect", branch = "main" }
+introspect-types = { git = "https://github.com/cartridge-gg/introspect", branch = "main" }
+introspect-events = { git = "https://github.com/cartridge-gg/introspect", branch = "main" }
+dojo-introspect-types = { git = "https://github.com/dojoengine/dojo-introspect", branch = "main" }
+dojo-introspect-utils = { git = "https://github.com/dojoengine/dojo-introspect", branch = "main" }
+dojo-introspect-events = { git = "https://github.com/dojoengine/dojo-introspect", branch = "main" }
 dojo-types-manager = { path = "crates/types/dojo-types-manager" }
 torii-types-introspect = { path = "crates/types/torii-types-introspect" }
 starknet-types-core = "0.2.0"

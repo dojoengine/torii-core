@@ -14,11 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use thiserror::Error;
 
-// TODO: @bengineer42 we should modify the introspect crate to get the
-// short string correctly instead of the raw value.
-// As currently, using "key" will not match the short string.
-// const KEY_ATTR: &str = "key";
-const KEY_ATTR_FELT: Felt = short_string!("key");
+const KEY_ATTR: &str = "key";
 
 #[derive(Debug, Error)]
 pub enum DojoTableErrors {
@@ -312,7 +308,7 @@ where
 
         for field in fields {
             let selector = get_selector_from_name(&field.name)?;
-            match field.attrs.contains(&KEY_ATTR_FELT.to_string()) {
+            match field.attrs.contains(&KEY_ATTR.to_string()) {
                 true => key_fields.push(selector),
                 false => value_fields.push(selector),
             }
@@ -362,7 +358,7 @@ where
         let mut value_fields = Vec::new();
         for field in fields {
             let selector = get_selector_from_name(&field.name)?;
-            match field.attrs.contains(&KEY_ATTR_FELT.to_string()) {
+            match field.attrs.contains(&KEY_ATTR.to_string()) {
                 true => key_fields.push(selector),
                 false => value_fields.push(selector),
             }

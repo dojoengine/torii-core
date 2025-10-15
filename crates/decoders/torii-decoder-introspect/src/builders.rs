@@ -151,7 +151,7 @@ where
         let event = raw_event_to_event::<StoreSetRecord>(raw)?;
         let id_field = make_entity_id_field(event.entity_id);
         let (table_id, table_name, fields) = self.with_table(event.selector, |table| {
-            let fields = table.parse_values(event.values)?;
+            let fields = table.parse_key_values(event.keys.clone(), event.values.clone())?;
             Ok((table.id, table.name.clone(), fields))
         })?;
         let data = UpdateRecordFieldsV1::new(table_id, table_name, id_field, fields);
