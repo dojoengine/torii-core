@@ -178,7 +178,7 @@ impl SqliteSink {
 
     fn storage_table_name(&self, address: &FieldElement, logical_name: &str) -> String {
         let prefix = self.contract_prefix(address);
-        let logical = sanitize_identifier(logical_name);
+        let logical = sanitize_table_segment(logical_name);
         if prefix.is_empty() {
             logical
         } else if logical.is_empty() {
@@ -563,6 +563,24 @@ impl SinkFactory for SqliteSinkFactory {
         )
         .await?;
         Ok(Arc::new(sink) as Arc<dyn Sink>)
+    }
+}
+
+fn sanitize_table_segment(name: &str) -> String {
+    let mut result = String::with_capacity(name.len());
+    let mut chars = name.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '(' | '<' => break,
+            c if c.is_ascii_alphanumeric() || c == '_' || c == '-' => result.push(c),
+            ':' => result.push('_'),
+            _ => result.push('_'),
+        }
+    }
+    if result.is_empty() {
+        "_".to_string()
+    } else {
+        result
     }
 }
 
