@@ -4,7 +4,6 @@ use introspect_types::{ColumnDef, FieldDef};
 use introspect_value::{FeltIterator, Field, ToValue};
 use serde::{Deserialize, Serialize};
 use starknet::core::utils::{get_selector_from_name, NonAsciiNameError};
-use starknet::macros::short_string;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::fs;

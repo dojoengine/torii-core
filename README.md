@@ -157,5 +157,28 @@ cargo run --bin simple-app config/sqlite-example.toml
 For detailed logging output, set the `RUST_LOG` environment variable (optional):
 
 ```bash
-RUST_LOG=trace cargo run --bin simple-app config/sqlite-example.toml
+RUST_LOG=torii=trace cargo run --bin simple-app config/sqlite-example.toml
 ```
+
+To test dojo-introspect specifically to ensure backward compatibility, is is recommended to deploy on a local katana the `spawn-and-move` example. Since it contains
+some complex types and all the systems to emit events.
+
+```
+git clone https://github.com/dojoengine/dojo
+
+cd dojo/examples/spawn-and-move
+
+sozo build
+sozo migrate
+
+sozo execute actions spawn
+sozo execute actions move 1
+
+# Arrays
+sozo execute actions set_player_config str:glihm
+
+# Enum as key for legacy and non legacy types
+sozo execute actions set_enemies
+```
+
+For the new introspect, refer to the [introspect](https://github.com/cartridge-gg/introspect) repository where test contracts and assocaited functions should soon be available.
