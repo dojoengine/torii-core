@@ -274,6 +274,16 @@ fn assign_values(
         (TypeDef::Enum(enum_def), Value::Enum(enum_value)) => {
             assign_enum(map, base, &enum_def, enum_value)
         }
+        (TypeDef::Array(_), Value::Array(_)) => {
+            let json = value_to_json_string(value)?;
+            map.insert(base.to_string(), ColumnValue::Text(json));
+            Ok(())
+        }
+        (TypeDef::FixedArray(_), Value::FixedArray(_)) => {
+            let json = value_to_json_string(value)?;
+            map.insert(base.to_string(), ColumnValue::Text(json));
+            Ok(())
+        }
         (
             TypeDef::Array(_)
             | TypeDef::FixedArray(_)
@@ -348,4 +358,9 @@ fn find_variant<'a>(enum_def: &'a EnumDef, name: &str) -> Option<&'a VariantDef>
 
 pub fn u256_to_padded_hex(value: &U256) -> String {
     format!("{:#066x}", value)
+}
+
+fn value_to_json_string(value: &Value) -> Result<String> {
+    let json_value: serde_json::Value = value.clone().into();
+    Ok(to_string(&json_value)?)
 }
