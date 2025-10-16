@@ -3,10 +3,10 @@ use dojo_introspect_events::{
     DojoEvent, EventEmitted, EventRegistered, EventUpgraded, ModelRegistered, ModelUpgraded,
     StoreDelRecord, StoreSetRecord, StoreUpdateMember, StoreUpdateRecord,
 };
-use dojo_introspect_types::{DojoSchemaFetcher, DojoSchemaFetcherError};
+use dojo_introspect_types::DojoSchemaFetcher;
 use dojo_types_manager::{DojoManagerError, DojoTable, DojoTableErrors};
 use introspect_value::{Field, Value};
-use starknet::{core::types::EmittedEvent, providers::Provider};
+use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -39,8 +39,9 @@ pub enum DojoEventBuilderError {
     #[error("Table Error: {0}")]
     TableError(#[from] DojoTableErrors),
     #[error("Schema fetch error: {0}")]
-    SchemaFetchError(#[from] DojoSchemaFetcherError),
+    SchemaFetchError(#[from] anyhow::Error),
 }
+
 pub type Result<T> = std::result::Result<T, DojoEventBuilderError>;
 
 pub trait DojoEventBuilder {
@@ -66,20 +67,20 @@ where
         .ok_or_else(|| DojoEventBuilderError::RawEventDecodeError(T::NAME.to_string()))
 }
 
-impl<P> DojoEventBuilder for IntrospectDecoder<P>
+impl<F> DojoEventBuilder for IntrospectDecoder<F>
 where
-    P: Provider,
+    F: DojoSchemaFetcher + Sync + Send,
 {
-    fn with_table<F, R>(&self, id: Felt, f: F) -> Result<R>
+    fn with_table<Fn, R>(&self, id: Felt, f: Fn) -> Result<R>
     where
-        F: FnOnce(&DojoTable) -> Result<R>,
+        Fn: FnOnce(&DojoTable) -> Result<R>,
     {
         self.manager.with_table(id, f)?
     }
 
     async fn build_model_registered(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<ModelRegistered>(raw)?;
-        let struct_def = self.provider.schema(event.address).await?;
+        let struct_def = self.fetcher.schema(event.address).await?;
         let schema = self.manager.register_table(
             event.namespace,
             event.name,
@@ -98,7 +99,7 @@ where
 
     async fn build_model_upgraded(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<ModelUpgraded>(raw)?;
-        let struct_def = self.provider.schema(event.address).await?;
+        let struct_def = self.fetcher.schema(event.address).await?;
         let schema = self
             .manager
             .update_table(event.selector, struct_def.fields)?;
@@ -114,7 +115,7 @@ where
 
     async fn build_event_registered(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<EventRegistered>(raw)?;
-        let struct_def = self.provider.schema(event.address).await?;
+        let struct_def = self.fetcher.schema(event.address).await?;
         let schema = self.manager.register_table(
             event.namespace,
             event.name,
@@ -133,7 +134,7 @@ where
 
     async fn build_event_upgraded(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<EventUpgraded>(raw)?;
-        let struct_def = self.provider.schema(event.address).await?;
+        let struct_def = self.fetcher.schema(event.address).await?;
         let schema = self
             .manager
             .update_table(event.selector, struct_def.fields)?;

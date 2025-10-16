@@ -9,7 +9,7 @@ use dojo_types_manager::{DojoManager, JsonStore};
 use serde::{Deserialize, Serialize};
 use starknet::{
     core::types::EmittedEvent,
-    providers::{jsonrpc::HttpTransport, JsonRpcClient, Provider, Url},
+    providers::{jsonrpc::HttpTransport, JsonRpcClient, Url},
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -47,10 +47,7 @@ pub struct IntrospectDecoderConfig {
 }
 
 /// Implementation of the introspect decoder.
-struct IntrospectDecoder<F>
-where
-    F: DojoSchemaFetcher,
-{
+pub struct IntrospectDecoder<F> {
     pub filter: DecoderFilter,
     pub manager: DojoManager<JsonStore>,
     pub fetcher: F,
@@ -83,7 +80,7 @@ impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
         }
         let provider = JsonRpcClient::new(HttpTransport::new(cfg.rpc_url));
 
-        let store = JsonStore::new(cfg.store_path.as_path());
+        let store = JsonStore::new(&cfg.store_path);
 
         let manager = DojoManager::new(store)?;
         let filter = DecoderFilter {
@@ -101,9 +98,9 @@ impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
 }
 
 #[async_trait]
-impl<P> Decoder for IntrospectDecoder<P>
+impl<F> Decoder for IntrospectDecoder<F>
 where
-    P: Provider + Sync + Send,
+    F: DojoSchemaFetcher + Sync + Send + 'static,
 {
     fn name(&self) -> &'static str {
         DECODER_NAME
