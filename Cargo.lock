@@ -48,6 +48,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "alphanumeric-sort"
+version = "1.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d67c60c5f10f11c6ee04de72b2dd98bb9d2548cbc314d22a609bfa8bd9e87e8f"
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -473,6 +479,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirs"
+version = "4.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca3aa72a6f96ea37bbc5aa912f6788242832f75369bdfdadcb0e38423f100059"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
+name = "dirs-sys"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b1d1d91c932ef41c0f2663aa8b0ca0342d444d842c06914aa0a7e352d0bada6"
+dependencies = [
+ "libc",
+ "redox_users",
+ "winapi",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -495,7 +521,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-events"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?branch=main#490003ea57afdaea72c85c90be07c73c63f45604"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#ed86c1c143b3d69cfebeb1ed757b0437eb76003c"
 dependencies = [
  "introspect-types",
  "introspect-value",
@@ -506,8 +532,10 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-types"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?branch=main#490003ea57afdaea72c85c90be07c73c63f45604"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#ed86c1c143b3d69cfebeb1ed757b0437eb76003c"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "cainome-cairo-serde",
  "dojo-introspect-utils",
  "introspect-events",
@@ -523,7 +551,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-utils"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?branch=main#490003ea57afdaea72c85c90be07c73c63f45604"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next#ed86c1c143b3d69cfebeb1ed757b0437eb76003c"
 dependencies = [
  "anyhow",
  "cainome-cairo-serde",
@@ -1215,7 +1243,7 @@ dependencies = [
 [[package]]
 name = "introspect-events"
 version = "0.1.2"
-source = "git+https://github.com/cartridge-gg/introspect?branch=main#5025c1e8d465bf1282cb1a8cce914f935f912989"
+source = "git+https://github.com/cartridge-gg/introspect?branch=next#c41d07efacc7669361c566f65806054d3bfe45ec"
 dependencies = [
  "cainome-cairo-serde",
  "introspect-types",
@@ -1227,7 +1255,7 @@ dependencies = [
 [[package]]
 name = "introspect-types"
 version = "0.1.2"
-source = "git+https://github.com/cartridge-gg/introspect?branch=main#5025c1e8d465bf1282cb1a8cce914f935f912989"
+source = "git+https://github.com/cartridge-gg/introspect?branch=next#c41d07efacc7669361c566f65806054d3bfe45ec"
 dependencies = [
  "cainome-cairo-serde",
  "introspect-value",
@@ -1240,7 +1268,7 @@ dependencies = [
 [[package]]
 name = "introspect-value"
 version = "0.1.2"
-source = "git+https://github.com/cartridge-gg/introspect?branch=main#5025c1e8d465bf1282cb1a8cce914f935f912989"
+source = "git+https://github.com/cartridge-gg/introspect?branch=next#c41d07efacc7669361c566f65806054d3bfe45ec"
 dependencies = [
  "cainome-cairo-serde",
  "convert_case 0.8.0",
@@ -1341,6 +1369,16 @@ name = "libc"
 version = "0.2.177"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2874a2af47a2325c2001a6e6fad9b16a53b802102b528163885171cf92b15976"
+
+[[package]]
+name = "libredox"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "416f7e718bdb06000964960ffa43b4335ad4012ae8b99060261aa4a8088d5ccb"
+dependencies = [
+ "bitflags",
+ "libc",
+]
 
 [[package]]
 name = "libsqlite3-sys"
@@ -1848,6 +1886,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "redox_users"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba009ff324d1fc1b900bd1fdb31564febe58a8ccc8a6fdbb93b543d33b13ca43"
+dependencies = [
+ "getrandom 0.2.16",
+ "libredox",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "ref-cast"
 version = "1.0.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1920,6 +1969,15 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "webpki-roots",
+]
+
+[[package]]
+name = "resolve-path"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "321e5e41b3b192dab6f1e75b9deacb6688b4b8c5e68906a78e8f43e7c2887bb5"
+dependencies = [
+ "dirs",
 ]
 
 [[package]]
@@ -2987,6 +3045,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "torii-json-test"
+version = "0.1.0"
+dependencies = [
+ "alphanumeric-sort",
+ "anyhow",
+ "async-trait",
+ "dojo-introspect-events",
+ "dojo-introspect-types",
+ "dojo-introspect-utils",
+ "dojo-types-manager",
+ "introspect-events",
+ "introspect-types",
+ "introspect-value",
+ "resolve-path",
+ "serde",
+ "serde_json",
+ "starknet",
+ "starknet-types-core",
+ "thiserror 2.0.17",
+ "tokio",
+ "torii-core",
+ "torii-decoder-introspect",
+ "torii-sink-json",
+ "torii-types-introspect",
+ "torii-utils",
+ "tracing",
+]
+
+[[package]]
 name = "torii-registry"
 version = "0.1.0"
 dependencies = [
@@ -3080,6 +3167,22 @@ dependencies = [
  "starknet",
  "starknet-types-core",
  "torii-core",
+]
+
+[[package]]
+name = "torii-utils"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dojo-introspect-utils",
+ "introspect-events",
+ "introspect-types",
+ "introspect-value",
+ "serde",
+ "serde_json",
+ "starknet",
+ "starknet-types-core",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -3437,6 +3540,28 @@ checksum = "32b130c0d2d49f8b6889abc456e795e82525204f27c42cf767cf0d7734e089b8"
 dependencies = [
  "rustls-pki-types",
 ]
+
+[[package]]
+name = "winapi"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c839a674fcd7a98952e593242ea400abe93992746761e38641405d28b00f419"
+dependencies = [
+ "winapi-i686-pc-windows-gnu",
+ "winapi-x86_64-pc-windows-gnu",
+]
+
+[[package]]
+name = "winapi-i686-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
+
+[[package]]
+name = "winapi-x86_64-pc-windows-gnu"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
 
 [[package]]
 name = "windows-core"
