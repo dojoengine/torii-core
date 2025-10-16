@@ -1,10 +1,9 @@
-use std::{fs::create_dir_all, path::PathBuf};
-
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use introspect_value::{Field, ToPrimitiveString};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
+use std::{fs, fs::create_dir_all, path::PathBuf};
 use torii_core::{Batch, Envelope, Event, Sink};
 use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1};
 
@@ -26,11 +25,40 @@ impl ToJson for PathBuf {
     }
 }
 
+pub fn read_json_file<T>(path: &PathBuf) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let data = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read file at path: {:?}", path))?;
+    let value = serde_json::from_str(&data)
+        .with_context(|| format!("Failed to parse JSON from file at path: {:?}", path))?;
+    Ok(value)
+}
+
+pub fn write_json_file<T>(path: &PathBuf, value: &T) -> Result<()>
+where
+    T: Serialize,
+{
+    let file = fs::File::create(path)
+        .with_context(|| format!("Failed to create file at path: {:?}", path))?;
+    serde_json::to_writer_pretty(file, value)
+        .with_context(|| format!("Failed to write JSON to file at path: {:?}", path))?;
+    Ok(())
+}
+
 pub struct JsonSink {
     pub path: PathBuf,
     pub label: String,
     pub table_path: PathBuf,
     pub record_path: PathBuf,
+}
+
+fn fields_to_json_array(fields: Vec<Field>) -> Vec<(String, JsonValue)> {
+    fields
+        .into_iter()
+        .map(|field| (field.name, field.value.into()))
+        .collect()
 }
 
 fn to_json_object(fields: Vec<Field>) -> Map<String, JsonValue> {
@@ -98,11 +126,7 @@ impl JsonSink {
         let path = self.table_path(&event.name);
         if path.exists() {
         } else {
-            let file = std::fs::File::create(&path)
-                .with_context(|| format!("Failed to create table file at path: {:?}", path))?;
-            serde_json::to_writer_pretty(file, &event).with_context(|| {
-                format!("Failed to write table data to file at path: {:?}", path)
-            })?;
+            write_json_file(&path, &event)?;
         }
 
         Ok(())
@@ -120,15 +144,17 @@ impl JsonSink {
                 .to_primitive_string()
                 .context("Failed to convert id_field value to string")?,
         );
-        if path.exists() {
+
+        let data = if path.exists() {
+            let mut data: Map<String, JsonValue> = read_json_file(&path)?;
+            for (key, value) in fields_to_json_array(event.fields.clone()) {
+                data.insert(key, value);
+            }
+            data
         } else {
-            let file = std::fs::File::create(&path)
-                .with_context(|| format!("Failed to create record file at path: {:?}", path))?;
-            let json = to_json_object(event.fields.clone());
-            serde_json::to_writer_pretty(file, &json).with_context(|| {
-                format!("Failed to write record data to file at path: {:?}", path)
-            })?;
-        }
+            to_json_object(event.fields.clone())
+        };
+        write_json_file(&path, &data)?;
         Ok(())
     }
 
