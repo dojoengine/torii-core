@@ -4,6 +4,7 @@ use dojo_introspect_events::{
     DojoEvent, EventEmitted, EventRegistered, EventUpgraded, ModelRegistered, ModelUpgraded,
     StoreDelRecord, StoreSetRecord, StoreUpdateMember, StoreUpdateRecord,
 };
+use dojo_introspect_types::DojoSchemaFetcher;
 use dojo_types_manager::{DojoManager, JsonStore};
 use serde::{Deserialize, Serialize};
 use starknet::{
@@ -46,13 +47,13 @@ pub struct IntrospectDecoderConfig {
 }
 
 /// Implementation of the introspect decoder.
-struct IntrospectDecoder<P>
+struct IntrospectDecoder<F>
 where
-    P: Provider,
+    F: DojoSchemaFetcher,
 {
     pub filter: DecoderFilter,
     pub manager: DojoManager<JsonStore>,
-    pub provider: P,
+    pub fetcher: F,
 }
 
 impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
@@ -94,7 +95,7 @@ impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
         Ok(Self {
             filter,
             manager,
-            provider,
+            fetcher: provider,
         })
     }
 }
