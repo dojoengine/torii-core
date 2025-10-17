@@ -1,22 +1,20 @@
-mod event_reader;
-mod schema_fetcher;
-use crate::schema_fetcher::FakeProvider;
 use anyhow::Error;
 use dojo_introspect_events::{
     DojoEvent, EventEmitted, EventRegistered, EventUpgraded, ModelRegistered, ModelUpgraded,
     StoreDelRecord, StoreSetRecord, StoreUpdateMember, StoreUpdateRecord,
 };
 use dojo_types_manager::{DojoManager, JsonStore};
-use event_reader::EventIterator;
 use resolve_path::PathResolveExt;
+use starknet::core::types::EmittedEvent;
 use std::path::PathBuf;
 use std::time::Instant;
 use torii_core::Decoder;
 use torii_decoder_introspect::IntrospectDecoder;
 use torii_sink_json::JsonSink;
+use torii_test_utils::{EventIterator, FakeProvider};
 const DATA_PATH: &str = "~/tc-tests/pistols";
 
-fn get_event_type(event: &starknet::core::types::EmittedEvent) -> (String, String) {
+fn get_event_type(event: &EmittedEvent) -> (String, String) {
     let selector = event.keys[0];
     if selector == ModelRegistered::SELECTOR {
         ("ModelRegistered".to_string(), "Mr".to_string())

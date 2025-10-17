@@ -1,12 +1,9 @@
-use std::{
-    collections::VecDeque,
-    fs::{self, canonicalize},
-    path::PathBuf,
-};
-
 use serde::Deserialize;
 use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
+use std::collections::VecDeque;
+use std::fs::read_dir;
+use std::path::PathBuf;
 use torii_utils::read_json_file;
 
 #[derive(Deserialize)]
@@ -50,8 +47,8 @@ pub struct EventIterator {
 
 impl EventIterator {
     pub fn new(path: PathBuf) -> Self {
-        let path = canonicalize(path).unwrap();
-        let mut paths = fs::read_dir(&path)
+        let path = path;
+        let mut paths = read_dir(&path)
             .unwrap()
             .map(|p| p.unwrap().path())
             .collect::<Vec<_>>();

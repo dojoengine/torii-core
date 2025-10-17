@@ -9,6 +9,7 @@ members = [
     "crates/decoders/torii-decoder-erc721",
     "crates/sinks/torii-sink-log",
     "crates/sinks/torii-sink-sqlite",
+    "crates/sinks/torii-sink-postgresql",
     "crates/sinks/torii-sink-json",
     "crates/types/torii-types-introspect",
     "crates/types/torii-types-erc20",
@@ -48,6 +49,7 @@ config = "0.14"
 sqlx = { version = "0.7", default-features = false, features = [
     "runtime-tokio",
     "sqlite",
+    "postgres",
 ] }
 url = "2"
 introspect-value = { git = "https://github.com/cartridge-gg/introspect", branch = "next" }
@@ -71,3 +73,4 @@ torii-types-introspect = { path = "crates/types/torii-types-introspect" }
 torii-decoder-introspect = { path = "crates/decoders/torii-decoder-introspect" }
 torii-sink-json = { path = "crates/sinks/torii-sink-json" }
 torii-utils = { path = "crates/utils" }
+torii-test-utils = { path = "tests/test_utils" }
