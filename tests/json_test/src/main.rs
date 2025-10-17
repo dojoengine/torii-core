@@ -14,7 +14,7 @@ use std::time::Instant;
 use torii_core::Decoder;
 use torii_decoder_introspect::IntrospectDecoder;
 use torii_sink_json::JsonSink;
-const DATA_PATH: &str = "~/tc-tests/blob-arena";
+const DATA_PATH: &str = "~/tc-tests/pistols";
 
 fn get_event_type(event: &starknet::core::types::EmittedEvent) -> (String, String) {
     let selector = event.keys[0];
@@ -63,7 +63,7 @@ async fn main() {
     };
     let sink = JsonSink::new(json_sink_path, "json-sink".to_string()).unwrap();
 
-    let mut decoder_errors = 0;
+    let mut decoder_errors: Vec<Error> = vec![];
     let mut sink_errors: Vec<Error> = vec![];
 
     let events = EventIterator::new(events_path);
@@ -84,21 +84,25 @@ async fn main() {
                 _ => (),
             },
             Err(err) => {
-                decoder_errors += 1;
                 println!("\nError Decoding event: {name:#?}");
-                println!("Error: {err:#?}");
+                println!("Error: {:#?}", &err);
                 println!("---------------");
                 println!("{event:#?}");
                 println!("---------------");
+                decoder_errors.push(err);
             }
         }
     }
     let elapsed = now.elapsed();
     println!(
-        "\nElapsed: {elapsed:.2?} decoder errors: {decoder_errors} sink errors: {}",
+        "\nElapsed: {elapsed:.2?} decoder errors: {} sink errors: {}",
+        decoder_errors.len(),
         sink_errors.len()
     );
-    println!("{:#?}", sink_errors)
+    println!("Decoder Errors:");
+    println!("{:#?}", decoder_errors);
+    println!("Sink Errors:");
+    println!("{:#?}", sink_errors);
 }
 
 // fn main() {

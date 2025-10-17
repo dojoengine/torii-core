@@ -22,7 +22,7 @@ fn make_entity_id_field(entity_id: Felt) -> Field {
     }
 }
 
-fn make_entity_id_for_event(keys: Vec<Felt>) -> Field {
+fn make_entity_id_for_event(keys: &Vec<Felt>) -> Field {
     let mut hasher = DefaultHasher::new();
     keys.hash(&mut hasher);
     let entity_id = hasher.finish();
@@ -193,11 +193,24 @@ where
 
     fn build_emit_event(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<EventEmitted>(raw)?;
-        let (table_id, table_name, fields) = self.with_table(event.selector, |table| {
-            let fields = table.parse_values(event.values)?;
+        let id_field = make_entity_id_for_event(&event.keys);
+        let EventEmitted {
+            keys,
+            values,
+            selector,
+            ..
+        } = event;
+        let (table_id, table_name, fields) = self.with_table(selector, |table| {
+            let fields = match table.parse_key_values(keys.clone(), values.clone()) {
+                Ok(fields) => fields,
+                Err(e) => {
+                    println!("\nError Parsing keys: {keys:#?} values: {values:#?}");
+                    println!("\nError Parsing table: {table:#?}");
+                    return Err(DojoEventBuilderError::TableError(e));
+                }
+            };
             Ok((table.id, table.name.clone(), fields))
         })?;
-        let id_field = make_entity_id_for_event(event.keys);
         let data = UpdateRecordFieldsV1::new(table_id, table_name, id_field, fields);
         Ok(data.to_envelope(raw))
     }
