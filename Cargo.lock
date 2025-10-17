@@ -3197,27 +3197,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "torii-sink-postgresql"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "introspect-types",
- "introspect-value",
- "primitive-types 0.14.0",
- "serde",
- "serde_json",
- "sqlx",
- "starknet-types-core",
- "tokio",
- "torii-core",
- "torii-types-erc20",
- "torii-types-erc721",
- "torii-types-introspect",
- "tracing",
-]
-
-[[package]]
 name = "torii-sink-sqlite"
 version = "0.1.0"
 dependencies = [
@@ -3247,10 +3226,11 @@ dependencies = [
  "dojo-types-manager",
  "resolve-path",
  "starknet",
+ "starknet-types-core",
  "tokio",
  "torii-core",
  "torii-decoder-introspect",
- "torii-sink-json",
+ "torii-sink-sqlite",
  "torii-test-utils",
 ]
 
