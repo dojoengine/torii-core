@@ -1,0 +1,32 @@
+[package]
+name = "torii-json-test"
+version = "0.1.0"
+edition = "2021"
+description = "Introspect decoder for Torii runtime"
+authors = ["Torii Runtime <dev@torii.rs>"]
+license = "Apache-2.0"
+
+[dependencies]
+alphanumeric-sort.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+resolve-path.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+starknet.workspace = true
+torii-core.workspace = true
+torii-types-introspect.workspace = true
+torii-sink-json.workspace = true
+tracing.workspace = true
+dojo-introspect-events.workspace = true
+dojo-introspect-types.workspace = true
+dojo-introspect-utils.workspace = true
+dojo-types-manager.workspace = true
+introspect-types.workspace = true
+introspect-events.workspace = true
+introspect-value.workspace = true
+torii-decoder-introspect.workspace = true
+starknet-types-core.workspace = true
+thiserror.workspace = true
+torii-utils.workspace = true
+tokio.workspace = true

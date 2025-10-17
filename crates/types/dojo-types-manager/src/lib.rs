@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fs;
 
 use std::ops::Deref;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::RwLock;
 use thiserror::Error;
 
@@ -195,7 +195,7 @@ pub struct JsonStore {
 }
 
 impl JsonStore {
-    pub fn new(path: &Path) -> Self {
+    pub fn new(path: &PathBuf) -> Self {
         if !path.exists() {
             std::fs::create_dir_all(path).expect("Unable to create directory");
         }
@@ -243,7 +243,7 @@ impl StoreTrait for JsonStore {
     type Error = serde_json::Error;
     fn dump(&self, table_id: Felt, data: &Self::Table) -> Result<(), Self::Error> {
         let file_path = self.path.join(felt_to_json_file_name(&table_id));
-        std::fs::write(file_path, serde_json::to_string(data).unwrap())
+        std::fs::write(file_path, serde_json::to_string_pretty(data).unwrap())
             .expect("Unable to write file");
         Ok(())
     }
