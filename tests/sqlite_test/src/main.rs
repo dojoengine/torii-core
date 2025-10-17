@@ -83,7 +83,7 @@ async fn main() {
     let mut running = true;
     while running {
         let mut batch = Vec::new();
-        for _ in 0..1000 {
+        for _ in 0..10000 {
             let event = match events.next() {
                 Some(event) => event,
                 None => {
@@ -116,37 +116,6 @@ async fn main() {
                 sink_errors.push(err);
             }
             _ => (),
-        }
-    }
-    for event in events {
-        let (name, _) = get_event_type(&event);
-        if name == "Unknown" {
-            continue;
-        }
-        match decoder.decode(&event).await {
-            Ok(envelope) => {
-                match sink
-                    .handle_batch(Batch {
-                        items: vec![envelope],
-                    })
-                    .await
-                {
-                    Err(err) => {
-                        println!("\nError Handling event: {name:#?}");
-                        println!("Error: {err:#?}");
-                        sink_errors.push(err);
-                    }
-                    _ => (),
-                }
-            }
-            Err(err) => {
-                println!("\nError Decoding event: {name:#?}");
-                println!("Error: {:#?}", &err);
-                println!("---------------");
-                println!("{event:#?}");
-                println!("---------------");
-                decoder_errors.push(err);
-            }
         }
     }
     let elapsed = now.elapsed();
