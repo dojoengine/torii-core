@@ -78,9 +78,46 @@ async fn main() {
     let mut decoder_errors: Vec<Error> = vec![];
     let mut sink_errors: Vec<Error> = vec![];
 
-    let events = EventIterator::new(events_path);
+    let mut events = EventIterator::new(events_path);
     let now = Instant::now();
+    let mut running = true;
+    while running {
+        let mut batch = Vec::new();
+        for _ in 0..1000 {
+            let event = match events.next() {
+                Some(event) => event,
+                None => {
+                    running = false;
+                    break;
+                }
+            };
+            let (name, _) = get_event_type(&event);
+            if name == "Unknown" {
+                continue;
+            }
+            match decoder.decode(&event).await {
+                Ok(envelope) => {
+                    batch.push(envelope);
+                }
+                Err(err) => {
+                    println!("\nError Decoding event: {name:#?}");
+                    println!("Error: {:#?}", &err);
+                    println!("---------------");
+                    println!("{event:#?}");
+                    println!("---------------");
+                    decoder_errors.push(err);
+                }
+            }
+        }
 
+        match sink.handle_batch(Batch { items: batch }).await {
+            Err(err) => {
+                println!("Error: {err:#?}");
+                sink_errors.push(err);
+            }
+            _ => (),
+        }
+    }
     for event in events {
         let (name, _) = get_event_type(&event);
         if name == "Unknown" {
