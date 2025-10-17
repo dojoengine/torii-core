@@ -79,6 +79,8 @@ impl JsonSink {
         create_dir_all(&path)?;
         let table_path = path.join(TABLE_DIR);
         let record_path = path.join(RECORD_DIR);
+        create_dir_all(&table_path)?;
+        create_dir_all(&record_path)?;
         Ok(Self {
             path,
             label,
@@ -128,7 +130,6 @@ impl JsonSink {
         } else {
             write_json_file(&path, &event)?;
         }
-
         Ok(())
     }
 

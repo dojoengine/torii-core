@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
-use starknet::core::types::{BlockId, BlockTag, EmittedEvent, EventFilter, EventsPage, Felt};
+use starknet::core::types::{EmittedEvent, EventFilter, EventsPage};
 use starknet::providers::{jsonrpc::HttpTransport, JsonRpcClient, Provider};
 use tokio::time::sleep;
 use torii_core::{FetchPlan, Fetcher};
