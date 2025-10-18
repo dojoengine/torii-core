@@ -13,7 +13,10 @@ use introspect_types::ColumnDef;
 use introspect_value::{Field, Value};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use sqlx::sqlite::{SqliteArguments, SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{
+    sqlite::{SqliteArguments, SqliteConnectOptions, SqlitePoolOptions},
+    Sqlite, Transaction,
+};
 use sqlx::{Arguments, Row, SqlitePool};
 use tokio::sync::RwLock;
 use torii_core::{
@@ -233,7 +236,11 @@ impl SqliteSink {
         Ok(())
     }
 
-    async fn persist_schema(&self, schema: &TableSchema) -> Result<()> {
+    async fn persist_schema(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        schema: &TableSchema,
+    ) -> Result<()> {
         let schema_json = serde_json::to_string(&schema.declare)?;
         sqlx::query(
             r#"
@@ -249,7 +256,11 @@ impl SqliteSink {
         Ok(())
     }
 
-    async fn ensure_table(&self, schema: &TableSchema) -> Result<()> {
+    async fn ensure_table(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        schema: &TableSchema,
+    ) -> Result<()> {
         let table_ident = quote_ident(schema.table_name());
         let pk_ident = quote_ident(&schema.id_column().name);
         let columns = schema.all_columns();
@@ -289,7 +300,11 @@ impl SqliteSink {
         Ok(())
     }
 
-    async fn load_schema(&self, storage_name: &str) -> Result<Arc<TableSchema>> {
+    async fn load_schema(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        storage_name: &str,
+    ) -> Result<Arc<TableSchema>> {
         if let Some(schema) = self.schemas.read().await.get(storage_name).cloned() {
             return Ok(schema);
         }
@@ -312,21 +327,26 @@ impl SqliteSink {
             declare,
             storage_name.to_string(),
         )?);
-        self.ensure_table(&schema).await?;
+        self.ensure_table(tx, &schema).await?;
 
         let mut cache = self.schemas.write().await;
         cache.insert(storage_name.to_string(), schema.clone());
         Ok(schema)
     }
 
-    async fn handle_declare(&self, env: &Envelope, event: &DeclareTableV1) -> Result<()> {
+    async fn handle_declare(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        env: &Envelope,
+        event: &DeclareTableV1,
+    ) -> Result<()> {
         let storage_name = self.storage_table_name(&env.raw.from_address, event.name.as_str());
         let schema = Arc::new(TableSchema::from_declare(
             event.clone(),
             storage_name.clone(),
         )?);
-        self.persist_schema(&schema).await?;
-        self.ensure_table(&schema).await?;
+        self.persist_schema(tx, &schema).await?;
+        self.ensure_table(tx, &schema).await?;
 
         {
             let mut cache = self.schemas.write().await;
@@ -345,12 +365,13 @@ impl SqliteSink {
 
     async fn handle_update_record(
         &self,
+        tx: &mut Transaction<'_, Sqlite>,
         env: &Envelope,
         event: &UpdateRecordFieldsV1,
     ) -> Result<()> {
         let storage_name =
             self.storage_table_name(&env.raw.from_address, event.table_name.as_str());
-        let schema = self.load_schema(&storage_name).await?;
+        let schema = self.load_schema(tx, &storage_name).await?;
         let id_value = format_id_field(&event.id_field)?;
 
         let column_types: HashMap<_, _> = schema
@@ -412,8 +433,6 @@ impl SqliteSink {
             table_ident, columns_sql, placeholders
         );
 
-        dbg!(&sql);
-
         let update_columns: Vec<&String> = column_names
             .iter()
             .filter(|name| **name != pk_name)
@@ -433,7 +452,7 @@ impl SqliteSink {
             sql.push_str(&format!(" ON CONFLICT({}) DO NOTHING", pk_ident));
         }
 
-        sqlx::query_with(&sql, args).execute(&self.pool).await?;
+        sqlx::query_with(&sql, args).execute(&mut **tx).await?;
 
         tracing::debug!(
             sink = %self.label,
@@ -446,7 +465,12 @@ impl SqliteSink {
         Ok(())
     }
 
-    async fn handle_erc20(&self, env: &Envelope, event: &Erc20Transfer) -> Result<()> {
+    async fn handle_erc20(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        env: &Envelope,
+        event: &Erc20Transfer,
+    ) -> Result<()> {
         let contract = felt_to_padded_hex(&event.contract);
         let from = felt_to_padded_hex(&event.from);
         let to = felt_to_padded_hex(&event.to);
@@ -464,13 +488,18 @@ impl SqliteSink {
         .bind(from)
         .bind(to)
         .bind(amount)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
 
         Ok(())
     }
 
-    async fn handle_erc721(&self, env: &Envelope, event: &Erc721Transfer) -> Result<()> {
+    async fn handle_erc721(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        env: &Envelope,
+        event: &Erc721Transfer,
+    ) -> Result<()> {
         let contract = felt_to_padded_hex(&event.contract);
         let from = felt_to_padded_hex(&event.from);
         let to = felt_to_padded_hex(&event.to);
@@ -488,7 +517,7 @@ impl SqliteSink {
         .bind(from)
         .bind(to)
         .bind(token_id)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
 
         Ok(())
@@ -502,25 +531,27 @@ impl Sink for SqliteSink {
     }
 
     async fn handle_batch(&self, batch: Batch) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
         for env in &batch.items {
             if env.type_id == DeclareTableV1::TYPE_ID {
                 if let Some(event) = env.downcast::<DeclareTableV1>() {
-                    self.handle_declare(env, event).await?;
+                    self.handle_declare(&mut tx, env, event).await?;
                 }
             } else if env.type_id == UpdateRecordFieldsV1::TYPE_ID {
                 if let Some(event) = env.downcast::<UpdateRecordFieldsV1>() {
-                    self.handle_update_record(env, event).await?;
+                    self.handle_update_record(&mut tx, env, event).await?;
                 }
             } else if env.type_id == Erc20Transfer::TYPE_ID {
                 if let Some(event) = env.downcast::<Erc20Transfer>() {
-                    self.handle_erc20(env, event).await?;
+                    self.handle_erc20(&mut tx, env, event).await?;
                 }
             } else if env.type_id == Erc721Transfer::TYPE_ID {
                 if let Some(event) = env.downcast::<Erc721Transfer>() {
-                    self.handle_erc721(env, event).await?;
+                    self.handle_erc721(&mut tx, env, event).await?;
                 }
             }
         }
+        tx.commit().await?;
         tracing::info!(sink = %self.label, processed = batch.items.len(), "sqlite sink processed batch");
         Ok(())
     }

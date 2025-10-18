@@ -5,11 +5,12 @@ use dojo_introspect_events::{
 };
 use dojo_types_manager::{DojoManager, JsonStore};
 use resolve_path::PathResolveExt;
-use std::path::PathBuf;
+use starknet_types_core::felt::Felt;
 use std::time::Instant;
-use torii_core::Decoder;
+use std::{collections::HashMap, path::PathBuf};
+use torii_core::{Batch, Decoder, Sink};
 use torii_decoder_introspect::IntrospectDecoder;
-use torii_sink_json::JsonSink;
+use torii_sink_sqlite::SqliteSink;
 use torii_test_utils::{EventIterator, FakeProvider};
 const DATA_PATH: &str = "~/tc-tests/blob-arena";
 
@@ -43,11 +44,11 @@ async fn main() {
     let data_path = PathBuf::from(DATA_PATH).resolve().into_owned();
     let manager_path = data_path.join("manager");
     let model_contracts_path = data_path.join("model-contracts");
-    let json_sink_path = data_path.join("json-sink");
+    let sql_sink_path = data_path.join("sql-sink");
     let events_path = data_path.join("events");
     println!("Manager Path: {manager_path:#?}");
     println!("Model Contracts Path: {model_contracts_path:#?}");
-    println!("JSON Sink Path: {json_sink_path:#?}");
+    println!("SQL Sink Path: {sql_sink_path:#?}");
     println!("Events Path: {events_path:#?}");
     let manager = DojoManager::new(JsonStore::new(&manager_path)).unwrap();
     let fetcher = FakeProvider {
@@ -58,36 +59,63 @@ async fn main() {
         manager,
         fetcher,
     };
-    let sink = JsonSink::new(json_sink_path, "json-sink".to_string()).unwrap();
+    let mut contract_labels: HashMap<Felt, String> = HashMap::new();
+    contract_labels.insert(
+        Felt::from_hex_unchecked(
+            "0x2d26295d6c541d64740e1ae56abc079b82b22c35ab83985ef8bd15dc0f9edfb",
+        ),
+        "BlobArena".to_string(),
+    );
+    let sink = SqliteSink::connect(
+        "sql-sink".to_string(),
+        &sql_sink_path.into_os_string().to_str().unwrap(),
+        None,
+        contract_labels,
+    )
+    .await
+    .unwrap();
 
     let mut decoder_errors: Vec<Error> = vec![];
     let mut sink_errors: Vec<Error> = vec![];
 
-    let events = EventIterator::new(events_path);
+    let mut events = EventIterator::new(events_path);
     let now = Instant::now();
-
-    for event in events {
-        let (name, _) = get_event_type(&event);
-        if name == "Unknown" {
-            continue;
-        }
-        match decoder.decode(&event).await {
-            Ok(envelope) => match sink.handle_envelope(&envelope) {
-                Err(err) => {
-                    println!("\nError Handling event: {name:#?}");
-                    println!("Error: {err:#?}");
-                    sink_errors.push(err);
+    let mut running = true;
+    while running {
+        let mut batch = Vec::new();
+        for _ in 0..10000 {
+            let event = match events.next() {
+                Some(event) => event,
+                None => {
+                    running = false;
+                    break;
                 }
-                _ => (),
-            },
-            Err(err) => {
-                println!("\nError Decoding event: {name:#?}");
-                println!("Error: {:#?}", &err);
-                println!("---------------");
-                println!("{event:#?}");
-                println!("---------------");
-                decoder_errors.push(err);
+            };
+            let (name, _) = get_event_type(&event);
+            if name == "Unknown" {
+                continue;
             }
+            match decoder.decode(&event).await {
+                Ok(envelope) => {
+                    batch.push(envelope);
+                }
+                Err(err) => {
+                    println!("\nError Decoding event: {name:#?}");
+                    println!("Error: {:#?}", &err);
+                    println!("---------------");
+                    println!("{event:#?}");
+                    println!("---------------");
+                    decoder_errors.push(err);
+                }
+            }
+        }
+
+        match sink.handle_batch(Batch { items: batch }).await {
+            Err(err) => {
+                println!("Error: {err:#?}");
+                sink_errors.push(err);
+            }
+            _ => (),
         }
     }
     let elapsed = now.elapsed();
