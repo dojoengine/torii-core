@@ -251,7 +251,7 @@ impl SqliteSink {
         )
         .bind(schema.table_name())
         .bind(schema_json)
-        .execute(&mut **tx)
+        .execute(&self.pool)
         .await?;
         Ok(())
     }
@@ -274,7 +274,7 @@ impl SqliteSink {
             "CREATE TABLE IF NOT EXISTS {} ({}, PRIMARY KEY ({}))",
             table_ident, column_defs, pk_ident
         );
-        sqlx::query(&create_sql).execute(&mut **tx).await?;
+        sqlx::query(&create_sql).execute(&self.pool).await?;
 
         let pragma_sql = format!("PRAGMA table_info({})", table_ident);
         let rows = sqlx::query(&pragma_sql).fetch_all(&self.pool).await?;
@@ -294,7 +294,7 @@ impl SqliteSink {
                 quote_ident(&column.name),
                 column.sql_type.as_sql()
             );
-            sqlx::query(&alter_sql).execute(&mut **tx).await?;
+            sqlx::query(&alter_sql).execute(&self.pool).await?;
         }
 
         Ok(())
@@ -432,8 +432,6 @@ impl SqliteSink {
             "INSERT INTO {} ({}) VALUES ({})",
             table_ident, columns_sql, placeholders
         );
-
-        dbg!(&sql);
 
         let update_columns: Vec<&String> = column_names
             .iter()

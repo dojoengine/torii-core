@@ -12,7 +12,7 @@ use torii_core::Decoder;
 use torii_decoder_introspect::IntrospectDecoder;
 use torii_sink_json::JsonSink;
 use torii_test_utils::{EventIterator, FakeProvider};
-const DATA_PATH: &str = "~/tc-tests/pistols";
+const DATA_PATH: &str = "~/tc-tests/blob-arena";
 
 fn get_event_type(event: &EmittedEvent) -> (String, String) {
     let selector = event.keys[0];
@@ -63,6 +63,7 @@ async fn main() {
 
     let mut decoder_errors: Vec<Error> = vec![];
     let mut sink_errors: Vec<Error> = vec![];
+    let mut successes = 0;
 
     let events = EventIterator::new(events_path);
     let now = Instant::now();
@@ -79,7 +80,9 @@ async fn main() {
                     println!("Error: {err:#?}");
                     sink_errors.push(err);
                 }
-                _ => (),
+                Ok(_) => {
+                    successes += 1;
+                }
             },
             Err(err) => {
                 println!("\nError Decoding event: {name:#?}");
@@ -93,7 +96,8 @@ async fn main() {
     }
     let elapsed = now.elapsed();
     println!(
-        "\nElapsed: {elapsed:.2?} decoder errors: {} sink errors: {}",
+        "\nElapsed: {elapsed:.2?} successes: {} decoder errors: {} sink errors: {}",
+        successes,
         decoder_errors.len(),
         sink_errors.len()
     );
