@@ -3,10 +3,10 @@ use dojo_introspect_events::{
     DojoEvent, EventEmitted, EventRegistered, EventUpgraded, ModelRegistered, ModelUpgraded,
     StoreDelRecord, StoreSetRecord, StoreUpdateMember, StoreUpdateRecord,
 };
-use dojo_introspect_types::{DojoSchemaFetcher, DojoSchemaFetcherError};
+use dojo_introspect_types::DojoSchemaFetcher;
 use dojo_types_manager::{DojoManagerError, DojoTable, DojoTableErrors};
 use introspect_value::{Field, Value};
-use starknet::{core::types::EmittedEvent, providers::Provider};
+use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -22,7 +22,7 @@ fn make_entity_id_field(entity_id: Felt) -> Field {
     }
 }
 
-fn make_entity_id_for_event(keys: Vec<Felt>) -> Field {
+fn make_entity_id_for_event(keys: &Vec<Felt>) -> Field {
     let mut hasher = DefaultHasher::new();
     keys.hash(&mut hasher);
     let entity_id = hasher.finish();
@@ -39,8 +39,9 @@ pub enum DojoEventBuilderError {
     #[error("Table Error: {0}")]
     TableError(#[from] DojoTableErrors),
     #[error("Schema fetch error: {0}")]
-    SchemaFetchError(#[from] DojoSchemaFetcherError),
+    SchemaFetchError(#[from] anyhow::Error),
 }
+
 pub type Result<T> = std::result::Result<T, DojoEventBuilderError>;
 
 pub trait DojoEventBuilder {
@@ -66,20 +67,20 @@ where
         .ok_or_else(|| DojoEventBuilderError::RawEventDecodeError(T::NAME.to_string()))
 }
 
-impl<P> DojoEventBuilder for IntrospectDecoder<P>
+impl<F> DojoEventBuilder for IntrospectDecoder<F>
 where
-    P: Provider,
+    F: DojoSchemaFetcher + Sync + Send,
 {
-    fn with_table<F, R>(&self, id: Felt, f: F) -> Result<R>
+    fn with_table<Fn, R>(&self, id: Felt, f: Fn) -> Result<R>
     where
-        F: FnOnce(&DojoTable) -> Result<R>,
+        Fn: FnOnce(&DojoTable) -> Result<R>,
     {
         self.manager.with_table(id, f)?
     }
 
     async fn build_model_registered(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<ModelRegistered>(raw)?;
-        let struct_def = self.provider.schema(event.address).await?;
+        let struct_def = self.fetcher.schema(event.address).await?;
         let schema = self.manager.register_table(
             event.namespace,
             event.name,
@@ -98,7 +99,7 @@ where
 
     async fn build_model_upgraded(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<ModelUpgraded>(raw)?;
-        let struct_def = self.provider.schema(event.address).await?;
+        let struct_def = self.fetcher.schema(event.address).await?;
         let schema = self
             .manager
             .update_table(event.selector, struct_def.fields)?;
@@ -114,7 +115,7 @@ where
 
     async fn build_event_registered(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<EventRegistered>(raw)?;
-        let struct_def = self.provider.schema(event.address).await?;
+        let struct_def = self.fetcher.schema(event.address).await?;
         let schema = self.manager.register_table(
             event.namespace,
             event.name,
@@ -133,7 +134,7 @@ where
 
     async fn build_event_upgraded(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<EventUpgraded>(raw)?;
-        let struct_def = self.provider.schema(event.address).await?;
+        let struct_def = self.fetcher.schema(event.address).await?;
         let schema = self
             .manager
             .update_table(event.selector, struct_def.fields)?;
@@ -192,11 +193,24 @@ where
 
     fn build_emit_event(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<EventEmitted>(raw)?;
-        let (table_id, table_name, fields) = self.with_table(event.selector, |table| {
-            let fields = table.parse_values(event.values)?;
+        let id_field = make_entity_id_for_event(&event.keys);
+        let EventEmitted {
+            keys,
+            values,
+            selector,
+            ..
+        } = event;
+        let (table_id, table_name, fields) = self.with_table(selector, |table| {
+            let fields = match table.parse_key_values(keys.clone(), values.clone()) {
+                Ok(fields) => fields,
+                Err(e) => {
+                    println!("\nError Parsing keys: {keys:#?} values: {values:#?}");
+                    println!("\nError Parsing table: {table:#?}");
+                    return Err(DojoEventBuilderError::TableError(e));
+                }
+            };
             Ok((table.id, table.name.clone(), fields))
         })?;
-        let id_field = make_entity_id_for_event(event.keys);
         let data = UpdateRecordFieldsV1::new(table_id, table_name, id_field, fields);
         Ok(data.to_envelope(raw))
     }
