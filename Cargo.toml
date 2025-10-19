@@ -10,6 +10,7 @@ members = [
     "crates/sinks/torii-sink-log",
     "crates/sinks/torii-sink-sqlite",
     "crates/sinks/torii-sink-json",
+    "crates/sinks/torii-sink-postgres",
     "crates/types/torii-types-introspect",
     "crates/types/torii-types-erc20",
     "crates/types/torii-types-erc721",
@@ -32,6 +33,7 @@ alphanumeric-sort = "1.5.3"
 anyhow = "1"
 async-trait = "0.1"
 bytes = "1"
+primitive-types = "0.14"
 resolve-path = "0.1.0"
 starknet = "0.17"
 tokio = { version = "1", features = [
@@ -40,6 +42,7 @@ tokio = { version = "1", features = [
     "time",
     "sync",
 ] }
+
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 serde = { version = "1", features = ["derive"] }
@@ -72,5 +75,6 @@ torii-types-introspect = { path = "crates/types/torii-types-introspect" }
 torii-decoder-introspect = { path = "crates/decoders/torii-decoder-introspect" }
 torii-sink-json = { path = "crates/sinks/torii-sink-json" }
 torii-sink-sqlite = { path = "crates/sinks/torii-sink-sqlite" }
+torii-sink-postgres = { path = "crates/sinks/torii-sink-postgres" }
 torii-utils = { path = "crates/utils" }
 torii-test-utils = { path = "tests/test_utils" }

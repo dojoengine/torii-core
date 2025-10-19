@@ -1,5 +1,5 @@
 [package]
-name = "torii-sink-postgresql"
+name = "torii-sink-postgres"
 version = "0.1.0"
 edition = "2021"
 description = "PostgreSQL sink implementation for Torii runtime"
@@ -7,17 +7,23 @@ authors = ["Torii Runtime <dev@torii.rs>"]
 license = "Apache-2.0"
 
 [dependencies]
+sqlx = { workspace = true, features = [
+    "postgres",
+    "runtime-tokio-rustls",
+    "macros",
+    "migrate",
+] }
 anyhow.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqlx.workspace = true
+starknet.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 introspect-types.workspace = true
 introspect-value.workspace = true
 starknet-types-core.workspace = true
-primitive-types = "0.14"
+thiserror.workspace = true
 
 # Local crates
 torii-core = { path = "../../core/torii-core" }
