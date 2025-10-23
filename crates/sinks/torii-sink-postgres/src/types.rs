@@ -1,7 +1,8 @@
 use introspect_types::{EnumDef, FixedArrayDef, StructDef, TypeDef};
+use rand::distr::{Alphanumeric, SampleString};
+use rand::rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::Hash;
 
 #[derive(Hash, Deserialize, Serialize)]
 pub enum PostgresType {
@@ -73,22 +74,12 @@ impl PostgresField {
     pub fn new(name: String, ptype: PostgresType) -> Self {
         Self { name, ptype }
     }
-}
-
-#[derive(Default, Deserialize, Serialize)]
-pub struct PostgresTypes {
-    types: HashMap<u64, PostgresComplexType>,
-    to_create: Vec<u64>,
-}
-
-fn hash_value<T: Hash>(t: &T) -> u64 {
-    let mut s = DefaultHasher::new();
-    t.hash(&mut s);
-    s.finish()
-}
-
-fn get_type_name(hash: u64) -> String {
-    format!("type_{hash:x}")
+    pub fn new_complex(name: String, type_name: &str) -> Self {
+        Self {
+            name,
+            ptype: PostgresType::Composite(type_name.to_string()),
+        }
+    }
 }
 
 fn create_enum_type_query(type_name: String, variants: &[String]) -> String {
@@ -124,65 +115,91 @@ fn create_struct_type_query(type_name: String, fields: &[PostgresField]) -> Stri
     )
 }
 
-impl PostgresTypes {
-    pub fn add_struct(&mut self, fields: Vec<PostgresField>) -> String {
-        let ptype = PostgresComplexType::Struct(fields);
-        let hash = hash_value(&ptype);
-        if !self.types.contains_key(&hash) {
-            self.types.insert(hash, ptype);
-            self.to_create.push(hash);
-        }
-        get_type_name(hash)
+fn truncate(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        None => s,
+        Some((idx, _)) => &s[..idx],
     }
-    pub fn add_enum(&mut self, variant_strings: Vec<String>) -> String {
-        let hash = hash_value(&variant_strings);
-        if !self.types.contains_key(&hash) {
-            self.types
-                .insert(hash, PostgresComplexType::Enum(variant_strings));
-            self.to_create.push(hash);
-        }
-        get_type_name(hash)
+}
+
+pub trait PostgresComplexTypes {
+    fn add_struct(&mut self, name: &str, fields: Vec<PostgresField>) -> String;
+    fn add_enum_struct_and_variants(
+        &mut self,
+        name: &str,
+        variant_strings: Vec<String>,
+        fields: Vec<PostgresField>,
+    ) -> String;
+    fn create_type_queries(&self) -> Vec<String>;
+}
+
+fn name_and_rand(base: &str, length: usize) -> String {
+    format!("{}_{}", truncate(base, 31), random_alphanumeric(length))
+}
+
+fn random_alphanumeric(length: usize) -> String {
+    Alphanumeric.sample_string(&mut rng(), length)
+}
+
+impl PostgresComplexTypes for Vec<(String, PostgresComplexType)> {
+    fn add_struct(&mut self, name: &str, fields: Vec<PostgresField>) -> String {
+        let name = name_and_rand(name, 31).to_lowercase();
+        self.push((name.clone(), PostgresComplexType::Struct(fields)));
+        name
+    }
+    fn add_enum_struct_and_variants(
+        &mut self,
+        name: &str,
+        variant_strings: Vec<String>,
+        mut fields: Vec<PostgresField>,
+    ) -> String {
+        let rand = random_alphanumeric(29);
+        let enum_name = format!("{}_v_{}", truncate(name, 31), rand).to_lowercase();
+        let struct_name = format!("{}_{}", truncate(name, 31), rand).to_lowercase();
+        fields.insert(
+            0,
+            PostgresField::new_complex("variant".to_string(), &enum_name),
+        );
+        self.push((enum_name, PostgresComplexType::Enum(variant_strings)));
+        self.push((struct_name.clone(), PostgresComplexType::Struct(fields)));
+        struct_name
     }
 
-    pub fn create_type_queries(&self) -> Vec<String> {
-        self.to_create
-            .iter()
-            .map(|hash| match &self.types[hash] {
+    fn create_type_queries(&self) -> Vec<String> {
+        self.iter()
+            .map(|(name, complex_type)| match complex_type {
                 PostgresComplexType::Struct(fields) => {
-                    create_struct_type_query(get_type_name(*hash), fields)
+                    create_struct_type_query(name.clone(), fields)
                 }
                 PostgresComplexType::Enum(variant_strings) => {
-                    create_enum_type_query(get_type_name(*hash), variant_strings)
+                    create_enum_type_query(name.clone(), variant_strings)
                 }
             })
             .collect()
     }
-
-    pub fn consume_create_types(&mut self) -> Vec<String> {
-        let queries = self.create_type_queries();
-        self.to_create.clear();
-        queries
-    }
 }
 
-fn extract_types_from_tuple(type_defs: &[TypeDef], types: &mut PostgresTypes) -> String {
+fn extract_types_from_tuple(
+    type_defs: &[TypeDef],
+    types: &mut Vec<(String, PostgresComplexType)>,
+) -> String {
     let fields = type_defs
         .iter()
         .enumerate()
         .map(|(i, t)| PostgresField::new(format!("_{i}"), t.extract_type(types)))
         .collect();
-    types.add_struct(fields)
+    types.add_struct("tuple", fields)
 }
 
 pub trait PostgresTypeExtractor {
-    fn extract_type(&self, types: &mut PostgresTypes) -> PostgresType;
-    fn extract_type_string(&self, types: &mut PostgresTypes) -> String {
+    fn extract_type(&self, types: &mut Vec<(String, PostgresComplexType)>) -> PostgresType;
+    fn extract_type_string(&self, types: &mut Vec<(String, PostgresComplexType)>) -> String {
         self.extract_type(types).to_string()
     }
 }
 
 impl PostgresTypeExtractor for TypeDef {
-    fn extract_type(&self, types: &mut PostgresTypes) -> PostgresType {
+    fn extract_type(&self, types: &mut Vec<(String, PostgresComplexType)>) -> PostgresType {
         match self {
             TypeDef::None => PostgresType::Text,
             TypeDef::Bool => PostgresType::Boolean,
@@ -213,7 +230,7 @@ impl PostgresTypeExtractor for TypeDef {
 }
 
 impl PostgresTypeExtractor for FixedArrayDef {
-    fn extract_type(&self, types: &mut PostgresTypes) -> PostgresType {
+    fn extract_type(&self, types: &mut Vec<(String, PostgresComplexType)>) -> PostgresType {
         PostgresType::Array(
             Box::new(self.type_def.extract_type(types)),
             Some(self.size as u32),
@@ -222,28 +239,26 @@ impl PostgresTypeExtractor for FixedArrayDef {
 }
 
 impl PostgresTypeExtractor for StructDef {
-    fn extract_type(&self, types: &mut PostgresTypes) -> PostgresType {
+    fn extract_type(&self, types: &mut Vec<(String, PostgresComplexType)>) -> PostgresType {
         let fields = self
             .fields
             .iter()
             .map(|f| PostgresField::new(f.name.clone(), f.type_def.extract_type(types)))
             .collect();
-        PostgresType::Composite(types.add_struct(fields))
+        PostgresType::Composite(types.add_struct(&self.name, fields))
     }
 }
 
 impl PostgresTypeExtractor for EnumDef {
-    fn extract_type(&self, types: &mut PostgresTypes) -> PostgresType {
+    fn extract_type(&self, types: &mut Vec<(String, PostgresComplexType)>) -> PostgresType {
         let variant_strings = self
             .variants
             .values()
             .map(|v| v.name.clone())
             .collect::<Vec<_>>();
-        let mut fields = vec![PostgresField::new(
-            "variant".to_string(),
-            PostgresType::Composite(types.add_enum(variant_strings)),
-        )];
-        for variant in self.variants.values() {
+        let mut fields = vec![];
+        for selector in self.order.iter() {
+            let variant = &self.variants[selector];
             if variant.type_def != TypeDef::None {
                 fields.push(PostgresField::new(
                     format!("_{}", variant.name),
@@ -251,6 +266,10 @@ impl PostgresTypeExtractor for EnumDef {
                 ));
             }
         }
-        PostgresType::Composite(types.add_struct(fields))
+        PostgresType::Composite(types.add_enum_struct_and_variants(
+            &self.name,
+            variant_strings,
+            fields,
+        ))
     }
 }

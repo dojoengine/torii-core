@@ -67,6 +67,7 @@ dojo-introspect-events = { git = "https://github.com/dojoengine/dojo-introspect"
 # dojo-introspect-utils = { path = "../dojo-introspect/crates/utils" }
 # dojo-introspect-events = { path = "../dojo-introspect/crates/events" }
 dojo-types-manager = { path = "crates/types/dojo-types-manager" }
+rand = "0.9.2"
 starknet-types-core = "0.2.0"
 thiserror = "2.0.17"
 torii-core = { path = "crates/core/torii-core" }

@@ -1,15 +1,15 @@
-use crate::types::{PostgresTypeExtractor, PostgresTypes};
-use crate::values::ToPostgresJson;
+use crate::json::ToPostgresJson;
+use crate::types::{PostgresComplexTypes, PostgresTypeExtractor};
+use crate::value::{PostgresValueError, ToPostgresValue};
 use async_trait::async_trait;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Transaction};
 use starknet::core::types::EmittedEvent;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::RwLock;
 use thiserror::Error;
 use torii_core::{Batch, Event, Sink};
-use torii_types_introspect::{DeclareTableV1, UpdateRecordFieldsV1};
+use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1};
 
 #[derive(Debug, Error)]
 pub enum PostgresSinkError {
@@ -21,6 +21,8 @@ pub enum PostgresSinkError {
     MigrationError(#[from] sqlx::migrate::MigrateError),
     #[error("Json error: {0}")]
     JsonError(#[from] serde_json::Error),
+    #[error("Postgres value error: {0}")]
+    PostgresValueError(#[from] PostgresValueError),
 }
 
 type Result<T> = std::result::Result<T, PostgresSinkError>;
@@ -28,7 +30,7 @@ type Result<T> = std::result::Result<T, PostgresSinkError>;
 pub struct PostgresSink {
     label: String,
     pool: PgPool,
-    types: RwLock<PostgresTypes>,
+    // types: RwLock<PostgresTypes>,
 }
 
 // Call this during your application startup:
@@ -48,7 +50,7 @@ impl PostgresSink {
         Ok(Self {
             label: label.into(),
             pool,
-            types: RwLock::new(PostgresTypes::default()),
+            // types: RwLock::new(PostgresTypes::default()),
         })
     }
 
@@ -69,10 +71,12 @@ impl PostgresSink {
 
         // Create SQL statements in a separate scope to ensure RwLock is released
         let (create_table_sql, create_types) = {
-            let mut types = self.types.write().unwrap();
+            let mut types = vec![];
+            let primary_field = event.id_field.type_def.extract_type_string(&mut types);
             // Build the CREATE TABLE statement
-            let mut create_table_sql = format!(r#"CREATE TABLE IF NOT EXISTS "{}" ("#, table_name);
-            create_table_sql.push_str("entity_id felt252 PRIMARY KEY, ");
+            let mut create_table_sql = format!(r#"CREATE TABLE IF NOT EXISTS "{table_name}" ("#,);
+            let primary_key = event.id_field.name.as_str();
+            create_table_sql.push_str(&format!(r#""{primary_key}" {primary_field} PRIMARY KEY, "#));
             let columns = event
                 .fields
                 .iter()
@@ -88,10 +92,9 @@ impl PostgresSink {
             create_table_sql.push_str(&columns.join(", "));
             create_table_sql.push_str(");");
 
-            (create_table_sql, types.consume_create_types())
+            (create_table_sql, types.create_type_queries())
         }; // RwLock is automatically dropped here
-
-        // Now we can safely use await since the lock is released
+           // Now we can safely use await since the lock is released
         for create_type in create_types {
             sqlx::query(&create_type).execute(&mut **tx).await?;
         }
@@ -140,14 +143,35 @@ impl PostgresSink {
         Ok(())
     }
 
-    // async fn handle_update_record(
-    //     &self,
-    //     tx: &mut Transaction<'_, Postgres>,
-    //     event: &UpdateRecordFieldsV1,
-    // ) -> Result<()> {
-    //     let table_name = &event.table_name;
-    //     let entity_id = &event.id_field.value;
-    // }
+    async fn handle_delete_records(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        raw: Arc<EmittedEvent>,
+        event: &DeleteRecordsV1,
+    ) -> Result<()> {
+        let table_name = &event.table_name;
+        let formatted_values: Result<Vec<String>> = event
+            .values
+            .iter()
+            .map(|v| Ok(format!(r#""{}""#, v.to_postgres_value()?)))
+            .collect();
+        sqlx::query(r#"DELETE FROM "$1" WHERE "$2" IN ($3))"#)
+            .bind(event.table_name.to_string())
+            .bind(event.id_field.to_string())
+            .bind(formatted_values?.join(", "))
+            .execute(&mut **tx)
+            .await?;
+
+        tracing::info!(
+            sink = %self.label,
+            table = %event.table_name,
+            storage_table = %table_name,
+            block = %raw.block_number.unwrap_or_default(),
+            "stored delete_records"
+        );
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -167,6 +191,11 @@ impl Sink for PostgresSink {
             } else if env.type_id == UpdateRecordFieldsV1::TYPE_ID {
                 if let Some(event) = env.downcast::<UpdateRecordFieldsV1>() {
                     self.handle_update_record(&mut tx, env.raw.clone(), event)
+                        .await?;
+                }
+            } else if env.type_id == DeleteRecordsV1::TYPE_ID {
+                if let Some(event) = env.downcast::<DeleteRecordsV1>() {
+                    self.handle_delete_records(&mut tx, env.raw.clone(), event)
                         .await?;
                 }
             }
