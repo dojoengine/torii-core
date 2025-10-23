@@ -7,9 +7,9 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
-use introspect_types::ColumnDef;
+use introspect_types::{ColumnDef, TypeDef};
 use introspect_value::{Field, Value};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -80,8 +80,14 @@ struct TableSchema {
 
 impl TableSchema {
     fn from_declare(event: DeclareTableV1, storage_name: String) -> Result<Self> {
+        if event.id_field.type_def != TypeDef::Felt252 {
+            bail!(
+                "only Felt252 id fields are supported, got {:?}",
+                event.id_field.type_def
+            );
+        }
         let id_column = ColumnInfo {
-            name: sanitize_identifier(&event.id_field),
+            name: sanitize_identifier(&event.id_field.name),
             sql_type: SqliteType::Text,
         };
 
@@ -236,11 +242,7 @@ impl SqliteSink {
         Ok(())
     }
 
-    async fn persist_schema(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        schema: &TableSchema,
-    ) -> Result<()> {
+    async fn persist_schema(&self, schema: &TableSchema) -> Result<()> {
         let schema_json = serde_json::to_string(&schema.declare)?;
         sqlx::query(
             r#"
@@ -256,11 +258,7 @@ impl SqliteSink {
         Ok(())
     }
 
-    async fn ensure_table(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        schema: &TableSchema,
-    ) -> Result<()> {
+    async fn ensure_table(&self, schema: &TableSchema) -> Result<()> {
         let table_ident = quote_ident(schema.table_name());
         let pk_ident = quote_ident(&schema.id_column().name);
         let columns = schema.all_columns();
@@ -300,11 +298,7 @@ impl SqliteSink {
         Ok(())
     }
 
-    async fn load_schema(
-        &self,
-        tx: &mut Transaction<'_, Sqlite>,
-        storage_name: &str,
-    ) -> Result<Arc<TableSchema>> {
+    async fn load_schema(&self, storage_name: &str) -> Result<Arc<TableSchema>> {
         if let Some(schema) = self.schemas.read().await.get(storage_name).cloned() {
             return Ok(schema);
         }
@@ -327,7 +321,7 @@ impl SqliteSink {
             declare,
             storage_name.to_string(),
         )?);
-        self.ensure_table(tx, &schema).await?;
+        self.ensure_table(&schema).await?;
 
         let mut cache = self.schemas.write().await;
         cache.insert(storage_name.to_string(), schema.clone());
@@ -336,7 +330,7 @@ impl SqliteSink {
 
     async fn handle_declare(
         &self,
-        tx: &mut Transaction<'_, Sqlite>,
+        _tx: &mut Transaction<'_, Sqlite>,
         env: &Envelope,
         event: &DeclareTableV1,
     ) -> Result<()> {
@@ -345,8 +339,8 @@ impl SqliteSink {
             event.clone(),
             storage_name.clone(),
         )?);
-        self.persist_schema(tx, &schema).await?;
-        self.ensure_table(tx, &schema).await?;
+        self.persist_schema(&schema).await?;
+        self.ensure_table(&schema).await?;
 
         {
             let mut cache = self.schemas.write().await;
@@ -371,7 +365,7 @@ impl SqliteSink {
     ) -> Result<()> {
         let storage_name =
             self.storage_table_name(&env.raw.from_address, event.table_name.as_str());
-        let schema = self.load_schema(tx, &storage_name).await?;
+        let schema = self.load_schema(&storage_name).await?;
         let id_value = format_id_field(&event.id_field)?;
 
         let column_types: HashMap<_, _> = schema

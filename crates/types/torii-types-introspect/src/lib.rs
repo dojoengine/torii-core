@@ -2,8 +2,8 @@
 //! taken from introspect crate. We may not need it, or only the URL declaration and the ID
 //! and then using the new type pattern, using the `impl_event!` on the struct.
 
-use introspect_types::ColumnDef;
-use introspect_value::Field;
+use introspect_types::{ColumnDef, FieldDef};
+use introspect_value::{Field, Value};
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
 use torii_core::{impl_event, type_id_from_url};
@@ -21,7 +21,7 @@ pub struct DeclareTableV1 {
     pub id: Felt,
     pub name: String,
     pub attrs: Vec<String>,
-    pub id_field: String,
+    pub id_field: FieldDef,
     pub fields: Vec<ColumnDef>,
 }
 
@@ -50,15 +50,17 @@ impl_event!(UpdateRecordFieldsV1, UPDATE_RECORD_FIELDS_URL);
 pub struct DeleteRecordsV1 {
     pub table_id: Felt,
     pub table_name: String,
-    pub id_fields: Vec<Field>,
+    pub id_field: String,
+    pub values: Vec<Value>,
 }
 
 impl DeleteRecordsV1 {
-    pub fn new(table_id: Felt, table_name: String, id_fields: Vec<Field>) -> Self {
+    pub fn new(table_id: Felt, table_name: String, id_field: String, values: Vec<Value>) -> Self {
         Self {
             table_id,
             table_name,
-            id_fields,
+            id_field,
+            values,
         }
     }
 }

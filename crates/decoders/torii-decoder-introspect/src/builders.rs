@@ -5,6 +5,7 @@ use dojo_introspect_events::{
 };
 use dojo_introspect_types::DojoSchemaFetcher;
 use dojo_types_manager::{DojoManagerError, DojoTable, DojoTableErrors};
+use introspect_types::{FieldDef, TypeDef};
 use introspect_value::{Field, Value};
 use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
@@ -13,6 +14,14 @@ use std::hash::{Hash, Hasher};
 use torii_core::{Envelope, Event};
 use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1};
 const DOJO_ID_FIELD_NAME: &str = "entity_id";
+
+fn primary_field_def() -> FieldDef {
+    FieldDef {
+        name: DOJO_ID_FIELD_NAME.to_string(),
+        attrs: vec![],
+        type_def: TypeDef::Felt252,
+    }
+}
 
 fn make_entity_id_field(entity_id: Felt) -> Field {
     Field {
@@ -91,7 +100,7 @@ where
             id: schema.table_id,
             name: schema.table_name,
             attrs: schema.attrs,
-            id_field: DOJO_ID_FIELD_NAME.to_string(),
+            id_field: primary_field_def(),
             fields: schema.fields,
         };
         Ok(data.to_envelope(raw))
@@ -107,7 +116,7 @@ where
             id: schema.table_id,
             name: schema.table_name,
             attrs: schema.attrs,
-            id_field: DOJO_ID_FIELD_NAME.to_string(),
+            id_field: primary_field_def(),
             fields: schema.fields,
         };
         Ok(data.to_envelope(raw))
@@ -126,7 +135,7 @@ where
             id: schema.table_id,
             name: schema.table_name,
             attrs: schema.attrs,
-            id_field: DOJO_ID_FIELD_NAME.to_string(),
+            id_field: primary_field_def(),
             fields: schema.fields,
         };
         Ok(data.to_envelope(raw))
@@ -142,7 +151,7 @@ where
             id: schema.table_id,
             name: schema.table_name,
             attrs: schema.attrs,
-            id_field: DOJO_ID_FIELD_NAME.to_string(),
+            id_field: primary_field_def(),
             fields: schema.fields,
         };
         Ok(data.to_envelope(raw))
@@ -186,8 +195,12 @@ where
         let event = raw_event_to_event::<StoreDelRecord>(raw)?;
         let (table_id, table_name) =
             self.with_table(event.selector, |table| Ok((table.id, table.name.clone())))?;
-        let id_field = make_entity_id_field(event.entity_id);
-        let data = DeleteRecordsV1::new(table_id, table_name, vec![id_field]);
+        let data = DeleteRecordsV1::new(
+            table_id,
+            table_name,
+            DOJO_ID_FIELD_NAME.to_string(),
+            vec![Value::Felt252(event.entity_id)],
+        );
         Ok(data.to_envelope(raw))
     }
 
