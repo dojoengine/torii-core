@@ -30,11 +30,8 @@ type Result<T> = std::result::Result<T, PostgresSinkError>;
 pub struct PostgresSink {
     label: String,
     pool: PgPool,
-    // types: RwLock<PostgresTypes>,
 }
 
-// Call this during your application startup:
-// initialize_domains(&pool).await?;
 impl PostgresSink {
     pub async fn connect(
         label: impl Into<String>,
@@ -76,17 +73,15 @@ impl PostgresSink {
             // Build the CREATE TABLE statement
             let mut create_table_sql = format!(r#"CREATE TABLE IF NOT EXISTS "{table_name}" ("#,);
             let primary_key = event.id_field.name.as_str();
-            create_table_sql.push_str(&format!(r#""{primary_key}" {primary_field} PRIMARY KEY, "#));
             let columns = event
                 .fields
                 .iter()
-                .map(|c| {
-                    format!(
-                        r#""{}" {}"#,
-                        c.name,
-                        c.type_def.extract_type_string(&mut types)
-                    )
-                })
+                .map(|f| (f.name.clone(), f.type_def.extract_type(&mut types)))
+                .collect::<Vec<_>>();
+            create_table_sql.push_str(&format!(r#""{primary_key}" {primary_field} PRIMARY KEY, "#));
+            let columns = columns
+                .iter()
+                .map(|(name, ty)| format!(r#""{}" {}"#, name, ty.to_string()))
                 .collect::<Vec<_>>();
 
             create_table_sql.push_str(&columns.join(", "));
