@@ -1,9 +1,13 @@
 pub mod json;
 pub mod manager;
 pub mod sink;
+pub mod sql;
+pub mod table;
 pub mod types;
-pub mod upgrade;
-pub mod upgrades;
+pub mod utils;
 pub mod value;
+pub use manager::TableManager;
 pub use sink::PostgresSink;
-pub use types::{PostgresComplexType, PostgresType};
+pub use table::TableSchema;
+pub use types::{PgRustEnum, PgStructDef, PostgresField, PostgresType};
+pub use utils::{name_and_rand, random_alphanumeric, truncate};

@@ -1,6 +1,7 @@
 use crate::json::ToPostgresJson;
-use crate::types::{PostgresComplexTypes, PostgresTypeExtractor};
+use crate::manager::TableManagerError;
 use crate::value::{PostgresValueError, ToPostgresValue};
+use crate::TableManager;
 use async_trait::async_trait;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -23,6 +24,8 @@ pub enum PostgresSinkError {
     JsonError(#[from] serde_json::Error),
     #[error("Postgres value error: {0}")]
     PostgresValueError(#[from] PostgresValueError),
+    #[error("Table manager error: {0}")]
+    TableManagerError(#[from] TableManagerError),
 }
 
 type Result<T> = std::result::Result<T, PostgresSinkError>;
@@ -30,6 +33,7 @@ type Result<T> = std::result::Result<T, PostgresSinkError>;
 pub struct PostgresSink {
     label: String,
     pool: PgPool,
+    manager: TableManager,
 }
 
 impl PostgresSink {
@@ -47,15 +51,26 @@ impl PostgresSink {
         Ok(Self {
             label: label.into(),
             pool,
-            // types: RwLock::new(PostgresTypes::default()),
+            manager: TableManager::default(),
         })
     }
 
     pub async fn initialize(&self) -> Result<()> {
-        sqlx::migrate!("./migrations")
+        match sqlx::migrate!("./migrations")
             .run(&self.pool)
             .await
             .map_err(PostgresSinkError::from)
+        {
+            Ok(_) => {
+                println!("Postgres sink migrations applied successfully");
+                tracing::info!(sink = %self.label, "Postgres sink migrations applied successfully");
+                Ok(())
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "Failed to run migrations");
+                Err(err)
+            }
+        }
     }
 
     async fn handle_declare_table(
@@ -65,35 +80,10 @@ impl PostgresSink {
         event: &DeclareTableV1,
     ) -> Result<()> {
         let table_name = &event.name;
-
-        // Create SQL statements in a separate scope to ensure RwLock is released
-        let (create_table_sql, create_types) = {
-            let mut types = vec![];
-            let primary_field = event.id_field.type_def.extract_type_string(&mut types);
-            // Build the CREATE TABLE statement
-            let mut create_table_sql = format!(r#"CREATE TABLE IF NOT EXISTS "{table_name}" ("#,);
-            let primary_key = event.id_field.name.as_str();
-            let columns = event
-                .fields
-                .iter()
-                .map(|f| (f.name.clone(), f.type_def.extract_type(&mut types)))
-                .collect::<Vec<_>>();
-            create_table_sql.push_str(&format!(r#""{primary_key}" {primary_field} PRIMARY KEY, "#));
-            let columns = columns
-                .iter()
-                .map(|(name, ty)| format!(r#""{}" {}"#, name, ty.to_string()))
-                .collect::<Vec<_>>();
-
-            create_table_sql.push_str(&columns.join(", "));
-            create_table_sql.push_str(");");
-
-            (create_table_sql, types.create_type_queries())
-        }; // RwLock is automatically dropped here
-           // Now we can safely use await since the lock is released
-        for create_type in create_types {
-            sqlx::query(&create_type).execute(&mut **tx).await?;
+        let queries = self.manager.declare_table(table_name, event)?;
+        for query in queries {
+            sqlx::query(&query).execute(&mut **tx).await?;
         }
-        sqlx::query(&create_table_sql).execute(&mut **tx).await?;
 
         tracing::info!(
             sink = %self.label,
@@ -148,14 +138,17 @@ impl PostgresSink {
         let formatted_values: Result<Vec<String>> = event
             .values
             .iter()
-            .map(|v| Ok(format!(r#""{}""#, v.to_postgres_value()?)))
+            .map(|v| Ok(format!(r#"'{}'"#, v.to_postgres_value()?)))
             .collect();
-        sqlx::query(r#"DELETE FROM "$1" WHERE "$2" IN ($3))"#)
-            .bind(event.table_name.to_string())
-            .bind(event.id_field.to_string())
-            .bind(formatted_values?.join(", "))
-            .execute(&mut **tx)
-            .await?;
+
+        sqlx::query(&format!(
+            r#"DELETE FROM "{}" WHERE "{}" IN ({})"#,
+            event.table_name,
+            event.id_field,
+            formatted_values?.join(", ")
+        ))
+        .execute(&mut **tx)
+        .await?;
 
         tracing::info!(
             sink = %self.label,
@@ -176,26 +169,49 @@ impl Sink for PostgresSink {
     }
 
     async fn handle_batch(&self, batch: Batch) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin().await?;
         for env in &batch.items {
+            let mut tx = self.pool.begin().await?;
+
             if env.type_id == DeclareTableV1::TYPE_ID {
                 if let Some(event) = env.downcast::<DeclareTableV1>() {
-                    self.handle_declare_table(&mut tx, env.raw.clone(), event)
-                        .await?;
+                    match self
+                        .handle_declare_table(&mut tx, env.raw.clone(), event)
+                        .await
+                    {
+                        Ok(_) => (),
+                        Err(err) => {
+                            println!("Error declaring table: {err:#?}");
+                            return Err(err.into());
+                        }
+                    }
                 }
             } else if env.type_id == UpdateRecordFieldsV1::TYPE_ID {
                 if let Some(event) = env.downcast::<UpdateRecordFieldsV1>() {
-                    self.handle_update_record(&mut tx, env.raw.clone(), event)
-                        .await?;
+                    match self
+                        .handle_update_record(&mut tx, env.raw.clone(), event)
+                        .await
+                    {
+                        Ok(_) => (),
+                        Err(err) => {
+                            println!("Error updating record: {err:#?}");
+                        }
+                    }
                 }
             } else if env.type_id == DeleteRecordsV1::TYPE_ID {
                 if let Some(event) = env.downcast::<DeleteRecordsV1>() {
-                    self.handle_delete_records(&mut tx, env.raw.clone(), event)
-                        .await?;
+                    match self
+                        .handle_delete_records(&mut tx, env.raw.clone(), event)
+                        .await
+                    {
+                        Ok(_) => (),
+                        Err(err) => {
+                            println!("Error deleting records");
+                        }
+                    }
                 }
             }
+            tx.commit().await?;
         }
-        tx.commit().await?;
 
         tracing::info!(sink = %self.label, processed = batch.items.len(), "sqlite sink processed batch");
         Ok(())

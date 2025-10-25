@@ -6,7 +6,7 @@ DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'uint8') THEN
         CREATE DOMAIN uint8 AS SmallInt
-        CHECK (VALUE >= 0) AND (VALUE < 256);
+        CHECK (VALUE >= 0 AND VALUE < 256);
     END IF;
 END $$;
 
@@ -14,7 +14,7 @@ DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'uint16') THEN
         CREATE DOMAIN uint16 AS Int
-        CHECK (VALUE >= 0) AND (VALUE < 65536);
+        CHECK (VALUE >= 0 AND VALUE < 65536);
     END IF;
 END $$;
 
@@ -22,7 +22,7 @@ DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'uint32') THEN
         CREATE DOMAIN uint32 AS BigInt
-        CHECK (VALUE >= 0) AND (VALUE < 4294967296);
+        CHECK (VALUE >= 0 AND VALUE < 4294967296);
     END IF;
 END $$;
 
