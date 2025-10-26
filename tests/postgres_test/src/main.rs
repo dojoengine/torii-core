@@ -6,14 +6,13 @@ use dojo_introspect_events::{
 use dojo_types_manager::{DojoManager, JsonStore};
 use resolve_path::PathResolveExt;
 use starknet::core::types::EmittedEvent;
-use starknet_types_core::felt::Felt;
+use std::path::PathBuf;
 use std::time::Instant;
-use std::{collections::HashMap, path::PathBuf};
 use torii_core::{Batch, Decoder, Sink};
 use torii_decoder_introspect::IntrospectDecoder;
 use torii_sink_postgres::PostgresSink;
 use torii_test_utils::{EventIterator, FakeProvider};
-const DATA_PATH: &str = "~/tc-tests/pistols";
+const DATA_PATH: &str = "~/tc-tests/blob-arena";
 const DB_URL: &str = "postgres://torii_user:password@localhost:5432/torii";
 fn get_event_type(event: &EmittedEvent) -> (String, String) {
     let selector = event.keys[0];

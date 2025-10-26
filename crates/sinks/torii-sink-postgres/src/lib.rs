@@ -10,4 +10,4 @@ pub use manager::TableManager;
 pub use sink::PostgresSink;
 pub use table::TableSchema;
 pub use types::{PgRustEnum, PgStructDef, PostgresField, PostgresType};
-pub use utils::{name_and_rand, random_alphanumeric, truncate};
+pub use utils::{truncate, HasherExt};

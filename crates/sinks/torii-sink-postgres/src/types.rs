@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use xxhash_rust::xxh3::Xxh3;
 
-use crate::{random_alphanumeric, truncate};
+use crate::utils::HasherExt;
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Debug)]
 pub enum PostgresType {
@@ -71,14 +72,6 @@ impl ToString for PostgresType {
     }
 }
 
-// #[derive(Deserialize, Serialize)]
-// pub enum PostgresComplexType {
-//     Struct(PgStructDef),
-//     Enum(Vec<String>),
-//     RustEnum(PgRustEnum),
-//     Tuple(Vec<PostgresType>),
-// }
-
 pub fn variant_member_name(variant: &str) -> String {
     format!("_{}", variant)
 }
@@ -102,35 +95,24 @@ pub struct PostgresField {
     pub pg_type: PostgresType,
 }
 
-const ALLOWED_TYPE_NAME_CHARS: &str =
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
-
-fn parse_type_name(type_name: &str) -> String {
-    fn parse_char(c: char) -> char {
-        if ALLOWED_TYPE_NAME_CHARS.contains(c) {
-            c
-        } else {
-            '_'
-        }
+impl Into<(String, PostgresType)> for PostgresField {
+    fn into(self) -> (String, PostgresType) {
+        (self.name, self.pg_type)
     }
-    type_name.chars().map(parse_char).collect()
 }
 
 impl PgRustEnum {
-    pub fn new(name: &str, variants: Vec<PostgresField>) -> (String, Self) {
-        let name = parse_type_name(name);
-        let rand = random_alphanumeric(29);
-        let name = truncate(&name, 31);
-        let struct_name = format!("{name}_{rand}").to_lowercase();
-        let variants_name = format!("{name}_v_{rand}").to_lowercase();
+    pub fn new(branch: &Xxh3, name: &str, variants: Vec<PostgresField>) -> (String, Self) {
+        let struct_name = branch.type_name(name);
+        let variants_type_name = branch.branch_to_type_name("variants", name);
         let order = variants.iter().map(|f| f.name.clone()).collect();
-        let variants_map = variants.into_iter().map(|f| (f.name, f.pg_type)).collect();
+        let variants_map = variants.into_iter().map(PostgresField::into).collect();
         (
-            struct_name,
+            struct_name.to_string(),
             Self {
                 order,
                 variants: variants_map,
-                variants_type_name: variants_name,
+                variants_type_name,
             },
         )
     }

@@ -169,9 +169,9 @@ impl Sink for PostgresSink {
     }
 
     async fn handle_batch(&self, batch: Batch) -> anyhow::Result<()> {
-        for env in &batch.items {
-            let mut tx = self.pool.begin().await?;
+        let mut tx = self.pool.begin().await?;
 
+        for env in &batch.items {
             if env.type_id == DeclareTableV1::TYPE_ID {
                 if let Some(event) = env.downcast::<DeclareTableV1>() {
                     match self
@@ -204,15 +204,15 @@ impl Sink for PostgresSink {
                         .await
                     {
                         Ok(_) => (),
-                        Err(err) => {
+                        Err(_err) => {
                             println!("Error deleting records");
                         }
                     }
                 }
             }
-            tx.commit().await?;
         }
 
+        tx.commit().await?;
         tracing::info!(sink = %self.label, processed = batch.items.len(), "sqlite sink processed batch");
         Ok(())
     }
