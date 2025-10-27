@@ -101,11 +101,23 @@ impl Into<(String, PostgresType)> for PostgresField {
     }
 }
 
+fn parse_variant_name(variant: &str) -> String {
+    if variant == "Some(T)" {
+        "Some".to_string()
+    } else {
+        variant.to_string()
+    }
+}
+
 impl PgRustEnum {
     pub fn new(branch: &Xxh3, name: &str, variants: Vec<PostgresField>) -> (String, Self) {
+        let name = if name == "Option<T>" { "Option" } else { name };
         let struct_name = branch.type_name(name);
         let variants_type_name = branch.branch_to_type_name("variants", name);
-        let order = variants.iter().map(|f| f.name.clone()).collect();
+        let order = variants
+            .iter()
+            .map(|f| parse_variant_name(&f.name))
+            .collect();
         let variants_map = variants.into_iter().map(PostgresField::into).collect();
         (
             struct_name.to_string(),

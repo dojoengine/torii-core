@@ -10,8 +10,18 @@ pub fn modify_column_query(name: &str, pg_type: &PostgresType) -> String {
 
 pub fn add_member_query(type_name: &str, member_name: &str, pg_type: &PostgresType) -> String {
     format!(
-        r#"ALTER TYPE "{type_name}" ADD ATTRIBUTE "{member_name}" {};"#,
-        pg_type.to_string()
+        r#"
+DO $$
+BEGIN
+    BEGIN
+        ALTER TYPE "{type_name}" ADD ATTRIBUTE "{member_name}" {pg_type};
+    EXCEPTION
+        WHEN duplicate_object OR duplicate_column THEN
+            RAISE NOTICE 'attribute already exists, skipping';
+    END;
+END $$;
+"#,
+        pg_type = pg_type.to_string()
     )
 }
 
@@ -23,7 +33,19 @@ pub fn modify_member_query(type_name: &str, member_name: &str, pg_type: &Postgre
 }
 
 pub fn add_enum_variant_query(type_name: &str, variant: &str) -> String {
-    format!(r#"ALTER TYPE "{type_name}" ADD VALUE '{variant}';"#)
+    format!(
+        r#"
+DO $$ 
+BEGIN
+  BEGIN
+    EXECUTE format('ALTER TYPE %I ADD VALUE %L', '{type_name}', '{variant}');
+  EXCEPTION
+    WHEN duplicate_object THEN
+        RAISE NOTICE 'enum value already exists, skipping';
+  END;
+END $$;
+"#,
+    )
 }
 
 pub fn create_table_query(table_name: &str, columns: &[String]) -> String {

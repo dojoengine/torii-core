@@ -106,14 +106,20 @@ impl PostgresSink {
         let update_fields = event
             .fields
             .iter()
-            .map(|f| format!(r#""{}" = EXCLUDED."{}""#, f.name, f.name))
+            .map(|f| {
+                format!(
+                    r#""{field}" = COALESCE(EXCLUDED."{field}", "{table_name}"."{field}")"#,
+                    field = f.name,
+                )
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let json_data = serde_json::to_string(&event.to_postgres_json())?;
         let query = format!(
             r#"INSERT INTO "{table_name}"
             SELECT * FROM jsonb_populate_record(NULL::"{table_name}", $${json_data}$$)
-            ON CONFLICT ("{primary_key_name}") DO UPDATE SET {update_fields}
+            ON CONFLICT ("{primary_key_name}") DO UPDATE SET 
+            {update_fields}
             ;"#,
         );
         sqlx::query(&query).execute(&mut **tx).await?;
@@ -169,11 +175,11 @@ impl Sink for PostgresSink {
     }
 
     async fn handle_batch(&self, batch: Batch) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin().await?;
-
         for env in &batch.items {
+            let mut tx = self.pool.begin().await?;
             if env.type_id == DeclareTableV1::TYPE_ID {
                 if let Some(event) = env.downcast::<DeclareTableV1>() {
+                    println!("{}", event.name);
                     match self
                         .handle_declare_table(&mut tx, env.raw.clone(), event)
                         .await
@@ -193,7 +199,7 @@ impl Sink for PostgresSink {
                     {
                         Ok(_) => (),
                         Err(err) => {
-                            println!("Error updating record: {err:#?}");
+                            // println!("Error updating record: {err:#?}");
                         }
                     }
                 }
@@ -210,9 +216,9 @@ impl Sink for PostgresSink {
                     }
                 }
             }
+            tx.commit().await?;
         }
 
-        tx.commit().await?;
         tracing::info!(sink = %self.label, processed = batch.items.len(), "sqlite sink processed batch");
         Ok(())
     }

@@ -202,8 +202,6 @@ impl TableSchema {
         if !table_queries.is_empty() {
             queries.push(alter_table_query(name, &table_queries));
         }
-        println!("Table {name}");
-        println!("{}", queries.join("\n"));
         Ok(queries)
     }
 
@@ -277,7 +275,7 @@ impl TableSchema {
             FixedArray, None as TDNone, Struct, Tuple, I128, I16, I32, I64, I8, U128, U16, U32,
             U64, U8,
         };
-        let val = match (old, new) {
+        match (old, new) {
             (PgNone, TDNone) | (Text, ByteArray) => Ok(None),
 
             (Boolean, Bool)
@@ -336,11 +334,7 @@ impl TableSchema {
                 }
             }
             _ => new_upgrade_error(name, old, new),
-        };
-        if let Ok(Some(ty)) = &val {
-            println!("{name}: {} to {:?}", old.to_string(), ty);
         }
-        val
     }
 
     fn upgrade_struct(

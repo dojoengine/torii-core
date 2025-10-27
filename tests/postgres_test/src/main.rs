@@ -12,7 +12,7 @@ use torii_core::{Batch, Decoder, Sink};
 use torii_decoder_introspect::IntrospectDecoder;
 use torii_sink_postgres::PostgresSink;
 use torii_test_utils::{EventIterator, FakeProvider};
-const DATA_PATH: &str = "~/tc-tests/blob-arena";
+const DATA_PATH: &str = "~/tc-tests/pistols";
 const DB_URL: &str = "postgres://torii_user:password@localhost:5432/torii";
 fn get_event_type(event: &EmittedEvent) -> (String, String) {
     let selector = event.keys[0];
@@ -69,7 +69,7 @@ async fn main() {
     let mut running = true;
     while running {
         let mut batch = Vec::new();
-        for _ in 0..1000 {
+        for _ in 0..1 {
             let event = match events.next() {
                 Some(event) => event,
                 None => {
@@ -78,11 +78,22 @@ async fn main() {
                 }
             };
             let (name, _) = get_event_type(&event);
+
             if name == "Unknown" {
                 continue;
             }
             match decoder.decode(&event).await {
                 Ok(envelope) => {
+                    if ([
+                        "ModelRegistered",
+                        "ModelUpgraded",
+                        "EventRegistered",
+                        "EventUpgraded",
+                    ]
+                    .contains(&name.as_str()))
+                    {
+                        println!("Decoded event: {name:#?}");
+                    }
                     batch.push(envelope);
                 }
                 Err(err) => {

@@ -12,7 +12,7 @@ use torii_core::Decoder;
 use torii_decoder_introspect::IntrospectDecoder;
 use torii_sink_json::JsonSink;
 use torii_test_utils::{EventIterator, FakeProvider};
-const DATA_PATH: &str = "~/tc-tests/blob-arena";
+const DATA_PATH: &str = "~/tc-tests/pistols";
 
 fn get_event_type(event: &EmittedEvent) -> (String, String) {
     let selector = event.keys[0];
