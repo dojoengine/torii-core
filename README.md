@@ -118,7 +118,12 @@ let fetcher = torii_registry::fetchers::from_config(
 let decoder_registry = torii_registry::decoders::from_config(&app.decoders)?;
 let sink_registry = torii_registry::sinks::from_config(&app.sinks, &app.contracts).await?;
 let sinks = sink_registry.sinks().to_vec();
-run_once_batch(fetcher.as_ref(), &decoder_registry, &sinks).await?;
+run_once_batch_with_config(
+    fetcher.as_ref(),
+    &decoder_registry,
+    &sinks,
+    &config.runtime,
+).await?;
 ```
 
 If you need typed decoder configs (for mocks or fixtures), deserialise the TOML tables before

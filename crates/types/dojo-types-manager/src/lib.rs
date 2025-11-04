@@ -117,15 +117,23 @@ impl DojoTable {
     }
 
     pub fn parse_values(&self, values: Vec<Felt>) -> TableResult<Vec<Field>> {
+        dbg!(&values);
+
         let mut values = values.into_iter();
         let vals = self
             .value_fields
             .iter()
             .map(|selector| self.fields.get(selector)?.to_value(&mut values))
             .collect::<Option<Vec<_>>>();
+
+        dbg!(&vals);
+
         match values.next() {
             None => vals.ok_or_else(|| DojoTableErrors::ParseValuesError(self.name.clone()).into()),
-            _ => Err(DojoTableErrors::ParseValuesError(self.name.clone()).into()),
+            Some(v) => {
+                dbg!(&v);
+                Err(DojoTableErrors::ParseValuesError(self.name.clone()).into())
+            },
         }
     }
 

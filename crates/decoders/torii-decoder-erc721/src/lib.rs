@@ -6,7 +6,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use starknet::{core::types::EmittedEvent, macros::selector};
-use torii_core::{Body, Decoder, DecoderFactory, DecoderFilter, DynEvent, Envelope, FieldElement};
+use torii_core::{
+    Body, ContractBinding, ContractFilter, Decoder, DecoderFactory, DecoderFilter, DynEvent,
+    Envelope, FieldElement,
+};
 use torii_types_erc721::{TransferV1, TRANSFER_ID};
 
 const DECODER_NAME: &str = "erc721";
@@ -24,7 +27,7 @@ struct Erc721Decoder {
 }
 
 impl Erc721Decoder {
-    fn from_config(_cfg: Erc721DecoderConfig, contracts: Vec<FieldElement>) -> Result<Self> {
+    fn from_config(_cfg: Erc721DecoderConfig, contracts: Vec<ContractBinding>) -> Result<Self> {
         if contracts.is_empty() {
             return Err(anyhow!(
                 "erc721 decoder requires at least one contract binding"
@@ -32,21 +35,29 @@ impl Erc721Decoder {
         }
 
         let mut contract_addresses = HashSet::default();
-        for address in contracts {
-            contract_addresses.insert(address);
-        }
-
         let mut selectors = HashSet::default();
         for selector in CAIRO_EVENT_SELECTORS {
             selectors.insert(selector);
         }
 
         let mut address_selectors = HashMap::new();
-        for address in contract_addresses.iter() {
-            address_selectors
-                .entry(*address)
-                .or_insert_with(HashSet::new)
-                .extend(selectors.iter().copied());
+        for binding in contracts {
+            contract_addresses.insert(binding.address);
+            let entry =
+                address_selectors
+                    .entry(binding.address)
+                    .or_insert_with(|| ContractFilter {
+                        selectors: HashSet::new(),
+                        deployed_at_block: binding.deployed_at_block,
+                    });
+
+            entry.selectors.extend(selectors.iter().copied());
+            if let Some(block) = binding.deployed_at_block {
+                entry.deployed_at_block = match entry.deployed_at_block {
+                    Some(existing) => Some(existing.min(block)),
+                    None => Some(block),
+                };
+            }
         }
 
         Ok(Self {
@@ -106,7 +117,7 @@ impl DecoderFactory for Erc721DecoderFactory {
     async fn create(
         &self,
         config: Value,
-        contracts: Vec<FieldElement>,
+        contracts: Vec<ContractBinding>,
     ) -> Result<Arc<dyn Decoder>> {
         let cfg: Erc721DecoderConfig = serde_json::from_value(config)?;
         let decoder = Erc721Decoder::from_config(cfg, contracts)?;

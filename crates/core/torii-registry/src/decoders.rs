@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
-use torii_core::{ContractConfig, DecoderFactory, DecoderRegistry, FieldElement};
+use torii_core::{ContractBinding, ContractConfig, DecoderFactory, DecoderRegistry, FieldElement};
 
 pub use torii_decoder_erc20::Erc20DecoderConfig;
 pub use torii_decoder_erc20::Erc20DecoderFactory;
@@ -95,8 +95,8 @@ pub async fn from_config(
 fn build_contract_index(
     contracts: &HashMap<String, ContractConfig>,
     enabled_kinds: &HashSet<String>,
-) -> Result<HashMap<String, Vec<FieldElement>>> {
-    let mut by_decoder: HashMap<String, Vec<FieldElement>> = HashMap::new();
+) -> Result<HashMap<String, Vec<ContractBinding>>> {
+    let mut by_decoder: HashMap<String, Vec<ContractBinding>> = HashMap::new();
 
     for (name, binding) in contracts {
         if binding.decoders.is_empty() {
@@ -115,8 +115,19 @@ fn build_contract_index(
             }
 
             let entry = by_decoder.entry(decoder.clone()).or_default();
-            if !entry.iter().any(|existing| existing == &felt) {
-                entry.push(felt);
+            if let Some(existing) = entry.iter_mut().find(|existing| existing.address == felt) {
+                existing.deployed_at_block =
+                    match (existing.deployed_at_block, binding.deployed_at_block) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (None, Some(b)) => Some(b),
+                        (Some(a), None) => Some(a),
+                        (None, None) => None,
+                    };
+            } else {
+                entry.push(ContractBinding {
+                    address: felt,
+                    deployed_at_block: binding.deployed_at_block,
+                });
             }
         }
     }

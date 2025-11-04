@@ -7,7 +7,10 @@ use async_trait::async_trait;
 use starknet::core::types::EmittedEvent;
 use starknet::macros::selector;
 use tokio::time::{sleep, Duration};
-use torii_core::{run_once_batch, FetchPlan, Fetcher, FieldElement, Sink, ToriiConfig};
+use torii_core::{
+    run_once_batch_with_config, FetchOptions, FetchOutcome, FetchPlan, Fetcher, FetcherCursor,
+    FieldElement, Sink, ToriiConfig,
+};
 use torii_registry::decoders;
 use torii_registry::{fetchers, sinks};
 use tracing_subscriber::EnvFilter;
@@ -49,7 +52,8 @@ async fn main() -> Result<()> {
         anyhow::bail!("no sinks configured");
     }
 
-    run_once_batch(fetcher.as_ref(), &decoder_registry, &sinks).await?;
+    run_once_batch_with_config(fetcher.as_ref(), &decoder_registry, &sinks, &config.runtime)
+        .await?;
     sleep(Duration::from_millis(250)).await;
 
     Ok(())
@@ -80,13 +84,21 @@ impl MockFetcher {
 
 #[async_trait]
 impl Fetcher for MockFetcher {
-    async fn fetch(&self, plan: &FetchPlan) -> Result<Vec<EmittedEvent>> {
+    async fn fetch(
+        &self,
+        plan: &FetchPlan,
+        _cursor: Option<&FetcherCursor>,
+        _options: &FetchOptions,
+    ) -> Result<FetchOutcome> {
         tracing::info!(
             addresses = plan.contract_addresses.len(),
             selectors = plan.selectors.len(),
             "mock fetcher returning synthetic events"
         );
-        Ok(self.events.clone())
+        Ok(FetchOutcome {
+            events: self.events.clone(),
+            cursor: FetcherCursor::default(),
+        })
     }
 }
 

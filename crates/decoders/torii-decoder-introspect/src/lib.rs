@@ -14,7 +14,10 @@ use starknet::{
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use torii_core::{Decoder, DecoderFactory, DecoderFilter, Envelope, Event, FieldElement};
+use torii_core::{
+    ContractBinding, ContractFilter, Decoder, DecoderFactory, DecoderFilter, Envelope, Event,
+    FieldElement,
+};
 use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1};
 mod builders;
 use builders::DojoEventBuilder;
@@ -55,7 +58,7 @@ pub struct IntrospectDecoder<F> {
 
 impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
     /// Builds the decoder from a configuration.
-    fn from_config(cfg: IntrospectDecoderConfig, contracts: Vec<FieldElement>) -> Result<Self> {
+    fn from_config(cfg: IntrospectDecoderConfig, contracts: Vec<ContractBinding>) -> Result<Self> {
         if contracts.is_empty() {
             return Err(anyhow!(
                 "introspect decoder requires at least one contract binding"
@@ -63,20 +66,27 @@ impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
         }
 
         let mut contract_addresses = HashSet::default();
-        for address in contracts {
-            contract_addresses.insert(address);
-        }
-
         let mut selectors = HashSet::default();
         for selector in DOJO_CAIRO_EVENT_SELECTORS {
             selectors.insert(selector);
         }
         let mut address_selectors = HashMap::new();
-        for address in &contract_addresses {
-            address_selectors
-                .entry(*address)
-                .or_insert_with(HashSet::new)
-                .extend(selectors.iter().copied());
+        for binding in contracts {
+            contract_addresses.insert(binding.address);
+            let entry =
+                address_selectors
+                    .entry(binding.address)
+                    .or_insert_with(|| ContractFilter {
+                        selectors: HashSet::new(),
+                        deployed_at_block: binding.deployed_at_block,
+                    });
+            entry.selectors.extend(selectors.iter().copied());
+            if let Some(block) = binding.deployed_at_block {
+                entry.deployed_at_block = match entry.deployed_at_block {
+                    Some(existing) => Some(existing.min(block)),
+                    None => Some(block),
+                };
+            }
         }
         let provider = JsonRpcClient::new(HttpTransport::new(cfg.rpc_url));
 
@@ -152,9 +162,10 @@ where
         } else {
             return Err(anyhow!("invalid event selector: {selector}"));
         };
+
         match result {
             Ok(envelope) => Ok(envelope),
-            Err(e) => Err(anyhow!("introspect decoder failed to decode event: {e}")),
+            Err(e) => Err(anyhow!("introspect decoder failed to decode event {event:?}\n==> {e}")),
         }
     }
 }
@@ -170,7 +181,7 @@ impl DecoderFactory for IntrospectDecoderFactory {
     async fn create(
         &self,
         config: serde_json::Value,
-        contracts: Vec<FieldElement>,
+        contracts: Vec<ContractBinding>,
     ) -> Result<Arc<dyn Decoder>> {
         let cfg: IntrospectDecoderConfig = serde_json::from_value(config)?;
         let decoder = IntrospectDecoder::from_config(cfg, contracts)?;

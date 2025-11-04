@@ -9,7 +9,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use starknet::{core::types::EmittedEvent, macros::selector};
-use torii_core::{Decoder, DecoderFactory, DecoderFilter, Envelope, Event, FieldElement};
+use torii_core::{
+    ContractBinding, ContractFilter, Decoder, DecoderFactory, DecoderFilter, Envelope, Event,
+    FieldElement,
+};
 use torii_types_erc20::TransferV1;
 
 const DECODER_NAME: &str = "erc20";
@@ -27,7 +30,7 @@ struct Erc20Decoder {
 }
 
 impl Erc20Decoder {
-    fn from_config(_cfg: Erc20DecoderConfig, contracts: Vec<FieldElement>) -> Result<Self> {
+    fn from_config(_cfg: Erc20DecoderConfig, contracts: Vec<ContractBinding>) -> Result<Self> {
         if contracts.is_empty() {
             return Err(anyhow!(
                 "erc20 decoder requires at least one contract binding"
@@ -35,21 +38,29 @@ impl Erc20Decoder {
         }
 
         let mut contract_addresses = HashSet::default();
-        for address in contracts {
-            contract_addresses.insert(address);
-        }
-
         let mut selectors = HashSet::default();
         for selector in CAIRO_EVENT_SELECTORS {
             selectors.insert(selector);
         }
 
         let mut address_selectors = HashMap::new();
-        for address in &contract_addresses {
-            address_selectors
-                .entry(*address)
-                .or_insert_with(HashSet::new)
-                .extend(selectors.iter().copied());
+        for binding in contracts {
+            contract_addresses.insert(binding.address);
+            let entry =
+                address_selectors
+                    .entry(binding.address)
+                    .or_insert_with(|| ContractFilter {
+                        selectors: HashSet::new(),
+                        deployed_at_block: binding.deployed_at_block,
+                    });
+
+            entry.selectors.extend(selectors.iter().copied());
+            if let Some(block) = binding.deployed_at_block {
+                entry.deployed_at_block = match entry.deployed_at_block {
+                    Some(existing) => Some(existing.min(block)),
+                    None => Some(block),
+                };
+            }
         }
 
         Ok(Self {
@@ -109,7 +120,7 @@ impl DecoderFactory for Erc20DecoderFactory {
     async fn create(
         &self,
         config: Value,
-        contracts: Vec<FieldElement>,
+        contracts: Vec<ContractBinding>,
     ) -> Result<Arc<dyn Decoder>> {
         let cfg: Erc20DecoderConfig = serde_json::from_value(config)?;
         let decoder = Erc20Decoder::from_config(cfg, contracts)?;

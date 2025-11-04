@@ -7,6 +7,7 @@ use std::{
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use starknet::core::types::EmittedEvent;
 
 use crate::FieldElement;
@@ -99,12 +100,24 @@ pub const fn type_id_from_url(url: &str) -> u64 {
     hash
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ContractFilter {
+    pub selectors: HashSet<FieldElement>,
+    pub deployed_at_block: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ContractBinding {
+    pub address: FieldElement,
+    pub deployed_at_block: Option<u64>,
+}
+
 /// Decoder supplied Starknet fetch filters.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DecoderFilter {
     pub contract_addresses: HashSet<FieldElement>,
     pub selectors: HashSet<FieldElement>,
-    pub address_selectors: HashMap<FieldElement, HashSet<FieldElement>>,
+    pub address_selectors: HashMap<FieldElement, ContractFilter>,
 }
 
 /// Union of all active decoder filters.
@@ -112,7 +125,7 @@ pub struct DecoderFilter {
 pub struct FetchPlan {
     pub contract_addresses: HashSet<FieldElement>,
     pub selectors: HashSet<FieldElement>,
-    pub address_selectors: HashMap<FieldElement, HashSet<FieldElement>>,
+    pub address_selectors: HashMap<FieldElement, ContractFilter>,
 }
 
 impl FetchPlan {
@@ -123,13 +136,77 @@ impl FetchPlan {
             plan.contract_addresses
                 .extend(filter.contract_addresses.into_iter());
             plan.selectors.extend(filter.selectors.into_iter());
-            for (address, selectors) in filter.address_selectors.into_iter() {
-                plan.address_selectors
+            for (address, contract_filter) in filter.address_selectors.into_iter() {
+                let entry = plan
+                    .address_selectors
                     .entry(address)
-                    .or_default()
-                    .extend(selectors.into_iter());
+                    .or_insert_with(ContractFilter::default);
+
+                entry
+                    .selectors
+                    .extend(contract_filter.selectors.into_iter());
+
+                entry.deployed_at_block =
+                    match (entry.deployed_at_block, contract_filter.deployed_at_block) {
+                        (Some(existing), Some(new)) => Some(existing.min(new)),
+                        (None, Some(new)) => Some(new),
+                        (Some(existing), None) => Some(existing),
+                        (None, None) => None,
+                    };
             }
         }
         plan
+    }
+}
+
+/// Opaque cursor returned by fetchers to indicate progress between paginated requests.
+///
+/// Use a HashMap where the key is the address of the contract used in the filters of the fetcher.
+/// And the value is the continuation token.
+///
+/// If future fetchers are allowing filtering with multiple addresses, then the Felt
+/// could be a hash of the addresses or something that uniquely identifies the filter.
+#[derive(Clone, Debug, Default)]
+pub struct FetcherCursor {
+    pub continuations: HashMap<FieldElement, Option<JsonValue>>,
+}
+
+impl FetcherCursor {
+    pub fn new(continuations: HashMap<FieldElement, Option<JsonValue>>) -> Self {
+        Self { continuations }
+    }
+
+    pub fn get_continuation_string(&self, address: &FieldElement) -> Option<String> {
+        self.continuations
+            .get(address)
+            .and_then(|c| c.as_ref().map(|v| v.to_string()))
+    }
+
+    pub fn set_continuation_string(
+        &mut self,
+        address: &FieldElement,
+        continuation: Option<String>,
+    ) {
+        self.continuations
+            .insert(address.clone(), continuation.map(|v| JsonValue::String(v)));
+    }
+
+    pub fn has_more(&self) -> bool {
+        self.continuations
+            .values()
+            .any(|continuation| continuation.is_some())
+    }
+}
+
+/// Result of a fetcher invocation, including the next cursor state.
+#[derive(Clone, Debug, Default)]
+pub struct FetchOutcome {
+    pub events: Vec<EmittedEvent>,
+    pub cursor: FetcherCursor,
+}
+
+impl FetchOutcome {
+    pub fn new(events: Vec<EmittedEvent>, cursor: FetcherCursor) -> Self {
+        Self { events, cursor }
     }
 }

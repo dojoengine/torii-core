@@ -16,3 +16,4 @@ tokio.workspace = true
 tracing.workspace = true
 torii-core = { path = "../../core/torii-core" }
 url.workspace = true
+futures.workspace = true

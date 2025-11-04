@@ -49,24 +49,30 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 config = "0.14"
+futures = "0.3"
 sqlx = { version = "0.7", default-features = false, features = [
     "runtime-tokio",
     "sqlite",
     "postgres",
 ] }
 url = "2"
-introspect-value = { git = "https://github.com/cartridge-gg/introspect", branch = "next" }
-introspect-types = { git = "https://github.com/cartridge-gg/introspect", branch = "next" }
-introspect-events = { git = "https://github.com/cartridge-gg/introspect", branch = "next" }
-# introspect-value = { path = "../introspect/crates/value" }
-# introspect-types = { path = "../introspect/crates/types" }
-# introspect-events = { path = "../introspect/crates/events" }
-dojo-introspect-types = { git = "https://github.com/dojoengine/dojo-introspect", branch = "next" }
-dojo-introspect-utils = { git = "https://github.com/dojoengine/dojo-introspect", branch = "next" }
-dojo-introspect-events = { git = "https://github.com/dojoengine/dojo-introspect", branch = "next" }
-# dojo-introspect-types = { path = "../dojo-introspect/crates/types" }
-# dojo-introspect-utils = { path = "../dojo-introspect/crates/utils" }
-# dojo-introspect-events = { path = "../dojo-introspect/crates/events" }
+
+#introspect-value = { git = "https://github.com/cartridge-gg/introspect", rev = "79a2a2e" }
+#introspect-types = { git = "https://github.com/cartridge-gg/introspect", rev = "79a2a2e" }
+#introspect-events = { git = "https://github.com/cartridge-gg/introspect", rev = "79a2a2e" }
+
+introspect-value = { path = "../introspect/crates/value" }
+introspect-types = { path = "../introspect/crates/types" }
+introspect-events = { path = "../introspect/crates/events" }
+
+#dojo-introspect-types = { git = "https://github.com/dojoengine/dojo-introspect", rev = "45ce54d" }
+#dojo-introspect-utils = { git = "https://github.com/dojoengine/dojo-introspect", rev = "45ce54d" }
+#dojo-introspect-events = { git = "https://github.com/dojoengine/dojo-introspect", rev = "45ce54d" }
+
+dojo-introspect-types = { path = "../dojo-introspect/crates/types" }
+dojo-introspect-utils = { path = "../dojo-introspect/crates/utils" }
+dojo-introspect-events = { path = "../dojo-introspect/crates/events" }
+
 dojo-types-manager = { path = "crates/types/dojo-types-manager" }
 rand = "0.9.2"
 starknet-types-core = "0.2.0"
