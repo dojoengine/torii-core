@@ -242,7 +242,11 @@ impl SqliteSink {
         Ok(())
     }
 
-    async fn persist_schema(&self, schema: &TableSchema) -> Result<()> {
+    async fn persist_schema(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        schema: &TableSchema,
+    ) -> Result<()> {
         let schema_json = serde_json::to_string(&schema.declare)?;
         sqlx::query(
             r#"
@@ -253,12 +257,16 @@ impl SqliteSink {
         )
         .bind(schema.table_name())
         .bind(schema_json)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await?;
         Ok(())
     }
 
-    async fn ensure_table(&self, schema: &TableSchema) -> Result<()> {
+    async fn ensure_table(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        schema: &TableSchema,
+    ) -> Result<()> {
         let table_ident = quote_ident(schema.table_name());
         let pk_ident = quote_ident(&schema.id_column().name);
         let columns = schema.all_columns();
@@ -272,10 +280,10 @@ impl SqliteSink {
             "CREATE TABLE IF NOT EXISTS {} ({}, PRIMARY KEY ({}))",
             table_ident, column_defs, pk_ident
         );
-        sqlx::query(&create_sql).execute(&self.pool).await?;
+        sqlx::query(&create_sql).execute(&mut **tx).await?;
 
         let pragma_sql = format!("PRAGMA table_info({})", table_ident);
-        let rows = sqlx::query(&pragma_sql).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(&pragma_sql).fetch_all(&mut **tx).await?;
         let mut existing = HashSet::new();
         for row in rows {
             let name: String = row.try_get("name")?;
@@ -292,13 +300,17 @@ impl SqliteSink {
                 quote_ident(&column.name),
                 column.sql_type.as_sql()
             );
-            sqlx::query(&alter_sql).execute(&self.pool).await?;
+            sqlx::query(&alter_sql).execute(&mut **tx).await?;
         }
 
         Ok(())
     }
 
-    async fn load_schema(&self, storage_name: &str) -> Result<Arc<TableSchema>> {
+    async fn load_schema(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        storage_name: &str,
+    ) -> Result<Arc<TableSchema>> {
         if let Some(schema) = self.schemas.read().await.get(storage_name).cloned() {
             return Ok(schema);
         }
@@ -311,7 +323,7 @@ impl SqliteSink {
         "#,
         )
         .bind(storage_name)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut **tx)
         .await?;
 
         let row = row.ok_or_else(|| anyhow!("no schema found for table {}", storage_name))?;
@@ -321,7 +333,7 @@ impl SqliteSink {
             declare,
             storage_name.to_string(),
         )?);
-        self.ensure_table(&schema).await?;
+        self.ensure_table(tx, &schema).await?;
 
         let mut cache = self.schemas.write().await;
         cache.insert(storage_name.to_string(), schema.clone());
@@ -330,7 +342,7 @@ impl SqliteSink {
 
     async fn handle_declare(
         &self,
-        _tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut Transaction<'_, Sqlite>,
         env: &Envelope,
         event: &DeclareTableV1,
     ) -> Result<()> {
@@ -339,8 +351,8 @@ impl SqliteSink {
             event.clone(),
             storage_name.clone(),
         )?);
-        self.persist_schema(&schema).await?;
-        self.ensure_table(&schema).await?;
+        self.persist_schema(tx, &schema).await?;
+        self.ensure_table(tx, &schema).await?;
 
         {
             let mut cache = self.schemas.write().await;
@@ -365,7 +377,7 @@ impl SqliteSink {
     ) -> Result<()> {
         let storage_name =
             self.storage_table_name(&env.raw.from_address, event.table_name.as_str());
-        let schema = self.load_schema(&storage_name).await?;
+        let schema = self.load_schema(tx, &storage_name).await?;
         let id_value = format_id_field(&event.id_field)?;
 
         let column_types: HashMap<_, _> = schema
@@ -527,26 +539,37 @@ impl Sink for SqliteSink {
     async fn handle_batch(&self, batch: Batch) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         for env in &batch.items {
-            if env.type_id == DeclareTableV1::TYPE_ID {
-                if let Some(event) = env.downcast::<DeclareTableV1>() {
-                    self.handle_declare(&mut tx, env, event).await?;
+            match env.type_id {
+                DeclareTableV1::TYPE_ID => {
+                    if let Some(event) = env.downcast::<DeclareTableV1>() {
+                        self.handle_declare(&mut tx, env, event).await?;
+                    }
                 }
-            } else if env.type_id == UpdateRecordFieldsV1::TYPE_ID {
-                if let Some(event) = env.downcast::<UpdateRecordFieldsV1>() {
-                    self.handle_update_record(&mut tx, env, event).await?;
+                UpdateRecordFieldsV1::TYPE_ID => {
+                    if let Some(event) = env.downcast::<UpdateRecordFieldsV1>() {
+                        self.handle_update_record(&mut tx, env, event).await?;
+                    }
                 }
-            } else if env.type_id == Erc20Transfer::TYPE_ID {
-                if let Some(event) = env.downcast::<Erc20Transfer>() {
-                    self.handle_erc20(&mut tx, env, event).await?;
+                Erc20Transfer::TYPE_ID => {
+                    if let Some(event) = env.downcast::<Erc20Transfer>() {
+                        self.handle_erc20(&mut tx, env, event).await?;
+                    }
                 }
-            } else if env.type_id == Erc721Transfer::TYPE_ID {
-                if let Some(event) = env.downcast::<Erc721Transfer>() {
-                    self.handle_erc721(&mut tx, env, event).await?;
+                Erc721Transfer::TYPE_ID => {
+                    if let Some(event) = env.downcast::<Erc721Transfer>() {
+                        self.handle_erc721(&mut tx, env, event).await?;
+                    }
+                }
+                _ => {
+                    tracing::warn!(sink = %self.label, "event type_id not handled: {}", env.type_id);
                 }
             }
         }
+
         tx.commit().await?;
+
         tracing::info!(sink = %self.label, processed = batch.items.len(), "sqlite sink processed batch");
+
         Ok(())
     }
 }

@@ -165,7 +165,9 @@ where
 
         match result {
             Ok(envelope) => Ok(envelope),
-            Err(e) => Err(anyhow!("introspect decoder failed to decode event {event:?}\n==> {e}")),
+            Err(e) => Err(anyhow!(
+                "introspect decoder failed to decode event {event:?}\n==> {e}"
+            )),
         }
     }
 }

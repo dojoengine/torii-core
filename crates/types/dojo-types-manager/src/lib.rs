@@ -133,7 +133,7 @@ impl DojoTable {
             Some(v) => {
                 dbg!(&v);
                 Err(DojoTableErrors::ParseValuesError(self.name.clone()).into())
-            },
+            }
         }
     }
 
