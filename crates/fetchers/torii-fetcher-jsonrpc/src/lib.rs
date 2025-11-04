@@ -2,13 +2,17 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use futures::{stream, StreamExt};
 use serde::Deserialize;
-use starknet::core::types::{BlockId, BlockTag, EmittedEvent, EventFilter, EventsPage};
-use starknet::providers::{jsonrpc::HttpTransport, JsonRpcClient, Provider};
+use starknet::core::types::requests::GetEventsRequest;
+use starknet::core::types::{
+    BlockId, BlockTag, EventFilter, EventFilterWithPage, EventsPage, ResultPageRequest,
+};
+use starknet::providers::{
+    jsonrpc::HttpTransport, JsonRpcClient, Provider, ProviderRequestData, ProviderResponseData,
+};
 use tokio::time::sleep;
 use torii_core::{FetchOptions, FetchOutcome, FetchPlan, Fetcher, FetcherCursor, FieldElement};
-use tracing::{debug, info, trace, warn};
+use tracing::{info, trace, warn};
 use url::Url;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -22,6 +26,10 @@ pub struct JsonRpcFetcherConfig {
     pub request_backoff_ms: Option<u64>,
     #[serde(default)]
     pub address_backoff_ms: Option<u64>,
+    #[serde(default)]
+    pub batch_requests: bool,
+    #[serde(default)]
+    pub max_events_per_cycle: Option<usize>,
 }
 
 pub struct JsonRpcFetcher {
@@ -30,6 +38,8 @@ pub struct JsonRpcFetcher {
     request_retry: usize,
     request_backoff: Duration,
     address_backoff: Duration,
+    use_batch_requests: bool,
+    max_events_per_cycle: Option<usize>,
 }
 
 impl JsonRpcFetcher {
@@ -41,6 +51,8 @@ impl JsonRpcFetcher {
         let request_retry = config.request_retry.unwrap_or(0);
         let request_backoff = Duration::from_millis(config.request_backoff_ms.unwrap_or(250));
         let address_backoff = Duration::from_millis(config.address_backoff_ms.unwrap_or(0));
+        let use_batch_requests = config.batch_requests;
+        let max_events_per_cycle = config.max_events_per_cycle;
 
         Ok(Self {
             provider,
@@ -48,6 +60,8 @@ impl JsonRpcFetcher {
             request_retry,
             request_backoff,
             address_backoff,
+            use_batch_requests,
+            max_events_per_cycle,
         })
     }
 
@@ -79,87 +93,60 @@ impl JsonRpcFetcher {
         }
     }
 
-    async fn fetch_filter(
+    fn build_get_events_request(
         &self,
-        mut context: FilterContext,
-        per_filter_limit: usize,
-    ) -> Result<FilterResult> {
-        let mut collected = Vec::new();
-        let mut page = 0usize;
+        filter: &EventFilter,
+        continuation: Option<String>,
+    ) -> ProviderRequestData {
+        ProviderRequestData::GetEvents(GetEventsRequest {
+            filter: EventFilterWithPage {
+                event_filter: filter.clone(),
+                result_page_request: ResultPageRequest {
+                    continuation_token: continuation,
+                    chunk_size: self.chunk_size,
+                },
+            },
+        })
+    }
 
-        let mut next_request = context.continuation.clone();
-        let mut next_cursor = context.continuation.take();
-
-        let limit = per_filter_limit.max(1);
-
+    async fn batch_get_events(&self, requests: &[ProviderRequestData]) -> Result<Vec<EventsPage>> {
+        let mut attempts = 0;
         loop {
-            if collected.len() >= limit {
-                debug!(
-                    target: "torii_fetcher_jsonrpc",
-                    address = ?context.address,
-                    limit,
-                    pages = page,
-                    "per-filter limit reached"
-                );
-                break;
-            }
-
-            let page_data = self
-                .get_events_page(&context.filter, next_request.clone())
-                .await?;
-            page += 1;
-
-            let continuation_token = page_data.continuation_token.clone();
-
-            debug!(
-                target: "torii_fetcher_jsonrpc",
-                address = ?context.address,
-                page,
-                events = page_data.events.len(),
-                has_more = continuation_token.is_some(),
-                last_block = page_data.events.last().and_then(|event| event.block_number),
-                "received events page"
-            );
-
-            if page_data.events.is_empty() {
-                if let Some(token) = continuation_token {
-                    next_request = Some(token.clone());
-                    next_cursor = Some(token);
-                    continue;
-                } else {
-                    next_cursor = None;
-                    break;
+            match self.provider.batch_requests(requests).await {
+                Ok(responses) => {
+                    let mut pages = Vec::with_capacity(responses.len());
+                    for response in responses {
+                        match response {
+                            ProviderResponseData::GetEvents(page) => pages.push(page),
+                            other => {
+                                return Err(anyhow!(
+                                    "unexpected response type, expected get_events, got {:?}",
+                                    other
+                                ))
+                            }
+                        }
+                    }
+                    return Ok(pages);
                 }
-            }
-
-            collected.extend(page_data.events.into_iter());
-
-            if let Some(token) = continuation_token {
-                next_request = Some(token.clone());
-                next_cursor = Some(token);
-            } else {
-                next_cursor = None;
-                break;
+                Err(err) if attempts < self.request_retry => {
+                    attempts += 1;
+                    warn!(
+                        target: "torii_fetcher_jsonrpc",
+                        attempt = attempts,
+                        error = ?err,
+                        "batch get_events failed, backing off"
+                    );
+                    sleep(self.request_backoff).await;
+                }
+                Err(err) => return Err(anyhow!(err)),
             }
         }
-
-        Ok(FilterResult {
-            address: context.address,
-            events: collected,
-            continuation: next_cursor,
-        })
     }
 }
 
 struct FilterContext {
     address: FieldElement,
     filter: EventFilter,
-    continuation: Option<String>,
-}
-
-struct FilterResult {
-    address: FieldElement,
-    events: Vec<EmittedEvent>,
     continuation: Option<String>,
 }
 
@@ -228,7 +215,7 @@ impl Fetcher for JsonRpcFetcher {
                 keys: Some(key_patterns),
             };
 
-            let continuation = cursor.and_then(|c| c.get_continuation_string(address));
+            let continuation = cursor.and_then(|c| c.get_continuation(address));
 
             contexts.push(FilterContext {
                 address: *address,
@@ -237,31 +224,49 @@ impl Fetcher for JsonRpcFetcher {
             });
         }
 
-        let mut tasks = stream::iter(
-            contexts
-                .into_iter()
-                .map(|context| async move { self.fetch_filter(context, per_filter_limit).await }),
-        )
-        .buffer_unordered(max_concurrent_filters);
+        if let Some(max_total) = self.max_events_per_cycle {
+            if !contexts.is_empty() {
+                let chunk = self.chunk_size as usize;
+                if chunk > 0 {
+                    let allowed = std::cmp::max(1, max_total / chunk);
+                    if contexts.len() > allowed {
+                        contexts.truncate(allowed);
+                    }
+                }
+            }
+        }
 
         let mut aggregated_events = Vec::new();
         let mut next_cursor = cursor.cloned().unwrap_or_default();
 
-        while let Some(result) = tasks.next().await {
-            let FilterResult {
-                address,
-                events,
-                continuation,
-            } = result?;
+        if self.use_batch_requests {
+            let requests: Vec<_> = contexts
+                .iter()
+                .map(|context| {
+                    self.build_get_events_request(&context.filter, context.continuation.clone())
+                })
+                .collect();
+            let pages = self.batch_get_events(&requests).await?;
 
-            if !events.is_empty() {
-                aggregated_events.extend(events);
+            for (context, page) in contexts.into_iter().zip(pages.into_iter()) {
+                let continuation_token = page.continuation_token.clone();
+                let limit = per_filter_limit.min(page.events.len());
+                aggregated_events.extend(page.events.into_iter().take(limit));
+                next_cursor.set_continuation(&context.address, continuation_token);
             }
+        } else {
+            for context in contexts.into_iter() {
+                let page = self
+                    .get_events_page(&context.filter, context.continuation.clone())
+                    .await?;
+                let continuation_token = page.continuation_token.clone();
+                let limit = per_filter_limit.min(page.events.len());
+                aggregated_events.extend(page.events.into_iter().take(limit));
+                next_cursor.set_continuation(&context.address, continuation_token);
 
-            next_cursor.set_continuation_string(&address, continuation);
-
-            if max_concurrent_filters == 1 && !self.address_backoff.is_zero() {
-                sleep(self.address_backoff).await;
+                if !self.address_backoff.is_zero() {
+                    sleep(self.address_backoff).await;
+                }
             }
         }
 

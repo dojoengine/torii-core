@@ -10,7 +10,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use introspect_types::{ColumnDef, TypeDef};
-use introspect_value::{Field, Value};
+use introspect_value::{Field, Nullable, ToPrimitiveString, Value};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::{
@@ -25,7 +25,9 @@ use torii_core::{
 };
 use torii_types_erc20::TransferV1 as Erc20Transfer;
 use torii_types_erc721::TransferV1 as Erc721Transfer;
-use torii_types_introspect::{DeclareTableV1, UpdateRecordFieldsV1};
+use torii_types_introspect::{
+    DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
+};
 mod types;
 use types::{
     collect_columns, field_values, sanitize_identifier, ColumnInfo, ColumnValue, SqliteType,
@@ -70,6 +72,25 @@ fn format_id_field(field: &Field) -> Result<String> {
     }
 }
 
+fn format_value(value: &Value) -> Result<String> {
+    if let Some(s) = value.to_primitive_string() {
+        return Ok(s);
+    }
+
+    match value {
+        Value::Option(inner) => match inner.as_ref() {
+            Some(v) => format_value(v),
+            None => Err(anyhow!("value has no data")),
+        },
+        Value::Nullable(inner) => match inner.as_ref() {
+            Nullable::NotNull(v) => format_value(v),
+            Nullable::Null => Err(anyhow!("value has no data")),
+        },
+        Value::None => Err(anyhow!("value has no data")),
+        _ => Ok(serde_json::to_string(value)?),
+    }
+}
+
 #[derive(Clone)]
 struct TableSchema {
     storage_name: String,
@@ -109,6 +130,17 @@ impl TableSchema {
             fields,
             declare: event,
         })
+    }
+
+    fn from_update(event: &UpdateTableV1, storage_name: String) -> Result<Self> {
+        let declare = DeclareTableV1 {
+            id: event.id,
+            name: event.name.clone(),
+            attrs: event.attrs.clone(),
+            id_field: event.id_field.clone(),
+            fields: event.fields.clone(),
+        };
+        Self::from_declare(declare, storage_name)
     }
 
     fn table_name(&self) -> &str {
@@ -369,6 +401,32 @@ impl SqliteSink {
         Ok(())
     }
 
+    async fn handle_update_table(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        env: &Envelope,
+        event: &UpdateTableV1,
+    ) -> Result<()> {
+        let storage_name = self.storage_table_name(&env.raw.from_address, event.name.as_str());
+        let schema = Arc::new(TableSchema::from_update(event, storage_name.clone())?);
+        self.persist_schema(tx, &schema).await?;
+        self.ensure_table(tx, &schema).await?;
+
+        {
+            let mut cache = self.schemas.write().await;
+            cache.insert(storage_name, schema.clone());
+        }
+
+        tracing::info!(
+            sink = %self.label,
+            table = %event.name,
+            storage_table = %schema.table_name(),
+            block = env.raw.block_number.unwrap_or_default(),
+            "updated table schema"
+        );
+        Ok(())
+    }
+
     async fn handle_update_record(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
@@ -471,6 +529,40 @@ impl SqliteSink {
         Ok(())
     }
 
+    async fn handle_delete_records(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        env: &Envelope,
+        event: &DeleteRecordsV1,
+    ) -> Result<()> {
+        let storage_name =
+            self.storage_table_name(&env.raw.from_address, event.table_name.as_str());
+        let schema = self.load_schema(tx, &storage_name).await?;
+        let table_ident = quote_ident(schema.table_name());
+        let pk_ident = quote_ident(&schema.id_column().name);
+        let pk_type = schema.id_column().sql_type;
+        let sql = format!("DELETE FROM {} WHERE {} = ?", table_ident, pk_ident);
+
+        for value in &event.values {
+            let formatted = format_value(value)?;
+            let mut args = SqliteArguments::default();
+            let column_value = ColumnValue::Text(formatted);
+            push_argument(&mut args, &column_value, pk_type);
+            sqlx::query_with(&sql, args).execute(&mut **tx).await?;
+        }
+
+        tracing::debug!(
+            sink = %self.label,
+            table = %event.table_name,
+            storage_table = %schema.table_name(),
+            deleted = event.values.len(),
+            block = env.raw.block_number.unwrap_or_default(),
+            "deleted records"
+        );
+
+        Ok(())
+    }
+
     async fn handle_erc20(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
@@ -545,9 +637,19 @@ impl Sink for SqliteSink {
                         self.handle_declare(&mut tx, env, event).await?;
                     }
                 }
+                UpdateTableV1::TYPE_ID => {
+                    if let Some(event) = env.downcast::<UpdateTableV1>() {
+                        self.handle_update_table(&mut tx, env, event).await?;
+                    }
+                }
                 UpdateRecordFieldsV1::TYPE_ID => {
                     if let Some(event) = env.downcast::<UpdateRecordFieldsV1>() {
                         self.handle_update_record(&mut tx, env, event).await?;
+                    }
+                }
+                DeleteRecordsV1::TYPE_ID => {
+                    if let Some(event) = env.downcast::<DeleteRecordsV1>() {
+                        self.handle_delete_records(&mut tx, env, event).await?;
                     }
                 }
                 Erc20Transfer::TYPE_ID => {

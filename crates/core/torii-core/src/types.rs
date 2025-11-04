@@ -168,27 +168,20 @@ impl FetchPlan {
 /// could be a hash of the addresses or something that uniquely identifies the filter.
 #[derive(Clone, Debug, Default)]
 pub struct FetcherCursor {
-    pub continuations: HashMap<FieldElement, Option<JsonValue>>,
+    pub continuations: HashMap<FieldElement, Option<String>>,
 }
 
 impl FetcherCursor {
-    pub fn new(continuations: HashMap<FieldElement, Option<JsonValue>>) -> Self {
+    pub fn new(continuations: HashMap<FieldElement, Option<String>>) -> Self {
         Self { continuations }
     }
 
-    pub fn get_continuation_string(&self, address: &FieldElement) -> Option<String> {
-        self.continuations
-            .get(address)
-            .and_then(|c| c.as_ref().map(|v| v.to_string()))
+    pub fn get_continuation(&self, address: &FieldElement) -> Option<String> {
+        self.continuations.get(address).and_then(|c| c.clone())
     }
 
-    pub fn set_continuation_string(
-        &mut self,
-        address: &FieldElement,
-        continuation: Option<String>,
-    ) {
-        self.continuations
-            .insert(address.clone(), continuation.map(|v| JsonValue::String(v)));
+    pub fn set_continuation(&mut self, address: &FieldElement, continuation: Option<String>) {
+        self.continuations.insert(address.clone(), continuation);
     }
 
     pub fn has_more(&self) -> bool {

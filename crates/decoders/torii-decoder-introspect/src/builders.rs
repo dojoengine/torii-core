@@ -1,18 +1,23 @@
 use crate::IntrospectDecoder;
+use anyhow::anyhow;
 use dojo_introspect_events::{
     DojoEvent, EventEmitted, EventRegistered, EventUpgraded, ModelRegistered, ModelUpgraded,
-    StoreDelRecord, StoreSetRecord, StoreUpdateMember, StoreUpdateRecord,
+    ModelWithSchemaRegistered, StoreDelRecord, StoreSetRecord, StoreUpdateMember,
+    StoreUpdateRecord,
 };
-use dojo_introspect_types::DojoSchemaFetcher;
+use dojo_introspect_types::{DojoSchemaFetcher, DojoTypeDefSerde};
 use dojo_types_manager::{DojoManagerError, DojoTable, DojoTableErrors};
-use introspect_types::{FieldDef, TypeDef};
+use introspect_events::types::TableSchema;
+use introspect_types::{FieldDef, StructDef, TypeDef};
 use introspect_value::{Field, Value};
 use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use torii_core::{Envelope, Event};
-use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1};
+use torii_types_introspect::{
+    DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
+};
 const DOJO_ID_FIELD_NAME: &str = "entity_id";
 
 fn primary_field_def() -> FieldDef {
@@ -20,6 +25,26 @@ fn primary_field_def() -> FieldDef {
         name: DOJO_ID_FIELD_NAME.to_string(),
         attrs: vec![],
         type_def: TypeDef::Felt252,
+    }
+}
+
+fn declare_from_schema(schema: TableSchema) -> DeclareTableV1 {
+    DeclareTableV1 {
+        id: schema.table_id,
+        name: schema.table_name,
+        attrs: schema.attrs,
+        id_field: primary_field_def(),
+        fields: schema.fields,
+    }
+}
+
+fn update_from_schema(schema: TableSchema) -> UpdateTableV1 {
+    UpdateTableV1 {
+        id: schema.table_id,
+        name: schema.table_name,
+        attrs: schema.attrs,
+        id_field: primary_field_def(),
+        fields: schema.fields,
     }
 }
 
@@ -55,6 +80,7 @@ pub type Result<T> = std::result::Result<T, DojoEventBuilderError>;
 
 pub trait DojoEventBuilder {
     async fn build_model_registered(&self, raw: &EmittedEvent) -> Result<Envelope>;
+    async fn build_model_with_schema_registered(&self, raw: &EmittedEvent) -> Result<Envelope>;
     async fn build_model_upgraded(&self, raw: &EmittedEvent) -> Result<Envelope>;
     async fn build_event_registered(&self, raw: &EmittedEvent) -> Result<Envelope>;
     async fn build_event_upgraded(&self, raw: &EmittedEvent) -> Result<Envelope>;
@@ -96,14 +122,27 @@ where
             struct_def.attrs,
             struct_def.fields,
         )?;
-        let data = DeclareTableV1 {
-            id: schema.table_id,
-            name: schema.table_name,
-            attrs: schema.attrs,
-            id_field: primary_field_def(),
-            fields: schema.fields,
-        };
-        Ok(data.to_envelope(raw))
+        Ok(declare_from_schema(schema).to_envelope(raw))
+    }
+
+    async fn build_model_with_schema_registered(&self, raw: &EmittedEvent) -> Result<Envelope> {
+        let event = raw_event_to_event::<ModelWithSchemaRegistered>(raw)?;
+        let struct_def = {
+            let mut iter = event.schema.clone().into_iter();
+            StructDef::dojo_deserialize(&mut iter, false).or_else(|| {
+                let mut iter = event.schema.clone().into_iter();
+                StructDef::dojo_deserialize(&mut iter, true)
+            })
+        }
+        .ok_or_else(|| anyhow!("failed to deserialize schema payload"))?;
+
+        let schema = self.manager.register_table(
+            event.namespace,
+            event.name,
+            struct_def.attrs,
+            struct_def.fields,
+        )?;
+        Ok(declare_from_schema(schema).to_envelope(raw))
     }
 
     async fn build_model_upgraded(&self, raw: &EmittedEvent) -> Result<Envelope> {
@@ -112,14 +151,7 @@ where
         let schema = self
             .manager
             .update_table(event.selector, struct_def.fields)?;
-        let data = DeclareTableV1 {
-            id: schema.table_id,
-            name: schema.table_name,
-            attrs: schema.attrs,
-            id_field: primary_field_def(),
-            fields: schema.fields,
-        };
-        Ok(data.to_envelope(raw))
+        Ok(update_from_schema(schema).to_envelope(raw))
     }
 
     async fn build_event_registered(&self, raw: &EmittedEvent) -> Result<Envelope> {
@@ -131,14 +163,7 @@ where
             struct_def.attrs,
             struct_def.fields,
         )?;
-        let data = DeclareTableV1 {
-            id: schema.table_id,
-            name: schema.table_name,
-            attrs: schema.attrs,
-            id_field: primary_field_def(),
-            fields: schema.fields,
-        };
-        Ok(data.to_envelope(raw))
+        Ok(declare_from_schema(schema).to_envelope(raw))
     }
 
     async fn build_event_upgraded(&self, raw: &EmittedEvent) -> Result<Envelope> {
@@ -147,14 +172,7 @@ where
         let schema = self
             .manager
             .update_table(event.selector, struct_def.fields)?;
-        let data = DeclareTableV1 {
-            id: schema.table_id,
-            name: schema.table_name,
-            attrs: schema.attrs,
-            id_field: primary_field_def(),
-            fields: schema.fields,
-        };
-        Ok(data.to_envelope(raw))
+        Ok(update_from_schema(schema).to_envelope(raw))
     }
 
     fn build_set_record(&self, raw: &EmittedEvent) -> Result<Envelope> {
@@ -207,17 +225,14 @@ where
     fn build_emit_event(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<EventEmitted>(raw)?;
         let id_field = make_entity_id_for_event(&event.keys);
-        let EventEmitted {
-            keys,
-            values,
-            selector,
-            ..
-        } = event;
-        let (table_id, table_name, fields) = self.with_table(selector, |table| {
-            let fields = match table.parse_key_values(keys.clone(), values.clone()) {
+        let (table_id, table_name, fields) = self.with_table(event.selector, |table| {
+            let fields = match table.parse_key_values(event.keys.clone(), event.values.clone()) {
                 Ok(fields) => fields,
                 Err(e) => {
-                    println!("\nError Parsing keys: {keys:#?} values: {values:#?}");
+                    println!(
+                        "\nError Parsing keys: {:#?} values: {:#?}",
+                        event.keys, event.values
+                    );
                     println!("\nError Parsing table: {table:#?}");
                     return Err(DojoEventBuilderError::TableError(e));
                 }

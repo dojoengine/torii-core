@@ -2,7 +2,7 @@
 # WIP, may not work with real data yet.
 [fetcher]
 type = "jsonrpc"
-rpc_url = "https://api.cartridge.gg/x/starknet/mainnet"
+rpc_url = "http://localhost:5050"
 chunk_size = 512
 
 [runtime]
@@ -10,8 +10,8 @@ process_events_batch_size = 2560
 filter_concurrency = 1
 
 [decoders.introspect]
-store_path = "/tmp/pistols_json"
-rpc_url = "https://api.cartridge.gg/x/starknet/mainnet"
+store_path = "/tmp/local_json"
+rpc_url = "http://localhost:5050"
 
 #[decoders.erc20]
 
@@ -22,9 +22,8 @@ rpc_url = "https://api.cartridge.gg/x/starknet/mainnet"
 #decoders = ["erc20"]
 
 [contracts.world]
-address = "0x8b4838140a3cbd36ebe64d4b5aaf56a30cc3753c928a79338bf56c53f506c5"
+address = "0x079b90aa209a333d5c4b2621d121adeecdb7d705c81615a67944d4fb233c9666"
 decoders = ["introspect"]
-deployed_at_block = 1376383
 
 #[sinks.log]
 #type = "log"
@@ -33,5 +32,5 @@ deployed_at_block = 1376383
 [sinks.sqlite]
 type = "sqlite"
 label = "sqlite"
-database_url = "sqlite:///tmp/torii_core.sqlite"
+database_url = "sqlite:///tmp/torii_core_local.sqlite"
 clean_on_start = true

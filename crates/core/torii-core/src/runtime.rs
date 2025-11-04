@@ -113,10 +113,14 @@ async fn run_once_batch_with_options(
             .fetch(&plan, cursor.as_ref(), &options)
             .instrument(span.clone())
             .await?;
+
+        dbg!(&outcome.cursor);
+
         let FetchOutcome {
             events: raw_events,
             cursor: next_cursor,
         } = outcome;
+
         let has_more = next_cursor.has_more();
 
         if raw_events.is_empty() {

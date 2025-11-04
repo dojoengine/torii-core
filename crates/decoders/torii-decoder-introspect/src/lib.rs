@@ -2,7 +2,8 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use dojo_introspect_events::{
     DojoEvent, EventEmitted, EventRegistered, EventUpgraded, ModelRegistered, ModelUpgraded,
-    StoreDelRecord, StoreSetRecord, StoreUpdateMember, StoreUpdateRecord,
+    ModelWithSchemaRegistered, StoreDelRecord, StoreSetRecord, StoreUpdateMember,
+    StoreUpdateRecord,
 };
 use dojo_introspect_types::DojoSchemaFetcher;
 use dojo_types_manager::{DojoManager, JsonStore};
@@ -18,13 +19,16 @@ use torii_core::{
     ContractBinding, ContractFilter, Decoder, DecoderFactory, DecoderFilter, Envelope, Event,
     FieldElement,
 };
-use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1};
+use torii_types_introspect::{
+    DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
+};
 mod builders;
 use builders::DojoEventBuilder;
 
 const DECODER_NAME: &str = "introspect";
-const DOJO_CAIRO_EVENT_SELECTORS: [FieldElement; 8] = [
+const DOJO_CAIRO_EVENT_SELECTORS: [FieldElement; 10] = [
     ModelRegistered::SELECTOR,
+    ModelWithSchemaRegistered::SELECTOR,
     ModelUpgraded::SELECTOR,
     EventRegistered::SELECTOR,
     EventUpgraded::SELECTOR,
@@ -32,10 +36,12 @@ const DOJO_CAIRO_EVENT_SELECTORS: [FieldElement; 8] = [
     StoreUpdateRecord::SELECTOR,
     StoreUpdateMember::SELECTOR,
     StoreDelRecord::SELECTOR,
+    EventEmitted::SELECTOR,
 ];
 
-const DOJO_EVENT_IDS: [u64; 3] = [
+const DOJO_EVENT_IDS: [u64; 4] = [
     DeclareTableV1::TYPE_ID,
+    UpdateTableV1::TYPE_ID,
     DeleteRecordsV1::TYPE_ID,
     UpdateRecordFieldsV1::TYPE_ID,
 ];
@@ -143,6 +149,8 @@ where
         // TODO: check if using hashmap would be better.
         let result = if selector == ModelRegistered::SELECTOR {
             self.build_model_registered(event).await
+        } else if selector == ModelWithSchemaRegistered::SELECTOR {
+            self.build_model_with_schema_registered(event).await
         } else if selector == ModelUpgraded::SELECTOR {
             self.build_model_upgraded(event).await
         } else if selector == EventRegistered::SELECTOR {

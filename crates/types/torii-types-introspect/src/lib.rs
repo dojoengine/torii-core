@@ -10,6 +10,9 @@ use torii_core::{impl_event, type_id_from_url};
 pub const DECLARE_TABLE_URL: &str = "torii.introspect/DeclareTable@1";
 pub const DECLARE_TABLE_ID: u64 = type_id_from_url(DECLARE_TABLE_URL);
 
+pub const UPDATE_TABLE_URL: &str = "torii.introspect/UpdateTable@1";
+pub const UPDATE_TABLE_ID: u64 = type_id_from_url(UPDATE_TABLE_URL);
+
 pub const UPDATE_RECORD_FIELDS_URL: &str = "torii.introspect/UpdateRecordFields@1";
 pub const UPDATE_RECORD_FIELDS_ID: u64 = type_id_from_url(UPDATE_RECORD_FIELDS_URL);
 
@@ -27,6 +30,18 @@ pub struct DeclareTableV1 {
 
 impl_event!(DeclareTableV1, DECLARE_TABLE_URL);
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateTableV1 {
+    pub id: Felt,
+    pub name: String,
+    pub attrs: Vec<String>,
+    pub id_field: FieldDef,
+    pub fields: Vec<ColumnDef>,
+}
+
+impl_event!(UpdateTableV1, UPDATE_TABLE_URL);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateRecordFieldsV1 {
     pub table_id: Felt,
     pub table_name: String,
@@ -47,6 +62,7 @@ impl UpdateRecordFieldsV1 {
 
 impl_event!(UpdateRecordFieldsV1, UPDATE_RECORD_FIELDS_URL);
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteRecordsV1 {
     pub table_id: Felt,
     pub table_name: String,
