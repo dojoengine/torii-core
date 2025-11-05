@@ -847,6 +847,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-events"
 version = "0.1.0"
+source = "git+https://github.com/dojoengine/dojo-introspect?rev=1ce7b3f7#1ce7b3f78885c6f8d1617a065ec38866224a33e0"
 dependencies = [
  "introspect-types",
  "introspect-value",
@@ -857,6 +858,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-types"
 version = "0.1.0"
+source = "git+https://github.com/dojoengine/dojo-introspect?rev=1ce7b3f7#1ce7b3f78885c6f8d1617a065ec38866224a33e0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -875,6 +877,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-utils"
 version = "0.1.0"
+source = "git+https://github.com/dojoengine/dojo-introspect?rev=1ce7b3f7#1ce7b3f78885c6f8d1617a065ec38866224a33e0"
 dependencies = [
  "anyhow",
  "cainome-cairo-serde",
@@ -1741,6 +1744,7 @@ dependencies = [
 [[package]]
 name = "introspect-events"
 version = "0.1.2"
+source = "git+https://github.com/cartridge-gg/introspect?rev=79a2a2e#79a2a2e59f9fd0313335c426d79b944e9d00bbaf"
 dependencies = [
  "cainome-cairo-serde",
  "introspect-types",
@@ -1752,6 +1756,7 @@ dependencies = [
 [[package]]
 name = "introspect-types"
 version = "0.1.2"
+source = "git+https://github.com/cartridge-gg/introspect?rev=79a2a2e#79a2a2e59f9fd0313335c426d79b944e9d00bbaf"
 dependencies = [
  "cainome-cairo-serde",
  "introspect-value",
@@ -1764,6 +1769,7 @@ dependencies = [
 [[package]]
 name = "introspect-value"
 version = "0.1.2"
+source = "git+https://github.com/cartridge-gg/introspect?rev=79a2a2e#79a2a2e59f9fd0313335c426d79b944e9d00bbaf"
 dependencies = [
  "cainome-cairo-serde",
  "convert_case 0.8.0",
