@@ -106,6 +106,13 @@ Binaries do not need manual code beyond reading the config; the registry helper 
    sequentially; tweak `address_backoff_ms` to add a per-address pause when monitoring many
    contracts so you do not overwhelm shared RPC infrastructure.
 
+### Available Fetchers
+
+- **`torii-fetcher-jsonrpc`**: Fetches events from a Starknet JSON-RPC endpoint. Ideal for live
+  indexing and monitoring deployed contracts.
+- **`torii-fetcher-json`**: Reads events from a JSON file. Perfect for testing, replaying captured
+  events, and ultra-fast bootstrapping from pre-captured historical data.
+
 ## Configuration Flow
 
 Binaries typically look like this:
@@ -151,6 +158,76 @@ cargo run -p log-sink-only
 cargo run -p sqlite-sinks -- config/sqlite-example.toml
 ```
 
+## Fast Bootstrapping with JSON Fetcher (WIP)
+
+Torii can support ultra-fast bootstrapping from pre-captured event data using the JSON fetcher.
+This dramatically reduces the time required to sync historical events by eliminating the need to
+fetch them from the chain.
+
+### How It Works
+
+1. **Capture Events**: Use the `dojo-fixtures` CLI to fetch and save events from deployed contracts:
+
+   ```bash
+   cd tests/dojo_fixtures
+   cargo run fetch \
+     --contract-address 0x... \
+     --rpc-url https://api.cartridge.gg/x/starknet/mainnet \
+     --output-events ./historical_events.json \
+     --from-block 0
+   ```
+
+2. **Bootstrap with JSON**: Configure Torii to use the JSON fetcher for initial sync:
+
+   ```toml
+   [fetcher]
+   type = "json"
+   file_path = "./historical_events.json"
+   chunk_size = 10000  # Process events in large batches
+   ```
+
+3. **Switch to Live Indexing**: After bootstrapping completes, stop Torii and switch to the
+   JSON-RPC fetcher to continue from the last indexed block:
+
+   ```toml
+   [fetcher]
+   type = "jsonrpc"
+   rpc_url = "https://your.starknet.node"
+   ```
+
+### Performance Benefits
+
+Bootstrapping with the JSON fetcher is **orders of magnitude faster** than fetching from the chain:
+
+- **No Network Latency**: Events are read from disk at memory speed
+- **No Rate Limits**: Process events as fast as your CPU and storage can handle
+- **No RPC Costs**: Eliminate the burden on shared RPC infrastructure
+- **Deterministic Testing**: Replay the exact same event sequence for testing
+
+The chain is still required for fetching schemas (Dojo introspect metadata, ERC token metadata,
+etc.), but the bulk of the data—raw events—comes from the pre-captured file. This makes Torii
+initialization incredibly fast even for contracts with millions of historical events.
+
+### Use Cases
+
+- **CI/CD Pipelines**: Rapidly spin up test databases with pre-captured production data
+- **Development**: Work offline with realistic event data
+- **Disaster Recovery**: Quickly restore indexer state from event snapshots
+- **Performance Testing**: Benchmark sink performance with large event datasets
+
+## Testing & Fixture Generation
+
+For comprehensive testing and fixture generation capabilities, refer to the **Dojo Fixtures** CLI
+located in `tests/dojo_fixtures/`. This tool provides:
+
+- **Local Event Generation**: Deploy baseline and upgraded contracts to Katana, execute
+  transactions, and capture events for testing schema migrations
+- **Production Event Capture**: Fetch events from mainnet/testnet contracts with filtering options
+- **Cainome Integration**: Type-safe contract bindings for generating realistic test data
+
+See the [Dojo Fixtures README](tests/dojo_fixtures/README.md) for detailed usage instructions and
+examples.
+
 ## Contributing
 
 To test the full indexing pipeline with a configuration file, use the `simple-app` binary:
@@ -186,4 +263,39 @@ sozo execute actions set_player_config str:glihm
 sozo execute actions set_enemies
 ```
 
-For the new introspect, refer to the [introspect](https://github.com/cartridge-gg/introspect) repository where test contracts and assocaited functions should soon be available.
+For the new introspect, refer to the [introspect](https://github.com/cartridge-gg/introspect) repository where test contracts and associated functions should soon be available.
+
+## Future Work
+
+### Append Mode for Event Capture
+
+The `dojo-fixtures fetch` command will be enhanced with an append mode that enables incremental
+event capture:
+
+- **Automatic Resume**: Check if the output file exists; if so, detect the latest block number and
+  resume from there
+- **Incremental Updates**: Append new events to the existing file rather than replacing it
+- **Continuous Monitoring**: Easily update event snapshots with the latest on-chain activity
+
+This will make it trivial to keep event snapshots up-to-date:
+
+```bash
+# Initial capture
+cargo run fetch --contract-address 0x... --output-events events.json --from-block 0
+
+# Later, append new events (automatically detects last block and continues)
+cargo run fetch --contract-address 0x... --output-events events.json --append
+```
+
+### Hot Reload for Live Indexing
+
+Future improvements may include the ability to switch fetchers without restarting Torii:
+
+- Bootstrap from JSON file for historical events
+- Automatically switch to JSON-RPC fetcher when the file is exhausted
+- Seamless transition from offline to live indexing
+
+### Distributed Event Capture
+
+For contracts with extensive history, consider implementing parallel event fetching across multiple
+block ranges, then merging the results into a single JSON file for bootstrapping.
