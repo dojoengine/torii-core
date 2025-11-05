@@ -4222,6 +4222,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "torii-fetcher-json"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
+ "starknet",
+ "tokio",
+ "torii-core",
+ "tracing",
+]
+
+[[package]]
 name = "torii-fetcher-jsonrpc"
 version = "0.1.0"
 dependencies = [
@@ -4283,6 +4297,7 @@ dependencies = [
  "torii-decoder-erc20",
  "torii-decoder-erc721",
  "torii-decoder-introspect",
+ "torii-fetcher-json",
  "torii-fetcher-jsonrpc",
  "torii-sink-log",
  "torii-sink-sqlite",

@@ -1,9 +1,18 @@
 # Uncomment the block below and update the RPC URL to use the JSON-RPC fetcher.
 # WIP, may not work with real data yet.
+
+#[fetcher]
+#type = "jsonrpc"
+#rpc_url = "https://api.cartridge.gg/x/starknet/mainnet"
+#chunk_size = 512
+
+# Bootstrap mode... using a JSON file with all the events.
+# The dojo-fixtures CLI tools can be used to generate this file.
+# 
 [fetcher]
-type = "jsonrpc"
-rpc_url = "https://api.cartridge.gg/x/starknet/mainnet"
-chunk_size = 512
+type = "json"
+file_path = "/tmp/pistols.json"
+chunk_size = 20000
 
 [runtime]
 process_events_batch_size = 2560

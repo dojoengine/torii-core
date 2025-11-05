@@ -6,9 +6,13 @@ use anyhow::{anyhow, Result};
 use serde_json::Value;
 use torii_core::Fetcher;
 use torii_fetcher_jsonrpc::{JsonRpcFetcher, JsonRpcFetcherConfig};
+use torii_fetcher_json::{JsonFetcher, JsonFetcherConfig};
 
 /// Kind string for the built-in JSON-RPC fetcher.
 pub const KIND_JSONRPC: &str = "jsonrpc";
+
+/// Kind string for the built-in JSON file fetcher.
+pub const KIND_JSON: &str = "json";
 
 /// Build a fetcher from configuration.
 ///
@@ -17,6 +21,12 @@ pub const KIND_JSONRPC: &str = "jsonrpc";
 pub async fn from_config(value: &Value) -> Result<Arc<dyn Fetcher>> {
     let (kind, cfg_value) = super::extract_kind("fetcher", value)?;
     match kind.as_str() {
+        KIND_JSON => {
+            let cfg: JsonFetcherConfig = serde_json::from_value(cfg_value)?;
+            tracing::info!(target: "torii_registry", kind, "building fetcher from config");
+            let fetcher = JsonFetcher::new(cfg)?;
+            Ok(Arc::new(fetcher))
+        }
         KIND_JSONRPC => {
             let cfg: JsonRpcFetcherConfig = serde_json::from_value(cfg_value)?;
             tracing::info!(target: "torii_registry", kind, "building fetcher from config");

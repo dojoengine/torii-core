@@ -4,6 +4,7 @@ members = [
     "crates/core/torii-core",
     "crates/core/torii-registry",
     "crates/fetchers/torii-fetcher-jsonrpc",
+    "crates/fetchers/torii-fetcher-json",
     "crates/decoders/torii-decoder-introspect",
     "crates/decoders/torii-decoder-erc20",
     "crates/decoders/torii-decoder-erc721",

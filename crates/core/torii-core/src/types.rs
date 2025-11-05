@@ -7,7 +7,6 @@ use std::{
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
 use starknet::core::types::EmittedEvent;
 
 use crate::FieldElement;

@@ -19,3 +19,4 @@ torii-decoder-erc721 = { path = "../../decoders/torii-decoder-erc721" }
 torii-sink-log = { path = "../../sinks/torii-sink-log" }
 torii-sink-sqlite = { path = "../../sinks/torii-sink-sqlite" }
 torii-fetcher-jsonrpc = { path = "../../fetchers/torii-fetcher-jsonrpc" }
+torii-fetcher-json = { path = "../../fetchers/torii-fetcher-json" }

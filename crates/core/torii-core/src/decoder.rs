@@ -7,10 +7,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use starknet::core::types::EmittedEvent;
 
-use crate::{
-    types::{ContractBinding, DecoderFilter, Envelope},
-    FieldElement,
-};
+use crate::types::{ContractBinding, DecoderFilter, Envelope};
 
 /// Runtime abstraction implemented by protocol decoders.
 #[async_trait]
