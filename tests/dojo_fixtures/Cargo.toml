@@ -1,0 +1,23 @@
+[package]
+name = "dojo-fixtures"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[[bin]]
+name = "dojo-fixtures"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap = { version = "4.5", features = ["derive"] }
+cainome = { version = "0.10.1", features = ["abigen-rs"] }
+serde.workspace = true
+serde_json.workspace = true
+starknet.workspace = true
+url.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
+katana-runner = { git = "https://github.com/dojoengine/katana", rev = "eba352a" }
+
+[build-dependencies]
+anyhow.workspace = true
