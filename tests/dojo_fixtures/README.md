@@ -4,12 +4,19 @@ Generate and manage test fixtures for Torii from Dojo contracts.
 
 ## Overview
 
-This CLI application creates comprehensive test fixtures for Torii by:
-1. Deploying baseline and upgraded Cairo contracts to a Katana node
-2. Executing transactions to generate events with real data
-3. Capturing all events in a structured JSON format
+This CLI application provides two main capabilities for managing Dojo test fixtures:
+
+### Local Fixture Generation (Migrate)
+1. Deploys baseline and upgraded Cairo contracts to a local Katana node
+2. Executes transactions to generate events with real data
+3. Captures all events in a structured JSON format
 
 The fixtures exercise schema migrations, model updates, and various Dojo world operations.
+
+### Production Event Capture (Fetch)
+1. Fetches events from deployed contracts on mainnet or testnet
+2. Filters events by block range and event names
+3. Saves events for testing with real-world data
 
 ## Project Structure
 
@@ -44,35 +51,71 @@ DOJO_FIXTURES_BUILD_CONTRACTS=1 cargo build
 
 ## CLI Usage
 
+The CLI provides two main commands: `migrate` for local testing and `fetch` for retrieving events from deployed contracts.
+
 ### Migrate Command
 
-Deploy baseline and upgrade contracts to Katana, execute transactions, and capture events:
+Deploy baseline and upgrade contracts to a local Katana node, execute transactions, and capture events:
 
 ```bash
-# Use default settings (starts Katana, saves to dojo_fixtures_events.json)
-cargo run --bin dojo-fixtures -- migrate
+# Migrate with default settings
+cargo run migrate --katana-db-dir ./katana_db
 
-# Specify custom output file
-cargo run --bin dojo-fixtures -- migrate --output-events ./my_events.json
-
-# Specify Katana database directory
-cargo run --bin dojo-fixtures -- migrate --katana-db-dir ./my_katana_db
+# Specify custom output file and contract tag
+cargo run migrate --katana-db-dir ./katana_db --output-events ./my_events.json --contract-tag ns-c1
 ```
 
-### Output Format
+**Options:**
+- `--katana-db-dir` (required) - Directory for Katana database
+- `--output-events` (optional) - Output file path (default: `dojo_fixtures_events.json`)
+- `--contract-tag` (optional) - Contract tag to fetch events for (default: `ns-c1`)
 
-The migrate command generates a JSON file with this structure:
+### Fetch Command
+
+Fetch events from a deployed contract on mainnet or testnet:
+
+```bash
+# Fetch all events from a contract on mainnet
+cargo run fetch \
+  --contract-address 0x8b4838140a3cbd36ebe64d4b5aaf56a30cc3753c928a79338bf56c53f506c5 \
+  --rpc-url https://api.cartridge.gg/x/starknet/mainnet \
+  --output-events /tmp/pistols.json \
+  --from-block 1376383
+
+# Fetch specific events by name with block range
+cargo run fetch \
+  --contract-address 0x1234... \
+  --rpc-url https://starknet-sepolia.public.blastapi.io \
+  --output-events ./events.json \
+  --from-block 100000 \
+  --to-block 200000 \
+  --event-names StoreSetRecord --event-names StoreUpdateRecord
+```
+
+**Options:**
+- `--contract-address` (required) - Contract address to fetch events from
+- `--rpc-url` (required) - RPC endpoint URL
+- `--output-events` (required) - Output file path
+- `--from-block` (optional) - Starting block number (default: 0)
+- `--to-block` (optional) - Ending block number (default: latest)
+- `--event-names` (optional) - Filter by specific event names (can be specified multiple times)
+
+### Output Formats
+
+#### Migrate Command Output
+
+The migrate command generates a JSON file containing the world address and all captured events:
 
 ```json
 {
-  "world_address": "0x...",
+  "world_address": "0x079b90aa209a333d5c4b2621d121adeecdb7d705c81615a67944d4fb233c9666",
   "events": [
     {
       "from_address": "0x...",
       "keys": ["0x..."],
       "data": ["0x..."],
       "block_hash": "0x...",
-      "block_number": 123,
+      "block_number": 2,
       "transaction_hash": "0x..."
     }
   ]
@@ -83,6 +126,28 @@ This fixture can be used for:
 - Testing Torii's event processing without a live Katana node
 - Regression testing of schema migrations
 - Validating event parsing and model updates
+
+#### Fetch Command Output
+
+The fetch command generates a JSON file containing only the events array:
+
+```json
+[
+  {
+    "from_address": "0x8b4838140a3cbd36ebe64d4b5aaf56a30cc3753c928a79338bf56c53f506c5",
+    "keys": ["0x..."],
+    "data": ["0x..."],
+    "block_hash": "0x...",
+    "block_number": 1376383,
+    "transaction_hash": "0x..."
+  }
+]
+```
+
+This is useful for:
+- Capturing real-world events from deployed contracts
+- Testing with production data
+- Analyzing event patterns and data structures
 
 ## Transaction Coverage
 
