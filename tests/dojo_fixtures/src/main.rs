@@ -216,7 +216,9 @@ async fn fetch_command(
 
     let filter = EventFilter {
         from_block: Some(BlockId::Number(from_block)),
-        to_block: to_block.map(BlockId::Number).or(Some(BlockId::Tag(BlockTag::Latest))),
+        to_block: to_block
+            .map(BlockId::Number)
+            .or(Some(BlockId::Tag(BlockTag::Latest))),
         address: Some(contract_address),
         keys,
     };
@@ -234,4 +236,3 @@ async fn fetch_command(
 
     Ok(())
 }
-

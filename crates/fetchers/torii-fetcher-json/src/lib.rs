@@ -11,9 +11,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
 use starknet::core::types::EmittedEvent;
-use torii_core::{
-    FetchOptions, FetchOutcome, FetchPlan, Fetcher, FetcherCursor, FieldElement,
-};
+use torii_core::{FetchOptions, FetchOutcome, FetchPlan, Fetcher, FetcherCursor, FieldElement};
 use tracing::{info, trace};
 
 /// Configuration for the JSON file fetcher.
@@ -54,7 +52,7 @@ impl JsonFetcher {
     /// Creates a new JSON fetcher from the provided configuration.
     pub fn new(config: JsonFetcherConfig) -> Result<Self> {
         let file_path = PathBuf::from(&config.file_path);
-        
+
         info!(
             target: "torii_fetcher_json",
             path = %file_path.display(),
@@ -65,7 +63,8 @@ impl JsonFetcher {
             .with_context(|| format!("failed to read file: {}", file_path.display()))?;
 
         let events = match serde_json::from_str::<EventsFileFormat>(&contents)
-            .context("failed to parse JSON file")? {
+            .context("failed to parse JSON file")?
+        {
             EventsFileFormat::DirectArray(events) => events,
             EventsFileFormat::WithMetadata { events } => events,
         };
@@ -144,8 +143,9 @@ impl Fetcher for JsonFetcher {
         for (address, contract_filter) in plan.address_selectors.iter() {
             // Check if this address has already been fully consumed
             if let Some(cursor) = cursor {
-                if cursor.continuations.contains_key(address) 
-                    && cursor.get_continuation(address).is_none() {
+                if cursor.continuations.contains_key(address)
+                    && cursor.get_continuation(address).is_none()
+                {
                     // Already fetched all events for this address
                     trace!(
                         target: "torii_fetcher_json",
@@ -185,7 +185,10 @@ impl Fetcher for JsonFetcher {
                     .iter()
                     .filter(|event| {
                         // Check if any of the event's keys match the requested selectors
-                        event.keys.iter().any(|key| contract_filter.selectors.contains(key))
+                        event
+                            .keys
+                            .iter()
+                            .any(|key| contract_filter.selectors.contains(key))
                     })
                     .cloned()
                     .collect()
@@ -207,7 +210,7 @@ impl Fetcher for JsonFetcher {
             // Get the next chunk of events
             let end_index = (current_index + chunk_size).min(filtered_events.len());
             let chunk = &filtered_events[current_index..end_index];
-            
+
             trace!(
                 target: "torii_fetcher_json",
                 address = %format!("{:#x}", address),

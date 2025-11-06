@@ -1,9 +1,15 @@
 # Uncomment the block below and update the RPC URL to use the JSON-RPC fetcher.
 # WIP, may not work with real data yet.
+
+#[fetcher]
+#type = "jsonrpc"
+#rpc_url = "http://localhost:5050"
+#chunk_size = 512
+
 [fetcher]
-type = "jsonrpc"
-rpc_url = "http://localhost:5050"
-chunk_size = 512
+type = "json"
+file_path = "/tmp/dojo1.json"
+chunk_size = 20000
 
 [runtime]
 process_events_batch_size = 2560

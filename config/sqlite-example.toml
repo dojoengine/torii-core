@@ -11,7 +11,7 @@
 # 
 [fetcher]
 type = "json"
-file_path = "/tmp/pistols.json"
+file_path = "/tmp/pistols2.json"
 chunk_size = 20000
 
 [runtime]
