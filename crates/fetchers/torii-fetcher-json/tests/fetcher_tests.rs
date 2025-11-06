@@ -302,8 +302,9 @@ async fn test_json_fetcher_pagination_with_selector_filtering_single_contract() 
     let fetcher = JsonFetcher::new(config).unwrap();
 
     let address = Felt::from_hex_unchecked("0x1");
-    let selector =
-        Felt::from_hex_unchecked("0x99cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9");
+    let selector = Felt::from_hex_unchecked(
+        "0x99cd8bde557814842a3121e8ddfd433a539b8c9f14bf31ebf108d12e6196e9",
+    );
 
     let mut selectors = HashSet::new();
     selectors.insert(selector);
@@ -495,4 +496,3 @@ async fn test_json_fetcher_pagination_with_selector_filtering_multiple_contracts
     // Cleanup
     fs::remove_file(file_path).ok();
 }
-

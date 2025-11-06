@@ -5,8 +5,8 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use torii_core::Fetcher;
-use torii_fetcher_jsonrpc::{JsonRpcFetcher, JsonRpcFetcherConfig};
 use torii_fetcher_json::{JsonFetcher, JsonFetcherConfig};
+use torii_fetcher_jsonrpc::{JsonRpcFetcher, JsonRpcFetcherConfig};
 
 /// Kind string for the built-in JSON-RPC fetcher.
 pub const KIND_JSONRPC: &str = "jsonrpc";

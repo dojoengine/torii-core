@@ -20,9 +20,17 @@ pub async fn fetch_all(rpc_url: &str, filter: &EventFilter) -> Result<Vec<Emitte
             .await
             .context("failed to fetch events")?;
 
-        let last_block = page.events.last().map(|event| event.block_number).unwrap_or(None);
+        let last_block = page
+            .events
+            .last()
+            .map(|event| event.block_number)
+            .unwrap_or(None);
 
-        println!("page fetched with {} events (block #{})", page.events.len(), last_block.unwrap_or_default());
+        println!(
+            "page fetched with {} events (block #{})",
+            page.events.len(),
+            last_block.unwrap_or_default()
+        );
 
         collected.extend(page.events.into_iter());
 
