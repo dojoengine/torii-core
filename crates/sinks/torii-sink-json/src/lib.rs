@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use introspect_value::{Field, ToPrimitiveString};
+use introspect_types::Field;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as JsonValue};
-use std::{fs, fs::create_dir_all, path::PathBuf};
+use std::fs;
+use std::fs::create_dir_all;
+use std::path::PathBuf;
 use torii_core::{Batch, Envelope, Event, Sink};
 use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1};
 
@@ -64,6 +66,7 @@ fn fields_to_json_array(fields: Vec<Field>) -> Vec<(String, JsonValue)> {
 fn to_json_object(fields: Vec<Field>) -> Map<String, JsonValue> {
     let mut map = Map::new();
     for Field {
+        id: _,
         name,
         attributes: _,
         value,
@@ -105,9 +108,7 @@ impl JsonSink {
             .downcast::<DeleteRecordsV1>()
             .context("Failed to downcast envelope to DeleteRecordsV1")?;
         for value in &event.values {
-            let name = value
-                .to_primitive_string()
-                .context("Failed to convert id_field value to string")?;
+            let name = value.to_string();
             let path = self.record_path(&event.table_name, &name);
             if path.exists() {
                 std::fs::remove_file(&path)
@@ -136,14 +137,7 @@ impl JsonSink {
         let event = envelope
             .downcast::<UpdateRecordFieldsV1>()
             .context("Failed to downcast envelope to UpdateRecordFieldsV1")?;
-        let path = self.record_path(
-            &event.table_name,
-            &event
-                .primary
-                .value
-                .to_primitive_string()
-                .context("Failed to convert id_field value to string")?,
-        );
+        let path = self.record_path(&event.table_name, &event.primary.value.to_string());
 
         let data = if path.exists() {
             let mut data: Map<String, JsonValue> = read_json_file(&path)?;

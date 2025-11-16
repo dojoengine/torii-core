@@ -1,7 +1,9 @@
-use anyhow::{anyhow, bail, Result};
-use introspect_types::{ColumnDef, EnumDef, StructDef, TypeDef, VariantDef};
-use introspect_value::{Enum as ValueEnum, Struct as ValueStruct, Value};
-use primitive_types::U256;
+use anyhow::{Result, anyhow, bail};
+use introspect_types::{
+    ColumnDef, Enum as ValueEnum, EnumDef, Struct as ValueStruct, StructDef, TypeDef, Value,
+    VariantDef,
+};
+use primitive_types::{U256, U512};
 use serde_json::to_string;
 use std::collections::HashMap;
 use torii_core::format::felt_to_padded_hex;
@@ -98,22 +100,28 @@ fn collect_columns_inner(base: &str, type_def: &TypeDef) -> Vec<ColumnInfo> {
             sql_type: SqliteType::Integer,
         }],
         TypeDef::Felt252
-        | TypeDef::ShortString
+        | TypeDef::Bytes31
+        | TypeDef::Bytes31E(_)
         | TypeDef::ClassHash
         | TypeDef::ContractAddress
         | TypeDef::EthAddress
-        | TypeDef::ByteArray
+        | TypeDef::StorageAddress
+        | TypeDef::StorageBaseAddress
+        | TypeDef::ByteArray(_)
+        | TypeDef::Utf8Array(_)
+        | TypeDef::ByteArrayE(_)
+        | TypeDef::ShortUtf8
         | TypeDef::U64
         | TypeDef::U128
         | TypeDef::U256
-        | TypeDef::I128
-        | TypeDef::USize => vec![ColumnInfo {
+        | TypeDef::U512
+        | TypeDef::I128 => vec![ColumnInfo {
             name: base.to_string(),
             sql_type: SqliteType::Text,
         }],
         TypeDef::Tuple(elements) => {
             let mut columns = Vec::new();
-            for (idx, element) in elements.iter().enumerate() {
+            for (idx, element) in elements.elements.iter().enumerate() {
                 let next_base = join_identifier(base, &idx.to_string());
                 columns.extend(collect_columns_inner(&next_base, element));
             }
@@ -125,13 +133,10 @@ fn collect_columns_inner(base: &str, type_def: &TypeDef) -> Vec<ColumnInfo> {
         | TypeDef::FixedArray(_)
         | TypeDef::Felt252Dict(_)
         | TypeDef::Ref(_)
-        | TypeDef::Schema(_)
         | TypeDef::Custom(_)
         | TypeDef::Option(_)
         | TypeDef::Result(_)
-        | TypeDef::Nullable(_)
-        | TypeDef::Encoding(_)
-        | TypeDef::DynamicEncoding => vec![ColumnInfo {
+        | TypeDef::Nullable(_) => vec![ColumnInfo {
             name: base.to_string(),
             sql_type: SqliteType::Text,
         }],
@@ -140,9 +145,9 @@ fn collect_columns_inner(base: &str, type_def: &TypeDef) -> Vec<ColumnInfo> {
 
 fn collect_struct_columns(base: &str, struct_def: &StructDef) -> Vec<ColumnInfo> {
     let mut columns = Vec::new();
-    for field in &struct_def.fields {
-        let next_base = join_identifier(base, &field.name);
-        columns.extend(collect_columns_inner(&next_base, &field.type_def));
+    for member in &struct_def.members {
+        let next_base = join_identifier(base, &member.name);
+        columns.extend(collect_columns_inner(&next_base, &member.type_def));
     }
     columns
 }
@@ -229,12 +234,14 @@ fn assign_values(
         (TypeDef::Felt252, Value::Felt252(v))
         | (TypeDef::ClassHash, Value::ClassHash(v))
         | (TypeDef::ContractAddress, Value::ContractAddress(v))
-        | (TypeDef::EthAddress, Value::EthAddress(v)) => {
+        | (TypeDef::EthAddress, Value::EthAddress(v))
+        | (TypeDef::StorageAddress, Value::StorageAddress(v))
+        | (TypeDef::StorageBaseAddress, Value::StorageBaseAddress(v)) => {
             map.insert(base.to_string(), ColumnValue::Text(felt_to_padded_hex(v)));
             Ok(())
         }
-        (TypeDef::ShortString, Value::ShortString(v))
-        | (TypeDef::ByteArray, Value::ByteArray(v)) => {
+        (TypeDef::Utf8Array(_), Value::Utf8Array(v))
+        | (TypeDef::ShortUtf8, Value::ShortUtf8(v)) => {
             map.insert(base.to_string(), ColumnValue::Text(v.clone()));
             Ok(())
         }
@@ -250,19 +257,19 @@ fn assign_values(
             map.insert(base.to_string(), ColumnValue::Text(v.to_string()));
             Ok(())
         }
-        (TypeDef::USize, Value::USize(v)) => {
-            map.insert(base.to_string(), ColumnValue::Text(v.to_string()));
-            Ok(())
-        }
         (TypeDef::U256, Value::U256(v)) => {
             map.insert(base.to_string(), ColumnValue::Text(u256_to_padded_hex(v)));
             Ok(())
         }
+        (TypeDef::U512, Value::U512(v)) => {
+            map.insert(base.to_string(), ColumnValue::Text(u512_to_padded_hex(v)));
+            Ok(())
+        }
         (TypeDef::Tuple(types), Value::Tuple(values)) => {
-            if types.len() != values.len() {
+            if types.elements.len() != values.len() {
                 bail!("tuple length mismatch for column {base}");
             }
-            for (idx, (ty, val)) in types.iter().zip(values.iter()).enumerate() {
+            for (idx, (ty, val)) in types.elements.iter().zip(values.iter()).enumerate() {
                 let next_base = join_identifier(base, &idx.to_string());
                 assign_values(map, &next_base, ty, val)?;
             }
@@ -289,13 +296,11 @@ fn assign_values(
             | TypeDef::FixedArray(_)
             | TypeDef::Felt252Dict(_)
             | TypeDef::Ref(_)
-            | TypeDef::Schema(_)
             | TypeDef::Custom(_)
             | TypeDef::Option(_)
             | TypeDef::Result(_)
             | TypeDef::Nullable(_)
-            | TypeDef::Encoding(_)
-            | TypeDef::DynamicEncoding,
+            | TypeDef::ByteArray(_),
             _,
         ) => {
             map.insert(base.to_string(), ColumnValue::Text(to_string(value)?));
@@ -313,15 +318,15 @@ fn assign_struct(
     struct_def: &StructDef,
     struct_value: &ValueStruct,
 ) -> Result<()> {
-    let field_map: HashMap<&str, &Value> = struct_value
-        .fields
+    let member_map: HashMap<&str, &Value> = struct_value
+        .members
         .iter()
-        .map(|field| (field.name.as_str(), &field.value))
+        .map(|member| (member.name.as_str(), &member.value))
         .collect();
-    for field_def in &struct_def.fields {
-        let next_base = join_identifier(base, &field_def.name);
-        if let Some(value) = field_map.get(field_def.name.as_str()) {
-            assign_values(map, &next_base, &field_def.type_def, value)?;
+    for member in &struct_def.members {
+        let next_base = join_identifier(base, &member.name);
+        if let Some(value) = member_map.get(member.name.as_str()) {
+            assign_values(map, &next_base, &member.type_def, value)?;
         } else {
             // leave as null if data not present
         }
@@ -358,6 +363,9 @@ fn find_variant<'a>(enum_def: &'a EnumDef, name: &str) -> Option<&'a VariantDef>
 
 pub fn u256_to_padded_hex(value: &U256) -> String {
     format!("{:#066x}", value)
+}
+pub fn u512_to_padded_hex(value: &U512) -> String {
+    format!("{:#0130x}", value)
 }
 
 fn value_to_json_string(value: &Value) -> Result<String> {

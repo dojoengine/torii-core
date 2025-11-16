@@ -1,4 +1,4 @@
-use introspect_value::Value;
+use introspect_types::Value;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -21,7 +21,9 @@ impl ToPostgresValue for Value {
             Value::Felt252(v)
             | Value::ClassHash(v)
             | Value::ContractAddress(v)
-            | Value::EthAddress(v) => Ok(v.to_string()),
+            | Value::EthAddress(v)
+            | Value::StorageAddress(v)
+            | Value::StorageBaseAddress(v) => Ok(v.to_string()),
             Value::Bool(v) => Ok(v.to_string()),
             Value::U8(v) => Ok(v.to_string()),
             Value::U16(v) => Ok(v.to_string()),
@@ -34,8 +36,7 @@ impl ToPostgresValue for Value {
             Value::I32(v) => Ok(v.to_string()),
             Value::I64(v) => Ok(v.to_string()),
             Value::I128(v) => Ok(v.to_string()),
-            Value::ShortString(s) => Ok(s.to_string()),
-            Value::ByteArray(s) => Ok(s.to_string()),
+            Value::Utf8Array(s) => Ok(s.clone()),
             _ => Err(PostgresValueError::UnsupportedType),
         }
     }

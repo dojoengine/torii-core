@@ -1,7 +1,7 @@
+use crate::TableManager;
 use crate::json::ToPostgresJson;
 use crate::manager::TableManagerError;
-use crate::value::{PostgresValueError, ToPostgresValue};
-use crate::TableManager;
+use crate::value::PostgresValueError;
 use async_trait::async_trait;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -144,13 +144,13 @@ impl PostgresSink {
         let formatted_values: Result<Vec<String>> = event
             .values
             .iter()
-            .map(|v| Ok(format!(r#"'{}'"#, v.to_postgres_value()?)))
+            .map(|v| Ok(format!(r#"'{}'"#, v.to_string())))
             .collect();
 
         sqlx::query(&format!(
             r#"DELETE FROM "{}" WHERE "{}" IN ({})"#,
             event.table_name,
-            event.id_field,
+            event.primary_name,
             formatted_values?.join(", ")
         ))
         .execute(&mut **tx)

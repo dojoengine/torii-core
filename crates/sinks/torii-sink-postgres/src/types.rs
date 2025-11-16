@@ -32,6 +32,7 @@ pub enum PostgresType {
     Tuple(String),
     Enum(String),
     RustEnum(String),
+    Bytea,
 }
 
 impl ToString for PostgresType {
@@ -68,6 +69,7 @@ impl ToString for PostgresType {
             PostgresType::Enum(type_name) => type_name.clone(),
             PostgresType::RustEnum(type_name) => type_name.clone(),
             PostgresType::Tuple(type_name) => type_name.clone(),
+            PostgresType::Bytea => "BYTEA".to_string(),
         }
     }
 }

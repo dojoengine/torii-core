@@ -5,7 +5,8 @@ use dojo_introspect_events::{
     ModelWithSchemaRegistered, StoreDelRecord, StoreSetRecord, StoreUpdateMember,
     StoreUpdateRecord,
 };
-use dojo_introspect_types::{DojoSchemaFetcher, DojoTypeDefSerde};
+use dojo_introspect_types::contract::DojoSchemaResponse;
+use dojo_introspect_types::{DojoSchema, DojoSchemaFetcher, DojoTypeDefSerde, make_dojo_table};
 use dojo_types_manager::{DojoManagerError, DojoTable, DojoTableErrors};
 use introspect_events::types::TableSchema;
 use introspect_types::{FieldDef, PrimaryDef, PrimaryTypeDef, StructDef, TypeDef};
@@ -18,7 +19,6 @@ use torii_core::{Envelope, Event};
 use torii_types_introspect::{
     DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
 };
-
 
 fn declare_from_schema(schema: TableSchema) -> DeclareTableV1 {
     DeclareTableV1 {
@@ -107,48 +107,34 @@ where
 
     async fn build_model_registered(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<ModelRegistered>(raw)?;
-        let struct_def = self.fetcher.schema(event.address).await?;
-        let schema = self.manager.register_table(
-            event.namespace,
-            event.name,
-            struct_def.attributes,
-            struct_def.fields,
-        )?;
+        let DojoSchemaResponse { legacy, data } = self.fetcher.schema(event.address).await?;
+        let schema = make_dojo_table(&event.namespace, &event.name, data, legacy)?;
+        self.manager.register_table(schema)?;
         Ok(declare_from_schema(schema).to_envelope(raw))
     }
 
     async fn build_model_with_schema_registered(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<ModelWithSchemaRegistered>(raw)?;
-        let struct_def = {
-            let mut iter = event.schema.clone().into_iter();
-            StructDef::dojo_deserialize(&mut iter, false).or_else(|| {
-                let mut iter = event.schema.clone().into_iter();
-                StructDef::dojo_deserialize(&mut iter, true)
-            })
-        }
-        .ok_or_else(|| anyhow!("failed to deserialize schema payload"))?;
-
-        let schema = self.manager.register_table(
-            event.namespace,
-            event.name,
-            struct_def.attributes,
-            struct_def.fields,
-        )?;
-        Ok(declare_from_schema(schema).to_envelope(raw))
+        let schema = DojoSchema::dojo_deserialize(&mut event.schema.into_iter(), true)
+            .expect("Could not decode schema");
+        let table = self
+            .manager
+            .register_table(&event.namespace, &event.name, schema)?;
+        Ok(declare_from_schema(table).to_envelope(raw))
     }
 
     async fn build_model_upgraded(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<ModelUpgraded>(raw)?;
-        let struct_def = self.fetcher.schema(event.address).await?;
-        let schema = self
-            .manager
-            .update_table(event.selector, struct_def.fields)?;
-        Ok(update_from_schema(schema).to_envelope(raw))
+        let dojo_schema = self.fetcher.schema(event.address).await?;
+        let table = self.manager.update_table(event.selector, dojo_schema)?;
+        Ok(update_from_schema(table).to_envelope(raw))
     }
 
     async fn build_event_registered(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<EventRegistered>(raw)?;
         let struct_def = self.fetcher.schema(event.address).await?;
+        let schema = make_dojo_table(&event.namespace, &event.name, event.schema, event.legacy)?;
+
         let schema = self.manager.register_table(
             event.namespace,
             event.name,

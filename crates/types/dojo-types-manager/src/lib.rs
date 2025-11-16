@@ -1,8 +1,9 @@
-use dojo_introspect_types::IsDojoKey;
-use dojo_introspect_utils::selector::compute_selector_from_namespace_and_name;
-use introspect_types::{Attribute, ColumnDef, FeltIterator, Field, PrimaryDef, PrimaryTypeDef, TableSchema, ToValue};
+use dojo_introspect_types::{DojoSchema, IsDojoKey};
+use introspect_types::{
+    Attribute, ColumnDef, FeltIterator, Field, PrimaryDef, PrimaryTypeDef, TableSchema, ToValue,
+};
 use serde::{Deserialize, Serialize};
-use starknet::core::utils::{get_selector_from_name, NonAsciiNameError};
+use starknet::core::utils::NonAsciiNameError;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::fs;
@@ -11,7 +12,6 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 use thiserror::Error;
 
-const KEY_ATTR: &str = "key";
 const DOJO_ID_FIELD_NAME: &str = "entity_id";
 
 #[derive(Debug, Error)]
@@ -83,6 +83,29 @@ pub struct DojoTable {
     pub columns: HashMap<Felt, ColumnDef>,
     pub key_fields: Vec<Felt>,
     pub value_fields: Vec<Felt>,
+}
+
+impl From<TableSchema> for DojoTable {
+    fn from(value: TableSchema) -> Self {
+        let mut field_map = HashMap::new();
+        let mut value_fields = Vec::new();
+        let mut key_fields = Vec::new();
+        for column in value.columns {
+            match column.is_dojo_key() {
+                true => key_fields.push(column.id),
+                false => value_fields.push(column.id),
+            }
+            field_map.insert(column.id, column);
+        }
+        DojoTable {
+            id: value.id,
+            name: value.name.clone(),
+            attributes: value.attributes.clone(),
+            columns: field_map,
+            key_fields,
+            value_fields,
+        }
+    }
 }
 
 pub fn primary_field_def() -> PrimaryDef {
@@ -293,57 +316,33 @@ where
     }
     pub fn register_table(
         &self,
-        namespace: String,
-        name: String,
-        attributes: Vec<Attribute>,
-        columns: Vec<ColumnDef>,
+        namespace: &str,
+        name: &str,
+        schema: DojoSchema,
     ) -> ManagerResult<TableSchema> {
-        let id = compute_selector_from_namespace_and_name(&namespace, &name);
-        let table_name = format!("{namespace}-{name}");
-
+        let table = schema.to_table_schema(namespace, name);
         if self
             .read()
             .map_err(|e| DojoManagerError::LockError(e.to_string()))?
             .tables
-            .contains_key(&id)
+            .contains_key(&table.id)
         {
-            return Err(DojoManagerError::TableAlreadyExists(id));
+            return Err(DojoManagerError::TableAlreadyExists(table.id));
         }
+        let dojo_table: DojoTable = table.clone().into();
 
-        let mut field_map = HashMap::new();
-        let mut value_fields = Vec::new();
-        let mut key_fields = Vec::new();
-
-        for column in columns {
-            if column.is_dojo_key(){
-                key_fields.push(column.id);
-                } else {
-                value_fields.push(column.id);
-            }
-            field_map.insert(column.id,column);
-        }
-        let table = DojoTable {
-            id,
-            name: table_name,
-            attributes,
-            columns: field_map,
-            value_fields,
-            key_fields,
-        };
-
-        let schema = table.schema();
         let mut manager = self
             .write()
             .map_err(|e| DojoManagerError::LockError(e.to_string()))?;
         manager
             .store
-            .dump(id, &table)
+            .dump(table.id, &dojo_table)
             .map_err(|e| DojoManagerError::StoreError(e.to_string()))?;
-        manager.tables.insert(id, RwLock::new(table));
-        Ok(schema)
+        manager.tables.insert(table.id, RwLock::new(dojo_table));
+        Ok(table)
     }
 
-    pub fn update_table(&self, id: Felt, fields: Vec<FieldDef>) -> ManagerResult<TableSchema> {
+    pub fn update_table(&self, id: Felt, schema: DojoSchema) -> ManagerResult<TableSchema> {
         let manager = self
             .read()
             .map_err(|e| DojoManagerError::LockError(e.to_string()))?;
@@ -355,21 +354,13 @@ where
         }?;
         let mut key_fields = Vec::new();
         let mut value_fields = Vec::new();
-        for field in fields {
-            let selector = get_selector_from_name(&field.name)?;
-            match field.attributes.contains(&KEY_ATTR.to_string()) {
-                true => key_fields.push(selector),
-                false => value_fields.push(selector),
+        for column in schema.columns {
+            if column.is_dojo_key() {
+                key_fields.push(column.id);
+            } else {
+                value_fields.push(column.id);
             }
-            table.columns.insert(
-                selector,
-                ColumnDef {
-                    selector,
-                    name: field.name,
-                    attributes: field.attributes,
-                    type_def: field.type_def,
-                },
-            );
+            table.columns.insert(column.id, column);
         }
         table.key_fields = key_fields;
         table.value_fields = value_fields;

@@ -847,7 +847,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-events"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?branch=next-2#fa9f202fa08102f1ac80bbb2aa8365730edc1585"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next-2#3e4c0d7bd74c589365d2f15103ea2b0ed3d91990"
 dependencies = [
  "introspect-types",
  "starknet",
@@ -857,7 +857,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-types"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?branch=next-2#fa9f202fa08102f1ac80bbb2aa8365730edc1585"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next-2#3e4c0d7bd74c589365d2f15103ea2b0ed3d91990"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -874,7 +874,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-utils"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?branch=next-2#fa9f202fa08102f1ac80bbb2aa8365730edc1585"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next-2#3e4c0d7bd74c589365d2f15103ea2b0ed3d91990"
 dependencies = [
  "anyhow",
  "cainome-cairo-serde",
@@ -1741,7 +1741,7 @@ dependencies = [
 [[package]]
 name = "introspect-events"
 version = "0.1.2"
-source = "git+https://github.com/cartridge-gg/introspect?branch=next-2#ad71ee3390ace2dfe39104249f6a2947bfca9165"
+source = "git+https://github.com/cartridge-gg/introspect?branch=next-2#51d7f222a11a9a8b77e8944ff326f3ba5960b0e2"
 dependencies = [
  "cainome-cairo-serde",
  "introspect-types",
@@ -1753,10 +1753,11 @@ dependencies = [
 [[package]]
 name = "introspect-types"
 version = "0.1.2"
-source = "git+https://github.com/cartridge-gg/introspect?branch=next-2#ad71ee3390ace2dfe39104249f6a2947bfca9165"
+source = "git+https://github.com/cartridge-gg/introspect?branch=next-2#51d7f222a11a9a8b77e8944ff326f3ba5960b0e2"
 dependencies = [
  "cainome-cairo-serde",
  "convert_case 0.8.0",
+ "hex",
  "lambdaworks-math",
  "num-traits",
  "primitive-types 0.14.0",
@@ -4321,6 +4322,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "introspect-types",
  "serde",
  "serde_json",
  "torii-core",
@@ -4346,6 +4348,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "hex",
  "introspect-types",
  "rand 0.9.2",
  "serde",

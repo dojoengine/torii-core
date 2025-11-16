@@ -1,28 +1,20 @@
 //! Very simple SQLite sink implementation.
 //! TO BE REWORKED properly with transactions and optimisations for speed.
 
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    str::FromStr,
-    sync::Arc,
-};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::str::FromStr;
+use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
-use introspect_types::{ColumnDef, TypeDef};
-use introspect_value::{Field, Nullable, ToPrimitiveString, Value};
+use introspect_types::{ColumnDef, PrimaryTypeDef};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use sqlx::{
-    sqlite::{SqliteArguments, SqliteConnectOptions, SqlitePoolOptions},
-    Sqlite, Transaction,
-};
-use sqlx::{Arguments, Row, SqlitePool};
+use sqlx::sqlite::{SqliteArguments, SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Arguments, Row, Sqlite, SqlitePool, Transaction};
 use tokio::sync::RwLock;
-use torii_core::{
-    format::felt_to_padded_hex, Batch, Envelope, Event, FieldElement, Sink, SinkFactory,
-    SinkRegistry,
-};
+use torii_core::format::felt_to_padded_hex;
+use torii_core::{Batch, Envelope, Event, FieldElement, Sink, SinkFactory, SinkRegistry};
 use torii_types_erc20::TransferV1 as Erc20Transfer;
 use torii_types_erc721::TransferV1 as Erc721Transfer;
 use torii_types_introspect::{
@@ -30,10 +22,8 @@ use torii_types_introspect::{
 };
 mod types;
 use types::{
-    collect_columns, field_values, sanitize_identifier, ColumnInfo, ColumnValue, SqliteType,
+    ColumnInfo, ColumnValue, SqliteType, collect_columns, field_values, sanitize_identifier,
 };
-
-use crate::types::u256_to_padded_hex;
 
 #[derive(Clone)]
 struct FieldSchema {
@@ -55,41 +45,22 @@ fn push_argument(args: &mut SqliteArguments, value: &ColumnValue, sql_type: Sqli
     }
 }
 
-fn format_id_field(field: &Field) -> Result<String> {
-    match &field.value {
-        Value::Felt252(felt)
-        | Value::ClassHash(felt)
-        | Value::ContractAddress(felt)
-        | Value::EthAddress(felt) => Ok(felt_to_padded_hex(felt)),
-        Value::ShortString(value) | Value::ByteArray(value) => Ok(value.clone()),
-        Value::U64(value) => Ok(value.to_string()),
-        Value::U128(value) => Ok(value.to_string()),
-        Value::I128(value) => Ok(value.to_string()),
-        Value::USize(value) => Ok(value.to_string()),
-        Value::U256(value) => Ok(u256_to_padded_hex(value)),
-        Value::None => Err(anyhow!("id field {} has no value", field.name)),
-        other => Ok(serde_json::to_string(other)?),
-    }
-}
-
-fn format_value(value: &Value) -> Result<String> {
-    if let Some(s) = value.to_primitive_string() {
-        return Ok(s);
-    }
-
-    match value {
-        Value::Option(inner) => match inner.as_ref() {
-            Some(v) => format_value(v),
-            None => Err(anyhow!("value has no data")),
-        },
-        Value::Nullable(inner) => match inner.as_ref() {
-            Nullable::NotNull(v) => format_value(v),
-            Nullable::Null => Err(anyhow!("value has no data")),
-        },
-        Value::None => Err(anyhow!("value has no data")),
-        _ => Ok(serde_json::to_string(value)?),
-    }
-}
+// fn format_id_field(field: &Field) -> Result<String> {
+//     match &field.value {
+//         Value::Felt252(felt)
+//         | Value::ClassHash(felt)
+//         | Value::ContractAddress(felt)
+//         | Value::EthAddress(felt) => Ok(felt_to_padded_hex(felt)),
+//         Value::ShortString(value) | Value::ByteArray(value) => Ok(value.clone()),
+//         Value::U64(value) => Ok(value.to_string()),
+//         Value::U128(value) => Ok(value.to_string()),
+//         Value::I128(value) => Ok(value.to_string()),
+//         Value::USize(value) => Ok(value.to_string()),
+//         Value::U256(value) => Ok(u256_to_padded_hex(value)),
+//         Value::None => Err(anyhow!("id field {} has no value", field.name)),
+//         other => Ok(serde_json::to_string(other)?),
+//     }
+// }
 
 #[derive(Clone)]
 struct TableSchema {
@@ -101,7 +72,7 @@ struct TableSchema {
 
 impl TableSchema {
     fn from_declare(event: DeclareTableV1, storage_name: String) -> Result<Self> {
-        if event.primary.type_def != TypeDef::Felt252 {
+        if event.primary.type_def != PrimaryTypeDef::Felt252 {
             bail!(
                 "only Felt252 id fields are supported, got {:?}",
                 event.primary.type_def
@@ -436,7 +407,7 @@ impl SqliteSink {
         let storage_name =
             self.storage_table_name(&env.raw.from_address, event.table_name.as_str());
         let schema = self.load_schema(tx, &storage_name).await?;
-        let id_value = format_id_field(&event.primary)?;
+        let id_value = event.primary.value.to_string();
 
         let column_types: HashMap<_, _> = schema
             .all_columns()
@@ -544,7 +515,7 @@ impl SqliteSink {
         let sql = format!("DELETE FROM {} WHERE {} = ?", table_ident, pk_ident);
 
         for value in &event.values {
-            let formatted = format_value(value)?;
+            let formatted = value.to_string();
             let mut args = SqliteArguments::default();
             let column_value = ColumnValue::Text(formatted);
             push_argument(&mut args, &column_value, pk_type);
