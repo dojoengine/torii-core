@@ -1,7 +1,5 @@
 use dojo_introspect_utils::selector::compute_selector_from_namespace_and_name;
-use introspect_events::types::TableSchema;
-use introspect_types::{ColumnDef, FieldDef};
-use introspect_value::{FeltIterator, Field, ToValue};
+use introspect_types::{Attribute, ColumnDef, FeltIterator, FieldDef, TableSchema, ToValue};
 use serde::{Deserialize, Serialize};
 use starknet::core::utils::{get_selector_from_name, NonAsciiNameError};
 use starknet_types_core::felt::Felt;
@@ -80,8 +78,8 @@ where
 pub struct DojoTable {
     pub id: Felt,
     pub name: String,
-    pub attrs: Vec<String>,
-    pub fields: HashMap<Felt, ColumnDef>,
+    pub attributes: Vec<Attribute>,
+    pub columns: HashMap<Felt, ColumnDef>,
     pub key_fields: Vec<Felt>,
     pub value_fields: Vec<Felt>,
 }
@@ -89,14 +87,14 @@ pub struct DojoTable {
 impl DojoTable {
     pub fn schema(&self) -> TableSchema {
         TableSchema {
-            table_id: self.id,
-            table_name: self.name.clone(),
-            attrs: self.attrs.clone(),
-            fields: self
+            id: self.id,
+            name: self.name.clone(),
+            attributes: self.attributes.clone(),
+            columns: self
                 .key_fields
                 .iter()
                 .chain(self.value_fields.iter())
-                .map(|selector| self.fields.get(selector).cloned().unwrap())
+                .map(|selector| self.columns.get(selector).cloned().unwrap())
                 .collect(),
         }
     }
@@ -106,7 +104,7 @@ impl DojoTable {
         let values = self
             .key_fields
             .iter()
-            .map(|selector| self.fields.get(selector)?.to_value(&mut keys))
+            .map(|selector| self.columns.get(selector)?.to_value(&mut keys))
             .collect::<Option<Vec<_>>>();
         match keys.next() {
             None => {
@@ -121,7 +119,7 @@ impl DojoTable {
         let vals = self
             .value_fields
             .iter()
-            .map(|selector| self.fields.get(selector)?.to_value(&mut values))
+            .map(|selector| self.columns.get(selector)?.to_value(&mut values))
             .collect::<Option<Vec<_>>>();
 
         match values.next() {
@@ -140,7 +138,7 @@ impl DojoTable {
     pub fn parse_field(&self, selector: Felt, data: Vec<Felt>) -> TableResult<Field> {
         let mut data = data.into_iter();
         let field_def = self
-            .fields
+            .columns
             .get(&selector)
             .ok_or_else(|| DojoTableErrors::FieldNotFound(selector, self.name.clone()))?;
         let field = field_def
@@ -160,7 +158,7 @@ impl DojoTable {
         let fields = selectors
             .iter()
             .map(|selector| {
-                let field_def = self.fields.get(selector)?;
+                let field_def = self.columns.get(selector)?;
                 field_def.to_value(data)
             })
             .collect::<Option<Vec<_>>>()
@@ -327,7 +325,7 @@ where
             id,
             name: table_name,
             attrs,
-            fields: field_map,
+            columns: field_map,
             value_fields,
             key_fields,
         };
@@ -362,7 +360,7 @@ where
                 true => key_fields.push(selector),
                 false => value_fields.push(selector),
             }
-            table.fields.insert(
+            table.columns.insert(
                 selector,
                 ColumnDef {
                     selector,

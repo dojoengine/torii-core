@@ -9,7 +9,6 @@ license = "Apache-2.0"
 [dependencies]
 serde.workspace = true
 torii-core = { path = "../../core/torii-core" }
-introspect-value.workspace = true
 introspect-events.workspace = true
 introspect-types.workspace = true
 starknet-types-core.workspace = true

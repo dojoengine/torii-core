@@ -15,7 +15,6 @@ sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 introspect-types.workspace = true
-introspect-value.workspace = true
 starknet-types-core.workspace = true
 primitive-types = "0.14"
 

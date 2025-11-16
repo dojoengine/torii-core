@@ -847,10 +847,9 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-events"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?rev=1ce7b3f7#1ce7b3f78885c6f8d1617a065ec38866224a33e0"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next-2#83bc621029e94b84161ed2356167c4e545e918a8"
 dependencies = [
  "introspect-types",
- "introspect-value",
  "starknet",
  "starknet-types-core",
 ]
@@ -858,15 +857,13 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-types"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?rev=1ce7b3f7#1ce7b3f78885c6f8d1617a065ec38866224a33e0"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next-2#83bc621029e94b84161ed2356167c4e545e918a8"
 dependencies = [
  "anyhow",
  "async-trait",
  "cainome-cairo-serde",
  "dojo-introspect-utils",
- "introspect-events",
  "introspect-types",
- "introspect-value",
  "num-traits",
  "serde",
  "starknet",
@@ -877,7 +874,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect-utils"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?rev=1ce7b3f7#1ce7b3f78885c6f8d1617a065ec38866224a33e0"
+source = "git+https://github.com/dojoengine/dojo-introspect?branch=next-2#83bc621029e94b84161ed2356167c4e545e918a8"
 dependencies = [
  "anyhow",
  "cainome-cairo-serde",
@@ -893,7 +890,6 @@ dependencies = [
  "dojo-introspect-utils",
  "introspect-events",
  "introspect-types",
- "introspect-value",
  "serde",
  "serde_json",
  "starknet",
@@ -1744,35 +1740,24 @@ dependencies = [
 [[package]]
 name = "introspect-events"
 version = "0.1.2"
-source = "git+https://github.com/cartridge-gg/introspect?rev=79a2a2e#79a2a2e59f9fd0313335c426d79b944e9d00bbaf"
+source = "git+https://github.com/cartridge-gg/introspect?branch=next-2#ad71ee3390ace2dfe39104249f6a2947bfca9165"
 dependencies = [
  "cainome-cairo-serde",
  "introspect-types",
- "introspect-value",
  "serde",
+ "starknet",
  "starknet-types-core",
 ]
 
 [[package]]
 name = "introspect-types"
 version = "0.1.2"
-source = "git+https://github.com/cartridge-gg/introspect?rev=79a2a2e#79a2a2e59f9fd0313335c426d79b944e9d00bbaf"
-dependencies = [
- "cainome-cairo-serde",
- "introspect-value",
- "num-traits",
- "primitive-types 0.14.0",
- "serde",
- "starknet-types-core",
-]
-
-[[package]]
-name = "introspect-value"
-version = "0.1.2"
-source = "git+https://github.com/cartridge-gg/introspect?rev=79a2a2e#79a2a2e59f9fd0313335c426d79b944e9d00bbaf"
+source = "git+https://github.com/cartridge-gg/introspect?branch=next-2#ad71ee3390ace2dfe39104249f6a2947bfca9165"
 dependencies = [
  "cainome-cairo-serde",
  "convert_case 0.8.0",
+ "lambdaworks-math",
+ "num-traits",
  "primitive-types 0.14.0",
  "serde",
  "serde_json",
@@ -2047,6 +2032,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "rand 0.8.5",
+ "rayon",
  "serde",
  "serde_json",
 ]
@@ -2739,6 +2725,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
 dependencies = [
  "getrandom 0.3.4",
+]
+
+[[package]]
+name = "rayon"
+version = "1.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "368f01d005bf8fd9b1206fb6fa653e6c4a81ceb1466406b81792d87c5677a58f"
+dependencies = [
+ "either",
+ "rayon-core",
+]
+
+[[package]]
+name = "rayon-core"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
+dependencies = [
+ "crossbeam-deque",
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -4216,7 +4222,6 @@ dependencies = [
  "dojo-types-manager",
  "introspect-events",
  "introspect-types",
- "introspect-value",
  "serde",
  "serde_json",
  "starknet",
@@ -4316,7 +4321,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "introspect-value",
  "serde",
  "serde_json",
  "torii-core",
@@ -4343,7 +4347,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "introspect-types",
- "introspect-value",
  "rand 0.9.2",
  "serde",
  "serde_json",
@@ -4367,7 +4370,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "introspect-types",
- "introspect-value",
  "primitive-types 0.14.0",
  "serde",
  "serde_json",
@@ -4442,7 +4444,6 @@ version = "0.1.0"
 dependencies = [
  "introspect-events",
  "introspect-types",
- "introspect-value",
  "serde",
  "starknet",
  "starknet-types-core",
@@ -4457,7 +4458,6 @@ dependencies = [
  "dojo-introspect-utils",
  "introspect-events",
  "introspect-types",
- "introspect-value",
  "serde",
  "serde_json",
  "starknet",

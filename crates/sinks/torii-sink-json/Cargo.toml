@@ -13,5 +13,4 @@ serde.workspace = true
 serde_json.workspace = true
 torii-core = { path = "../../core/torii-core" }
 torii-types-introspect.workspace = true
-introspect-value.workspace = true
 tracing.workspace = true
