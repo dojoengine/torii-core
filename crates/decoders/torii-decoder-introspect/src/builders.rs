@@ -1,16 +1,12 @@
 use crate::IntrospectDecoder;
-use anyhow::anyhow;
 use dojo_introspect_events::{
     DojoEvent, EventEmitted, EventRegistered, EventUpgraded, ModelRegistered, ModelUpgraded,
     ModelWithSchemaRegistered, StoreDelRecord, StoreSetRecord, StoreUpdateMember,
     StoreUpdateRecord,
 };
-use dojo_introspect_types::contract::DojoSchemaResponse;
-use dojo_introspect_types::{DojoSchema, DojoSchemaFetcher, DojoTypeDefSerde, make_dojo_table};
-use dojo_types_manager::{DojoManagerError, DojoTable, DojoTableErrors};
-use introspect_events::types::TableSchema;
-use introspect_types::{FieldDef, PrimaryDef, PrimaryTypeDef, StructDef, TypeDef};
-use introspect_value::{Field, Value};
+use dojo_introspect_types::{DojoSchema, DojoSchemaFetcher, DojoTypeDefSerde};
+use dojo_types_manager::{DOJO_ID_FIELD_NAME, DojoManagerError, DojoTable, DojoTableErrors};
+use introspect_types::{Primary, PrimaryValue};
 use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
 use std::collections::hash_map::DefaultHasher;
@@ -20,35 +16,15 @@ use torii_types_introspect::{
     DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
 };
 
-fn declare_from_schema(schema: TableSchema) -> DeclareTableV1 {
-    DeclareTableV1 {
-        id: schema.table_id,
-        name: schema.table_name,
-        attributes: schema.attributes,
-        primary: primary_field_def(),
-        columns: schema.fields,
-    }
-}
-
-fn update_from_schema(schema: TableSchema) -> UpdateTableV1 {
-    UpdateTableV1 {
-        id: schema.table_id,
-        name: schema.table_name,
-        attributes: schema.attributes,
-        primary: primary_field_def(),
-        fields: schema.fields,
-    }
-}
-
-fn make_entity_id_field(entity_id: Felt) -> Field {
-    Field {
+fn make_entity_id_field(entity_id: Felt) -> Primary {
+    Primary {
         attributes: vec![],
         name: DOJO_ID_FIELD_NAME.to_string(),
-        value: Value::Felt252(entity_id),
+        value: PrimaryValue::Felt252(entity_id),
     }
 }
 
-fn make_entity_id_for_event(keys: &Vec<Felt>) -> Field {
+fn make_entity_id_for_event(keys: &Vec<Felt>) -> Primary {
     let mut hasher = DefaultHasher::new();
     keys.hash(&mut hasher);
     let entity_id = hasher.finish();
@@ -107,10 +83,11 @@ where
 
     async fn build_model_registered(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<ModelRegistered>(raw)?;
-        let DojoSchemaResponse { legacy, data } = self.fetcher.schema(event.address).await?;
-        let schema = make_dojo_table(&event.namespace, &event.name, data, legacy)?;
-        self.manager.register_table(schema)?;
-        Ok(declare_from_schema(schema).to_envelope(raw))
+        let schema = self.fetcher.schema(event.address).await?;
+        let table = self
+            .manager
+            .register_table(&event.namespace, &event.name, schema)?;
+        Ok(Into::<DeclareTableV1>::into(table).to_envelope(raw))
     }
 
     async fn build_model_with_schema_registered(&self, raw: &EmittedEvent) -> Result<Envelope> {
@@ -120,37 +97,30 @@ where
         let table = self
             .manager
             .register_table(&event.namespace, &event.name, schema)?;
-        Ok(declare_from_schema(table).to_envelope(raw))
+        Ok(Into::<DeclareTableV1>::into(table).to_envelope(raw))
     }
 
     async fn build_model_upgraded(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<ModelUpgraded>(raw)?;
         let dojo_schema = self.fetcher.schema(event.address).await?;
         let table = self.manager.update_table(event.selector, dojo_schema)?;
-        Ok(update_from_schema(table).to_envelope(raw))
+        Ok(Into::<UpdateTableV1>::into(table).to_envelope(raw))
     }
 
     async fn build_event_registered(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<EventRegistered>(raw)?;
-        let struct_def = self.fetcher.schema(event.address).await?;
-        let schema = make_dojo_table(&event.namespace, &event.name, event.schema, event.legacy)?;
-
-        let schema = self.manager.register_table(
-            event.namespace,
-            event.name,
-            struct_def.attributes,
-            struct_def.fields,
-        )?;
-        Ok(declare_from_schema(schema).to_envelope(raw))
+        let schema = self.fetcher.schema(event.address).await?;
+        let table = self
+            .manager
+            .register_table(&event.namespace, &event.name, schema)?;
+        Ok(Into::<DeclareTableV1>::into(table).to_envelope(raw))
     }
 
     async fn build_event_upgraded(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<EventUpgraded>(raw)?;
-        let struct_def = self.fetcher.schema(event.address).await?;
-        let schema = self
-            .manager
-            .update_table(event.selector, struct_def.fields)?;
-        Ok(update_from_schema(schema).to_envelope(raw))
+        let schema = self.fetcher.schema(event.address).await?;
+        let table = self.manager.update_table(event.selector, schema)?;
+        Ok(Into::<UpdateTableV1>::into(table).to_envelope(raw))
     }
 
     fn build_set_record(&self, raw: &EmittedEvent) -> Result<Envelope> {
@@ -195,7 +165,7 @@ where
             table_id,
             table_name,
             DOJO_ID_FIELD_NAME.to_string(),
-            vec![Value::Felt252(event.entity_id)],
+            vec![PrimaryValue::Felt252(event.entity_id)],
         );
         Ok(data.to_envelope(raw))
     }

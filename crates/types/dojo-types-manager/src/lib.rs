@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 use thiserror::Error;
 
-const DOJO_ID_FIELD_NAME: &str = "entity_id";
+pub const DOJO_ID_FIELD_NAME: &str = "entity_id";
 
 #[derive(Debug, Error)]
 pub enum DojoTableErrors {

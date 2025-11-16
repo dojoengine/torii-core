@@ -2,7 +2,9 @@
 //! taken from introspect crate. We may not need it, or only the URL declaration and the ID
 //! and then using the new type pattern, using the `impl_event!` on the struct.
 
-use introspect_types::{ColumnDef, Field, Primary, PrimaryDef, PrimaryValue};
+use introspect_types::{
+    Attribute, ColumnDef, Field, Primary, PrimaryDef, PrimaryValue, TableSchema,
+};
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
 use torii_core::{impl_event, type_id_from_url};
@@ -22,9 +24,21 @@ pub const DELETE_RECORDS_ID: u64 = type_id_from_url(DELETE_RECORDS_URL);
 pub struct DeclareTableV1 {
     pub id: Felt,
     pub name: String,
-    pub attributes: Vec<String>,
+    pub attributes: Vec<Attribute>,
     pub primary: PrimaryDef,
     pub columns: Vec<ColumnDef>,
+}
+
+impl From<TableSchema> for DeclareTableV1 {
+    fn from(schema: TableSchema) -> Self {
+        Self {
+            id: schema.id,
+            name: schema.name,
+            attributes: schema.attributes,
+            primary: schema.primary,
+            columns: schema.columns,
+        }
+    }
 }
 
 impl_event!(DeclareTableV1, DECLARE_TABLE_URL);
@@ -33,9 +47,20 @@ impl_event!(DeclareTableV1, DECLARE_TABLE_URL);
 pub struct UpdateTableV1 {
     pub id: Felt,
     pub name: String,
-    pub attributes: Vec<String>,
+    pub attributes: Vec<Attribute>,
     pub primary: PrimaryDef,
     pub fields: Vec<ColumnDef>,
+}
+impl From<TableSchema> for UpdateTableV1 {
+    fn from(schema: TableSchema) -> Self {
+        Self {
+            id: schema.id,
+            name: schema.name,
+            attributes: schema.attributes,
+            primary: schema.primary,
+            fields: schema.columns,
+        }
+    }
 }
 
 impl_event!(UpdateTableV1, UPDATE_TABLE_URL);
@@ -70,7 +95,12 @@ pub struct DeleteRecordsV1 {
 }
 
 impl DeleteRecordsV1 {
-    pub fn new(table_id: Felt, table_name: String, primary_name: String, values: Vec<PrimaryValue>) -> Self {
+    pub fn new(
+        table_id: Felt,
+        table_name: String,
+        primary_name: String,
+        values: Vec<PrimaryValue>,
+    ) -> Self {
         Self {
             table_id,
             table_name,

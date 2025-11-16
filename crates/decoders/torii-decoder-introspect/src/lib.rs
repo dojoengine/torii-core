@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use dojo_introspect_events::{
     DojoEvent, EventEmitted, EventRegistered, EventUpgraded, ModelRegistered, ModelUpgraded,
@@ -8,10 +8,9 @@ use dojo_introspect_events::{
 use dojo_introspect_types::DojoSchemaFetcher;
 use dojo_types_manager::{DojoManager, JsonStore};
 use serde::{Deserialize, Serialize};
-use starknet::{
-    core::types::EmittedEvent,
-    providers::{jsonrpc::HttpTransport, JsonRpcClient, Url},
-};
+use starknet::core::types::EmittedEvent;
+use starknet::providers::jsonrpc::HttpTransport;
+use starknet::providers::{JsonRpcClient, Url};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,7 +22,7 @@ use torii_types_introspect::{
     DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
 };
 mod builders;
-use builders::{DojoEventBuilder, primary_field_def};
+use builders::DojoEventBuilder;
 
 const DECODER_NAME: &str = "introspect";
 const DOJO_CAIRO_EVENT_SELECTORS: [FieldElement; 10] = [
