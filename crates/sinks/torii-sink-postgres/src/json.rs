@@ -34,8 +34,8 @@ impl ToPostgresJson for UpdateRecordFieldsV1 {
     fn to_postgres_json(&self) -> JsonValue {
         let mut map = Map::new();
         map.insert(
-            self.id_field.name.clone(),
-            self.id_field.value.to_postgres_json(),
+            self.primary.name.clone(),
+            self.primary.value.to_postgres_json(),
         );
         for field in self.fields.iter() {
             let key = field.name.clone();

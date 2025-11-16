@@ -42,12 +42,12 @@ impl TableManager {
             Some(schema) => {
                 println!("Upgrading existing table schema: {}", table_name);
                 let mut schema = schema.write()?;
-                Ok(schema.upgrade_schema(table_name, &event.fields)?)
+                Ok(schema.upgrade_schema(table_name, &event.columns)?)
             }
             None => {
                 println!("Declaring new table schema: {}", table_name);
                 let (table, queries) =
-                    TableSchema::new(table_name, &event.id_field, &event.fields)?;
+                    TableSchema::new(table_name, &event.primary, &event.columns)?;
                 drop(table_read);
 
                 self.0

@@ -102,7 +102,7 @@ impl PostgresSink {
         event: &UpdateRecordFieldsV1,
     ) -> Result<()> {
         let table_name = &event.table_name;
-        let primary_key_name = event.id_field.name.clone();
+        let primary_key_name = event.primary.name.clone();
         let update_fields = event
             .fields
             .iter()

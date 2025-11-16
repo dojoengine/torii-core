@@ -23,7 +23,7 @@ use torii_types_introspect::{
     DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
 };
 mod builders;
-use builders::DojoEventBuilder;
+use builders::{DojoEventBuilder, primary_field_def};
 
 const DECODER_NAME: &str = "introspect";
 const DOJO_CAIRO_EVENT_SELECTORS: [FieldElement; 10] = [

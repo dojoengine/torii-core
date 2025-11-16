@@ -101,19 +101,19 @@ struct TableSchema {
 
 impl TableSchema {
     fn from_declare(event: DeclareTableV1, storage_name: String) -> Result<Self> {
-        if event.id_field.type_def != TypeDef::Felt252 {
+        if event.primary.type_def != TypeDef::Felt252 {
             bail!(
                 "only Felt252 id fields are supported, got {:?}",
-                event.id_field.type_def
+                event.primary.type_def
             );
         }
         let id_column = ColumnInfo {
-            name: sanitize_identifier(&event.id_field.name),
+            name: sanitize_identifier(&event.primary.name),
             sql_type: SqliteType::Text,
         };
 
         let mut fields = HashMap::new();
-        for column in &event.fields {
+        for column in &event.columns {
             let columns = collect_columns(column);
             fields.insert(
                 column.name.clone(),
@@ -136,9 +136,9 @@ impl TableSchema {
         let declare = DeclareTableV1 {
             id: event.id,
             name: event.name.clone(),
-            attrs: event.attrs.clone(),
-            id_field: event.id_field.clone(),
-            fields: event.fields.clone(),
+            attributes: event.attributes.clone(),
+            primary: event.primary.clone(),
+            columns: event.fields.clone(),
         };
         Self::from_declare(declare, storage_name)
     }
@@ -436,7 +436,7 @@ impl SqliteSink {
         let storage_name =
             self.storage_table_name(&env.raw.from_address, event.table_name.as_str());
         let schema = self.load_schema(tx, &storage_name).await?;
-        let id_value = format_id_field(&event.id_field)?;
+        let id_value = format_id_field(&event.primary)?;
 
         let column_types: HashMap<_, _> = schema
             .all_columns()

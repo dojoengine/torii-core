@@ -8,7 +8,7 @@ use dojo_introspect_events::{
 use dojo_introspect_types::{DojoSchemaFetcher, DojoTypeDefSerde};
 use dojo_types_manager::{DojoManagerError, DojoTable, DojoTableErrors};
 use introspect_events::types::TableSchema;
-use introspect_types::{FieldDef, StructDef, TypeDef};
+use introspect_types::{FieldDef, PrimaryDef, PrimaryTypeDef, StructDef, TypeDef};
 use introspect_value::{Field, Value};
 use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
@@ -18,23 +18,15 @@ use torii_core::{Envelope, Event};
 use torii_types_introspect::{
     DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
 };
-const DOJO_ID_FIELD_NAME: &str = "entity_id";
 
-fn primary_field_def() -> FieldDef {
-    FieldDef {
-        name: DOJO_ID_FIELD_NAME.to_string(),
-        attrs: vec![],
-        type_def: TypeDef::Felt252,
-    }
-}
 
 fn declare_from_schema(schema: TableSchema) -> DeclareTableV1 {
     DeclareTableV1 {
         id: schema.table_id,
         name: schema.table_name,
-        attrs: schema.attrs,
-        id_field: primary_field_def(),
-        fields: schema.fields,
+        attributes: schema.attributes,
+        primary: primary_field_def(),
+        columns: schema.fields,
     }
 }
 
@@ -42,15 +34,15 @@ fn update_from_schema(schema: TableSchema) -> UpdateTableV1 {
     UpdateTableV1 {
         id: schema.table_id,
         name: schema.table_name,
-        attrs: schema.attrs,
-        id_field: primary_field_def(),
+        attributes: schema.attributes,
+        primary: primary_field_def(),
         fields: schema.fields,
     }
 }
 
 fn make_entity_id_field(entity_id: Felt) -> Field {
     Field {
-        attrs: vec![],
+        attributes: vec![],
         name: DOJO_ID_FIELD_NAME.to_string(),
         value: Value::Felt252(entity_id),
     }
@@ -119,7 +111,7 @@ where
         let schema = self.manager.register_table(
             event.namespace,
             event.name,
-            struct_def.attrs,
+            struct_def.attributes,
             struct_def.fields,
         )?;
         Ok(declare_from_schema(schema).to_envelope(raw))
@@ -139,7 +131,7 @@ where
         let schema = self.manager.register_table(
             event.namespace,
             event.name,
-            struct_def.attrs,
+            struct_def.attributes,
             struct_def.fields,
         )?;
         Ok(declare_from_schema(schema).to_envelope(raw))
@@ -160,7 +152,7 @@ where
         let schema = self.manager.register_table(
             event.namespace,
             event.name,
-            struct_def.attrs,
+            struct_def.attributes,
             struct_def.fields,
         )?;
         Ok(declare_from_schema(schema).to_envelope(raw))

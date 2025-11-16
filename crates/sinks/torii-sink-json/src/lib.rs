@@ -65,7 +65,7 @@ fn to_json_object(fields: Vec<Field>) -> Map<String, JsonValue> {
     let mut map = Map::new();
     for Field {
         name,
-        attrs: _,
+        attributes: _,
         value,
     } in fields
     {
@@ -139,7 +139,7 @@ impl JsonSink {
         let path = self.record_path(
             &event.table_name,
             &event
-                .id_field
+                .primary
                 .value
                 .to_primitive_string()
                 .context("Failed to convert id_field value to string")?,
