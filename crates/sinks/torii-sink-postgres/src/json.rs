@@ -83,7 +83,7 @@ impl ToPostgresJson for Value {
             Value::I32(v) => to_json_number(*v),
             Value::I64(v) => to_json_string(*v),
             Value::I128(v) => to_json_string(*v),
-            Value::Utf8Array(s) | Value::ShortUtf8(s) => to_json_string(s),
+            Value::Utf8String(s) | Value::ShortUtf8(s) => to_json_string(s),
             Value::ByteArray(b) => to_json_bytea(b),
             Value::Bytes31(b) => to_json_bytea(b),
             Value::Bytes31E(b) | Value::ByteArrayE(b) => to_json_bytea(&b.bytes),

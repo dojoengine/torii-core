@@ -36,7 +36,7 @@ type Result<T> = std::result::Result<T, PostgresValueError>;
 //             Value::I32(v) => Ok(v.to_string()),
 //             Value::I64(v) => Ok(v.to_string()),
 //             Value::I128(v) => Ok(v.to_string()),
-//             Value::Utf8Array(s) => Ok(s.clone()),
+//             Value::Utf8String(s) => Ok(s.clone()),
 //             _ => Err(PostgresValueError::UnsupportedType),
 //         }
 //     }

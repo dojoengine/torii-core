@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 use torii_core::{Batch, Decoder, Sink};
-use torii_decoder_dojo_introspect::IntrospectDecoder;
+use torii_decoder_dojo_introspect::DojoIntrospectDecoder;
 use torii_sink_sqlite::SqliteSink;
 use torii_test_utils::{EventIterator, FakeProvider};
 const DATA_PATH: &str = "~/tc-tests/blob-arena";
@@ -55,7 +55,7 @@ async fn main() {
     let fetcher = FakeProvider {
         file_path: model_contracts_path,
     };
-    let decoder = IntrospectDecoder {
+    let decoder = DojoIntrospectDecoder {
         filter: Default::default(),
         manager,
         fetcher,

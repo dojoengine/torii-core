@@ -1,20 +1,20 @@
-use crate::IntrospectDecoder;
+use crate::DojoIntrospectDecoder;
 use dojo_introspect_events::{
     DojoEvent, EventEmitted, EventRegistered, EventUpgraded, ModelRegistered, ModelUpgraded,
     ModelWithSchemaRegistered, StoreDelRecord, StoreSetRecord, StoreUpdateMember,
     StoreUpdateRecord,
 };
 use dojo_introspect_types::{DojoSchema, DojoSchemaFetcher, DojoTypeDefSerde};
-use dojo_types_manager::{DOJO_ID_FIELD_NAME, DojoManagerError, DojoTable, DojoTableErrors};
+use dojo_types_manager::{
+    DOJO_ID_FIELD_NAME, DojoManagerError, DojoTable, DojoTableErrors, primary_field_info,
+};
 use introspect_types::{Primary, PrimaryValue};
 use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use torii_core::{Envelope, Event};
-use torii_types_introspect::{
-    DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
-};
+use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateFieldsV1, UpdateTableV1};
 
 fn make_entity_id_field(entity_id: Felt) -> Primary {
     Primary {
@@ -70,7 +70,7 @@ where
         .ok_or_else(|| DojoEventBuilderError::RawEventDecodeError(T::NAME.to_string()))
 }
 
-impl<F> DojoEventBuilder for IntrospectDecoder<F>
+impl<F> DojoEventBuilder for DojoIntrospectDecoder<F>
 where
     F: DojoSchemaFetcher + Sync + Send,
 {
@@ -130,7 +130,7 @@ where
             let fields = table.parse_key_values(event.keys.clone(), event.values.clone())?;
             Ok((table.id, table.name.clone(), fields))
         })?;
-        let data = UpdateRecordFieldsV1::new(table_id, table_name, id_field, fields);
+        let data = UpdateFieldsV1::new(table_id, table_name, id_field, fields);
         Ok(data.to_envelope(raw))
     }
 
@@ -141,7 +141,7 @@ where
             let fields = table.parse_values(event.values)?;
             Ok((table.id, table.name.clone(), fields))
         })?;
-        let data = UpdateRecordFieldsV1::new(table_id, table_name, id_field, fields);
+        let data = UpdateFieldsV1::new(table_id, table_name, id_field, fields);
         Ok(data.to_envelope(raw))
     }
 
@@ -153,7 +153,7 @@ where
             Ok((table.id, table.name.clone(), field))
         })?;
 
-        let data = UpdateRecordFieldsV1::new(table_id, table_name, id_field, vec![field]);
+        let data = UpdateFieldsV1::new(table_id, table_name, id_field, vec![field]);
         Ok(data.to_envelope(raw))
     }
 
@@ -164,7 +164,7 @@ where
         let data = DeleteRecordsV1::new(
             table_id,
             table_name,
-            DOJO_ID_FIELD_NAME.to_string(),
+            primary_field_info(),
             vec![PrimaryValue::Felt252(event.entity_id)],
         );
         Ok(data.to_envelope(raw))
@@ -187,7 +187,7 @@ where
             };
             Ok((table.id, table.name.clone(), fields))
         })?;
-        let data = UpdateRecordFieldsV1::new(table_id, table_name, id_field, fields);
+        let data = UpdateFieldsV1::new(table_id, table_name, id_field, fields);
         Ok(data.to_envelope(raw))
     }
 }

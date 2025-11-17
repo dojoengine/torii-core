@@ -275,12 +275,12 @@ impl PgTableSchema {
             Array, Bool, ByteArray, ByteArrayE, Bytes31, Bytes31E, ClassHash, ContractAddress,
             Enum, EthAddress, Felt252, FixedArray, I8, I16, I32, I64, I128, None as TDNone,
             ShortUtf8, StorageAddress, StorageBaseAddress, Struct, Tuple, U8, U16, U32, U64, U128,
-            Utf8Array,
+            Utf8String,
         };
         match (old, new) {
             (PgNone, TDNone)
             | (Bytea, ByteArray(_) | ByteArrayE(_))
-            | (Text, Utf8Array(_))
+            | (Text, Utf8String(_))
             | (PgBytes31, Bytes31 | Bytes31E(_))
             | (Char31, ShortUtf8)
             | (Boolean, Bool)
@@ -532,7 +532,7 @@ impl PostgresTypeExtractor for TypeDef {
             | TypeDef::StorageAddress
             | TypeDef::StorageBaseAddress => Ok(PostgresType::StarknetHash),
             TypeDef::EthAddress => Ok(PostgresType::EthAddress),
-            TypeDef::Utf8Array(_) => Ok(PostgresType::Text),
+            TypeDef::Utf8String(_) => Ok(PostgresType::Text),
             TypeDef::ShortUtf8 => Ok(PostgresType::Char31),
             TypeDef::ByteArray(_) | TypeDef::ByteArrayE(_) => Ok(PostgresType::Bytea),
             TypeDef::Bytes31 | TypeDef::Bytes31E(_) => Ok(PostgresType::Bytes31),

@@ -1,4 +1,5 @@
 use dojo_introspect_types::{DojoSchema, IsDojoKey};
+use introspect_types::schema::PrimaryInfo;
 use introspect_types::{
     Attribute, ColumnDef, FeltIterator, Field, PrimaryDef, PrimaryTypeDef, TableSchema, ToValue,
 };
@@ -113,6 +114,13 @@ pub fn primary_field_def() -> PrimaryDef {
         name: DOJO_ID_FIELD_NAME.to_string(),
         attributes: vec![],
         type_def: PrimaryTypeDef::Felt252,
+    }
+}
+
+pub fn primary_field_info() -> PrimaryInfo {
+    PrimaryInfo {
+        name: DOJO_ID_FIELD_NAME.to_string(),
+        attributes: vec![],
     }
 }
 

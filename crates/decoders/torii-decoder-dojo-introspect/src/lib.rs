@@ -24,7 +24,7 @@ use torii_types_introspect::{
 mod builders;
 use builders::DojoEventBuilder;
 
-const DECODER_NAME: &str = "introspect";
+const DECODER_NAME: &str = "dojo-introspect";
 const DOJO_CAIRO_EVENT_SELECTORS: [FieldElement; 10] = [
     ModelRegistered::SELECTOR,
     ModelWithSchemaRegistered::SELECTOR,
@@ -55,13 +55,13 @@ pub struct IntrospectDecoderConfig {
 }
 
 /// Implementation of the introspect decoder.
-pub struct IntrospectDecoder<F> {
+pub struct DojoIntrospectDecoder<F> {
     pub filter: DecoderFilter,
     pub manager: DojoManager<JsonStore>,
     pub fetcher: F,
 }
 
-impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
+impl DojoIntrospectDecoder<JsonRpcClient<HttpTransport>> {
     /// Builds the decoder from a configuration.
     fn from_config(cfg: IntrospectDecoderConfig, contracts: Vec<ContractBinding>) -> Result<Self> {
         if contracts.is_empty() {
@@ -113,7 +113,7 @@ impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
 }
 
 #[async_trait]
-impl<F> Decoder for IntrospectDecoder<F>
+impl<F> Decoder for DojoIntrospectDecoder<F>
 where
     F: DojoSchemaFetcher + Sync + Send + 'static,
 {
@@ -193,7 +193,7 @@ impl DecoderFactory for IntrospectDecoderFactory {
         contracts: Vec<ContractBinding>,
     ) -> Result<Arc<dyn Decoder>> {
         let cfg: IntrospectDecoderConfig = serde_json::from_value(config)?;
-        let decoder = IntrospectDecoder::from_config(cfg, contracts)?;
+        let decoder = DojoIntrospectDecoder::from_config(cfg, contracts)?;
         Ok(Arc::new(decoder))
     }
 }

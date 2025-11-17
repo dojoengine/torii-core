@@ -108,7 +108,7 @@ fn collect_columns_inner(base: &str, type_def: &TypeDef) -> Vec<ColumnInfo> {
         | TypeDef::StorageAddress
         | TypeDef::StorageBaseAddress
         | TypeDef::ByteArray(_)
-        | TypeDef::Utf8Array(_)
+        | TypeDef::Utf8String(_)
         | TypeDef::ByteArrayE(_)
         | TypeDef::ShortUtf8
         | TypeDef::U64
@@ -240,7 +240,7 @@ fn assign_values(
             map.insert(base.to_string(), ColumnValue::Text(felt_to_padded_hex(v)));
             Ok(())
         }
-        (TypeDef::Utf8Array(_), Value::Utf8Array(v))
+        (TypeDef::Utf8String(_), Value::Utf8String(v))
         | (TypeDef::ShortUtf8, Value::ShortUtf8(v)) => {
             map.insert(base.to_string(), ColumnValue::Text(v.clone()));
             Ok(())

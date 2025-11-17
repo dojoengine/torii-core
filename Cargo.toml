@@ -6,6 +6,7 @@ members = [
     "crates/fetchers/torii-fetcher-jsonrpc",
     "crates/fetchers/torii-fetcher-json",
     "crates/decoders/torii-decoder-dojo-introspect",
+    "crates/decoders/torii-decoder-introspect",
     "crates/decoders/torii-decoder-erc20",
     "crates/decoders/torii-decoder-erc721",
     "crates/sinks/torii-sink-log",
@@ -74,6 +75,7 @@ torii-core = { path = "crates/core/torii-core" }
 torii-registry = { path = "crates/core/torii-registry" }
 torii-types-introspect = { path = "crates/types/torii-types-introspect" }
 torii-decoder-dojo-introspect = { path = "crates/decoders/torii-decoder-dojo-introspect" }
+torii-decoder-introspect = { path = "crates/decoders/torii-decoder-introspect" }
 torii-sink-json = { path = "crates/sinks/torii-sink-json" }
 torii-sink-sqlite = { path = "crates/sinks/torii-sink-sqlite" }
 torii-sink-postgres = { path = "crates/sinks/torii-sink-postgres" }
