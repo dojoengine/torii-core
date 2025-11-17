@@ -9,7 +9,7 @@ use starknet::core::types::EmittedEvent;
 use std::path::PathBuf;
 use std::time::Instant;
 use torii_core::Decoder;
-use torii_decoder_introspect::IntrospectDecoder;
+use torii_decoder_dojo_introspect::IntrospectDecoder;
 use torii_sink_json::JsonSink;
 use torii_test_utils::{EventIterator, FakeProvider};
 const DATA_PATH: &str = "~/tc-tests/pistols";

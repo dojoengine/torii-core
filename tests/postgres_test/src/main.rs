@@ -9,7 +9,7 @@ use starknet::core::types::EmittedEvent;
 use std::path::PathBuf;
 use std::time::Instant;
 use torii_core::{Batch, Decoder, Sink};
-use torii_decoder_introspect::IntrospectDecoder;
+use torii_decoder_dojo_introspect::IntrospectDecoder;
 use torii_sink_postgres::PostgresSink;
 use torii_test_utils::{EventIterator, FakeProvider};
 

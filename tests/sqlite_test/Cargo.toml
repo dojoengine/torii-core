@@ -15,6 +15,6 @@ starknet.workspace = true
 starknet-types-core.workspace = true
 tokio.workspace = true
 torii-core.workspace = true
-torii-decoder-introspect.workspace = true
+torii-decoder-dojo-introspect.workspace = true
 torii-test-utils.workspace = true
 torii-sink-sqlite.workspace = true

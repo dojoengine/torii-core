@@ -10,8 +10,8 @@ pub use torii_decoder_erc20::Erc20DecoderConfig;
 pub use torii_decoder_erc20::Erc20DecoderFactory;
 pub use torii_decoder_erc721::Erc721DecoderConfig;
 pub use torii_decoder_erc721::Erc721DecoderFactory;
-pub use torii_decoder_introspect::IntrospectDecoderConfig;
-pub use torii_decoder_introspect::IntrospectDecoderFactory;
+pub use torii_decoder_dojo_introspect::IntrospectDecoderConfig;
+pub use torii_decoder_dojo_introspect::IntrospectDecoderFactory;
 
 /// Kind string used for introspect decoders in configuration.
 pub const KIND_INTROSPECT: &str = "introspect";

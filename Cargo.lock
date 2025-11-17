@@ -4184,6 +4184,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "torii-decoder-dojo-introspect"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "dojo-introspect-events",
+ "dojo-introspect-types",
+ "dojo-introspect-utils",
+ "dojo-types-manager",
+ "introspect-events",
+ "introspect-types",
+ "serde",
+ "serde_json",
+ "starknet",
+ "starknet-types-core",
+ "thiserror 2.0.17",
+ "torii-core",
+ "torii-types-introspect",
+ "tracing",
+]
+
+[[package]]
 name = "torii-decoder-erc20"
 version = "0.1.0"
 dependencies = [
@@ -4208,28 +4230,6 @@ dependencies = [
  "starknet",
  "torii-core",
  "torii-types-erc721",
- "tracing",
-]
-
-[[package]]
-name = "torii-decoder-introspect"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "dojo-introspect-events",
- "dojo-introspect-types",
- "dojo-introspect-utils",
- "dojo-types-manager",
- "introspect-events",
- "introspect-types",
- "serde",
- "serde_json",
- "starknet",
- "starknet-types-core",
- "thiserror 2.0.17",
- "torii-core",
- "torii-types-introspect",
  "tracing",
 ]
 
@@ -4275,7 +4275,7 @@ dependencies = [
  "starknet-types-core",
  "tokio",
  "torii-core",
- "torii-decoder-introspect",
+ "torii-decoder-dojo-introspect",
  "torii-sink-json",
  "torii-test-utils",
 ]
@@ -4292,7 +4292,7 @@ dependencies = [
  "starknet-types-core",
  "tokio",
  "torii-core",
- "torii-decoder-introspect",
+ "torii-decoder-dojo-introspect",
  "torii-sink-postgres",
  "torii-test-utils",
 ]
@@ -4306,9 +4306,9 @@ dependencies = [
  "serde",
  "serde_json",
  "torii-core",
+ "torii-decoder-dojo-introspect",
  "torii-decoder-erc20",
  "torii-decoder-erc721",
- "torii-decoder-introspect",
  "torii-fetcher-json",
  "torii-fetcher-jsonrpc",
  "torii-sink-log",
@@ -4398,7 +4398,7 @@ dependencies = [
  "starknet-types-core",
  "tokio",
  "torii-core",
- "torii-decoder-introspect",
+ "torii-decoder-dojo-introspect",
  "torii-sink-sqlite",
  "torii-test-utils",
 ]

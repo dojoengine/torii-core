@@ -1,5 +1,5 @@
 [package]
-name = "torii-decoder-introspect"
+name = "torii-decoder-dojo-introspect"
 version = "0.1.0"
 edition = "2021"
 description = "Introspect decoder for Torii runtime"

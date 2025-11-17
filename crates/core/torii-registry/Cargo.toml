@@ -13,7 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 torii-core = { path = "../torii-core" }
-torii-decoder-introspect = { path = "../../decoders/torii-decoder-introspect" }
+torii-decoder-dojo-introspect = { path = "../../decoders/torii-decoder-dojo-introspect" }
 torii-decoder-erc20 = { path = "../../decoders/torii-decoder-erc20" }
 torii-decoder-erc721 = { path = "../../decoders/torii-decoder-erc721" }
 torii-sink-log = { path = "../../sinks/torii-sink-log" }
