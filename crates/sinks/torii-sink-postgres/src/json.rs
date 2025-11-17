@@ -4,7 +4,10 @@ use serde_json::Value::{
     String as JsonString,
 };
 use serde_json::{Map, Value as JsonValue};
+use starknet_types_core::felt::Felt;
 use torii_types_introspect::UpdateRecordFieldsV1;
+
+use crate::types::parse_variant_name;
 
 pub fn bytes_to_hex<T: AsRef<[u8]>>(bytes: T) -> JsonValue {
     JsonString(hex::encode(bytes))
@@ -16,6 +19,14 @@ pub fn to_json_number<T: Into<serde_json::Number>>(value: T) -> JsonValue {
 
 pub fn to_json_string<T: ToString>(value: T) -> JsonValue {
     JsonString(value.to_string())
+}
+
+pub fn felt_to_json_bytea(felt: Felt) -> JsonValue {
+    to_json_bytea(felt.to_bytes_be())
+}
+
+pub fn to_json_bytea<T: AsRef<[u8]>>(bytes: T) -> JsonValue {
+    JsonString(format!("\\x{}", hex::encode(bytes)))
 }
 
 pub fn to_pg_json_array(values: &Vec<Value>) -> JsonValue {
@@ -58,7 +69,7 @@ impl ToPostgresJson for Value {
             | Value::ContractAddress(v)
             | Value::EthAddress(v)
             | Value::StorageAddress(v)
-            | Value::StorageBaseAddress(v) => to_json_string(v),
+            | Value::StorageBaseAddress(v) => felt_to_json_bytea(*v),
             Value::Bool(v) => JsonBool(*v),
             Value::U8(v) => to_json_number(*v),
             Value::U16(v) => to_json_number(*v),
@@ -73,9 +84,9 @@ impl ToPostgresJson for Value {
             Value::I64(v) => to_json_string(*v),
             Value::I128(v) => to_json_string(*v),
             Value::Utf8Array(s) | Value::ShortUtf8(s) => to_json_string(s),
-            Value::ByteArray(b) => bytes_to_hex(b),
-            Value::Bytes31(b) => bytes_to_hex(b),
-            Value::Bytes31E(b) | Value::ByteArrayE(b) => bytes_to_hex(&b.bytes),
+            Value::ByteArray(b) => to_json_bytea(b),
+            Value::Bytes31(b) => to_json_bytea(b),
+            Value::Bytes31E(b) | Value::ByteArrayE(b) => to_json_bytea(&b.bytes),
             Value::Struct(s) => s.to_postgres_json(),
             Value::Enum(e) => e.to_postgres_json(),
             Value::Array(vs) | Value::FixedArray(vs) => to_pg_json_array(vs),
@@ -93,9 +104,9 @@ impl ToPostgresJson for PrimaryValue {
             | PrimaryValue::ContractAddress(v)
             | PrimaryValue::EthAddress(v)
             | PrimaryValue::StorageAddress(v)
-            | PrimaryValue::StorageBaseAddress(v) => to_json_string(v),
-            PrimaryValue::Bytes31(v) => bytes_to_hex(v),
-            PrimaryValue::Bytes31E(v) => bytes_to_hex(&v.bytes),
+            | PrimaryValue::StorageBaseAddress(v) => felt_to_json_bytea(*v),
+            PrimaryValue::Bytes31(v) => to_json_bytea(v),
+            PrimaryValue::Bytes31E(v) => to_json_bytea(&v.bytes),
             PrimaryValue::ShortUtf8(v) => to_json_string(v),
             PrimaryValue::Bool(v) => JsonBool(*v),
             PrimaryValue::U8(v) => to_json_number(*v),
@@ -127,7 +138,10 @@ impl ToPostgresJson for Struct {
 impl ToPostgresJson for Enum {
     fn to_postgres_json(&self) -> JsonValue {
         let mut map = Map::new();
-        map.insert("variant".into(), JsonString(self.variant.clone()));
+        map.insert(
+            "variant".into(),
+            JsonString(parse_variant_name(&self.variant)),
+        );
         if self.value != Value::None {
             map.insert(format!("_{}", self.variant), self.value.to_postgres_json());
         }

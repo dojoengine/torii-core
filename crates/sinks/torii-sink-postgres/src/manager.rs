@@ -1,11 +1,9 @@
-use crate::TableSchema;
-use std::{
-    collections::HashMap,
-    ops::Deref,
-    sync::{PoisonError, RwLock},
-};
+use crate::PgTableSchema;
+use introspect_types::{ColumnDef, PrimaryDef};
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::sync::{PoisonError, RwLock};
 use thiserror::Error;
-use torii_types_introspect::DeclareTableV1;
 
 #[derive(Debug, Error)]
 pub enum TableManagerError {
@@ -24,10 +22,10 @@ impl<T> From<PoisonError<T>> for TableManagerError {
 }
 
 #[derive(Default)]
-pub struct TableManager(pub RwLock<HashMap<String, RwLock<TableSchema>>>);
+pub struct TableManager(pub RwLock<HashMap<String, RwLock<PgTableSchema>>>);
 
 impl Deref for TableManager {
-    type Target = RwLock<HashMap<String, RwLock<TableSchema>>>;
+    type Target = RwLock<HashMap<String, RwLock<PgTableSchema>>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -35,19 +33,23 @@ impl Deref for TableManager {
 }
 
 impl TableManager {
-    pub fn declare_table(&self, table_name: &str, event: &DeclareTableV1) -> Result<Vec<String>> {
+    pub fn declare_table(
+        &self,
+        table_name: &str,
+        primary: &PrimaryDef,
+        columns: &[ColumnDef],
+    ) -> Result<Vec<String>> {
         let table_read = self.0.read()?;
 
         match table_read.get(table_name) {
             Some(schema) => {
                 println!("Upgrading existing table schema: {}", table_name);
                 let mut schema = schema.write()?;
-                Ok(schema.upgrade_schema(table_name, &event.columns)?)
+                Ok(schema.upgrade_schema(table_name, columns)?)
             }
             None => {
                 println!("Declaring new table schema: {}", table_name);
-                let (table, queries) =
-                    TableSchema::new(table_name, &event.primary, &event.columns)?;
+                let (table, queries) = PgTableSchema::new(table_name, primary, columns)?;
                 drop(table_read);
 
                 self.0

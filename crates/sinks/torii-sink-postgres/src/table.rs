@@ -44,7 +44,7 @@ impl<T> From<PoisonError<T>> for TableError {
 pub type Result<T> = std::result::Result<T, TableError>;
 
 #[derive(Default)]
-pub struct TableSchema {
+pub struct PgTableSchema {
     columns: HashMap<String, PostgresType>,
     structs: RwLock<HashMap<String, Arc<RwLock<PgStructDef>>>>,
     tuples: RwLock<HashMap<String, Arc<RwLock<Vec<PostgresType>>>>>,
@@ -64,7 +64,7 @@ impl PgStructDef {
         branch: &Xxh3,
         struct_name: &str,
         new: &MemberDef,
-        schema: &TableSchema,
+        schema: &PgTableSchema,
         queries: &mut Vec<String>,
     ) -> Result<()> {
         match self.fields.get(&new.name) {
@@ -99,7 +99,7 @@ impl PgRustEnum {
         branch: &Xxh3,
         enum_name: &str,
         new: &VariantDef,
-        schema: &TableSchema,
+        schema: &PgTableSchema,
         queries: &mut Vec<String>,
     ) -> Result<()> {
         match self.variants.get(&new.name) {
@@ -140,14 +140,14 @@ impl PgRustEnum {
     }
 }
 
-impl TableSchema {
+impl PgTableSchema {
     pub fn new(
         name: &str,
         primary_key: &PrimaryDef,
         columns: &[ColumnDef],
     ) -> Result<(Self, Vec<String>)> {
         let mut queries = vec![];
-        let mut table = TableSchema::default();
+        let mut table = PgTableSchema::default();
         let branch = Xxh3::new_based(name);
         let type_def = primary_key
             .type_def
@@ -266,18 +266,23 @@ impl TableSchema {
         queries: &mut Vec<String>,
     ) -> Result<Option<PostgresType>> {
         use PostgresType::{
-            Array as PgArray, BigInt, Boolean, EthAddress as PgEthAddress, Felt252 as PgFelt252,
-            Int, Int128, None as PgNone, RustEnum as PgRustEnum, SmallInt, StarknetHash,
-            Struct as PgStruct, Text, Tuple as PgTuple, Uint8, Uint16, Uint32, Uint64, Uint128,
+            Array as PgArray, BigInt, Boolean, Bytea, Bytes31 as PgBytes31, Char31,
+            EthAddress as PgEthAddress, Felt252 as PgFelt252, Int, Int128, None as PgNone,
+            RustEnum as PgRustEnum, SmallInt, StarknetHash, Struct as PgStruct, Text,
+            Tuple as PgTuple, Uint8, Uint16, Uint32, Uint64, Uint128,
         };
         use TypeDef::{
-            Array, Bool, ByteArray, ClassHash, ContractAddress, Enum, EthAddress, Felt252,
-            FixedArray, I8, I16, I32, I64, I128, None as TDNone, Struct, Tuple, U8, U16, U32, U64,
-            U128,
+            Array, Bool, ByteArray, ByteArrayE, Bytes31, Bytes31E, ClassHash, ContractAddress,
+            Enum, EthAddress, Felt252, FixedArray, I8, I16, I32, I64, I128, None as TDNone,
+            ShortUtf8, StorageAddress, StorageBaseAddress, Struct, Tuple, U8, U16, U32, U64, U128,
+            Utf8Array,
         };
         match (old, new) {
             (PgNone, TDNone)
-            | (Text, ByteArray(_))
+            | (Bytea, ByteArray(_) | ByteArrayE(_))
+            | (Text, Utf8Array(_))
+            | (PgBytes31, Bytes31 | Bytes31E(_))
+            | (Char31, ShortUtf8)
             | (Boolean, Bool)
             | (SmallInt, I8 | I16)
             | (Int, I32)
@@ -289,7 +294,7 @@ impl TableSchema {
             | (Uint128, U128)
             | (Int128, I128)
             | (PgFelt252, Felt252)
-            | (StarknetHash, ClassHash | ContractAddress)
+            | (StarknetHash, ClassHash | ContractAddress | StorageAddress | StorageBaseAddress)
             | (PgEthAddress, EthAddress) => Ok(None),
             (Boolean | Uint8, I8 | I16) => Ok(Some(SmallInt)),
             (Boolean | Uint8 | Uint16 | SmallInt, I32) => Ok(Some(Int)),
@@ -421,13 +426,13 @@ pub trait PostgresTypeExtractor {
     fn extract_type(
         &self,
         branch: &Xxh3,
-        schema: &TableSchema,
+        schema: &PgTableSchema,
         queries: &mut Vec<String>,
     ) -> Result<PostgresType>;
     fn extract_type_string(
         &self,
         branch: &Xxh3,
-        schema: &TableSchema,
+        schema: &PgTableSchema,
         queries: &mut Vec<String>,
     ) -> Result<String> {
         self.extract_type(branch, schema, queries)
@@ -441,7 +446,7 @@ pub trait PostgresFieldExtractor {
     fn extract_type(
         &self,
         branch: &Xxh3,
-        schema: &TableSchema,
+        schema: &PgTableSchema,
         queries: &mut Vec<String>,
     ) -> Result<PostgresType> {
         self.type_def()
@@ -450,7 +455,7 @@ pub trait PostgresFieldExtractor {
     fn extract_field(
         &self,
         branch: &Xxh3,
-        schema: &TableSchema,
+        schema: &PgTableSchema,
         queries: &mut Vec<String>,
     ) -> Result<PostgresField> {
         Ok(PostgresField::new(
@@ -504,7 +509,7 @@ impl PostgresTypeExtractor for TypeDef {
     fn extract_type(
         &self,
         branch: &Xxh3,
-        schema: &TableSchema,
+        schema: &PgTableSchema,
         queries: &mut Vec<String>,
     ) -> Result<PostgresType> {
         match self {
@@ -520,12 +525,17 @@ impl PostgresTypeExtractor for TypeDef {
             TypeDef::U128 => Ok(PostgresType::Uint128),
             TypeDef::I128 => Ok(PostgresType::Int128),
             TypeDef::U256 => Ok(PostgresType::Uint256),
+            TypeDef::U512 => Ok(PostgresType::Uint512),
             TypeDef::Felt252 => Ok(PostgresType::Felt252),
-            TypeDef::ContractAddress | TypeDef::ClassHash => Ok(PostgresType::StarknetHash),
+            TypeDef::ContractAddress
+            | TypeDef::ClassHash
+            | TypeDef::StorageAddress
+            | TypeDef::StorageBaseAddress => Ok(PostgresType::StarknetHash),
             TypeDef::EthAddress => Ok(PostgresType::EthAddress),
             TypeDef::Utf8Array(_) => Ok(PostgresType::Text),
-            TypeDef::ByteArray(_) => Ok(PostgresType::Bytea),
-            TypeDef::ShortUtf8 => Ok(PostgresType::Varchar(31)),
+            TypeDef::ShortUtf8 => Ok(PostgresType::Char31),
+            TypeDef::ByteArray(_) | TypeDef::ByteArrayE(_) => Ok(PostgresType::Bytea),
+            TypeDef::Bytes31 | TypeDef::Bytes31E(_) => Ok(PostgresType::Bytes31),
             TypeDef::Tuple(type_defs) => type_defs.extract_type(branch, schema, queries),
             TypeDef::Enum(enum_def) => enum_def.extract_type(branch, schema, queries),
             TypeDef::Array(array_def) => Ok(PostgresType::Array(
@@ -545,7 +555,7 @@ impl PostgresTypeExtractor for PrimaryTypeDef {
     fn extract_type(
         &self,
         _branch: &Xxh3,
-        _schema: &TableSchema,
+        _schema: &PgTableSchema,
         _queries: &mut Vec<String>,
     ) -> Result<PostgresType> {
         match self {
@@ -560,12 +570,13 @@ impl PostgresTypeExtractor for PrimaryTypeDef {
             PrimaryTypeDef::U128 => Ok(PostgresType::Uint128),
             PrimaryTypeDef::I128 => Ok(PostgresType::Int128),
             PrimaryTypeDef::Felt252 => Ok(PostgresType::Felt252),
-            PrimaryTypeDef::ContractAddress | PrimaryTypeDef::ClassHash => {
-                Ok(PostgresType::StarknetHash)
-            }
+            PrimaryTypeDef::ContractAddress
+            | PrimaryTypeDef::ClassHash
+            | PrimaryTypeDef::StorageAddress
+            | PrimaryTypeDef::StorageBaseAddress => Ok(PostgresType::StarknetHash),
             PrimaryTypeDef::EthAddress => Ok(PostgresType::EthAddress),
-            PrimaryTypeDef::ShortUtf8 => Ok(PostgresType::Varchar(31)),
-            _ => Err(TableError::UnsupportedType(format!("{self:?}"))),
+            PrimaryTypeDef::ShortUtf8 => Ok(PostgresType::Char31),
+            PrimaryTypeDef::Bytes31 | PrimaryTypeDef::Bytes31E(_) => Ok(PostgresType::Bytes31),
         }
     }
 }
@@ -574,7 +585,7 @@ impl PostgresTypeExtractor for FixedArrayDef {
     fn extract_type(
         &self,
         branch: &Xxh3,
-        schema: &TableSchema,
+        schema: &PgTableSchema,
         queries: &mut Vec<String>,
     ) -> Result<PostgresType> {
         Ok(PostgresType::Array(
@@ -588,7 +599,7 @@ impl PostgresTypeExtractor for StructDef {
     fn extract_type(
         &self,
         branch: &Xxh3,
-        schema: &TableSchema,
+        schema: &PgTableSchema,
         queries: &mut Vec<String>,
     ) -> Result<PostgresType> {
         let members = self
@@ -618,7 +629,7 @@ impl PostgresTypeExtractor for EnumDef {
     fn extract_type(
         &self,
         branch: &Xxh3,
-        schema: &TableSchema,
+        schema: &PgTableSchema,
         queries: &mut Vec<String>,
     ) -> Result<PostgresType> {
         let variants = self
@@ -639,7 +650,7 @@ impl PostgresTypeExtractor for TupleDef {
     fn extract_type(
         &self,
         branch: &Xxh3,
-        schema: &TableSchema,
+        schema: &PgTableSchema,
         queries: &mut Vec<String>,
     ) -> Result<PostgresType> {
         let variants = self

@@ -41,6 +41,18 @@ impl From<TableSchema> for DeclareTableV1 {
     }
 }
 
+impl Into<TableSchema> for DeclareTableV1 {
+    fn into(self) -> TableSchema {
+        TableSchema {
+            id: self.id,
+            name: self.name,
+            attributes: self.attributes,
+            primary: self.primary,
+            columns: self.columns,
+        }
+    }
+}
+
 impl_event!(DeclareTableV1, DECLARE_TABLE_URL);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +61,7 @@ pub struct UpdateTableV1 {
     pub name: String,
     pub attributes: Vec<Attribute>,
     pub primary: PrimaryDef,
-    pub fields: Vec<ColumnDef>,
+    pub columns: Vec<ColumnDef>,
 }
 impl From<TableSchema> for UpdateTableV1 {
     fn from(schema: TableSchema) -> Self {
@@ -58,7 +70,19 @@ impl From<TableSchema> for UpdateTableV1 {
             name: schema.name,
             attributes: schema.attributes,
             primary: schema.primary,
-            fields: schema.columns,
+            columns: schema.columns,
+        }
+    }
+}
+
+impl Into<TableSchema> for UpdateTableV1 {
+    fn into(self) -> TableSchema {
+        TableSchema {
+            id: self.id,
+            name: self.name,
+            attributes: self.attributes,
+            primary: self.primary,
+            columns: self.columns,
         }
     }
 }

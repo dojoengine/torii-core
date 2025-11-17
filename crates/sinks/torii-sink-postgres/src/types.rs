@@ -18,6 +18,7 @@ pub enum PostgresType {
     Uint64,
     Uint128,
     Uint256,
+    Uint512,
     Felt252,
     StarknetHash,
     EthAddress,
@@ -25,6 +26,7 @@ pub enum PostgresType {
     Text,
     Char(u32),
     Varchar(u32),
+    Char31,
     Json,
     JsonB,
     Array(Box<PostgresType>, Option<u32>),
@@ -32,6 +34,7 @@ pub enum PostgresType {
     Tuple(String),
     Enum(String),
     RustEnum(String),
+    Bytes31,
     Bytea,
 }
 
@@ -50,9 +53,12 @@ impl ToString for PostgresType {
             PostgresType::Uint64 => "uint64".to_string(),
             PostgresType::Uint128 => "uint128".to_string(),
             PostgresType::Uint256 => "uint256".to_string(),
-            PostgresType::Felt252 => "felt252".to_string(),
-            PostgresType::StarknetHash => "starknet_hash".to_string(),
-            PostgresType::EthAddress => "eth_address".to_string(),
+            PostgresType::Uint512 => "uint512".to_string(),
+            PostgresType::Felt252 => "bytea".to_string(),
+            PostgresType::Char31 => "char31".to_string(),
+            PostgresType::Bytes31 => "bytea".to_string(),
+            PostgresType::StarknetHash => "bytea".to_string(),
+            PostgresType::EthAddress => "bytea".to_string(),
             PostgresType::Numeric(precision, scale) => {
                 format!("NUMERIC({}, {})", precision, scale)
             }
@@ -103,7 +109,7 @@ impl Into<(String, PostgresType)> for PostgresField {
     }
 }
 
-fn parse_variant_name(variant: &str) -> String {
+pub fn parse_variant_name(variant: &str) -> String {
     if variant == "Some(T)" {
         "Some".to_string()
     } else {

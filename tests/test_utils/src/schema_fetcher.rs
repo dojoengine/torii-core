@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use dojo_introspect_types::{DojoSchemaFetcher, DojoTypeDefSerde};
-use introspect_types::StructDef;
+use dojo_introspect_types::{DojoSchema, DojoSchemaFetcher, DojoTypeDefSerde};
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
 use std::path::PathBuf;
@@ -17,10 +16,10 @@ struct ModelContract {
     use_legacy_storage: bool,
 }
 
-fn read_model_schema(path: &PathBuf, contract_address: Felt) -> Result<StructDef> {
+fn read_model_schema(path: &PathBuf, contract_address: Felt) -> Result<DojoSchema> {
     let contract: ModelContract =
         read_json_file(&path.join(format!("{contract_address:#x}.json"))).unwrap();
-    StructDef::dojo_deserialize(
+    DojoSchema::dojo_deserialize(
         &mut contract.schema.into_iter(),
         contract.use_legacy_storage,
     )
@@ -29,7 +28,7 @@ fn read_model_schema(path: &PathBuf, contract_address: Felt) -> Result<StructDef
 
 #[async_trait]
 impl DojoSchemaFetcher for FakeProvider {
-    async fn schema(&self, contract_address: Felt) -> Result<StructDef> {
+    async fn schema(&self, contract_address: Felt) -> Result<DojoSchema> {
         read_model_schema(&self.file_path, contract_address)
     }
 }

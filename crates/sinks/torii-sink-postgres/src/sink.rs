@@ -3,6 +3,7 @@ use crate::json::ToPostgresJson;
 use crate::manager::TableManagerError;
 use crate::value::PostgresValueError;
 use async_trait::async_trait;
+use introspect_types::TableSchema;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Transaction};
 use starknet::core::types::EmittedEvent;
@@ -10,7 +11,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
 use torii_core::{Batch, Event, Sink};
-use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1};
+use torii_types_introspect::{
+    DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
+};
 
 #[derive(Debug, Error)]
 pub enum PostgresSinkError {
@@ -80,7 +83,33 @@ impl PostgresSink {
         event: &DeclareTableV1,
     ) -> Result<()> {
         let table_name = &event.name;
-        let queries = self.manager.declare_table(table_name, event)?;
+        let queries = self
+            .manager
+            .declare_table(table_name, &event.primary, &event.columns)?;
+        for query in queries {
+            sqlx::query(&query).execute(&mut **tx).await?;
+        }
+
+        tracing::info!(
+            sink = %self.label,
+            table = %event.name,
+            storage_table = %table_name,
+            block = %raw.block_number.unwrap_or_default(),
+            "stored declare_table"
+        );
+        Ok(())
+    }
+
+    async fn handle_update_table(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        raw: Arc<EmittedEvent>,
+        event: &UpdateTableV1,
+    ) -> Result<()> {
+        let table_name = &event.name;
+        let queries = self
+            .manager
+            .declare_table(table_name, &event.primary, &event.columns)?;
         for query in queries {
             sqlx::query(&query).execute(&mut **tx).await?;
         }
@@ -175,13 +204,29 @@ impl Sink for PostgresSink {
     }
 
     async fn handle_batch(&self, batch: Batch) -> anyhow::Result<()> {
+        let mut tx = self.pool.begin().await?;
+
         for env in &batch.items {
-            let mut tx = self.pool.begin().await?;
             if env.type_id == DeclareTableV1::TYPE_ID {
                 if let Some(event) = env.downcast::<DeclareTableV1>() {
                     println!("{}", event.name);
                     match self
                         .handle_declare_table(&mut tx, env.raw.clone(), event)
+                        .await
+                    {
+                        Ok(_) => (),
+                        Err(err) => {
+                            println!("Error declaring table: {err:#?}");
+                            return Err(err.into());
+                        }
+                    }
+                }
+            }
+            if env.type_id == UpdateTableV1::TYPE_ID {
+                if let Some(event) = env.downcast::<UpdateTableV1>() {
+                    println!("{}", event.name);
+                    match self
+                        .handle_update_table(&mut tx, env.raw.clone(), event)
                         .await
                     {
                         Ok(_) => (),
@@ -199,7 +244,7 @@ impl Sink for PostgresSink {
                     {
                         Ok(_) => (),
                         Err(err) => {
-                            // println!("Error updating record: {err:#?}");
+                            println!("Error updating record: {err:#?}");
                         }
                     }
                 }
@@ -216,8 +261,8 @@ impl Sink for PostgresSink {
                     }
                 }
             }
-            tx.commit().await?;
         }
+        tx.commit().await?;
 
         tracing::info!(sink = %self.label, processed = batch.items.len(), "sqlite sink processed batch");
         Ok(())

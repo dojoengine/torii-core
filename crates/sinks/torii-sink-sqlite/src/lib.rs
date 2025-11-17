@@ -109,7 +109,7 @@ impl TableSchema {
             name: event.name.clone(),
             attributes: event.attributes.clone(),
             primary: event.primary.clone(),
-            columns: event.fields.clone(),
+            columns: event.columns.clone(),
         };
         Self::from_declare(declare, storage_name)
     }

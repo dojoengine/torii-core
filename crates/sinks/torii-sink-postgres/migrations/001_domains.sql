@@ -62,12 +62,20 @@ BEGIN
     END IF;
 END $$;
 
+-- uint512: Unsigned 512-bit integer (0 to 2^512-1)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'uint512') THEN
+        CREATE DOMAIN uint512 AS NUMERIC(155, 0)
+        CHECK (VALUE >= 0 AND VALUE < power(2::numeric, 512));
+    END IF;
+END $$;
+
 -- felt252: Cairo field element (0 to PRIME-1)
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'felt252') THEN
-        CREATE DOMAIN felt252 AS NUMERIC(76, 0)
-        CHECK (VALUE >= 0 AND VALUE < 3618502788666131213697322783095070105623107215331596699973092056135872020481);
+        CREATE DOMAIN felt252 AS  bytea CHECK (octet_length(VALUE) = 32);
     END IF;
 END $$;
 
@@ -75,8 +83,7 @@ END $$;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'starknet_hash') THEN
-        CREATE DOMAIN starknet_hash AS NUMERIC(76, 0)
-        CHECK (VALUE >= 0 AND VALUE < power(2::numeric, 251));
+        CREATE DOMAIN starknet_hash AS bytea CHECK (octet_length(VALUE) = 32);
     END IF;
 END $$;
 
@@ -84,7 +91,22 @@ END $$;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'eth_address') THEN
-        CREATE DOMAIN eth_address AS NUMERIC(49, 0)
-        CHECK (VALUE >= 0 AND VALUE < power(2::numeric, 160));
+        CREATE DOMAIN eth_address AS  bytea CHECK (octet_length(VALUE) = 20);
+    END IF;
+END $$;
+
+-- byte31: 31-byte array
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'byte31') THEN
+        CREATE DOMAIN byte31 AS  bytea CHECK (octet_length(VALUE) = 31);
+    END IF;
+END $$;
+
+-- char31: character string of max length 31
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'char31') THEN
+        CREATE DOMAIN char31 AS  varchar(31);
     END IF;
 END $$;
