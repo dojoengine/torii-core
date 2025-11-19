@@ -10,10 +10,19 @@ pub trait DynEvent: Send + Sync + 'static {
 }
 
 /// Trait providing static metadata for events.
-pub trait Event: DynEvent + Send + Sync + 'static {
+pub trait Event: DynEvent + Send + Sync + 'static
+where
+    Self: Sized,
+{
     const SELECTOR: &str;
     const TYPE_ID: u64 = type_id_from_url(Self::SELECTOR);
     fn to_envelope(self, raw: &EmittedEvent) -> crate::Envelope;
+    fn to_ok_envelope<E>(self, raw: &EmittedEvent) -> Result<crate::Envelope, E>
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Ok(self.to_envelope(raw))
+    }
 }
 
 /// Helper macro to implement [`Event`] and [`StaticEvent`] for a struct with the provided metadata.

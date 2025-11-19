@@ -1,20 +1,44 @@
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
+use introspect_events::database::IdData;
+use introspect_types::schema::SchemaInfo;
 use introspect_types::{
-    Attribute, ColumnDef, Field, Primary, PrimaryDef, Record, RecordValues, TableSchema, ToValue, TypeDef, Value
+    Attribute, ColumnDef, ColumnInfo, DerefDefTrait, FeltIterator, Field, GetRefTypeDef, Primary,
+    PrimaryDef, Record, RecordValues, TableSchema, ToValue, TypeDef, Value,
 };
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
+
+pub trait StoreTrait {
+    fn dump_table(&self, table: &Table);
+
+    fn load_table(&self, id: Felt) -> Option<Table>;
+    fn load_all_tables(&self) -> Vec<Table>;
+
+    fn dump_type(&self, id: Felt, type_def: &TypeDef);
+    fn dump_types(&self, types: &[(Felt, TypeDef)]);
+
+    fn load_type(&self, id: Felt) -> Option<TypeDef>;
+    fn load_types(&self, ids: &[Felt]) -> Option<Vec<TypeDef>>;
+    fn load_all_types(&self) -> Vec<(Felt, TypeDef)>;
+
+    fn dump_group(&self, id: Felt, columns: &[Felt]);
+    fn dump_groups(&self, groups: &[(Felt, Vec<Felt>)]);
+
+    fn load_group(&self, id: Felt) -> Option<Vec<Felt>>;
+    fn load_groups(&self, ids: &[Felt]) -> Option<Vec<Vec<Felt>>>;
+    fn load_all_groups(&self) -> Vec<(Felt, Vec<Felt>)>;
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Table {
     pub id: Felt,
     pub name: String,
-    pub attributes: Vec<Attribute>,
-    pub primary: PrimaryDef,
-    pub columns: HashMap<Felt, ColumnDef>,
+    pub attributes: Arc<Vec<Attribute>>,
+    pub primary: Arc<PrimaryDef>,
+    pub columns: HashMap<Felt, Arc<ColumnDef>>,
     pub order: Vec<Felt>,
 }
 
@@ -22,10 +46,24 @@ pub struct ManagerInner<Store>
 where
     Store: Send + Sync,
 {
-    pub tables: HashMap<Felt, RwLock<Table>>,
-    pub types: HashMap<Felt, RwLock<TypeDef>>,
-    pub groups: HashMap<Felt, RwLock<Vec<Felt>>>,
+    pub tables: HashMap<Felt, RwLock<Arc<Table>>>,
+    pub types: HashMap<Felt, TypeDef>,
+    pub groups: HashMap<Felt, Vec<Felt>>,
     pub store: Store,
+}
+
+impl<Store> GetRefTypeDef for ManagerInner<Store>
+where
+    Store: Send + Sync,
+{
+    fn get_type_def(&self, id: Felt) -> Option<TypeDef> {
+        if let Some(type_def_lock) = self.types.get(&id) {
+            if let Ok(type_def) = type_def_lock.read() {
+                return Some(type_def.clone());
+            }
+        }
+        None
+    }
 }
 
 pub struct Manager<Store>(pub RwLock<ManagerInner<Store>>)
@@ -42,138 +80,177 @@ where
     }
 }
 
+impl<Store> Manager<Store>
+where
+    Store: StoreTrait + Send + Sync,
+{
+    pub fn new(store: Store) -> Self {
+        Self(RwLock::new(ManagerInner {
+            tables: HashMap::new(),
+            types: HashMap::new(),
+            groups: HashMap::new(),
+            store,
+        }))
+    }
+}
+
+impl<Store> Manager<Store>
+where
+    Store: StoreTrait + Send + Sync,
+{
+    pub fn table(&self, id: Felt) -> Option<Arc<Table>> {
+        let manager = self.read().unwrap();
+        let table_lock = manager.tables.get(&id)?;
+        let table = table_lock.read().unwrap();
+        Some(table.clone())
+    }
+
+    fn table_name_and_primary(&self, id: Felt) -> Option<(String, PrimaryDef)> {
+        let table = self.table(id)?;
+        Some((table.name.clone(), table.primary.deref().clone()))
+    }
+    pub fn schema(&self, id: Felt, columns: &[Felt]) -> Option<SchemaRef> {
+        self.table(id)?.schema_ref(columns)
+    }
+
+    pub fn full_schema(&self, id: Felt) -> Option<SchemaRef> {
+        self.table(id)?.full_schema_ref()
+    }
+
+    pub fn group(&self, id: Felt) -> Option<Vec<Felt>> {
+        let manager = self.read().unwrap();
+        manager.groups.get(&id).map(Clone::clone)
+    }
+
+    pub fn add_column_group(&self, id: Felt, columns: Vec<Felt>) {
+        let mut manager = self.write().unwrap();
+        manager.store.dump_group(id, &columns);
+        manager.groups.insert(id, columns);
+    }
+
+    pub fn create_type_def(&mut self, id: Felt, type_def: TypeDef) {
+        let mut manager = self.write().unwrap();
+        manager.store.dump_type(id, &type_def);
+        manager.types.insert(id, type_def);
+    }
+
+    pub fn create_table(&self, schema: TableSchema) {
+        let mut manager = self.write().unwrap();
+        let table: Table = schema.into();
+        manager.store.dump_table(&table);
+        manager
+            .tables
+            .insert(table.id.clone(), RwLock::new(table.into()));
+    }
+}
+
 impl From<TableSchema> for Table {
     fn from(schema: TableSchema) -> Self {
+        let order = schema.columns.iter().map(|col| col.id.clone()).collect();
         let columns = schema
             .columns
             .into_iter()
-            .map(|col| (col.id.clone(), col))
+            .map(|col| (col.id.clone(), Arc::new(col)))
             .collect();
-        let order = schema.columns.into_iter().map(|col| col.id).collect();
+
         Self {
             id: schema.id,
             name: schema.name,
-            attributes: schema.attributes,
-            primary: schema.primary,
+            attributes: Arc::new(schema.attributes),
+            primary: Arc::new(schema.primary),
             columns,
             order,
         }
     }
 }
 
-impl Into<TableSchema> for Table {
-    fn into(self) -> TableSchema {
-        let columns = self
-            .order
-            .into_iter()
-            .filter_map(|id| self.columns.get(&id).cloned())
-            .collect();
-        TableSchema {
-            id: self.id,
-            name: self.name,
-            attributes: self.attributes,
-            primary: self.primary,
-            columns,
-        }
+impl Table {
+    pub fn column(&self, id: Felt) -> Option<Arc<ColumnDef>> {
+        self.columns.get(&id).cloned()
+    }
+    pub fn columns<T: AsRef<[Felt]>>(&self, ids: T) -> Option<Vec<Arc<ColumnDef>>> {
+        ids.as_ref().iter().map(|id| self.column(*id)).collect()
+    }
+
+    pub fn all_columns(&self) -> Option<Vec<Arc<ColumnDef>>> {
+        self.columns(&self.order)
+    }
+
+    pub fn column_info(&self, id: Felt) -> Option<ColumnInfo> {
+        self.column(id).map(From::from)
+    }
+
+    pub fn columns_info<T: AsRef<[Felt]>>(&self, ids: T) -> Option<Vec<ColumnInfo>> {
+        ids.as_ref()
+            .iter()
+            .map(|id| self.column_info(*id))
+            .collect()
+    }
+
+    pub fn schema_ref(&self, ids: &[Felt]) -> Option<SchemaRef> {
+        Some(SchemaRef {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            attributes: self.attributes.clone(),
+            primary: self.primary.clone(),
+            columns: ids
+                .iter()
+                .map(|id| self.columns.get(id).cloned())
+                .collect::<Option<Vec<_>>>()?,
+        })
+    }
+
+    pub fn full_schema_ref(&self) -> Option<SchemaRef> {
+        self.schema_ref(&self.order)
     }
 }
 
-impl Table {
-    pub fn get_column(&self, id: Felt) -> Option<ColumnDef> {
-        self.get_column_ref(id).cloned()
-    }
+pub struct SchemaRef {
+    pub id: Felt,
+    pub name: String,
+    pub attributes: Arc<Vec<Attribute>>,
+    pub primary: Arc<PrimaryDef>,
+    pub columns: Vec<Arc<ColumnDef>>,
+}
 
-    pub fn get_column_ref<'a>(&'a self, id: Felt) -> Option<&'a ColumnDef> {
-        self.columns.get(&id)
-    }
-
-    pub fn get_columns<T: AsRef<[Felt]>>(&self, ids: T) -> Option<Vec<ColumnDef>> {
-        ids.as_ref().iter().map(|id| self.get_column(*id)).collect()
-    }
-
-    pub fn get_all_columns(&self) -> Option<Vec<ColumnDef>> {
-        self.get_columns(&self.order)
-    }
-
-    pub fn get_all_columns_ref<'a>(&'a self) -> Option<Vec<&'a ColumnDef>> {
-        self.get_columns_ref(&self.order)
-    }
-
-    pub fn get_columns_ref<'a, T: AsRef<[Felt]>>(&'a self, ids: T) -> Option<Vec<&'a ColumnDef>> {
-        ids.as_ref()
-            .iter()
-            .map(|id| self.get_column_ref(*id))
-            .collect()
-    }
-
-    pub fn parse_columns<T: AsRef<[Felt]>>(
-        &self,
-        columns: T,
-        data: &mut impl Iterator<Item = Felt>,
-    ) -> Option<Vec<Field>> {
-        columns
-            .as_ref()
-            .iter()
-            .map(|id| self.get_column_ref(*id)?.to_value(data))
-            .collect()
-    }
-
-    pub fn parse_primary(&self, felt: Felt) -> Option<Primary> {
-        self.primary.to_primary(felt)
-    }
-
-    pub fn parse_record<T: AsRef<[Felt]>>(
-        &self,
-        columns: T,
-        primary: Felt,
-        data: &mut impl Iterator<Item = Felt>,
-    ) -> Option<Record> {
+impl SchemaRef {
+    pub fn to_record<'a>(&self, primary: Felt, data: Vec<Felt>) -> Option<Record> {
+        let mut data = data.into_iter();
         Some(Record {
             table_id: self.id.clone(),
             table_name: self.name.clone(),
-            attributes: self.attributes.clone(),
-            primary: self.parse_primary(primary)?,
-            fields: self.parse_columns(columns, data)?,
+            attributes: self.attributes.deref().clone(),
+            primary: self.primary.to_primary(primary)?,
+            fields: self.columns.to_value(&mut data)?,
         })
     }
 
-    pub fn parse_full_record(
-        &self,
-        primary: Felt,
-        data: &mut impl Iterator<Item = Felt>,
-    ) -> Option<Record> {
-        self.parse_record(&self.order, primary, data)
-    }
-
-    pub fn parse_record_values(
-        &self,
-        primary: Felt,
-        data: &mut impl Iterator<Item = Felt>,
-    ) -> Option<RecordValues> {
+    pub fn to_record_values(&self, primary: Felt, data: Vec<Felt>) -> Option<RecordValues> {
+        let mut data = data.into_iter();
         Some(RecordValues {
             primary: self.primary.to_primary_value(primary)?,
             fields: self
-                .order
+                .columns
                 .iter()
-                .map(|id| self.get_column_ref(*id)?.to_value(data))
-                .collect::<Option<Vec<Value>>>()?,
+                .map(|col| col.type_def.to_value(&mut data))
+                .collect::<Option<Vec<_>>>()?,
         })
     }
-}
 
-impl<Store> ManagerInner<Store>
-where
-    Store: Send + Sync,
-{
-    fn parse_record(
-        &self,
-        table_id: Felt,
-        primary: Felt,
-        data: &mut impl Iterator<Item = Felt>,
-    ) -> Option<Record> {
-        let table = self.tables.get(&table_id)?.read().ok()?;
-        table.parse_record(primary, data)
+    pub fn to_records_values(&self, id_datas: Vec<IdData>) -> Option<Vec<RecordValues>> {
+        id_datas
+            .into_iter()
+            .map(|id_data| self.to_record_values(id_data.id, id_data.data))
+            .collect()
     }
 
-    fn parse
+    pub fn to_info(&self) -> SchemaInfo {
+        SchemaInfo {
+            table_id: self.id.clone(),
+            table_name: self.name.clone(),
+            attributes: self.attributes.deref().clone(),
+            primary: self.primary.to_primary_info(),
+            columns: self.columns.iter().map(ColumnInfo::from).collect(),
+        }
+    }
 }

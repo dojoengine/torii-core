@@ -514,7 +514,7 @@ impl SqliteSink {
         let pk_type = schema.id_column().sql_type;
         let sql = format!("DELETE FROM {} WHERE {} = ?", table_ident, pk_ident);
 
-        for value in &event.values {
+        for value in &event.records {
             let formatted = value.to_string();
             let mut args = SqliteArguments::default();
             let column_value = ColumnValue::Text(formatted);
@@ -526,7 +526,7 @@ impl SqliteSink {
             sink = %self.label,
             table = %event.table_name,
             storage_table = %schema.table_name(),
-            deleted = event.values.len(),
+            deleted = event.records.len(),
             block = env.raw.block_number.unwrap_or_default(),
             "deleted records"
         );

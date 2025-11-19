@@ -107,7 +107,7 @@ impl JsonSink {
         let event = envelope
             .downcast::<DeleteRecordsV1>()
             .context("Failed to downcast envelope to DeleteRecordsV1")?;
-        for value in &event.values {
+        for value in &event.records {
             let name = value.to_string();
             let path = self.record_path(&event.table_name, &name);
             if path.exists() {

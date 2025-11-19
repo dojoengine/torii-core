@@ -4,8 +4,8 @@
 
 use introspect_types::schema::PrimaryInfo;
 use introspect_types::{
-    Attribute, ColumnDef, ColumnInfo, Field, Primary, PrimaryDef, PrimaryValue, RecordValues,
-    TableSchema,
+    Attribute, ColumnDef, ColumnInfo, Field, Primary, PrimaryDef, PrimaryValue, Record,
+    RecordValues, TableSchema,
 };
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
@@ -20,6 +20,12 @@ pub const UPDATE_FIELDS_URL: &str = "torii.introspect/UpdateFields@1";
 pub const UPDATES_FIELDS_URL: &str = "torii.introspect/UpdatesFields@1";
 pub const DELETE_RECORDS_URL: &str = "torii.introspect/DeleteRecords@1";
 pub const DELETES_FIELDS_URL: &str = "torii.introspect/DeletesFields@1";
+pub const CREATE_FIELD_GROUP_URL: &str = "torii.introspect/CreateFieldGroup@1";
+pub const CREATE_TYPE_DEF_URL: &str = "torii.introspect/CreateTypeDef@1";
+pub const RENAME_TABLE_URL: &str = "torii.introspect/RenameTable@1";
+pub const RENAME_COLUMNS_URL: &str = "torii.introspect/RenameColumns@1";
+pub const DROP_TABLE_URL: &str = "torii.introspect/DropTable@1";
+pub const DROP_COLUMNS_URL: &str = "torii.introspect/DropColumns@1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeclareTableV1 {
@@ -108,6 +114,17 @@ impl UpdateFieldsV1 {
     }
 }
 
+impl From<Record> for UpdateFieldsV1 {
+    fn from(record: Record) -> Self {
+        Self {
+            table_id: record.table_id,
+            table_name: record.table_name,
+            primary: record.primary,
+            fields: record.fields,
+        }
+    }
+}
+
 impl_event!(UpdateFieldsV1, UPDATE_FIELDS_URL);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,7 +143,7 @@ pub struct DeleteRecordsV1 {
     pub table_id: Felt,
     pub table_name: String,
     pub primary: PrimaryInfo,
-    pub values: Vec<PrimaryValue>,
+    pub records: Vec<PrimaryValue>,
 }
 
 impl DeleteRecordsV1 {
@@ -140,7 +157,7 @@ impl DeleteRecordsV1 {
             table_id,
             table_name,
             primary,
-            values,
+            records: values,
         }
     }
 }
@@ -150,8 +167,21 @@ impl_event!(DeleteRecordsV1, DELETE_RECORDS_URL);
 pub struct DeletesFieldsV1 {
     pub table_id: Felt,
     pub table_name: String,
-    pub columns: Vec<ColumnInfo>,
+    pub primary: PrimaryInfo,
     pub records: Vec<PrimaryValue>,
+    pub columns: Vec<ColumnInfo>,
 }
 
 impl_event!(DeletesFieldsV1, DELETES_FIELDS_URL);
+
+pub struct CreateFieldGroupV1 {
+    pub id: Felt,
+    pub columns: Vec<Felt>,
+}
+impl_event!(CreateFieldGroupV1, CREATE_FIELD_GROUP_URL);
+
+pub struct CreateTypeDefV1 {
+    pub id: Felt,
+    pub type_def: introspect_types::TypeDef,
+}
+impl_event!(CreateTypeDefV1, CREATE_TYPE_DEF_URL);

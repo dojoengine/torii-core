@@ -171,7 +171,7 @@ impl PostgresSink {
     ) -> Result<()> {
         let table_name = &event.table_name;
         let formatted_values: Result<Vec<String>> = event
-            .values
+            .records
             .iter()
             .map(|v| Ok(format!(r#"'{}'"#, v.to_string())))
             .collect();

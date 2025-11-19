@@ -1,4 +1,4 @@
-use crate::manager::Manager;
+use crate::manager::{Manager, StoreTrait};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use introspect_events::database::{
@@ -32,12 +32,12 @@ const DOJO_EVENT_IDS: [u64; 0] = [];
 // }
 
 /// Implementation of the introspect decoder.
-pub struct IntrospectEventReader<F, M>
+pub struct IntrospectEventReader<S, F>
 where
-    M: Send + Sync + 'static,
+    S: StoreTrait + Send + Sync + 'static,
 {
     pub filter: DecoderFilter,
-    pub manager: Manager<M>,
+    pub manager: Manager<S>,
     pub fetcher: F,
 }
 
