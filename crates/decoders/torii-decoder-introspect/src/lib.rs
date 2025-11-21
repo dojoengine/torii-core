@@ -15,6 +15,7 @@ use parser::IntrospectParser;
 use starknet::core::types::EmittedEvent;
 use torii_core::{Decoder, DecoderFilter, Envelope};
 
+mod fetcher;
 mod manager;
 mod parser;
 
@@ -32,71 +33,71 @@ const DOJO_EVENT_IDS: [u64; 0] = [];
 // }
 
 /// Implementation of the introspect decoder.
-pub struct IntrospectEventReader<S, F>
+pub struct IntrospectEventReader<F, M>
 where
-    S: StoreTrait + Send + Sync + 'static,
+    M: ManagerTrait + Send + Sync + 'static,
 {
     pub filter: DecoderFilter,
-    pub manager: Manager<S>,
+    pub manager: M,
     pub fetcher: F,
 }
 
-// impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
-//     /// Builds the decoder from a configuration.
-//     fn from_config(cfg: IntrospectDecoderConfig, contracts: Vec<ContractBinding>) -> Result<Self> {
-//         if contracts.is_empty() {
-//             return Err(anyhow!(
-//                 "introspect decoder requires at least one contract binding"
-//             ));
-//         }
+impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
+    /// Builds the decoder from a configuration.
+    fn from_config(cfg: IntrospectDecoderConfig, contracts: Vec<ContractBinding>) -> Result<Self> {
+        if contracts.is_empty() {
+            return Err(anyhow!(
+                "introspect decoder requires at least one contract binding"
+            ));
+        }
 
-//         let mut contract_addresses = HashSet::default();
-//         let mut selectors = HashSet::default();
-//         for selector in DOJO_CAIRO_EVENT_SELECTORS {
-//             selectors.insert(selector);
-//         }
-//         let mut address_selectors = HashMap::new();
-//         for binding in contracts {
-//             contract_addresses.insert(binding.address);
-//             let entry =
-//                 address_selectors
-//                     .entry(binding.address)
-//                     .or_insert_with(|| ContractFilter {
-//                         selectors: HashSet::new(),
-//                         deployed_at_block: binding.deployed_at_block,
-//                     });
-//             entry.selectors.extend(selectors.iter().copied());
-//             if let Some(block) = binding.deployed_at_block {
-//                 entry.deployed_at_block = match entry.deployed_at_block {
-//                     Some(existing) => Some(existing.min(block)),
-//                     None => Some(block),
-//                 };
-//             }
-//         }
-//         let provider = JsonRpcClient::new(HttpTransport::new(cfg.rpc_url));
+        let mut contract_addresses = HashSet::default();
+        let mut selectors = HashSet::default();
+        for selector in DOJO_CAIRO_EVENT_SELECTORS {
+            selectors.insert(selector);
+        }
+        let mut address_selectors = HashMap::new();
+        for binding in contracts {
+            contract_addresses.insert(binding.address);
+            let entry =
+                address_selectors
+                    .entry(binding.address)
+                    .or_insert_with(|| ContractFilter {
+                        selectors: HashSet::new(),
+                        deployed_at_block: binding.deployed_at_block,
+                    });
+            entry.selectors.extend(selectors.iter().copied());
+            if let Some(block) = binding.deployed_at_block {
+                entry.deployed_at_block = match entry.deployed_at_block {
+                    Some(existing) => Some(existing.min(block)),
+                    None => Some(block),
+                };
+            }
+        }
+        let provider = JsonRpcClient::new(HttpTransport::new(cfg.rpc_url));
 
-//         let store = JsonStore::new(&cfg.store_path);
+        let store = JsonStore::new(&cfg.store_path);
 
-//         let manager = DojoManager::new(store)?;
-//         let filter = DecoderFilter {
-//             contract_addresses,
-//             selectors,
-//             address_selectors,
-//         };
+        let manager = DojoManager::new(store)?;
+        let filter = DecoderFilter {
+            contract_addresses,
+            selectors,
+            address_selectors,
+        };
 
-//         Ok(Self {
-//             filter,
-//             manager,
-//             fetcher: provider,
-//         })
-//     }
-// }
+        Ok(Self {
+            filter,
+            manager,
+            fetcher: provider,
+        })
+    }
+}
 
 #[async_trait]
 impl<F, M> Decoder for IntrospectEventReader<F, M>
 where
-    F: Sync + Send + 'static,
-    M: Send + Sync + 'static,
+    F: Fetcher + Sync + Send + 'static,
+    M: ManagerTrait + Send + Sync + 'static,
 {
     fn name(&self) -> &'static str {
         DECODER_NAME

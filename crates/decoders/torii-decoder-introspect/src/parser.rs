@@ -1,23 +1,27 @@
+use std::vec;
+
 use crate::IntrospectEventReader;
-use crate::manager::{SchemaRef, StoreTrait};
+use crate::fetcher::{SchemaFetcherTrait, TableClass};
+use crate::manager::{SchemaRef, StoreTrait, TableNameAnd};
 use introspect_events::database::{
     AddColumn, AddColumns, CreateColumnGroup, CreateTable, CreateTableFromClassHash,
     CreateTableWithColumns, DeleteField, DeleteFieldGroup, DeleteFieldGroups, DeleteFields,
     DeleteRecord, DeleteRecords, DeletesField, DeletesFieldGroup, DeletesFieldGroups,
-    DeletesFields, DropColumn, DropColumns, DropTable, IdData, IdName, IdTypeAttributes,
-    InsertField, InsertFieldGroup, InsertFieldGroups, InsertFields, InsertRecord, InsertRecords,
-    InsertsField, InsertsFieldGroup, InsertsFieldGroups, InsertsFields, RenameColumn,
-    RenameColumns, RenamePrimary, RenameTable, RetypeColumn, RetypeColumns, RetypePrimary,
+    DeletesFields, DropColumn, DropColumns, DropTable, IdData, InsertField, InsertFieldGroup,
+    InsertFieldGroups, InsertFields, InsertRecord, InsertRecords, InsertsField, InsertsFieldGroup,
+    InsertsFieldGroups, InsertsFields, RenameColumn, RenameColumns, RenamePrimary, RenameTable,
+    RetypeColumn, RetypeColumns, RetypePrimary,
 };
 use introspect_events::event::EventTrait;
-use introspect_types::{FeltIterator, TableSchema, schema};
+use introspect_types::{ColumnDef, FeltIterator, TableSchema, TypeDef};
 use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
 use thiserror::Error;
 use torii_core::{Envelope, Event};
 use torii_types_introspect::{
-    CreateFieldGroupV1, DeclareTableV1, DeleteRecordsV1, DeletesFieldsV1, UpdateFieldsV1,
-    UpdatesFieldsV1,
+    AddColumnsV1, CreateFieldGroupV1, DeclareTableV1, DeleteRecordsV1, DeletesFieldsV1,
+    DropColumnsV1, DropTableV1, RenameColumnsV1, RenamePrimaryV1, RenameTableV1, RetypeColumnsV1,
+    RetypePrimaryV1, UpdateFieldsV1, UpdatesFieldsV1,
 };
 
 #[derive(Debug, Error)]
@@ -43,6 +47,30 @@ pub trait IntrospectParser {
     fn _schema(&self, id: Felt, columns: Option<&[Felt]>) -> Result<SchemaRef>;
     fn columns_from_groups(&self, groups: &[Felt]) -> Result<Vec<Felt>>;
     fn columns_from_group(&self, group_id: &Felt) -> Result<Vec<Felt>>;
+    fn add_columns_msg(
+        &self,
+        raw: &EmittedEvent,
+        table: Felt,
+        columns: Vec<ColumnDef>,
+    ) -> Result<Envelope>;
+    fn rename_columns_msg(
+        &self,
+        raw: &EmittedEvent,
+        table: Felt,
+        renames: Vec<(Felt, String)>,
+    ) -> Result<Envelope>;
+    fn retype_columns_msg(
+        &self,
+        raw: &EmittedEvent,
+        table: Felt,
+        retypes: Vec<(Felt, TypeDef)>,
+    ) -> Result<Envelope>;
+    fn drop_columns_msg(
+        &self,
+        raw: &EmittedEvent,
+        table_id: Felt,
+        columns: Vec<Felt>,
+    ) -> Result<Envelope>;
     fn update_fields_msg(
         &self,
         raw: &EmittedEvent,
@@ -292,7 +320,7 @@ pub trait IntrospectParser {
 impl<S, F> IntrospectParser for IntrospectEventReader<S, F>
 where
     S: StoreTrait + Send + Sync + 'static,
-    F: Send + Sync + 'static,
+    F: SchemaFetcherTrait + Send + Sync + 'static,
 {
     fn deserialize_event<T: EventTrait>(
         &self,
@@ -326,6 +354,86 @@ where
         self.manager
             .group(*group_id)
             .ok_or(Error::ColumnGroupNotFound)
+    }
+    fn add_columns_msg(
+        &self,
+        raw: &EmittedEvent,
+        table_id: Felt,
+        columns: Vec<ColumnDef>,
+    ) -> Result<Envelope> {
+        let TableNameAnd {
+            table_name,
+            value: _,
+        } = self
+            .manager
+            .add_columns(table_id, columns.clone())
+            .ok_or(Error::SchemaNotFound)?;
+        AddColumnsV1 {
+            table_id,
+            table_name,
+            columns,
+        }
+        .to_ok_envelope(raw)
+    }
+    fn drop_columns_msg(
+        &self,
+        raw: &EmittedEvent,
+        table_id: Felt,
+        columns: Vec<Felt>,
+    ) -> Result<Envelope> {
+        let TableNameAnd {
+            table_name,
+            value: columns,
+        } = self
+            .manager
+            .drop_columns(table_id, columns.clone())
+            .ok_or(Error::SchemaNotFound)?;
+        DropColumnsV1 {
+            table_id,
+            table_name,
+            columns,
+        }
+        .to_ok_envelope(raw)
+    }
+    fn rename_columns_msg(
+        &self,
+        raw: &EmittedEvent,
+        table_id: Felt,
+        renames: Vec<(Felt, String)>,
+    ) -> Result<Envelope> {
+        let TableNameAnd {
+            table_name,
+            value: columns,
+        } = self
+            .manager
+            .rename_columns(table_id, renames.clone())
+            .ok_or(Error::SchemaNotFound)?;
+        RenameColumnsV1 {
+            table_id,
+            table_name,
+            columns,
+        }
+        .to_ok_envelope(raw)
+    }
+    fn retype_columns_msg(
+        &self,
+        raw: &EmittedEvent,
+        table: Felt,
+        retypes: Vec<(Felt, TypeDef)>,
+    ) -> Result<Envelope> {
+        let TableNameAnd {
+            table_name,
+            value: columns,
+        } = self
+            .manager
+            .retype_columns(table, retypes.clone())
+            .ok_or(Error::SchemaNotFound)?;
+        RetypeColumnsV1 {
+            table_id: table,
+            table_name,
+            columns,
+        }
+        .to_ok_envelope(raw)
     }
     fn update_fields_msg(
         &self,
@@ -462,7 +570,25 @@ where
         keys: &mut FeltIterator,
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
-        let event = CreateTableFromClassHash::deserialize_event(keys, data)?;
+        let event: CreateTableFromClassHash = self.deserialize_event(keys, data)?;
+        let TableClass {
+            attributes,
+            primary,
+            columns,
+        } = self
+            .fetcher
+            .columns_and_attributes(&event.class_hash)
+            .await
+            .ok_or(Error::SchemaNotFound)?;
+        let schema = TableSchema {
+            id: event.id,
+            name: event.name,
+            attributes,
+            primary,
+            columns,
+        };
+        self.manager.create_table(schema.clone());
+        DeclareTableV1::from(schema).to_ok_envelope(raw)
     }
     async fn rename_table(
         &self,
@@ -470,7 +596,20 @@ where
         keys: &mut FeltIterator,
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
-        let event = RenameTable::deserialize_event(keys, data)?;
+        let event: RenameTable = self.deserialize_event(keys, data)?;
+        let TableNameAnd {
+            table_name: old_name,
+            value: _,
+        } = self
+            .manager
+            .rename_table(event.id, event.name.clone())
+            .ok_or(Error::SchemaNotFound)?;
+        RenameTableV1 {
+            id: event.id,
+            old_name,
+            new_name: event.name,
+        }
+        .to_ok_envelope(raw)
     }
     async fn drop_table(
         &self,
@@ -478,7 +617,12 @@ where
         keys: &mut FeltIterator,
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
-        let event = DropTable::deserialize_event(keys, data)?;
+        let event: DropTable = self.deserialize_event(keys, data)?;
+        let name = self
+            .manager
+            .drop_table(event.id)
+            .ok_or(Error::SchemaNotFound)?;
+        DropTableV1 { id: event.id, name }.to_ok_envelope(raw)
     }
     async fn rename_primary(
         &self,
@@ -486,7 +630,18 @@ where
         keys: &mut FeltIterator,
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
-        let event = RenamePrimary::deserialize_event(keys, data)?;
+        let event: RenamePrimary = self.deserialize_event(keys, data)?;
+        let TableNameAnd { table_name, value } = self
+            .manager
+            .rename_primary(event.table, event.name.clone())
+            .ok_or(Error::SchemaNotFound)?;
+        RenamePrimaryV1 {
+            table: event.table,
+            table_name,
+            old_name: value,
+            new_name: event.name,
+        }
+        .to_ok_envelope(raw)
     }
     async fn retype_primary(
         &self,
@@ -494,7 +649,23 @@ where
         keys: &mut FeltIterator,
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
-        let event = RetypePrimary::deserialize_event(keys, data)?;
+        let event: RetypePrimary = self.deserialize_event(keys, data)?;
+        let TableNameAnd { table_name, value } = self
+            .manager
+            .retype_primary(
+                event.table,
+                event.attributes.clone(),
+                event.type_def.clone(),
+            )
+            .ok_or(Error::SchemaNotFound)?;
+        RetypePrimaryV1 {
+            table: event.table,
+            table_name,
+            name: value,
+            attributes: event.attributes,
+            type_def: event.type_def,
+        }
+        .to_ok_envelope(raw)
     }
     async fn add_column(
         &self,
@@ -502,7 +673,14 @@ where
         keys: &mut FeltIterator,
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
-        let event = AddColumn::deserialize_event(keys, data)?;
+        let event: AddColumn = self.deserialize_event(keys, data)?;
+        let column = ColumnDef {
+            id: event.id,
+            name: event.name,
+            attributes: event.attributes,
+            type_def: event.type_def,
+        };
+        self.add_columns_msg(raw, event.table, vec![column])
     }
     async fn add_columns(
         &self,
@@ -510,7 +688,8 @@ where
         keys: &mut FeltIterator,
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
-        let event = AddColumns::deserialize_event(keys, data)?;
+        let event: AddColumns = self.deserialize_event(keys, data)?;
+        self.add_columns_msg(raw, event.table, event.columns)
     }
     async fn rename_column(
         &self,
@@ -518,7 +697,8 @@ where
         keys: &mut FeltIterator,
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
-        let event = RenameColumn::deserialize_event(keys, data)?;
+        let event: RenameColumn = self.deserialize_event(keys, data)?;
+        self.rename_columns_msg(raw, event.table, vec![(event.id, event.name)])
     }
     async fn rename_columns(
         &self,
@@ -526,7 +706,9 @@ where
         keys: &mut FeltIterator,
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
-        let event = RenameColumns::deserialize_event(keys, data)?;
+        let event: RenameColumns = self.deserialize_event(keys, data)?;
+        let columns = event.columns.into_iter().map(|c| (c.id, c.name)).collect();
+        self.rename_columns_msg(raw, event.table, columns)
     }
     async fn retype_column(
         &self,
@@ -534,7 +716,8 @@ where
         keys: &mut FeltIterator,
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
-        let event = RetypeColumn::deserialize_event(keys, data)?;
+        let event: RetypeColumn = self.deserialize_event(keys, data)?;
+        self.retype_columns_msg(raw, event.table, vec![(event.id, event.type_def)])
     }
     async fn retype_columns(
         &self,
@@ -542,7 +725,13 @@ where
         keys: &mut FeltIterator,
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
-        let event = RetypeColumns::deserialize_event(keys, data)?;
+        let event: RetypeColumns = self.deserialize_event(keys, data)?;
+        let retypes = event
+            .columns
+            .into_iter()
+            .map(|c| (c.id, c.type_def))
+            .collect();
+        self.retype_columns_msg(raw, event.table, retypes)
     }
     async fn drop_column(
         &self,
@@ -550,7 +739,8 @@ where
         keys: &mut FeltIterator,
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
-        let event = DropColumn::deserialize_event(keys, data)?;
+        let event: DropColumn = self.deserialize_event(keys, data)?;
+        self.drop_columns_msg(raw, event.table, vec![event.id])
     }
     async fn drop_columns(
         &self,
@@ -558,7 +748,8 @@ where
         keys: &mut FeltIterator,
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
-        let event = DropColumns::deserialize_event(keys, data)?;
+        let event: DropColumns = self.deserialize_event(keys, data)?;
+        self.drop_columns_msg(raw, event.table, event.ids)
     }
     fn insert_record(
         &self,

@@ -1,15 +1,23 @@
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 
-use introspect_events::database::IdData;
+use introspect_events::database::{IdData, IdName};
 use introspect_types::schema::SchemaInfo;
 use introspect_types::{
     Attribute, ColumnDef, ColumnInfo, DerefDefTrait, FeltIterator, Field, GetRefTypeDef, Primary,
-    PrimaryDef, Record, RecordValues, TableSchema, ToValue, TypeDef, Value,
+    PrimaryDef, PrimaryTypeDef, Record, RecordValues, TableSchema, ToValue, TypeDef, Value,
 };
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
+use torii_types_introspect::ColumnRename;
+
+pub enum Error {}
+
+pub struct TableNameAnd<T> {
+    pub table_name: String,
+    pub value: T,
+}
 
 pub trait StoreTrait {
     fn dump_table(&self, table: &Table);
@@ -40,6 +48,7 @@ pub struct Table {
     pub primary: Arc<PrimaryDef>,
     pub columns: HashMap<Felt, Arc<ColumnDef>>,
     pub order: Vec<Felt>,
+    pub alive: bool,
 }
 
 pub struct ManagerInner<Store>
@@ -105,10 +114,22 @@ where
         Some(table.clone())
     }
 
-    fn table_name_and_primary(&self, id: Felt) -> Option<(String, PrimaryDef)> {
-        let table = self.table(id)?;
-        Some((table.name.clone(), table.primary.deref().clone()))
+    pub fn modify_table<F, R>(&self, id: Felt, f: F) -> Option<TableNameAnd<R>>
+    where
+        F: FnOnce(&mut Table) -> Option<R>,
+    {
+        let manager = self.read().unwrap();
+        let table_lock = manager.tables.get(&id)?;
+        let mut table_ref = table_lock.write().unwrap();
+        let table = Arc::make_mut(&mut table_ref);
+        let result = f(table)?;
+        manager.store.dump_table(&table);
+        Some(TableNameAnd {
+            table_name: table.name.clone(),
+            value: result,
+        })
     }
+
     pub fn schema(&self, id: Felt, columns: &[Felt]) -> Option<SchemaRef> {
         self.table(id)?.schema_ref(columns)
     }
@@ -142,6 +163,129 @@ where
             .tables
             .insert(table.id.clone(), RwLock::new(table.into()));
     }
+
+    fn dump_table(&self, id: Felt) -> Option<()> {
+        let manager = self.read().unwrap();
+        manager.store.dump_table(self.table(id)?.as_ref());
+        Some(())
+    }
+
+    pub fn drop_table(&self, id: Felt) -> Option<String> {
+        // TODO: implement drop in store
+        let mut manager = self.write().unwrap();
+    }
+
+    pub fn rename_table(&self, id: Felt, new_name: String) -> Option<TableNameAnd<()>> {
+        let rename_func = |table: &mut Table| {
+            std::mem::replace(&mut table.name, new_name);
+            Some(())
+        };
+        self.modify_table(id, rename_func)
+    }
+
+    pub fn rename_primary(
+        &self,
+        id: Felt,
+        new_primary_name: String,
+    ) -> Option<TableNameAnd<String>> {
+        let rename_func = |table: &mut Table| {
+            Some(std::mem::replace(
+                &mut Arc::get_mut(&mut table.primary).unwrap().name,
+                new_primary_name,
+            ))
+        };
+        self.modify_table(id, rename_func)
+    }
+
+    pub fn retype_primary(
+        &self,
+        id: Felt,
+        attributes: Vec<Attribute>,
+        type_def: PrimaryTypeDef,
+    ) -> Option<TableNameAnd<String>> {
+        let retype_func = |table: &mut Table| {
+            let primary = Arc::get_mut(&mut table.primary).unwrap();
+            primary.attributes = attributes;
+            primary.type_def = type_def;
+            Some(primary.name.clone())
+        };
+        self.modify_table(id, retype_func)
+    }
+
+    pub fn add_columns(&self, id: Felt, columns: Vec<ColumnDef>) -> Option<TableNameAnd<()>> {
+        let add_func = |table: &mut Table| {
+            for column in columns.into_iter() {
+                table.order.push(column.id);
+                table.columns.insert(column.id, Arc::new(column));
+            }
+            Some(())
+        };
+        self.modify_table(id, add_func)
+    }
+
+    pub fn rename_columns(
+        &self,
+        id: Felt,
+        renames: Vec<(Felt, String)>,
+    ) -> Option<TableNameAnd<Vec<ColumnRename>>> {
+        let rename_func = |table: &mut Table| {
+            let mut old_names = Vec::new();
+            for (id, new_name) in renames.into_iter() {
+                if let Some(column) = table.columns.get(&id) {
+                    let old_name = std::mem::replace(
+                        &mut Arc::get_mut(&mut column.clone()).unwrap().name,
+                        new_name.clone(),
+                    );
+                    old_names.push(ColumnRename {
+                        id,
+                        old_name,
+                        new_name,
+                    });
+                }
+            }
+
+            old_names
+        };
+        self.modify_table(id, rename_func)
+    }
+
+    pub fn retype_columns(
+        &self,
+        id: Felt,
+        retypes: Vec<(Felt, TypeDef)>,
+    ) -> Option<TableNameAnd<Vec<ColumnDef>>> {
+        let retype_func = |table: &mut Table| {
+            let mut retyped_columns = Vec::new();
+            for (id, new_type) in retypes.into_iter() {
+                if let Some(column) = table.columns.get(&id) {
+                    Arc::get_mut(&mut column.clone()).unwrap().type_def = new_type;
+                    retyped_columns.push(column.deref().clone());
+                }
+            }
+            Some(retyped_columns)
+        };
+        self.modify_table(id, retype_func)
+    }
+
+    pub fn drop_columns(
+        &self,
+        id: Felt,
+        column_ids: Vec<Felt>,
+    ) -> Option<TableNameAnd<Vec<IdName>>> {
+        let drop_func = |table: &mut Table| {
+            let mut dropped = Vec::new();
+            for column_id in column_ids.iter() {
+                let column = table.columns.remove(column_id)?;
+                table.order.retain(|cid| cid != column_id);
+                dropped.push(IdName {
+                    id: column_id.clone(),
+                    name: column.name.clone(),
+                });
+            }
+            Some(dropped)
+        };
+        self.modify_table(id, drop_func)
+    }
 }
 
 impl From<TableSchema> for Table {
@@ -160,6 +304,7 @@ impl From<TableSchema> for Table {
             primary: Arc::new(schema.primary),
             columns,
             order,
+            alive: true,
         }
     }
 }

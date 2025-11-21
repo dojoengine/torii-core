@@ -2,10 +2,11 @@
 //! taken from introspect crate. We may not need it, or only the URL declaration and the ID
 //! and then using the new type pattern, using the `impl_event!` on the struct.
 
+use introspect_events::database::IdName;
 use introspect_types::schema::PrimaryInfo;
 use introspect_types::{
-    Attribute, ColumnDef, ColumnInfo, Field, Primary, PrimaryDef, PrimaryValue, Record,
-    RecordValues, TableSchema,
+    Attribute, ColumnDef, ColumnInfo, Field, Primary, PrimaryDef, PrimaryTypeDef, PrimaryValue,
+    Record, RecordValues, TableSchema,
 };
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
@@ -14,7 +15,14 @@ pub const DECLARE_TABLE_URL: &str = "torii.introspect/DeclareTable@1";
 
 pub const UPDATE_TABLE_URL: &str = "torii.introspect/UpdateTable@1";
 
-pub const UPDATE_RECORD_FIELDS_URL: &str = "torii.introspect/UpdateRecordFields@1";
+pub const RENAME_TABLE_URL: &str = "torii.introspect/RenameTable@1";
+pub const RENAME_PRIMARY_URL: &str = "torii.introspect/RenamePrimary@1";
+pub const RETYPE_PRIMARY_URL: &str = "torii.introspect/RetypePrimary@1";
+pub const RENAME_COLUMNS_URL: &str = "torii.introspect/RenameColumns@1";
+pub const ADD_COLUMNS_URL: &str = "torii.introspect/AddColumns@1";
+pub const RETYPE_COLUMNS_URL: &str = "torii.introspect/RetypeColumns@1";
+pub const DROP_TABLE_URL: &str = "torii.introspect/DropTable@1";
+pub const DROP_COLUMNS_URL: &str = "torii.introspect/DropColumns@1";
 
 pub const UPDATE_FIELDS_URL: &str = "torii.introspect/UpdateFields@1";
 pub const UPDATES_FIELDS_URL: &str = "torii.introspect/UpdatesFields@1";
@@ -22,10 +30,6 @@ pub const DELETE_RECORDS_URL: &str = "torii.introspect/DeleteRecords@1";
 pub const DELETES_FIELDS_URL: &str = "torii.introspect/DeletesFields@1";
 pub const CREATE_FIELD_GROUP_URL: &str = "torii.introspect/CreateFieldGroup@1";
 pub const CREATE_TYPE_DEF_URL: &str = "torii.introspect/CreateTypeDef@1";
-pub const RENAME_TABLE_URL: &str = "torii.introspect/RenameTable@1";
-pub const RENAME_COLUMNS_URL: &str = "torii.introspect/RenameColumns@1";
-pub const DROP_TABLE_URL: &str = "torii.introspect/DropTable@1";
-pub const DROP_COLUMNS_URL: &str = "torii.introspect/DropColumns@1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeclareTableV1 {
@@ -81,6 +85,86 @@ impl From<TableSchema> for UpdateTableV1 {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameTableV1 {
+    pub id: Felt,
+    pub old_name: String,
+    pub new_name: String,
+}
+
+impl_event!(RenameTableV1, RENAME_TABLE_URL);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenamePrimaryV1 {
+    pub table: Felt,
+    pub table_name: String,
+    pub old_name: String,
+    pub new_name: String,
+}
+
+impl_event!(RenamePrimaryV1, RENAME_PRIMARY_URL);
+
+pub struct RetypePrimaryV1 {
+    pub table: Felt,
+    pub table_name: String,
+    pub name: String,
+    pub attributes: Vec<Attribute>,
+    pub type_def: PrimaryTypeDef,
+}
+
+impl_event!(RetypePrimaryV1, RETYPE_PRIMARY_URL);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnRename {
+    pub id: Felt,
+    pub old_name: String,
+    pub new_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameColumnsV1 {
+    pub table_id: Felt,
+    pub table_name: String,
+    pub columns: Vec<ColumnRename>,
+}
+
+impl_event!(RenameColumnsV1, RENAME_COLUMNS_URL);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetypeColumnsV1 {
+    pub table_id: Felt,
+    pub table_name: String,
+    pub columns: Vec<ColumnDef>,
+}
+
+impl_event!(RetypeColumnsV1, RETYPE_COLUMNS_URL);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddColumnsV1 {
+    pub table_id: Felt,
+    pub table_name: String,
+    pub columns: Vec<ColumnDef>,
+}
+
+impl_event!(AddColumnsV1, ADD_COLUMNS_URL);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DropTableV1 {
+    pub id: Felt,
+    pub name: String,
+}
+
+impl_event!(DropTableV1, DROP_TABLE_URL);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DropColumnsV1 {
+    pub table_id: Felt,
+    pub table_name: String,
+    pub columns: Vec<IdName>,
+}
+
+impl_event!(DropColumnsV1, DROP_COLUMNS_URL);
 
 impl Into<TableSchema> for UpdateTableV1 {
     fn into(self) -> TableSchema {
