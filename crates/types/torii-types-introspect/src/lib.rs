@@ -2,16 +2,15 @@
 //! taken from introspect crate. We may not need it, or only the URL declaration and the ID
 //! and then using the new type pattern, using the `impl_event!` on the struct.
 
-use introspect_events::database::IdName;
-use introspect_types::schema::PrimaryInfo;
+use introspect_events::database::{IdName, IdTypeAttributes};
 use introspect_types::{
-    Attribute, ColumnDef, ColumnInfo, Field, Primary, PrimaryDef, PrimaryTypeDef, PrimaryValue,
-    Record, RecordValues, TableSchema,
+    Attribute, ColumnDef, PrimaryDef, PrimaryTypeDef, PrimaryValue, RecordValues, TableSchema,
+    TypeDef, Value,
 };
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
 use torii_core::impl_event;
-pub const DECLARE_TABLE_URL: &str = "torii.introspect/DeclareTable@1";
+pub const CREATE_TABLE_URL: &str = "torii.introspect/CreateTable@1";
 
 pub const UPDATE_TABLE_URL: &str = "torii.introspect/UpdateTable@1";
 
@@ -32,7 +31,19 @@ pub const CREATE_FIELD_GROUP_URL: &str = "torii.introspect/CreateFieldGroup@1";
 pub const CREATE_TYPE_DEF_URL: &str = "torii.introspect/CreateTypeDef@1";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeclareTableV1 {
+pub struct IdValue {
+    pub id: Felt,
+    pub value: Value,
+}
+
+impl IdValue {
+    pub fn new(id: Felt, value: Value) -> Self {
+        Self { id, value }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateTableV1 {
     pub id: Felt,
     pub name: String,
     pub attributes: Vec<Attribute>,
@@ -40,7 +51,7 @@ pub struct DeclareTableV1 {
     pub columns: Vec<ColumnDef>,
 }
 
-impl From<TableSchema> for DeclareTableV1 {
+impl From<TableSchema> for CreateTableV1 {
     fn from(schema: TableSchema) -> Self {
         Self {
             id: schema.id,
@@ -52,7 +63,7 @@ impl From<TableSchema> for DeclareTableV1 {
     }
 }
 
-impl Into<TableSchema> for DeclareTableV1 {
+impl Into<TableSchema> for CreateTableV1 {
     fn into(self) -> TableSchema {
         TableSchema {
             id: self.id,
@@ -64,21 +75,20 @@ impl Into<TableSchema> for DeclareTableV1 {
     }
 }
 
-impl_event!(DeclareTableV1, DECLARE_TABLE_URL);
+impl_event!(CreateTableV1, CREATE_TABLE_URL);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateTableV1 {
     pub id: Felt,
-    pub name: String,
     pub attributes: Vec<Attribute>,
     pub primary: PrimaryDef,
     pub columns: Vec<ColumnDef>,
 }
+
 impl From<TableSchema> for UpdateTableV1 {
     fn from(schema: TableSchema) -> Self {
         Self {
             id: schema.id,
-            name: schema.name,
             attributes: schema.attributes,
             primary: schema.primary,
             columns: schema.columns,
@@ -89,8 +99,7 @@ impl From<TableSchema> for UpdateTableV1 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenameTableV1 {
     pub id: Felt,
-    pub old_name: String,
-    pub new_name: String,
+    pub name: String,
 }
 
 impl_event!(RenameTableV1, RENAME_TABLE_URL);
@@ -98,17 +107,13 @@ impl_event!(RenameTableV1, RENAME_TABLE_URL);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenamePrimaryV1 {
     pub table: Felt,
-    pub table_name: String,
-    pub old_name: String,
-    pub new_name: String,
+    pub name: String,
 }
 
 impl_event!(RenamePrimaryV1, RENAME_PRIMARY_URL);
 
 pub struct RetypePrimaryV1 {
     pub table: Felt,
-    pub table_name: String,
-    pub name: String,
     pub attributes: Vec<Attribute>,
     pub type_def: PrimaryTypeDef,
 }
@@ -116,34 +121,24 @@ pub struct RetypePrimaryV1 {
 impl_event!(RetypePrimaryV1, RETYPE_PRIMARY_URL);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ColumnRename {
-    pub id: Felt,
-    pub old_name: String,
-    pub new_name: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenameColumnsV1 {
-    pub table_id: Felt,
-    pub table_name: String,
-    pub columns: Vec<ColumnRename>,
+    pub table: Felt,
+    pub columns: Vec<IdName>,
 }
 
 impl_event!(RenameColumnsV1, RENAME_COLUMNS_URL);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetypeColumnsV1 {
-    pub table_id: Felt,
-    pub table_name: String,
-    pub columns: Vec<ColumnDef>,
+    pub table: Felt,
+    pub columns: Vec<IdTypeAttributes>,
 }
 
 impl_event!(RetypeColumnsV1, RETYPE_COLUMNS_URL);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddColumnsV1 {
-    pub table_id: Felt,
-    pub table_name: String,
+    pub table: Felt,
     pub columns: Vec<ColumnDef>,
 }
 
@@ -152,108 +147,65 @@ impl_event!(AddColumnsV1, ADD_COLUMNS_URL);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DropTableV1 {
     pub id: Felt,
-    pub name: String,
 }
 
 impl_event!(DropTableV1, DROP_TABLE_URL);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DropColumnsV1 {
-    pub table_id: Felt,
-    pub table_name: String,
-    pub columns: Vec<IdName>,
+    pub table: Felt,
+    pub columns: Vec<Felt>,
 }
 
 impl_event!(DropColumnsV1, DROP_COLUMNS_URL);
 
-impl Into<TableSchema> for UpdateTableV1 {
-    fn into(self) -> TableSchema {
-        TableSchema {
-            id: self.id,
-            name: self.name,
-            attributes: self.attributes,
-            primary: self.primary,
-            columns: self.columns,
-        }
-    }
+pub struct InsertFieldsV1 {
+    pub table: Felt,
+    pub primary: PrimaryValue,
+    pub fields: Vec<IdValue>,
 }
 
 impl_event!(UpdateTableV1, UPDATE_TABLE_URL);
 
-pub struct UpdateFieldsV1 {
-    pub table_id: Felt,
-    pub table_name: String,
-    pub primary: Primary,
-    pub fields: Vec<Field>,
-}
-
-impl UpdateFieldsV1 {
-    pub fn new(table_id: Felt, table_name: String, primary: Primary, fields: Vec<Field>) -> Self {
+impl InsertFieldsV1 {
+    pub fn new(table: Felt, primary: PrimaryValue, fields: Vec<IdValue>) -> Self {
         Self {
-            table_id,
-            table_name,
+            table,
             primary,
             fields,
         }
     }
 }
 
-impl From<Record> for UpdateFieldsV1 {
-    fn from(record: Record) -> Self {
-        Self {
-            table_id: record.table_id,
-            table_name: record.table_name,
-            primary: record.primary,
-            fields: record.fields,
-        }
-    }
-}
-
-impl_event!(UpdateFieldsV1, UPDATE_FIELDS_URL);
+impl_event!(InsertFieldsV1, UPDATE_FIELDS_URL);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdatesFieldsV1 {
-    pub table_id: Felt,
-    pub table_name: String,
-    pub primary: PrimaryInfo,
-    pub columns: Vec<ColumnInfo>,
+    pub table: Felt,
+    pub columns: Vec<Felt>,
     pub records: Vec<RecordValues>,
 }
 
 impl_event!(UpdatesFieldsV1, UPDATES_FIELDS_URL);
-#[derive(Debug, Clone, Serialize, Deserialize)]
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteRecordsV1 {
-    pub table_id: Felt,
-    pub table_name: String,
-    pub primary: PrimaryInfo,
+    pub table: Felt,
     pub records: Vec<PrimaryValue>,
 }
 
 impl DeleteRecordsV1 {
-    pub fn new(
-        table_id: Felt,
-        table_name: String,
-        primary: PrimaryInfo,
-        values: Vec<PrimaryValue>,
-    ) -> Self {
-        Self {
-            table_id,
-            table_name,
-            primary,
-            records: values,
-        }
+    pub fn new(table: Felt, records: Vec<PrimaryValue>) -> Self {
+        Self { table, records }
     }
 }
 
 impl_event!(DeleteRecordsV1, DELETE_RECORDS_URL);
 
 pub struct DeletesFieldsV1 {
-    pub table_id: Felt,
-    pub table_name: String,
-    pub primary: PrimaryInfo,
+    pub table: Felt,
     pub records: Vec<PrimaryValue>,
-    pub columns: Vec<ColumnInfo>,
+    pub columns: Vec<Felt>,
 }
 
 impl_event!(DeletesFieldsV1, DELETES_FIELDS_URL);
@@ -266,6 +218,6 @@ impl_event!(CreateFieldGroupV1, CREATE_FIELD_GROUP_URL);
 
 pub struct CreateTypeDefV1 {
     pub id: Felt,
-    pub type_def: introspect_types::TypeDef,
+    pub type_def: TypeDef,
 }
 impl_event!(CreateTypeDefV1, CREATE_TYPE_DEF_URL);

@@ -12,6 +12,7 @@ use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::RwLock;
 use thiserror::Error;
+use torii_types_introspect::IdValue;
 
 pub const DOJO_ID_FIELD_NAME: &str = "entity_id";
 
@@ -155,12 +156,18 @@ impl DojoTable {
         }
     }
 
-    pub fn parse_values(&self, values: Vec<Felt>) -> TableResult<Vec<Field>> {
+    pub fn parse_values(&self, values: Vec<Felt>) -> TableResult<Vec<IdValue>> {
         let mut values = values.into_iter();
         let vals = self
             .value_fields
             .iter()
-            .map(|selector| self.columns.get(selector)?.to_value(&mut values))
+            .map(|selector| {
+                self.columns
+                    .get(selector)?
+                    .type_def
+                    .to_value(&mut values)
+                    .map(|v| IdValue::new(*selector, v))
+            })
             .collect::<Option<Vec<_>>>();
 
         match values.next() {
@@ -169,7 +176,11 @@ impl DojoTable {
         }
     }
 
-    pub fn parse_key_values(&self, keys: Vec<Felt>, values: Vec<Felt>) -> TableResult<Vec<Field>> {
+    pub fn parse_key_values(
+        &self,
+        keys: Vec<Felt>,
+        values: Vec<Felt>,
+    ) -> TableResult<Vec<IdValue>> {
         let mut k = self.parse_keys(keys)?;
         let mut v = self.parse_values(values)?;
         k.append(&mut v);

@@ -897,6 +897,7 @@ dependencies = [
  "starknet-types-core",
  "thiserror 2.0.17",
  "torii-core",
+ "torii-types-introspect",
 ]
 
 [[package]]

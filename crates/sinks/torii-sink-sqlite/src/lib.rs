@@ -18,7 +18,7 @@ use torii_core::{Batch, Envelope, Event, FieldElement, Sink, SinkFactory, SinkRe
 use torii_types_erc20::TransferV1 as Erc20Transfer;
 use torii_types_erc721::TransferV1 as Erc721Transfer;
 use torii_types_introspect::{
-    DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
+    CreateTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
 };
 mod types;
 use types::{
@@ -67,11 +67,11 @@ struct TableSchema {
     storage_name: String,
     id_column: ColumnInfo,
     fields: HashMap<String, FieldSchema>,
-    declare: DeclareTableV1,
+    declare: CreateTableV1,
 }
 
 impl TableSchema {
-    fn from_declare(event: DeclareTableV1, storage_name: String) -> Result<Self> {
+    fn from_declare(event: CreateTableV1, storage_name: String) -> Result<Self> {
         if event.primary.type_def != PrimaryTypeDef::Felt252 {
             bail!(
                 "only Felt252 id fields are supported, got {:?}",
@@ -104,7 +104,7 @@ impl TableSchema {
     }
 
     fn from_update(event: &UpdateTableV1, storage_name: String) -> Result<Self> {
-        let declare = DeclareTableV1 {
+        let declare = CreateTableV1 {
             id: event.id,
             name: event.name.clone(),
             attributes: event.attributes.clone(),
@@ -331,7 +331,7 @@ impl SqliteSink {
 
         let row = row.ok_or_else(|| anyhow!("no schema found for table {}", storage_name))?;
         let schema_json: String = row.try_get("schema_json")?;
-        let declare: DeclareTableV1 = serde_json::from_str(&schema_json)?;
+        let declare: CreateTableV1 = serde_json::from_str(&schema_json)?;
         let schema = Arc::new(TableSchema::from_declare(
             declare,
             storage_name.to_string(),
@@ -347,7 +347,7 @@ impl SqliteSink {
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         env: &Envelope,
-        event: &DeclareTableV1,
+        event: &CreateTableV1,
     ) -> Result<()> {
         let storage_name = self.storage_table_name(&env.raw.from_address, event.name.as_str());
         let schema = Arc::new(TableSchema::from_declare(
@@ -603,8 +603,8 @@ impl Sink for SqliteSink {
         let mut tx = self.pool.begin().await?;
         for env in &batch.items {
             match env.type_id {
-                DeclareTableV1::TYPE_ID => {
-                    if let Some(event) = env.downcast::<DeclareTableV1>() {
+                CreateTableV1::TYPE_ID => {
+                    if let Some(event) = env.downcast::<CreateTableV1>() {
                         self.handle_declare(&mut tx, env, event).await?;
                     }
                 }

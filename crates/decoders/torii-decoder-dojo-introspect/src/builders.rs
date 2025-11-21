@@ -14,21 +14,19 @@ use starknet_types_core::felt::Felt;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use torii_core::{Envelope, Event};
-use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateFieldsV1, UpdateTableV1};
+use torii_types_introspect::{
+    CreateTableV1, DeleteRecordsV1, IdValue, InsertFieldsV1, UpdateTableV1,
+};
 
-fn make_entity_id_field(entity_id: Felt) -> Primary {
-    Primary {
-        attributes: vec![],
-        name: DOJO_ID_FIELD_NAME.to_string(),
-        value: PrimaryValue::Felt252(entity_id),
-    }
+fn make_entity_id_value(entity_id: Felt) -> PrimaryValue {
+    PrimaryValue::Felt252(entity_id)
 }
 
 fn make_entity_id_for_event(keys: &Vec<Felt>) -> Primary {
     let mut hasher = DefaultHasher::new();
     keys.hash(&mut hasher);
     let entity_id = hasher.finish();
-    make_entity_id_field(entity_id.into())
+    make_entity_id_value(entity_id.into())
 }
 
 use thiserror::Error;
@@ -87,7 +85,7 @@ where
         let table = self
             .manager
             .register_table(&event.namespace, &event.name, schema)?;
-        Ok(Into::<DeclareTableV1>::into(table).to_envelope(raw))
+        Ok(Into::<CreateTableV1>::into(table).to_envelope(raw))
     }
 
     async fn build_model_with_schema_registered(&self, raw: &EmittedEvent) -> Result<Envelope> {
@@ -97,7 +95,7 @@ where
         let table = self
             .manager
             .register_table(&event.namespace, &event.name, schema)?;
-        Ok(Into::<DeclareTableV1>::into(table).to_envelope(raw))
+        Ok(Into::<CreateTableV1>::into(table).to_envelope(raw))
     }
 
     async fn build_model_upgraded(&self, raw: &EmittedEvent) -> Result<Envelope> {
@@ -113,7 +111,7 @@ where
         let table = self
             .manager
             .register_table(&event.namespace, &event.name, schema)?;
-        Ok(Into::<DeclareTableV1>::into(table).to_envelope(raw))
+        Ok(Into::<CreateTableV1>::into(table).to_envelope(raw))
     }
 
     async fn build_event_upgraded(&self, raw: &EmittedEvent) -> Result<Envelope> {
@@ -125,54 +123,51 @@ where
 
     fn build_set_record(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<StoreSetRecord>(raw)?;
-        let id_field = make_entity_id_field(event.entity_id);
+        let id_field = make_entity_id_value(event.entity_id);
         let (table_id, table_name, fields) = self.with_table(event.selector, |table| {
             let fields = table.parse_key_values(event.keys.clone(), event.values.clone())?;
             Ok((table.id, table.name.clone(), fields))
         })?;
-        let data = UpdateFieldsV1::new(table_id, table_name, id_field, fields);
-        Ok(data.to_envelope(raw))
+        let data = InsertFieldsV1::new(table_id, PrimaryValue::Felt252(event.entity_id), fields);
+        data.to_ok_envelope(raw)
     }
 
     fn build_update_record(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<StoreUpdateRecord>(raw)?;
-        let id_field = make_entity_id_field(event.entity_id);
-        let (table_id, table_name, fields) = self.with_table(event.selector, |table| {
-            let fields = table.parse_values(event.values)?;
-            Ok((table.id, table.name.clone(), fields))
-        })?;
-        let data = UpdateFieldsV1::new(table_id, table_name, id_field, fields);
-        Ok(data.to_envelope(raw))
+        let id_field = make_entity_id_value(event.entity_id);
+        let fields = self.with_table(event.selector, |table| table.parse_values(event.values))?;
+        let data = InsertFieldsV1::new(
+            event.selector,
+            PrimaryValue::Felt252(event.entity_id),
+            fields,
+        );
+        data.to_ok_envelope(raw)
     }
 
     fn build_update_member(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<StoreUpdateMember>(raw)?;
-        let id_field = make_entity_id_field(event.entity_id);
-        let (table_id, table_name, field) = self.with_table(event.selector, |table| {
-            let field = table.parse_field(event.member_selector, event.values)?;
-            Ok((table.id, table.name.clone(), field))
+        let field = self.with_table(event.selector, |table| {
+            table.parse_field(event.member_selector, event.values)
         })?;
 
-        let data = UpdateFieldsV1::new(table_id, table_name, id_field, vec![field]);
-        Ok(data.to_envelope(raw))
+        let data = InsertFieldsV1::new(
+            event.selector,
+            PrimaryValue::Felt252(event.entity_id),
+            vec![field],
+        );
+        data.to_ok_envelope(raw)
     }
 
     fn build_del_record(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<StoreDelRecord>(raw)?;
         let (table_id, table_name) =
             self.with_table(event.selector, |table| Ok((table.id, table.name.clone())))?;
-        let data = DeleteRecordsV1::new(
-            table_id,
-            table_name,
-            primary_field_info(),
-            vec![PrimaryValue::Felt252(event.entity_id)],
-        );
-        Ok(data.to_envelope(raw))
+        let data = DeleteRecordsV1::new(table_id, vec![PrimaryValue::Felt252(event.entity_id)]);
+        data.to_ok_envelope(raw)
     }
 
     fn build_emit_event(&self, raw: &EmittedEvent) -> Result<Envelope> {
         let event = raw_event_to_event::<EventEmitted>(raw)?;
-        let id_field = make_entity_id_for_event(&event.keys);
         let (table_id, table_name, fields) = self.with_table(event.selector, |table| {
             let fields = match table.parse_key_values(event.keys.clone(), event.values.clone()) {
                 Ok(fields) => fields,
@@ -185,9 +180,13 @@ where
                     return Err(DojoEventBuilderError::TableError(e));
                 }
             };
-            Ok((table.id, table.name.clone(), fields))
+            Ok(fields)
         })?;
-        let data = UpdateFieldsV1::new(table_id, table_name, id_field, fields);
-        Ok(data.to_envelope(raw))
+        let data = InsertFieldsV1::new(
+            event.selector,
+            PrimaryValue::Felt252(event.entity_id),
+            fields,
+        );
+        data.to_ok_envelope(raw)
     }
 }

@@ -1,23 +1,17 @@
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::sync::{Arc, RwLock};
 
 use introspect_events::database::{IdData, IdName};
-use introspect_types::schema::SchemaInfo;
 use introspect_types::{
-    Attribute, ColumnDef, ColumnInfo, DerefDefTrait, FeltIterator, Field, GetRefTypeDef, Primary,
-    PrimaryDef, PrimaryTypeDef, Record, RecordValues, TableSchema, ToValue, TypeDef, Value,
+    Attribute, ColumnDef, ColumnInfo, GetRefTypeDef, PrimaryDef, PrimaryTypeDef, PrimaryValue,
+    RecordValues, TableSchema, ToValue, TypeDef,
 };
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
-use torii_types_introspect::ColumnRename;
+use torii_types_introspect::IdValue;
 
 pub enum Error {}
-
-pub struct TableNameAnd<T> {
-    pub table_name: String,
-    pub value: T,
-}
 
 pub trait StoreTrait {
     fn dump_table(&self, table: &Table);
@@ -114,7 +108,7 @@ where
         Some(table.clone())
     }
 
-    pub fn modify_table<F, R>(&self, id: Felt, f: F) -> Option<TableNameAnd<R>>
+    pub fn modify_table<F, R>(&self, id: Felt, f: F) -> Option<R>
     where
         F: FnOnce(&mut Table) -> Option<R>,
     {
@@ -124,10 +118,7 @@ where
         let table = Arc::make_mut(&mut table_ref);
         let result = f(table)?;
         manager.store.dump_table(&table);
-        Some(TableNameAnd {
-            table_name: table.name.clone(),
-            value: result,
-        })
+        Some(result)
     }
 
     pub fn schema(&self, id: Felt, columns: &[Felt]) -> Option<SchemaRef> {
@@ -175,7 +166,7 @@ where
         let mut manager = self.write().unwrap();
     }
 
-    pub fn rename_table(&self, id: Felt, new_name: String) -> Option<TableNameAnd<()>> {
+    pub fn rename_table(&self, id: Felt, new_name: String) -> Option<()> {
         let rename_func = |table: &mut Table| {
             std::mem::replace(&mut table.name, new_name);
             Some(())
@@ -183,11 +174,7 @@ where
         self.modify_table(id, rename_func)
     }
 
-    pub fn rename_primary(
-        &self,
-        id: Felt,
-        new_primary_name: String,
-    ) -> Option<TableNameAnd<String>> {
+    pub fn rename_primary(&self, id: Felt, new_primary_name: String) -> Option<String> {
         let rename_func = |table: &mut Table| {
             Some(std::mem::replace(
                 &mut Arc::get_mut(&mut table.primary).unwrap().name,
@@ -202,7 +189,7 @@ where
         id: Felt,
         attributes: Vec<Attribute>,
         type_def: PrimaryTypeDef,
-    ) -> Option<TableNameAnd<String>> {
+    ) -> Option<String> {
         let retype_func = |table: &mut Table| {
             let primary = Arc::get_mut(&mut table.primary).unwrap();
             primary.attributes = attributes;
@@ -212,7 +199,7 @@ where
         self.modify_table(id, retype_func)
     }
 
-    pub fn add_columns(&self, id: Felt, columns: Vec<ColumnDef>) -> Option<TableNameAnd<()>> {
+    pub fn add_columns(&self, id: Felt, columns: Vec<ColumnDef>) -> Option<()> {
         let add_func = |table: &mut Table| {
             for column in columns.into_iter() {
                 table.order.push(column.id);
@@ -223,11 +210,7 @@ where
         self.modify_table(id, add_func)
     }
 
-    pub fn rename_columns(
-        &self,
-        id: Felt,
-        renames: Vec<(Felt, String)>,
-    ) -> Option<TableNameAnd<Vec<ColumnRename>>> {
+    pub fn rename_columns(&self, id: Felt, renames: Vec<(Felt, String)>) -> Option<Vec<IdName>> {
         let rename_func = |table: &mut Table| {
             let mut old_names = Vec::new();
             for (id, new_name) in renames.into_iter() {
@@ -236,11 +219,7 @@ where
                         &mut Arc::get_mut(&mut column.clone()).unwrap().name,
                         new_name.clone(),
                     );
-                    old_names.push(ColumnRename {
-                        id,
-                        old_name,
-                        new_name,
-                    });
+                    old_names.push(IdName { id, name: new_name });
                 }
             }
 
@@ -253,7 +232,7 @@ where
         &self,
         id: Felt,
         retypes: Vec<(Felt, TypeDef)>,
-    ) -> Option<TableNameAnd<Vec<ColumnDef>>> {
+    ) -> Option<Vec<ColumnDef>> {
         let retype_func = |table: &mut Table| {
             let mut retyped_columns = Vec::new();
             for (id, new_type) in retypes.into_iter() {
@@ -267,11 +246,7 @@ where
         self.modify_table(id, retype_func)
     }
 
-    pub fn drop_columns(
-        &self,
-        id: Felt,
-        column_ids: Vec<Felt>,
-    ) -> Option<TableNameAnd<Vec<IdName>>> {
+    pub fn drop_columns(&self, id: Felt, column_ids: Vec<Felt>) -> Option<Vec<IdName>> {
         let drop_func = |table: &mut Table| {
             let mut dropped = Vec::new();
             for column_id in column_ids.iter() {
@@ -358,13 +333,16 @@ pub struct SchemaRef {
     pub columns: Vec<Arc<ColumnDef>>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RecordFields {
+    pub primary: PrimaryValue,
+    pub fields: Vec<IdValue>,
+}
+
 impl SchemaRef {
-    pub fn to_record<'a>(&self, primary: Felt, data: Vec<Felt>) -> Option<Record> {
+    pub fn to_record<'a>(&self, primary: Felt, data: Vec<Felt>) -> Option<RecordFields> {
         let mut data = data.into_iter();
-        Some(Record {
-            table_id: self.id.clone(),
-            table_name: self.name.clone(),
-            attributes: self.attributes.deref().clone(),
+        Some(RecordFields {
             primary: self.primary.to_primary(primary)?,
             fields: self.columns.to_value(&mut data)?,
         })
@@ -389,13 +367,7 @@ impl SchemaRef {
             .collect()
     }
 
-    pub fn to_info(&self) -> SchemaInfo {
-        SchemaInfo {
-            table_id: self.id.clone(),
-            table_name: self.name.clone(),
-            attributes: self.attributes.deref().clone(),
-            primary: self.primary.to_primary_info(),
-            columns: self.columns.iter().map(ColumnInfo::from).collect(),
-        }
+    pub fn columns(&self) -> Vec<Felt> {
+        self.columns.iter().map(|col| col.id.clone()).collect()
     }
 }

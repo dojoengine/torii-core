@@ -7,7 +7,7 @@ use std::fs;
 use std::fs::create_dir_all;
 use std::path::PathBuf;
 use torii_core::{Batch, Envelope, Event, Sink};
-use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1};
+use torii_types_introspect::{CreateTableV1, DeleteRecordsV1, UpdateRecordFieldsV1};
 
 const TABLE_DIR: &str = "tables";
 const RECORD_DIR: &str = "records";
@@ -122,7 +122,7 @@ impl JsonSink {
 
     pub fn handle_declare_table(&self, envelope: &Envelope) -> Result<()> {
         let event = envelope
-            .downcast::<DeclareTableV1>()
+            .downcast::<CreateTableV1>()
             .context("Failed to downcast envelope to DeclareTableV1")?;
         create_dir_all(self.record_path.join(&event.name)).ok();
         let path = self.table_path(&event.name);
@@ -154,7 +154,7 @@ impl JsonSink {
 
     pub fn handle_envelope(&self, envelope: &Envelope) -> Result<()> {
         let type_id = envelope.type_id;
-        if type_id == DeclareTableV1::TYPE_ID {
+        if type_id == CreateTableV1::TYPE_ID {
             self.handle_declare_table(envelope)?;
         } else if type_id == UpdateRecordFieldsV1::TYPE_ID {
             self.handle_update_record_fields(envelope)?;

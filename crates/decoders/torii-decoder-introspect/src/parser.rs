@@ -2,7 +2,7 @@ use std::vec;
 
 use crate::IntrospectEventReader;
 use crate::fetcher::{SchemaFetcherTrait, TableClass};
-use crate::manager::{SchemaRef, StoreTrait, TableNameAnd};
+use crate::manager::{SchemaRef, StoreTrait};
 use introspect_events::database::{
     AddColumn, AddColumns, CreateColumnGroup, CreateTable, CreateTableFromClassHash,
     CreateTableWithColumns, DeleteField, DeleteFieldGroup, DeleteFieldGroups, DeleteFields,
@@ -19,9 +19,9 @@ use starknet_types_core::felt::Felt;
 use thiserror::Error;
 use torii_core::{Envelope, Event};
 use torii_types_introspect::{
-    AddColumnsV1, CreateFieldGroupV1, DeclareTableV1, DeleteRecordsV1, DeletesFieldsV1,
-    DropColumnsV1, DropTableV1, RenameColumnsV1, RenamePrimaryV1, RenameTableV1, RetypeColumnsV1,
-    RetypePrimaryV1, UpdateFieldsV1, UpdatesFieldsV1,
+    AddColumnsV1, CreateFieldGroupV1, CreateTableV1, DeleteRecordsV1, DeletesFieldsV1,
+    DropColumnsV1, DropTableV1, InsertFieldsV1, RenameColumnsV1, RenamePrimaryV1, RenameTableV1,
+    RetypeColumnsV1, RetypePrimaryV1, UpdatesFieldsV1,
 };
 
 #[derive(Debug, Error)]
@@ -358,62 +358,37 @@ where
     fn add_columns_msg(
         &self,
         raw: &EmittedEvent,
-        table_id: Felt,
+        table: Felt,
         columns: Vec<ColumnDef>,
     ) -> Result<Envelope> {
-        let TableNameAnd {
-            table_name,
-            value: _,
-        } = self
-            .manager
-            .add_columns(table_id, columns.clone())
+        self.manager
+            .add_columns(table, columns.clone())
             .ok_or(Error::SchemaNotFound)?;
-        AddColumnsV1 {
-            table_id,
-            table_name,
-            columns,
-        }
-        .to_ok_envelope(raw)
+        AddColumnsV1 { table, columns }.to_ok_envelope(raw)
     }
     fn drop_columns_msg(
         &self,
         raw: &EmittedEvent,
-        table_id: Felt,
+        table: Felt,
         columns: Vec<Felt>,
     ) -> Result<Envelope> {
-        let TableNameAnd {
-            table_name,
-            value: columns,
-        } = self
+        let columns = self
             .manager
-            .drop_columns(table_id, columns.clone())
+            .drop_columns(table, columns.clone())
             .ok_or(Error::SchemaNotFound)?;
-        DropColumnsV1 {
-            table_id,
-            table_name,
-            columns,
-        }
-        .to_ok_envelope(raw)
+        DropColumnsV1 { table, columns }.to_ok_envelope(raw)
     }
     fn rename_columns_msg(
         &self,
         raw: &EmittedEvent,
-        table_id: Felt,
+        table: Felt,
         renames: Vec<(Felt, String)>,
     ) -> Result<Envelope> {
-        let TableNameAnd {
-            table_name,
-            value: columns,
-        } = self
+        let columns = self
             .manager
-            .rename_columns(table_id, renames.clone())
+            .rename_columns(table, renames.clone())
             .ok_or(Error::SchemaNotFound)?;
-        RenameColumnsV1 {
-            table_id,
-            table_name,
-            columns,
-        }
-        .to_ok_envelope(raw)
+        RenameColumnsV1 { table, columns }.to_ok_envelope(raw)
     }
     fn retype_columns_msg(
         &self,
@@ -421,19 +396,11 @@ where
         table: Felt,
         retypes: Vec<(Felt, TypeDef)>,
     ) -> Result<Envelope> {
-        let TableNameAnd {
-            table_name,
-            value: columns,
-        } = self
+        let columns = self
             .manager
             .retype_columns(table, retypes.clone())
             .ok_or(Error::SchemaNotFound)?;
-        RetypeColumnsV1 {
-            table_id: table,
-            table_name,
-            columns,
-        }
-        .to_ok_envelope(raw)
+        RetypeColumnsV1 { table, columns }.to_ok_envelope(raw)
     }
     fn update_fields_msg(
         &self,
@@ -444,39 +411,33 @@ where
         data: Vec<Felt>,
     ) -> Result<Envelope> {
         let schema = self._schema(table, columns)?;
-        UpdateFieldsV1::from(schema.to_record(record, data).ok_or(Error::ParseError)?)
+        InsertFieldsV1::from(schema.to_record(record, data).ok_or(Error::ParseError)?)
             .to_ok_envelope(raw)
     }
 
     fn delete_records_msg(
         &self,
         raw: &EmittedEvent,
-        table_id: Felt,
+        table: Felt,
         records: &[Felt],
     ) -> Result<Envelope> {
-        let table = self.manager.table(table_id).ok_or(Error::SchemaNotFound)?;
+        let table = self.manager.table(table).ok_or(Error::SchemaNotFound)?;
         let records = records
             .iter()
             .map(|id| table.primary.to_primary_value(*id))
             .collect::<Option<Vec<_>>>()
             .ok_or(Error::ParseError)?;
-        DeleteRecordsV1 {
-            table_id,
-            table_name: table.name.clone(),
-            primary: table.primary.to_primary_info(),
-            records,
-        }
-        .to_ok_envelope(raw)
+        DeleteRecordsV1 { table, records }.to_ok_envelope(raw)
     }
 
     fn delete_fields_msg(
         &self,
         raw: &EmittedEvent,
-        table_id: Felt,
+        table: Felt,
         records: &[Felt],
         columns: &[Felt],
     ) -> Result<Envelope> {
-        let table = self.manager.table(table_id).ok_or(Error::SchemaNotFound)?;
+        let table = self.manager.table(table).ok_or(Error::SchemaNotFound)?;
         let records = records
             .iter()
             .map(|id| table.primary.to_primary_value(*id))
@@ -484,9 +445,7 @@ where
             .ok_or(Error::ParseError)?;
         let columns = table.columns_info(columns).ok_or(Error::ParseError)?;
         DeletesFieldsV1 {
-            table_id,
-            table_name: table.name.clone(),
-            primary: table.primary.to_primary_info(),
+            table,
             columns,
             records,
         }
@@ -501,16 +460,14 @@ where
         records_data: Vec<IdData>,
     ) -> Result<Envelope> {
         let schema = self._schema(table, columns)?;
-        let record_values = schema
+        let records = schema
             .to_records_values(records_data)
             .ok_or(Error::ParseError)?;
-        let info = schema.to_info();
+        let columns = schema.columns();
         UpdatesFieldsV1 {
-            table_id: info.table_id,
-            table_name: info.table_name,
-            primary: info.primary,
-            columns: info.columns,
-            records: record_values,
+            table,
+            columns,
+            records,
         }
         .to_ok_envelope(raw)
     }
@@ -545,7 +502,7 @@ where
             vec![],
         );
         self.manager.create_table(schema.clone());
-        DeclareTableV1::from(schema).to_ok_envelope(raw)
+        CreateTableV1::from(schema).to_ok_envelope(raw)
     }
     async fn create_table_with_columns(
         &self,
@@ -562,7 +519,7 @@ where
             event.columns,
         );
         self.manager.create_table(schema.clone());
-        DeclareTableV1::from(schema).to_ok_envelope(raw)
+        CreateTableV1::from(schema).to_ok_envelope(raw)
     }
     async fn create_table_from_class_hash(
         &self,
@@ -588,7 +545,7 @@ where
             columns,
         };
         self.manager.create_table(schema.clone());
-        DeclareTableV1::from(schema).to_ok_envelope(raw)
+        CreateTableV1::from(schema).to_ok_envelope(raw)
     }
     async fn rename_table(
         &self,
@@ -597,17 +554,12 @@ where
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
         let event: RenameTable = self.deserialize_event(keys, data)?;
-        let TableNameAnd {
-            table_name: old_name,
-            value: _,
-        } = self
-            .manager
+        self.manager
             .rename_table(event.id, event.name.clone())
             .ok_or(Error::SchemaNotFound)?;
         RenameTableV1 {
             id: event.id,
-            old_name,
-            new_name: event.name,
+            name: event.name,
         }
         .to_ok_envelope(raw)
     }
@@ -622,7 +574,7 @@ where
             .manager
             .drop_table(event.id)
             .ok_or(Error::SchemaNotFound)?;
-        DropTableV1 { id: event.id, name }.to_ok_envelope(raw)
+        DropTableV1 { id: event.id }.to_ok_envelope(raw)
     }
     async fn rename_primary(
         &self,
@@ -631,15 +583,12 @@ where
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
         let event: RenamePrimary = self.deserialize_event(keys, data)?;
-        let TableNameAnd { table_name, value } = self
-            .manager
+        self.manager
             .rename_primary(event.table, event.name.clone())
             .ok_or(Error::SchemaNotFound)?;
         RenamePrimaryV1 {
             table: event.table,
-            table_name,
-            old_name: value,
-            new_name: event.name,
+            name: event.name,
         }
         .to_ok_envelope(raw)
     }
@@ -650,8 +599,7 @@ where
         data: &mut FeltIterator,
     ) -> Result<Envelope> {
         let event: RetypePrimary = self.deserialize_event(keys, data)?;
-        let TableNameAnd { table_name, value } = self
-            .manager
+        self.manager
             .retype_primary(
                 event.table,
                 event.attributes.clone(),
@@ -660,8 +608,6 @@ where
             .ok_or(Error::SchemaNotFound)?;
         RetypePrimaryV1 {
             table: event.table,
-            table_name,
-            name: value,
             attributes: event.attributes,
             type_def: event.type_def,
         }

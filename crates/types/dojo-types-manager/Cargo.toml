@@ -12,6 +12,7 @@ torii-core = { path = "../../core/torii-core" }
 starknet-types-core.workspace = true
 dojo-introspect-utils.workspace = true
 dojo-introspect-types.workspace = true
+torii-types-introspect.workspace = true
 introspect-types.workspace = true
 introspect-events.workspace = true
 serde_json.workspace = true

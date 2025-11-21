@@ -11,9 +11,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
 use torii_core::{Batch, Event, Sink};
-use torii_types_introspect::{
-    DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
-};
+use torii_types_introspect::{CreateTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1};
 
 #[derive(Debug, Error)]
 pub enum PostgresSinkError {
@@ -80,7 +78,7 @@ impl PostgresSink {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         raw: Arc<EmittedEvent>,
-        event: &DeclareTableV1,
+        event: &CreateTableV1,
     ) -> Result<()> {
         let table_name = &event.name;
         let queries = self
@@ -207,8 +205,8 @@ impl Sink for PostgresSink {
         let mut tx = self.pool.begin().await?;
 
         for env in &batch.items {
-            if env.type_id == DeclareTableV1::TYPE_ID {
-                if let Some(event) = env.downcast::<DeclareTableV1>() {
+            if env.type_id == CreateTableV1::TYPE_ID {
+                if let Some(event) = env.downcast::<CreateTableV1>() {
                     println!("{}", event.name);
                     match self
                         .handle_declare_table(&mut tx, env.raw.clone(), event)
