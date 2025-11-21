@@ -2,6 +2,7 @@ use dojo_introspect_types::{DojoSchema, IsDojoKey};
 use introspect_types::schema::PrimaryInfo;
 use introspect_types::{
     Attribute, ColumnDef, FeltIterator, Field, PrimaryDef, PrimaryTypeDef, TableSchema, ToValue,
+    Value,
 };
 use serde::{Deserialize, Serialize};
 use starknet::core::utils::NonAsciiNameError;
@@ -141,12 +142,18 @@ impl DojoTable {
         }
     }
 
-    pub fn parse_keys(&self, keys: Vec<Felt>) -> TableResult<Vec<Field>> {
+    pub fn parse_keys(&self, keys: Vec<Felt>) -> TableResult<Vec<IdValue>> {
         let mut keys = keys.into_iter();
         let values = self
             .key_fields
             .iter()
-            .map(|selector| self.columns.get(selector)?.to_value(&mut keys))
+            .map(|selector| {
+                self.columns
+                    .get(selector)?
+                    .type_def
+                    .to_value(&mut keys)
+                    .map(|v| IdValue::new(*selector, v))
+            })
             .collect::<Option<Vec<_>>>();
         match keys.next() {
             None => {
@@ -187,13 +194,14 @@ impl DojoTable {
         Ok(k)
     }
 
-    pub fn parse_field(&self, selector: Felt, data: Vec<Felt>) -> TableResult<Field> {
+    pub fn parse_field(&self, selector: Felt, data: Vec<Felt>) -> TableResult<Value> {
         let mut data = data.into_iter();
-        let field_def = self
+        let column_def = self
             .columns
             .get(&selector)
             .ok_or_else(|| DojoTableErrors::FieldNotFound(selector, self.name.clone()))?;
-        let field = field_def
+        let field = column_def
+            .type_def
             .to_value(&mut data)
             .ok_or_else(|| DojoTableErrors::FieldParseError(selector, self.name.clone()))?;
         match data.next() {
