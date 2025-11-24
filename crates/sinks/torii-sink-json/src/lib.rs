@@ -7,7 +7,7 @@ use std::fs;
 use std::fs::create_dir_all;
 use std::path::PathBuf;
 use torii_core::{Batch, Envelope, Event, Sink};
-use torii_types_introspect::{CreateTableV1, DeleteRecordsV1, UpdateRecordFieldsV1};
+use torii_types_introspect::{CreateTableV1, DeleteRecordsV1, InsertFieldsV1};
 
 const TABLE_DIR: &str = "tables";
 const RECORD_DIR: &str = "records";

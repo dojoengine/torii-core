@@ -17,6 +17,7 @@ members = [
     "crates/types/torii-types-erc20",
     "crates/types/torii-types-erc721",
     "crates/types/dojo-types-manager",
+    "crates/types/torii-introspect-manager",
     "bins/*",
     "tests/*",
 ]

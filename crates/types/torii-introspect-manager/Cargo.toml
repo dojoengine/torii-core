@@ -1,0 +1,21 @@
+[package]
+name = "torii-introspect-manager"
+version = "0.1.0"
+edition = "2021"
+description = "Event type manager for Dojo"
+authors = ["Torii Runtime <dev@torii.rs>"]
+license = "Apache-2.0"
+
+[dependencies]
+serde.workspace = true
+torii-core = { path = "../../core/torii-core" }
+starknet-types-core.workspace = true
+dojo-introspect-utils.workspace = true
+dojo-introspect-types.workspace = true
+torii-types-introspect.workspace = true
+introspect-types.workspace = true
+introspect-events.workspace = true
+serde_json.workspace = true
+starknet.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true

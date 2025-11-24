@@ -4283,6 +4283,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "torii-introspect-manager"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dojo-introspect-types",
+ "dojo-introspect-utils",
+ "introspect-events",
+ "introspect-types",
+ "serde",
+ "serde_json",
+ "starknet",
+ "starknet-types-core",
+ "thiserror 2.0.17",
+ "torii-core",
+ "torii-types-introspect",
+]
+
+[[package]]
 name = "torii-json-test"
 version = "0.1.0"
 dependencies = [
