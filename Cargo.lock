@@ -1741,7 +1741,7 @@ dependencies = [
 [[package]]
 name = "introspect-events"
 version = "0.1.2"
-source = "git+https://github.com/cartridge-gg/introspect?branch=next-2#f824859cbb0f891c3fc9fda7644d1c7fae688a45"
+source = "git+https://github.com/cartridge-gg/introspect?branch=next-2#432957c4263be3c142a501f1dd53ec30bf5e2325"
 dependencies = [
  "cainome-cairo-serde",
  "introspect-types",
@@ -1753,7 +1753,7 @@ dependencies = [
 [[package]]
 name = "introspect-types"
 version = "0.1.2"
-source = "git+https://github.com/cartridge-gg/introspect?branch=next-2#f824859cbb0f891c3fc9fda7644d1c7fae688a45"
+source = "git+https://github.com/cartridge-gg/introspect?branch=next-2#432957c4263be3c142a501f1dd53ec30bf5e2325"
 dependencies = [
  "cainome-cairo-serde",
  "convert_case 0.8.0",
@@ -4951,7 +4951,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

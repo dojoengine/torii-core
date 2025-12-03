@@ -14,7 +14,7 @@ use starknet_types_core::felt::Felt;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use torii_core::{Envelope, Event};
-use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateFieldsV1, UpdateTableV1};
+use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, InsertFieldsV1, UpdateTableV1};
 
 fn make_entity_id_field(entity_id: Felt) -> Primary {
     Primary {
@@ -130,7 +130,7 @@ where
             let fields = table.parse_key_values(event.keys.clone(), event.values.clone())?;
             Ok((table.id, table.name.clone(), fields))
         })?;
-        let data = UpdateFieldsV1::new(table_id, table_name, id_field, fields);
+        let data = InsertFieldsV1::new(table_id, table_name, id_field, fields);
         Ok(data.to_envelope(raw))
     }
 
@@ -141,7 +141,7 @@ where
             let fields = table.parse_values(event.values)?;
             Ok((table.id, table.name.clone(), fields))
         })?;
-        let data = UpdateFieldsV1::new(table_id, table_name, id_field, fields);
+        let data = InsertFieldsV1::new(table_id, table_name, id_field, fields);
         Ok(data.to_envelope(raw))
     }
 
@@ -153,7 +153,7 @@ where
             Ok((table.id, table.name.clone(), field))
         })?;
 
-        let data = UpdateFieldsV1::new(table_id, table_name, id_field, vec![field]);
+        let data = InsertFieldsV1::new(table_id, table_name, id_field, vec![field]);
         Ok(data.to_envelope(raw))
     }
 
@@ -187,7 +187,7 @@ where
             };
             Ok((table.id, table.name.clone(), fields))
         })?;
-        let data = UpdateFieldsV1::new(table_id, table_name, id_field, fields);
+        let data = InsertFieldsV1::new(table_id, table_name, id_field, fields);
         Ok(data.to_envelope(raw))
     }
 }

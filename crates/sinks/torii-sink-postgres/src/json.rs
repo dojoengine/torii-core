@@ -5,7 +5,7 @@ use serde_json::Value::{
 };
 use serde_json::{Map, Value as JsonValue};
 use starknet_types_core::felt::Felt;
-use torii_types_introspect::UpdateRecordFieldsV1;
+use torii_types_introspect::InsertFieldsV1;
 
 use crate::types::parse_variant_name;
 
@@ -45,7 +45,7 @@ pub trait ToPostgresJson {
     fn to_postgres_json(&self) -> JsonValue;
 }
 
-impl ToPostgresJson for UpdateRecordFieldsV1 {
+impl ToPostgresJson for InsertFieldsV1  {
     fn to_postgres_json(&self) -> JsonValue {
         let mut map = Map::new();
         map.insert(

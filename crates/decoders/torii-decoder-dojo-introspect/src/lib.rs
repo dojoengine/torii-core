@@ -18,9 +18,7 @@ use torii_core::{
     ContractBinding, ContractFilter, Decoder, DecoderFactory, DecoderFilter, Envelope, Event,
     FieldElement,
 };
-use torii_types_introspect::{
-    DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
-};
+use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, InsertFieldsV1, UpdateTableV1};
 mod builders;
 use builders::DojoEventBuilder;
 
@@ -42,7 +40,7 @@ const DOJO_EVENT_IDS: [u64; 4] = [
     DeclareTableV1::TYPE_ID,
     UpdateTableV1::TYPE_ID,
     DeleteRecordsV1::TYPE_ID,
-    UpdateRecordFieldsV1::TYPE_ID,
+    InsertFieldsV1::TYPE_ID,
 ];
 
 /// Cairo selectors of the events to be processed by this decoder.

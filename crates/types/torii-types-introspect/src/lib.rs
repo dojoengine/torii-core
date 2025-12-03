@@ -24,8 +24,8 @@ pub const RETYPE_COLUMNS_URL: &str = "torii.introspect/RetypeColumns@1";
 pub const DROP_TABLE_URL: &str = "torii.introspect/DropTable@1";
 pub const DROP_COLUMNS_URL: &str = "torii.introspect/DropColumns@1";
 
-pub const UPDATE_FIELDS_URL: &str = "torii.introspect/UpdateFields@1";
-pub const UPDATES_FIELDS_URL: &str = "torii.introspect/UpdatesFields@1";
+pub const INSERT_FIELDS_URL: &str = "torii.introspect/InsertFields@1";
+pub const INSERTS_FIELDS_URL: &str = "torii.introspect/InsertsFields@1";
 pub const DELETE_RECORDS_URL: &str = "torii.introspect/DeleteRecords@1";
 pub const DELETES_FIELDS_URL: &str = "torii.introspect/DeletesFields@1";
 pub const CREATE_FIELD_GROUP_URL: &str = "torii.introspect/CreateFieldGroup@1";
@@ -180,14 +180,14 @@ impl Into<TableSchema> for UpdateTableV1 {
 
 impl_event!(UpdateTableV1, UPDATE_TABLE_URL);
 
-pub struct UpdateFieldsV1 {
+pub struct InsertFieldsV1 {
     pub table_id: Felt,
     pub table_name: String,
     pub primary: Primary,
     pub fields: Vec<Field>,
 }
 
-impl UpdateFieldsV1 {
+impl InsertFieldsV1 {
     pub fn new(table_id: Felt, table_name: String, primary: Primary, fields: Vec<Field>) -> Self {
         Self {
             table_id,
@@ -198,7 +198,7 @@ impl UpdateFieldsV1 {
     }
 }
 
-impl From<Record> for UpdateFieldsV1 {
+impl From<Record> for InsertFieldsV1 {
     fn from(record: Record) -> Self {
         Self {
             table_id: record.table_id,
@@ -209,10 +209,10 @@ impl From<Record> for UpdateFieldsV1 {
     }
 }
 
-impl_event!(UpdateFieldsV1, UPDATE_FIELDS_URL);
+impl_event!(InsertFieldsV1, INSERT_FIELDS_URL);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdatesFieldsV1 {
+pub struct InsertsFieldsV1 {
     pub table_id: Felt,
     pub table_name: String,
     pub primary: PrimaryInfo,
@@ -220,7 +220,7 @@ pub struct UpdatesFieldsV1 {
     pub records: Vec<RecordValues>,
 }
 
-impl_event!(UpdatesFieldsV1, UPDATES_FIELDS_URL);
+impl_event!(InsertsFieldsV1, INSERTS_FIELDS_URL);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 
 pub struct DeleteRecordsV1 {

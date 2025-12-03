@@ -17,9 +17,7 @@ use torii_core::format::felt_to_padded_hex;
 use torii_core::{Batch, Envelope, Event, FieldElement, Sink, SinkFactory, SinkRegistry};
 use torii_types_erc20::TransferV1 as Erc20Transfer;
 use torii_types_erc721::TransferV1 as Erc721Transfer;
-use torii_types_introspect::{
-    DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
-};
+use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, InsertFieldsV1, UpdateTableV1};
 mod types;
 use types::{
     ColumnInfo, ColumnValue, SqliteType, collect_columns, field_values, sanitize_identifier,
@@ -402,7 +400,7 @@ impl SqliteSink {
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         env: &Envelope,
-        event: &UpdateRecordFieldsV1,
+        event: &InsertFieldsV1,
     ) -> Result<()> {
         let storage_name =
             self.storage_table_name(&env.raw.from_address, event.table_name.as_str());
@@ -613,8 +611,8 @@ impl Sink for SqliteSink {
                         self.handle_update_table(&mut tx, env, event).await?;
                     }
                 }
-                UpdateRecordFieldsV1::TYPE_ID => {
-                    if let Some(event) = env.downcast::<UpdateRecordFieldsV1>() {
+                InsertFieldsV1::TYPE_ID => {
+                    if let Some(event) = env.downcast::<InsertFieldsV1>() {
                         self.handle_update_record(&mut tx, env, event).await?;
                     }
                 }

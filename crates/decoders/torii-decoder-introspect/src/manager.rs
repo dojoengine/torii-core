@@ -1,47 +1,49 @@
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use introspect_events::database::{IdData, IdName};
 use introspect_types::schema::SchemaInfo;
 use introspect_types::{
-    Attribute, ColumnDef, ColumnInfo, DerefDefTrait, FeltIterator, Field, GetRefTypeDef, Primary,
-    PrimaryDef, PrimaryTypeDef, Record, RecordValues, TableSchema, ToValue, TypeDef, Value,
+    Attribute, ColumnDef, ColumnInfo, PrimaryDef, PrimaryTypeDef, Record, RecordValues,
+    TableSchema, ToValue, TypeDef,
 };
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
 use torii_types_introspect::ColumnRename;
 
-pub enum Error {}
+use crate::store::StoreTrait;
 
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Store(#[from] crate::store::Error),
+    #[error("Failed to deserialize value: {0}")]
+    ValueDeserializeError(String),
+    #[error("Table {0} lock poisoned")]
+    TableLockPoisoned(Felt),
+    #[error("Manager lock poisoned")]
+    ManagerLockPoisoned,
+    #[error("Table not found for id: {0}")]
+    TableNotFound(Felt),
+    #[error("Column not found for id: {0}")]
+    ColumnNotFound(Felt),
+    #[error("Type not found for id: {0}")]
+    TypeNotFound(Felt),
+    #[error("Group not found for id: {0}")]
+    GroupNotFound(Felt),
+}
+pub type Result<T> = std::result::Result<T, Error>;
 pub struct TableNameAnd<T> {
     pub table_name: String,
     pub value: T,
 }
 
-pub trait StoreTrait {
-    fn dump_table(&self, table: &Table);
-
-    fn load_table(&self, id: Felt) -> Option<Table>;
-    fn load_all_tables(&self) -> Vec<Table>;
-
-    fn dump_type(&self, id: Felt, type_def: &TypeDef);
-    fn dump_types(&self, types: &[(Felt, TypeDef)]);
-
-    fn load_type(&self, id: Felt) -> Option<TypeDef>;
-    fn load_types(&self, ids: &[Felt]) -> Option<Vec<TypeDef>>;
-    fn load_all_types(&self) -> Vec<(Felt, TypeDef)>;
-
-    fn dump_group(&self, id: Felt, columns: &[Felt]);
-    fn dump_groups(&self, groups: &[(Felt, Vec<Felt>)]);
-
-    fn load_group(&self, id: Felt) -> Option<Vec<Felt>>;
-    fn load_groups(&self, ids: &[Felt]) -> Option<Vec<Vec<Felt>>>;
-    fn load_all_groups(&self) -> Vec<(Felt, Vec<Felt>)>;
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Table {
+pub struct Table
+where
+    Self: Sized + Send + Sync + 'static,
+{
     pub id: Felt,
     pub name: String,
     pub attributes: Arc<Vec<Attribute>>,
@@ -53,7 +55,7 @@ pub struct Table {
 
 pub struct ManagerInner<Store>
 where
-    Store: Send + Sync,
+    Store: Send + Sync + 'static,
 {
     pub tables: HashMap<Felt, RwLock<Arc<Table>>>,
     pub types: HashMap<Felt, TypeDef>,
@@ -61,27 +63,41 @@ where
     pub store: Store,
 }
 
-impl<Store> GetRefTypeDef for ManagerInner<Store>
+// impl<Store> GetRefTypeDef for ManagerInner<Store>
+// where
+//     Store: Send + Sync,
+// {
+//     fn get_type_def(&self, id: Felt) -> Option<TypeDef> {
+//         if let Some(type_def_lock) = self.types.get(&id) {
+//             if let Ok(type_def) = type_def_lock.read() {
+//                 return Some(type_def.clone());
+//             }
+//         }
+//         None
+//     }
+// }
+
+impl<Store> ManagerInner<Store>
 where
-    Store: Send + Sync,
+    Store: Send + Sync + 'static,
 {
-    fn get_type_def(&self, id: Felt) -> Option<TypeDef> {
-        if let Some(type_def_lock) = self.types.get(&id) {
-            if let Ok(type_def) = type_def_lock.read() {
-                return Some(type_def.clone());
-            }
-        }
-        None
+    pub fn table(&self, id: Felt) -> Result<Arc<Table>> {
+        let table_lock = self.tables.get(&id).ok_or(Error::TableNotFound(id))?;
+        let table = table_lock
+            .read()
+            .map_err(|_| Error::TableLockPoisoned(id))?
+            .clone();
+        Ok(table)
     }
 }
 
 pub struct Manager<Store>(pub RwLock<ManagerInner<Store>>)
 where
-    Store: Send + Sync;
+    Store: Send + Sync + 'static;
 
 impl<Store> Deref for Manager<Store>
 where
-    Store: Send + Sync,
+    Store: Send + Sync + 'static,
 {
     type Target = RwLock<ManagerInner<Store>>;
     fn deref(&self) -> &Self::Target {
@@ -91,7 +107,7 @@ where
 
 impl<Store> Manager<Store>
 where
-    Store: StoreTrait + Send + Sync,
+    Store: StoreTrait + Send + Sync + 'static,
 {
     pub fn new(store: Store) -> Self {
         Self(RwLock::new(ManagerInner {
@@ -105,80 +121,101 @@ where
 
 impl<Store> Manager<Store>
 where
-    Store: StoreTrait + Send + Sync,
+    Store: StoreTrait + Send + Sync + 'static,
 {
-    pub fn table(&self, id: Felt) -> Option<Arc<Table>> {
-        let manager = self.read().unwrap();
-        let table_lock = manager.tables.get(&id)?;
-        let table = table_lock.read().unwrap();
-        Some(table.clone())
+    pub fn table(&self, id: Felt) -> Result<Arc<Table>> {
+        let manager = self.manager()?;
+        Ok(manager.table(id)?)
     }
 
-    pub fn modify_table<F, R>(&self, id: Felt, f: F) -> Option<TableNameAnd<R>>
+    pub fn manager_mut<'rwlock>(
+        &'rwlock self,
+    ) -> Result<RwLockWriteGuard<'rwlock, ManagerInner<Store>>> {
+        self.write().map_err(|_| Error::ManagerLockPoisoned)
+    }
+
+    pub fn manager(&self) -> Result<RwLockReadGuard<'_, ManagerInner<Store>>> {
+        self.read().map_err(|_| Error::ManagerLockPoisoned)
+    }
+
+    pub fn modify_table<'rwlock, F, R>(&'rwlock self, id: Felt, f: F) -> Result<TableNameAnd<R>>
     where
-        F: FnOnce(&mut Table) -> Option<R>,
+        F: FnOnce(&mut Table) -> Result<R>,
     {
-        let manager = self.read().unwrap();
-        let table_lock = manager.tables.get(&id)?;
-        let mut table_ref = table_lock.write().unwrap();
+        let manager = self.manager()?;
+        let table_lock = manager.tables.get(&id).ok_or(Error::TableNotFound(id))?;
+        let mut table_ref = table_lock
+            .write()
+            .map_err(|_| Error::TableLockPoisoned(id))?;
         let table = Arc::make_mut(&mut table_ref);
         let result = f(table)?;
-        manager.store.dump_table(&table);
-        Some(TableNameAnd {
+        manager.store.dump_table(&table)?;
+        Ok(TableNameAnd {
             table_name: table.name.clone(),
             value: result,
         })
     }
 
-    pub fn schema(&self, id: Felt, columns: &[Felt]) -> Option<SchemaRef> {
-        self.table(id)?.schema_ref(columns)
+    pub fn schema(&self, id: Felt, columns: &[Felt]) -> Result<SchemaRef> {
+        self.table(id)?
+            .schema_ref(columns)
+            .ok_or(Error::ColumnNotFound(id))
     }
 
-    pub fn full_schema(&self, id: Felt) -> Option<SchemaRef> {
-        self.table(id)?.full_schema_ref()
+    pub fn full_schema(&self, id: Felt) -> Result<SchemaRef> {
+        self.table(id)?
+            .full_schema_ref()
+            .ok_or(Error::ColumnNotFound(id))
     }
 
-    pub fn group(&self, id: Felt) -> Option<Vec<Felt>> {
-        let manager = self.read().unwrap();
-        manager.groups.get(&id).map(Clone::clone)
+    pub fn group(&self, id: Felt) -> Result<Vec<Felt>> {
+        self.manager()?
+            .groups
+            .get(&id)
+            .ok_or(Error::GroupNotFound(id))
+            .cloned()
     }
 
-    pub fn add_column_group(&self, id: Felt, columns: Vec<Felt>) {
-        let mut manager = self.write().unwrap();
-        manager.store.dump_group(id, &columns);
+    pub fn add_column_group(&self, id: Felt, columns: Vec<Felt>) -> Result<()> {
+        let mut manager = self.manager_mut()?;
+        manager.store.dump_group(id, &columns)?;
         manager.groups.insert(id, columns);
+        Ok(())
     }
 
-    pub fn create_type_def(&mut self, id: Felt, type_def: TypeDef) {
-        let mut manager = self.write().unwrap();
-        manager.store.dump_type(id, &type_def);
+    pub fn create_type_def(&mut self, id: Felt, type_def: TypeDef) -> Result<()> {
+        let mut manager = self.manager_mut()?;
+        manager.store.dump_type(id, &type_def)?;
         manager.types.insert(id, type_def);
+        Ok(())
     }
 
-    pub fn create_table(&self, schema: TableSchema) {
-        let mut manager = self.write().unwrap();
+    pub fn create_table(&self, schema: TableSchema) -> Result<()> {
+        let mut manager = self.manager_mut()?;
         let table: Table = schema.into();
-        manager.store.dump_table(&table);
+        manager.store.dump_table(&table)?;
         manager
             .tables
             .insert(table.id.clone(), RwLock::new(table.into()));
+        Ok(())
     }
 
-    fn dump_table(&self, id: Felt) -> Option<()> {
-        let manager = self.read().unwrap();
-        manager.store.dump_table(self.table(id)?.as_ref());
-        Some(())
+    pub fn drop_table(&self, id: Felt) -> Result<String> {
+        let mut manager = self.manager_mut()?;
+        manager.store.remove_table(id)?;
+        let table = manager.tables.remove(&id).ok_or(Error::TableNotFound(id))?;
+        let name = table
+            .read()
+            .map_err(|_| Error::TableLockPoisoned(id))?
+            .name
+            .clone();
+        Ok(name)
     }
 
-    pub fn drop_table(&self, id: Felt) -> Option<String> {
-        // TODO: implement drop in store
-        let mut manager = self.write().unwrap();
-    }
-
-    pub fn rename_table(&self, id: Felt, new_name: String) -> Option<TableNameAnd<()>> {
+    pub fn rename_table(&self, id: Felt, new_name: String) -> Result<TableNameAnd<()>> {
         let rename_func = |table: &mut Table| {
-            std::mem::replace(&mut table.name, new_name);
-            Some(())
+            table.name = new_name;
+            Ok(())
         };
         self.modify_table(id, rename_func)
     }
@@ -187,9 +224,9 @@ where
         &self,
         id: Felt,
         new_primary_name: String,
-    ) -> Option<TableNameAnd<String>> {
+    ) -> Result<TableNameAnd<String>> {
         let rename_func = |table: &mut Table| {
-            Some(std::mem::replace(
+            Ok(std::mem::replace(
                 &mut Arc::get_mut(&mut table.primary).unwrap().name,
                 new_primary_name,
             ))
@@ -202,23 +239,23 @@ where
         id: Felt,
         attributes: Vec<Attribute>,
         type_def: PrimaryTypeDef,
-    ) -> Option<TableNameAnd<String>> {
+    ) -> Result<TableNameAnd<String>> {
         let retype_func = |table: &mut Table| {
             let primary = Arc::get_mut(&mut table.primary).unwrap();
             primary.attributes = attributes;
             primary.type_def = type_def;
-            Some(primary.name.clone())
+            Ok(primary.name.clone())
         };
         self.modify_table(id, retype_func)
     }
 
-    pub fn add_columns(&self, id: Felt, columns: Vec<ColumnDef>) -> Option<TableNameAnd<()>> {
+    pub fn add_columns(&self, id: Felt, columns: Vec<ColumnDef>) -> Result<TableNameAnd<()>> {
         let add_func = |table: &mut Table| {
             for column in columns.into_iter() {
                 table.order.push(column.id);
                 table.columns.insert(column.id, Arc::new(column));
             }
-            Some(())
+            Ok(())
         };
         self.modify_table(id, add_func)
     }
@@ -227,7 +264,7 @@ where
         &self,
         id: Felt,
         renames: Vec<(Felt, String)>,
-    ) -> Option<TableNameAnd<Vec<ColumnRename>>> {
+    ) -> Result<TableNameAnd<Vec<ColumnRename>>> {
         let rename_func = |table: &mut Table| {
             let mut old_names = Vec::new();
             for (id, new_name) in renames.into_iter() {
@@ -244,7 +281,7 @@ where
                 }
             }
 
-            old_names
+            Ok(old_names)
         };
         self.modify_table(id, rename_func)
     }
@@ -253,7 +290,7 @@ where
         &self,
         id: Felt,
         retypes: Vec<(Felt, TypeDef)>,
-    ) -> Option<TableNameAnd<Vec<ColumnDef>>> {
+    ) -> Result<TableNameAnd<Vec<ColumnDef>>> {
         let retype_func = |table: &mut Table| {
             let mut retyped_columns = Vec::new();
             for (id, new_type) in retypes.into_iter() {
@@ -262,7 +299,7 @@ where
                     retyped_columns.push(column.deref().clone());
                 }
             }
-            Some(retyped_columns)
+            Ok(retyped_columns)
         };
         self.modify_table(id, retype_func)
     }
@@ -271,18 +308,21 @@ where
         &self,
         id: Felt,
         column_ids: Vec<Felt>,
-    ) -> Option<TableNameAnd<Vec<IdName>>> {
+    ) -> Result<TableNameAnd<Vec<IdName>>> {
         let drop_func = |table: &mut Table| {
             let mut dropped = Vec::new();
             for column_id in column_ids.iter() {
-                let column = table.columns.remove(column_id)?;
+                let column = table
+                    .columns
+                    .remove(column_id)
+                    .ok_or(Error::ColumnNotFound(id))?;
                 table.order.retain(|cid| cid != column_id);
                 dropped.push(IdName {
                     id: column_id.clone(),
                     name: column.name.clone(),
                 });
             }
-            Some(dropped)
+            Ok(dropped)
         };
         self.modify_table(id, drop_func)
     }

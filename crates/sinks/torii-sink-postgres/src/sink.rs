@@ -1,9 +1,7 @@
 use crate::TableManager;
 use crate::json::ToPostgresJson;
 use crate::manager::TableManagerError;
-use crate::value::PostgresValueError;
 use async_trait::async_trait;
-use introspect_types::TableSchema;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Transaction};
 use starknet::core::types::EmittedEvent;
@@ -11,9 +9,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
 use torii_core::{Batch, Event, Sink};
-use torii_types_introspect::{
-    DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1,
-};
+use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, InsertFieldsV1, UpdateTableV1};
 
 #[derive(Debug, Error)]
 pub enum PostgresSinkError {
@@ -25,8 +21,6 @@ pub enum PostgresSinkError {
     MigrationError(#[from] sqlx::migrate::MigrateError),
     #[error("Json error: {0}")]
     JsonError(#[from] serde_json::Error),
-    #[error("Postgres value error: {0}")]
-    PostgresValueError(#[from] PostgresValueError),
     #[error("Table manager error: {0}")]
     TableManagerError(#[from] TableManagerError),
 }
@@ -128,7 +122,7 @@ impl PostgresSink {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         raw: Arc<EmittedEvent>,
-        event: &UpdateRecordFieldsV1,
+        event: &InsertFieldsV1,
     ) -> Result<()> {
         let table_name = &event.table_name;
         let primary_key_name = event.primary.name.clone();
@@ -179,7 +173,7 @@ impl PostgresSink {
         sqlx::query(&format!(
             r#"DELETE FROM "{}" WHERE "{}" IN ({})"#,
             event.table_name,
-            event.primary_name,
+            event.primary.name,
             formatted_values?.join(", ")
         ))
         .execute(&mut **tx)
@@ -236,8 +230,8 @@ impl Sink for PostgresSink {
                         }
                     }
                 }
-            } else if env.type_id == UpdateRecordFieldsV1::TYPE_ID {
-                if let Some(event) = env.downcast::<UpdateRecordFieldsV1>() {
+            } else if env.type_id == InsertFieldsV1::TYPE_ID {
+                if let Some(event) = env.downcast::<InsertFieldsV1>() {
                     match self
                         .handle_update_record(&mut tx, env.raw.clone(), event)
                         .await

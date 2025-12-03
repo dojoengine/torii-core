@@ -7,7 +7,7 @@ use std::fs;
 use std::fs::create_dir_all;
 use std::path::PathBuf;
 use torii_core::{Batch, Envelope, Event, Sink};
-use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, UpdateRecordFieldsV1};
+use torii_types_introspect::{DeclareTableV1, DeleteRecordsV1, InsertFieldsV1};
 
 const TABLE_DIR: &str = "tables";
 const RECORD_DIR: &str = "records";
@@ -133,10 +133,10 @@ impl JsonSink {
         Ok(())
     }
 
-    pub fn handle_update_record_fields(&self, envelope: &Envelope) -> Result<()> {
+    pub fn handle_insert_fields(&self, envelope: &Envelope) -> Result<()> {
         let event = envelope
-            .downcast::<UpdateRecordFieldsV1>()
-            .context("Failed to downcast envelope to UpdateRecordFieldsV1")?;
+            .downcast::<InsertFieldsV1>()
+            .context("Failed to downcast envelope to InsertFieldsV1")?;
         let path = self.record_path(&event.table_name, &event.primary.value.to_string());
 
         let data = if path.exists() {
@@ -156,8 +156,8 @@ impl JsonSink {
         let type_id = envelope.type_id;
         if type_id == DeclareTableV1::TYPE_ID {
             self.handle_declare_table(envelope)?;
-        } else if type_id == UpdateRecordFieldsV1::TYPE_ID {
-            self.handle_update_record_fields(envelope)?;
+        } else if type_id == InsertFieldsV1::TYPE_ID {
+            self.handle_insert_fields(envelope)?;
         } else if type_id == DeleteRecordsV1::TYPE_ID {
             self.handle_delete_records(envelope)?;
         } else {

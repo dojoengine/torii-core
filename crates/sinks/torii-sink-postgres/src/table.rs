@@ -7,8 +7,8 @@ use crate::types::variant_member_name;
 use crate::{HasherExt, PgRustEnum, PgStructDef, PostgresField, PostgresType};
 use introspect_types::type_def::TypeName;
 use introspect_types::{
-    ColumnDef, EnumDef, FixedArrayDef, MemberDef, PrimaryDef, PrimaryTypeDef, StructDef, TupleDef,
-    TypeDef, VariantDef,
+    ArrayDef, ColumnDef, EnumDef, FixedArrayDef, MemberDef, PrimaryDef, PrimaryTypeDef, StructDef,
+    TupleDef, TypeDef, VariantDef,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};
@@ -328,7 +328,7 @@ impl PgTableSchema {
                 Ok(None)
             }
             (PgArray(elem_type, _), Array(new_elem_type)) => self
-                .compare_type(branch, name, elem_type, new_elem_type, queries)
+                .compare_type(branch, name, elem_type, &new_elem_type.type_def, queries)
                 .map(|s| s.map(|t| PgArray(Box::new(t), None))),
             (PgArray(elem_type, Some(size)), FixedArray(new_def)) => {
                 if new_def.size >= *size {
@@ -390,7 +390,7 @@ impl PgTableSchema {
         &self,
         branch: &Xxh3,
         name: &str,
-        new: &[TypeDef],
+        new: &TupleDef,
         queries: &mut Vec<String>,
     ) -> Result<()> {
         let tuple_lock = {
@@ -401,7 +401,7 @@ impl PgTableSchema {
                 .clone()
         };
         let mut tuple_def = tuple_lock.write()?;
-        for (i, new_type) in new.iter().enumerate() {
+        for (i, new_type) in new.elements.iter().enumerate() {
             let part_name = format!("_{i}");
             if i >= tuple_def.len() {
                 let type_def = new_type.extract_type(branch, self, queries)?;
@@ -538,10 +538,7 @@ impl PostgresTypeExtractor for TypeDef {
             TypeDef::Bytes31 | TypeDef::Bytes31E(_) => Ok(PostgresType::Bytes31),
             TypeDef::Tuple(type_defs) => type_defs.extract_type(branch, schema, queries),
             TypeDef::Enum(enum_def) => enum_def.extract_type(branch, schema, queries),
-            TypeDef::Array(array_def) => Ok(PostgresType::Array(
-                Box::new(array_def.extract_type(branch, schema, queries)?),
-                None,
-            )),
+            TypeDef::Array(array_def) => array_def.extract_type(branch, schema, queries),
             TypeDef::FixedArray(fixed_array_def) => {
                 fixed_array_def.extract_type(branch, schema, queries)
             }
@@ -646,6 +643,18 @@ impl PostgresTypeExtractor for EnumDef {
     }
 }
 
+impl PostgresTypeExtractor for ArrayDef {
+    fn extract_type(
+        &self,
+        branch: &Xxh3,
+        schema: &PgTableSchema,
+        queries: &mut Vec<String>,
+    ) -> Result<PostgresType> {
+        let elem_type = self.type_def.extract_type(branch, schema, queries)?;
+        Ok(PostgresType::Array(Box::new(elem_type), None))
+    }
+}
+
 impl PostgresTypeExtractor for TupleDef {
     fn extract_type(
         &self,
@@ -654,6 +663,7 @@ impl PostgresTypeExtractor for TupleDef {
         queries: &mut Vec<String>,
     ) -> Result<PostgresType> {
         let variants = self
+            .elements
             .iter()
             .enumerate()
             .map(|(i, type_def)| {

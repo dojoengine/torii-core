@@ -1,4 +1,6 @@
-use crate::manager::{Manager, StoreTrait};
+use crate::fetcher::SchemaFetcherTrait;
+use crate::manager::Manager;
+use crate::store::StoreTrait;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use introspect_events::database::{
@@ -18,6 +20,7 @@ use torii_core::{Decoder, DecoderFilter, Envelope};
 mod fetcher;
 mod manager;
 mod parser;
+mod store;
 
 const DECODER_NAME: &str = "introspect";
 
@@ -33,71 +36,72 @@ const DOJO_EVENT_IDS: [u64; 0] = [];
 // }
 
 /// Implementation of the introspect decoder.
-pub struct IntrospectEventReader<F, M>
+pub struct IntrospectEventReader<Store, F>
 where
-    M: ManagerTrait + Send + Sync + 'static,
+    Store: StoreTrait + Send + Sync + 'static,
+    F: Send + Sync + 'static,
 {
     pub filter: DecoderFilter,
-    pub manager: M,
+    pub manager: Manager<Store>,
     pub fetcher: F,
 }
 
-impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
-    /// Builds the decoder from a configuration.
-    fn from_config(cfg: IntrospectDecoderConfig, contracts: Vec<ContractBinding>) -> Result<Self> {
-        if contracts.is_empty() {
-            return Err(anyhow!(
-                "introspect decoder requires at least one contract binding"
-            ));
-        }
+// impl IntrospectDecoder<JsonRpcClient<HttpTransport>> {
+//     /// Builds the decoder from a configuration.
+//     fn from_config(cfg: IntrospectDecoderConfig, contracts: Vec<ContractBinding>) -> Result<Self> {
+//         if contracts.is_empty() {
+//             return Err(anyhow!(
+//                 "introspect decoder requires at least one contract binding"
+//             ));
+//         }
 
-        let mut contract_addresses = HashSet::default();
-        let mut selectors = HashSet::default();
-        for selector in DOJO_CAIRO_EVENT_SELECTORS {
-            selectors.insert(selector);
-        }
-        let mut address_selectors = HashMap::new();
-        for binding in contracts {
-            contract_addresses.insert(binding.address);
-            let entry =
-                address_selectors
-                    .entry(binding.address)
-                    .or_insert_with(|| ContractFilter {
-                        selectors: HashSet::new(),
-                        deployed_at_block: binding.deployed_at_block,
-                    });
-            entry.selectors.extend(selectors.iter().copied());
-            if let Some(block) = binding.deployed_at_block {
-                entry.deployed_at_block = match entry.deployed_at_block {
-                    Some(existing) => Some(existing.min(block)),
-                    None => Some(block),
-                };
-            }
-        }
-        let provider = JsonRpcClient::new(HttpTransport::new(cfg.rpc_url));
+//         let mut contract_addresses = HashSet::default();
+//         let mut selectors = HashSet::default();
+//         for selector in DOJO_CAIRO_EVENT_SELECTORS {
+//             selectors.insert(selector);
+//         }
+//         let mut address_selectors = HashMap::new();
+//         for binding in contracts {
+//             contract_addresses.insert(binding.address);
+//             let entry =
+//                 address_selectors
+//                     .entry(binding.address)
+//                     .or_insert_with(|| ContractFilter {
+//                         selectors: HashSet::new(),
+//                         deployed_at_block: binding.deployed_at_block,
+//                     });
+//             entry.selectors.extend(selectors.iter().copied());
+//             if let Some(block) = binding.deployed_at_block {
+//                 entry.deployed_at_block = match entry.deployed_at_block {
+//                     Some(existing) => Some(existing.min(block)),
+//                     None => Some(block),
+//                 };
+//             }
+//         }
+//         let provider = JsonRpcClient::new(HttpTransport::new(cfg.rpc_url));
 
-        let store = JsonStore::new(&cfg.store_path);
+//         let store = JsonStore::new(&cfg.store_path);
 
-        let manager = DojoManager::new(store)?;
-        let filter = DecoderFilter {
-            contract_addresses,
-            selectors,
-            address_selectors,
-        };
+//         let manager = DojoManager::new(store)?;
+//         let filter = DecoderFilter {
+//             contract_addresses,
+//             selectors,
+//             address_selectors,
+//         };
 
-        Ok(Self {
-            filter,
-            manager,
-            fetcher: provider,
-        })
-    }
-}
+//         Ok(Self {
+//             filter,
+//             manager,
+//             fetcher: provider,
+//         })
+//     }
+// }
 
 #[async_trait]
-impl<F, M> Decoder for IntrospectEventReader<F, M>
+impl<Store, F> Decoder for IntrospectEventReader<Store, F>
 where
-    F: Fetcher + Sync + Send + 'static,
-    M: ManagerTrait + Send + Sync + 'static,
+    F: SchemaFetcherTrait + Sync + Send + 'static,
+    Store: StoreTrait + Send + Sync + 'static,
 {
     fn name(&self) -> &'static str {
         DECODER_NAME
@@ -125,52 +129,69 @@ where
     }
 
     async fn decode(&self, event: &EmittedEvent) -> Result<Envelope> {
-        let mut keys = event.keys.into_iter();
-        let mut data = event.data.into_iter();
+        let mut keys = event.keys.clone().into_iter();
+        let mut data = event.data.clone().into_iter();
         let selector = keys.next().expect("event selector is required");
         // Felts are non structural types, so we can't use a match statement directly.
         // TODO: check if using hashmap would be better.
-        let result = match selector {
-            CreateColumnGroup::SELECTOR => self.create_column_group(event, &mut keys, &mut data),
-            CreateTable::SELECTOR => self.create_table(event, &mut keys, &mut data),
-            CreateTableWithColumns::SELECTOR => {
+        let result = match selector.to_raw() {
+            CreateColumnGroup::SELECTOR_RAW => {
+                self.create_column_group(event, &mut keys, &mut data).await
+            }
+            CreateTable::SELECTOR_RAW => self.create_table(event, &mut keys, &mut data).await,
+            CreateTableWithColumns::SELECTOR_RAW => {
                 self.create_table_with_columns(event, &mut keys, &mut data)
+                    .await
             }
-            CreateTableFromClassHash::SELECTOR => {
+            CreateTableFromClassHash::SELECTOR_RAW => {
                 self.create_table_from_class_hash(event, &mut keys, &mut data)
+                    .await
             }
-            RenameTable::SELECTOR => self.rename_table(event, &mut keys, &mut data),
-            DropTable::SELECTOR => self.drop_table(event, &mut keys, &mut data),
-            RenamePrimary::SELECTOR => self.rename_primary(event, &mut keys, &mut data),
-            RetypePrimary::SELECTOR => self.retype_primary(event, &mut keys, &mut data),
-            AddColumn::SELECTOR => self.add_column(event, &mut keys, &mut data),
-            AddColumns::SELECTOR => self.add_columns(event, &mut keys, &mut data),
-            RenameColumn::SELECTOR => self.rename_column(event, &mut keys, &mut data),
-            RenameColumns::SELECTOR => self.rename_columns(event, &mut keys, &mut data),
-            RetypeColumn::SELECTOR => self.retype_column(event, &mut keys, &mut data),
-            RetypeColumns::SELECTOR => self.retype_columns(event, &mut keys, &mut data),
-            DropColumn::SELECTOR => self.drop_column(event, &mut keys, &mut data),
-            DropColumns::SELECTOR => self.drop_columns(event, &mut keys, &mut data),
-            InsertRecord::SELECTOR => self.insert_record(event, &mut keys, &mut data),
-            InsertRecords::SELECTOR => self.insert_records(event, &mut keys, &mut data),
-            InsertField::SELECTOR => self.insert_field(event, &mut keys, &mut data),
-            InsertFields::SELECTOR => self.insert_fields(event, &mut keys, &mut data),
-            InsertsField::SELECTOR => self.inserts_field(event, &mut keys, &mut data),
-            InsertsFields::SELECTOR => self.inserts_fields(event, &mut keys, &mut data),
-            InsertFieldGroup::SELECTOR => self.insert_field_group(event, &mut keys, &mut data),
-            InsertFieldGroups::SELECTOR => self.insert_field_groups(event, &mut keys, &mut data),
-            InsertsFieldGroup::SELECTOR => self.inserts_field_group(event, &mut keys, &mut data),
-            InsertsFieldGroups::SELECTOR => self.inserts_field_groups(event, &mut keys, &mut data),
-            DeleteRecord::SELECTOR => self.delete_record(event, &mut keys, &mut data),
-            DeleteRecords::SELECTOR => self.delete_records(event, &mut keys, &mut data),
-            DeleteField::SELECTOR => self.delete_field(event, &mut keys, &mut data),
-            DeleteFields::SELECTOR => self.delete_fields(event, &mut keys, &mut data),
-            DeletesField::SELECTOR => self.deletes_field(event, &mut keys, &mut data),
-            DeletesFields::SELECTOR => self.deletes_fields(event, &mut keys, &mut data),
-            DeleteFieldGroup::SELECTOR => self.delete_field_group(event, &mut keys, &mut data),
-            DeleteFieldGroups::SELECTOR => self.delete_field_groups(event, &mut keys, &mut data),
-            DeletesFieldGroup::SELECTOR => self.deletes_field_group(event, &mut keys, &mut data),
-            DeletesFieldGroups::SELECTOR => self.deletes_field_groups(event, &mut keys, &mut data),
+            RenameTable::SELECTOR_RAW => self.rename_table(event, &mut keys, &mut data).await,
+            DropTable::SELECTOR_RAW => self.drop_table(event, &mut keys, &mut data).await,
+            RenamePrimary::SELECTOR_RAW => self.rename_primary(event, &mut keys, &mut data).await,
+            RetypePrimary::SELECTOR_RAW => self.retype_primary(event, &mut keys, &mut data).await,
+            AddColumn::SELECTOR_RAW => self.add_column(event, &mut keys, &mut data).await,
+            AddColumns::SELECTOR_RAW => self.add_columns(event, &mut keys, &mut data).await,
+            RenameColumn::SELECTOR_RAW => self.rename_column(event, &mut keys, &mut data).await,
+            RenameColumns::SELECTOR_RAW => self.rename_columns(event, &mut keys, &mut data).await,
+            RetypeColumn::SELECTOR_RAW => self.retype_column(event, &mut keys, &mut data).await,
+            RetypeColumns::SELECTOR_RAW => self.retype_columns(event, &mut keys, &mut data).await,
+            DropColumn::SELECTOR_RAW => self.drop_column(event, &mut keys, &mut data).await,
+            DropColumns::SELECTOR_RAW => self.drop_columns(event, &mut keys, &mut data).await,
+            InsertRecord::SELECTOR_RAW => self.insert_record(event, &mut keys, &mut data),
+            InsertRecords::SELECTOR_RAW => self.insert_records(event, &mut keys, &mut data),
+            InsertField::SELECTOR_RAW => self.insert_field(event, &mut keys, &mut data),
+            InsertFields::SELECTOR_RAW => self.insert_fields(event, &mut keys, &mut data),
+            InsertsField::SELECTOR_RAW => self.inserts_field(event, &mut keys, &mut data),
+            InsertsFields::SELECTOR_RAW => self.inserts_fields(event, &mut keys, &mut data),
+            InsertFieldGroup::SELECTOR_RAW => self.insert_field_group(event, &mut keys, &mut data),
+            InsertFieldGroups::SELECTOR_RAW => {
+                self.insert_field_groups(event, &mut keys, &mut data)
+            }
+            InsertsFieldGroup::SELECTOR_RAW => {
+                self.inserts_field_group(event, &mut keys, &mut data)
+            }
+            InsertsFieldGroups::SELECTOR_RAW => {
+                self.inserts_field_groups(event, &mut keys, &mut data)
+            }
+            DeleteRecord::SELECTOR_RAW => self.delete_record(event, &mut keys, &mut data),
+            DeleteRecords::SELECTOR_RAW => self.delete_records(event, &mut keys, &mut data),
+            DeleteField::SELECTOR_RAW => self.delete_field(event, &mut keys, &mut data),
+            DeleteFields::SELECTOR_RAW => self.delete_fields(event, &mut keys, &mut data),
+            DeletesField::SELECTOR_RAW => self.deletes_field(event, &mut keys, &mut data),
+            DeletesFields::SELECTOR_RAW => self.deletes_fields(event, &mut keys, &mut data),
+            DeleteFieldGroup::SELECTOR_RAW => self.delete_field_group(event, &mut keys, &mut data),
+            DeleteFieldGroups::SELECTOR_RAW => {
+                self.delete_field_groups(event, &mut keys, &mut data)
+            }
+            DeletesFieldGroup::SELECTOR_RAW => {
+                self.deletes_field_group(event, &mut keys, &mut data)
+            }
+            DeletesFieldGroups::SELECTOR_RAW => {
+                self.deletes_field_groups(event, &mut keys, &mut data)
+            }
+            _ => Err(anyhow!("unrecognized event selector: {}", selector))?,
         };
         match result {
             Ok(envelope) => Ok(envelope),
