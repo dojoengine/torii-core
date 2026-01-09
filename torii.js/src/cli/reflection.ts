@@ -1,17 +1,6 @@
 import { generateClientCode, type ServiceDefinition, type GeneratorOptions } from './generator';
-
-interface ReflectionResponse {
-  listServicesResponse?: {
-    service: Array<{ name: string }>;
-  };
-  fileDescriptorResponse?: {
-    fileDescriptorProto: Uint8Array[];
-  };
-  errorResponse?: {
-    errorCode: number;
-    errorMessage: string;
-  };
-}
+import { fromBinary } from '@bufbuild/protobuf';
+import { FileDescriptorProtoSchema, type FileDescriptorProto } from '@bufbuild/protobuf/wkt';
 
 export async function generateFromReflection(
   serverUrl: string,
@@ -47,21 +36,13 @@ export async function generateFromReflection(
 }
 
 async function listServices(serverUrl: string): Promise<string[]> {
-  const response = await callReflection(serverUrl, {
-    listServices: '',
-  });
+  const request = createListServicesRequest();
+  const response = await callReflection(serverUrl, request);
 
-  if (response.errorResponse) {
-    throw new Error(
-      `Reflection error: ${response.errorResponse.errorMessage}`
-    );
-  }
+  const services: string[] = [];
+  parseListServicesResponse(response, services);
 
-  if (!response.listServicesResponse?.service) {
-    throw new Error('No services returned from reflection');
-  }
-
-  return response.listServicesResponse.service.map((s) => s.name);
+  return services;
 }
 
 async function getServiceDefinition(
@@ -69,25 +50,37 @@ async function getServiceDefinition(
   serviceName: string
 ): Promise<ServiceDefinition | null> {
   try {
-    const response = await callReflection(serverUrl, {
-      fileContainingSymbol: serviceName,
-    });
+    const request = createFileContainingSymbolRequest(serviceName);
+    const response = await callReflection(serverUrl, request);
 
-    if (response.errorResponse) {
-      console.warn(
-        `Warning: Could not get definition for ${serviceName}: ${response.errorResponse.errorMessage}`
-      );
-      return null;
+    const fileDescriptors = parseFileDescriptorResponse(response);
+
+    for (const fd of fileDescriptors) {
+      for (const service of fd.service) {
+        const fullName = fd.package ? `${fd.package}.${service.name}` : service.name;
+        if (fullName === serviceName) {
+          return {
+            name: service.name,
+            fullName,
+            package: fd.package,
+            methods: service.method.map((m) => ({
+              name: m.name,
+              inputType: m.inputType.split('.').pop() || m.inputType,
+              outputType: m.outputType.split('.').pop() || m.outputType,
+              clientStreaming: m.clientStreaming ?? false,
+              serverStreaming: m.serverStreaming ?? false,
+            })),
+          };
+        }
+      }
     }
 
+    // Fallback: return service without methods if not found in descriptors
     const parts = serviceName.split('.');
-    const name = parts[parts.length - 1];
-    const packageName = parts.slice(0, -1).join('.');
-
     return {
-      name,
+      name: parts[parts.length - 1],
       fullName: serviceName,
-      package: packageName,
+      package: parts.slice(0, -1).join('.'),
       methods: [],
     };
   } catch (error) {
@@ -96,13 +89,8 @@ async function getServiceDefinition(
   }
 }
 
-async function callReflection(
-  serverUrl: string,
-  request: Record<string, unknown>
-): Promise<ReflectionResponse> {
+async function callReflection(serverUrl: string, request: Uint8Array): Promise<Uint8Array> {
   const url = `${serverUrl}/grpc.reflection.v1.ServerReflection/ServerReflectionInfo`;
-
-  const requestBody = encodeReflectionRequest(request);
 
   const response = await fetch(url, {
     method: 'POST',
@@ -111,89 +99,196 @@ async function callReflection(
       'Accept': 'application/grpc-web+proto',
       'x-grpc-web': '1',
     },
-    body: requestBody,
+    body: request,
   });
 
   if (!response.ok) {
-    throw new Error(
-      `Reflection request failed: ${response.status} ${response.statusText}`
-    );
+    throw new Error(`Reflection request failed: ${response.status} ${response.statusText}`);
   }
 
   const responseBody = await response.arrayBuffer();
-  return decodeReflectionResponse(new Uint8Array(responseBody));
+  return new Uint8Array(responseBody);
 }
 
-function encodeReflectionRequest(request: Record<string, unknown>): Uint8Array {
-  const parts: number[] = [];
+function createListServicesRequest(): Uint8Array {
+  // ServerReflectionRequest with list_services = "" (field 7)
+  const message = new Uint8Array([0x3a, 0x00]); // field 7, length 0
+  return frameMessage(message);
+}
 
-  if ('listServices' in request) {
-    parts.push(0x3a, 0x00);
-  } else if ('fileContainingSymbol' in request) {
-    const symbol = request.fileContainingSymbol as string;
-    const symbolBytes = new TextEncoder().encode(symbol);
-    parts.push(0x22, symbolBytes.length, ...symbolBytes);
-  }
+function createFileContainingSymbolRequest(symbol: string): Uint8Array {
+  // ServerReflectionRequest with file_containing_symbol (field 4)
+  const symbolBytes = new TextEncoder().encode(symbol);
+  const message = new Uint8Array(2 + symbolBytes.length);
+  message[0] = 0x22; // field 4, wire type 2 (length-delimited)
+  message[1] = symbolBytes.length;
+  message.set(symbolBytes, 2);
+  return frameMessage(message);
+}
 
-  const message = new Uint8Array(parts);
-
+function frameMessage(message: Uint8Array): Uint8Array {
   const frame = new Uint8Array(5 + message.length);
-  frame[0] = 0x00;
+  frame[0] = 0x00; // not compressed
   const len = message.length;
   frame[1] = (len >> 24) & 0xff;
   frame[2] = (len >> 16) & 0xff;
   frame[3] = (len >> 8) & 0xff;
   frame[4] = len & 0xff;
   frame.set(message, 5);
-
   return frame;
 }
 
-function decodeReflectionResponse(data: Uint8Array): ReflectionResponse {
-  if (data.length < 5) {
-    return {};
-  }
+function parseListServicesResponse(data: Uint8Array, services: string[]): void {
+  // Skip gRPC frame header (5 bytes)
+  if (data.length < 5) return;
 
-  const messageLength =
-    (data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4];
+  const messageLength = (data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4];
   const message = data.slice(5, 5 + messageLength);
-
-  const result: ReflectionResponse = {};
 
   let offset = 0;
   while (offset < message.length) {
-    const fieldTag = message[offset];
-    const fieldNumber = fieldTag >> 3;
-    const wireType = fieldTag & 0x07;
+    const tag = message[offset++];
+    const fieldNumber = tag >> 3;
+    const wireType = tag & 0x07;
 
-    offset++;
-
-    if (fieldNumber === 6 && wireType === 2) {
-      const length = message[offset++];
-      const submessage = message.slice(offset, offset + length);
+    if (wireType === 2) { // length-delimited
+      const length = readVarint(message, offset);
+      offset += varintSize(length);
+      const fieldData = message.slice(offset, offset + length);
       offset += length;
 
-      const services: Array<{ name: string }> = [];
-      let subOffset = 0;
-      while (subOffset < submessage.length) {
-        const subTag = submessage[subOffset++];
-        const subFieldNumber = subTag >> 3;
-        if (subFieldNumber === 1) {
-          const nameLength = submessage[subOffset++];
-          const nameBytes = submessage.slice(subOffset, subOffset + nameLength);
-          subOffset += nameLength;
-          services.push({ name: new TextDecoder().decode(nameBytes) });
-        }
+      // Field 6 is list_services_response
+      if (fieldNumber === 6) {
+        parseServiceResponseList(fieldData, services);
       }
-      result.listServicesResponse = { service: services };
-    } else if (wireType === 2) {
-      const length = message[offset++];
+    } else if (wireType === 0) { // varint
+      readVarint(message, offset);
+      offset += varintSize(readVarint(message, offset));
+    }
+  }
+}
+
+function parseServiceResponseList(data: Uint8Array, services: string[]): void {
+  let offset = 0;
+  while (offset < data.length) {
+    const tag = data[offset++];
+    const fieldNumber = tag >> 3;
+    const wireType = tag & 0x07;
+
+    if (wireType === 2) {
+      const length = readVarint(data, offset);
+      offset += varintSize(length);
+      const fieldData = data.slice(offset, offset + length);
       offset += length;
+
+      // Field 1 is repeated ServiceResponse
+      if (fieldNumber === 1) {
+        const name = parseServiceResponse(fieldData);
+        if (name) services.push(name);
+      }
+    }
+  }
+}
+
+function parseServiceResponse(data: Uint8Array): string | null {
+  let offset = 0;
+  while (offset < data.length) {
+    const tag = data[offset++];
+    const fieldNumber = tag >> 3;
+    const wireType = tag & 0x07;
+
+    if (wireType === 2) {
+      const length = readVarint(data, offset);
+      offset += varintSize(length);
+      const fieldData = data.slice(offset, offset + length);
+      offset += length;
+
+      // Field 1 is name
+      if (fieldNumber === 1) {
+        return new TextDecoder().decode(fieldData);
+      }
+    }
+  }
+  return null;
+}
+
+function parseFileDescriptorResponse(data: Uint8Array): FileDescriptorProto[] {
+  const descriptors: FileDescriptorProto[] = [];
+
+  // Skip gRPC frame header
+  if (data.length < 5) return descriptors;
+
+  const messageLength = (data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4];
+  const message = data.slice(5, 5 + messageLength);
+
+  let offset = 0;
+  while (offset < message.length) {
+    const tag = message[offset++];
+    const fieldNumber = tag >> 3;
+    const wireType = tag & 0x07;
+
+    if (wireType === 2) {
+      const length = readVarint(message, offset);
+      offset += varintSize(length);
+      const fieldData = message.slice(offset, offset + length);
+      offset += length;
+
+      // Field 4 is file_descriptor_response
+      if (fieldNumber === 4) {
+        parseFileDescriptorResponseInner(fieldData, descriptors);
+      }
     } else if (wireType === 0) {
-      while (message[offset] & 0x80) offset++;
-      offset++;
+      const val = readVarint(message, offset);
+      offset += varintSize(val);
     }
   }
 
+  return descriptors;
+}
+
+function parseFileDescriptorResponseInner(data: Uint8Array, descriptors: FileDescriptorProto[]): void {
+  let offset = 0;
+  while (offset < data.length) {
+    const tag = data[offset++];
+    const fieldNumber = tag >> 3;
+    const wireType = tag & 0x07;
+
+    if (wireType === 2) {
+      const length = readVarint(data, offset);
+      offset += varintSize(length);
+      const fieldData = data.slice(offset, offset + length);
+      offset += length;
+
+      // Field 1 is repeated file_descriptor_proto (bytes)
+      if (fieldNumber === 1) {
+        try {
+          const fd = fromBinary(FileDescriptorProtoSchema, fieldData);
+          descriptors.push(fd);
+        } catch (e) {
+          console.warn('Failed to parse FileDescriptorProto');
+        }
+      }
+    }
+  }
+}
+
+function readVarint(data: Uint8Array, offset: number): number {
+  let result = 0;
+  let shift = 0;
+  let byte: number;
+  do {
+    byte = data[offset++];
+    result |= (byte & 0x7f) << shift;
+    shift += 7;
+  } while (byte & 0x80);
   return result;
+}
+
+function varintSize(value: number): number {
+  let size = 1;
+  while (value >= 0x80) {
+    value >>= 7;
+    size++;
+  }
+  return size;
 }
