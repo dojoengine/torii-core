@@ -28,7 +28,7 @@
 		filters: Record<string, string>;
 	}
 	let activeTopics = $state<TopicWithFilters[]>([]);
-	let newTopicName = $state('entities');
+	let newTopicName = $state('sql');
 	let newTopicFilters = $state<Array<{ key: string; value: string }>>([]);
 	let topicsToUnsubscribe = $state<string[]>([]);
 
@@ -1002,7 +1002,7 @@
 
 			<!-- SQL Sink Persistent Subscription -->
 			<section class="panel">
-				<h2>🔔 SQL Sink Persistent Subscription (NEW!)</h2>
+				<h2>🔔 SQL Sink Persistent Subscription</h2>
 				<p class="help">
 					Subscribe to real-time SQL operations as they happen (persistent stream)
 				</p>

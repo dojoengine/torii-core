@@ -14,13 +14,14 @@ TypeScript/Svelte demo client with gRPC-web support for real-time blockchain eve
 ## Quick Start
 
 ```bash
+# In client folder.
 pnpm install
 pnpm run proto:generate
 
-# Start torii
+# At the workspace root.
 cargo run --example multi_sink_example
 
-# Start the client
+# Start the client in client folder.
 pnpm run dev
 ```
 
