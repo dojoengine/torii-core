@@ -6,6 +6,7 @@ import { generateFromProtos } from './protos';
 interface CliOptions {
   url: string;
   output: string;
+  sdkImport: string;
   path?: string;
 }
 
@@ -18,15 +19,17 @@ Usage:
   torii.js <path> [options]       Generate from proto files
 
 Options:
-  --url <url>       Server URL for reflection (default: http://localhost:8080)
-  --output, -o      Output directory (default: ./generated)
-  --help, -h        Show this help message
+  --url <url>           Server URL for reflection (default: http://localhost:8080)
+  --output, -o          Output directory (default: ./generated)
+  --sdk-import <path>   SDK import path (default: @toriijs/sdk)
+  --help, -h            Show this help message
 
 Examples:
   torii.js                                    # Reflection from localhost:8080
   torii.js --url http://myserver:8080         # Reflection from custom URL
   torii.js ./protos                           # Generate from proto files
   torii.js ./protos --output ./src/generated  # Custom output directory
+  torii.js --sdk-import ../sdk                # Custom SDK import path
 `);
 }
 
@@ -42,6 +45,10 @@ function parseCliArgs(): CliOptions {
         type: 'string',
         short: 'o',
         default: './generated',
+      },
+      'sdk-import': {
+        type: 'string',
+        default: '@toriijs/sdk',
       },
       help: {
         type: 'boolean',
@@ -60,6 +67,7 @@ function parseCliArgs(): CliOptions {
   return {
     url: values.url as string,
     output: values.output as string,
+    sdkImport: values['sdk-import'] as string,
     path: positionals[0],
   };
 }
@@ -73,13 +81,19 @@ async function main(): Promise<void> {
     if (options.path) {
       console.log(`Mode: Proto files`);
       console.log(`Path: ${options.path}`);
-      console.log(`Output: ${options.output}\n`);
-      await generateFromProtos(options.path, options.output);
+      console.log(`Output: ${options.output}`);
+      console.log(`SDK Import: ${options.sdkImport}\n`);
+      await generateFromProtos(options.path, options.output, {
+        sdkImport: options.sdkImport,
+      });
     } else {
       console.log(`Mode: gRPC Reflection`);
       console.log(`URL: ${options.url}`);
-      console.log(`Output: ${options.output}\n`);
-      await generateFromReflection(options.url, options.output);
+      console.log(`Output: ${options.output}`);
+      console.log(`SDK Import: ${options.sdkImport}\n`);
+      await generateFromReflection(options.url, options.output, {
+        sdkImport: options.sdkImport,
+      });
     }
 
     console.log('\nGeneration complete!');

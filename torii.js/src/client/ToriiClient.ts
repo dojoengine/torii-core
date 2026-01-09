@@ -1,11 +1,34 @@
-// Base ToriiClient class that can be extended by generated clients
-// This provides a foundation for the generated aggregated client
+/**
+ * ToriiClient - Generic plugin-based client for Torii gRPC services
+ *
+ * Usage:
+ * ```typescript
+ * import { ToriiClient } from "@toriijs/sdk";
+ * import { SqlSinkClient, LogSinkClient } from "./generated";
+ *
+ * const client = new ToriiClient("http://localhost:8080", {
+ *   sql: SqlSinkClient,
+ *   log: LogSinkClient,
+ * });
+ *
+ * // Fully typed access
+ * const result = await client.sql.query("SELECT * FROM users");
+ * ```
+ */
 
-export interface CallOptions {
-  abort?: AbortSignal;
-  timeout?: number;
-  headers?: Record<string, string>;
-}
+import { BaseSinkClient, type CallOptions } from './BaseSinkClient';
+import { GrpcTransport } from './GrpcTransport';
+
+// Type for a client class constructor
+type ClientClass<T extends BaseSinkClient = BaseSinkClient> = new (baseUrl: string) => T;
+
+// Map of plugin names to client classes
+type ClientMap = Record<string, ClientClass>;
+
+// Transform client classes to instances
+type InstantiatedClients<T extends ClientMap> = {
+  [K in keyof T]: InstanceType<T[K]>;
+};
 
 export interface TopicSubscription {
   topic: string;
@@ -20,22 +43,57 @@ export interface TopicUpdate {
   data?: unknown;
 }
 
-export class BaseToriiClient {
-  protected baseUrl: string;
-  private abortController: AbortController | null = null;
+export interface ToriiClientOptions<T extends ClientMap = ClientMap> {
+  plugins?: T;
+}
 
-  constructor(baseUrl: string = 'http://localhost:8080') {
-    this.baseUrl = baseUrl.replace(/\/$/, '');
+/**
+ * Main Torii client with plugin support
+ */
+class ToriiClientImpl<T extends ClientMap = {}> {
+  private _baseUrl: string;
+  private _transport: GrpcTransport;
+  private _clients: InstantiatedClients<T>;
+  private _abortController: AbortController | null = null;
+
+  constructor(baseUrl: string, plugins?: T) {
+    this._baseUrl = baseUrl;
+    this._transport = new GrpcTransport(baseUrl);
+
+    // Instantiate all plugin clients
+    this._clients = {} as InstantiatedClients<T>;
+    if (plugins) {
+      for (const [key, ClientClass] of Object.entries(plugins)) {
+        (this._clients as Record<string, BaseSinkClient>)[key] = new ClientClass(baseUrl);
+      }
+    }
   }
 
+  get baseUrl(): string {
+    return this._baseUrl;
+  }
+
+  // ==================
+  // Core Torii Methods
+  // ==================
+
+  /**
+   * Get server version
+   */
   async getVersion(): Promise<{ version: string; buildTime: string }> {
-    const response = await this.makeUnaryCall('/torii.Torii/GetVersion', {});
+    const response = await this._transport.unaryCall<{
+      version?: string;
+      build_time?: string;
+    }>('/torii.Torii/GetVersion', {});
     return {
-      version: (response as any).version ?? '',
-      buildTime: (response as any).build_time ?? '',
+      version: response.version ?? '',
+      buildTime: response.build_time ?? '',
     };
   }
 
+  /**
+   * List available topics from all registered sinks
+   */
   async listTopics(): Promise<
     Array<{
       name: string;
@@ -44,24 +102,34 @@ export class BaseToriiClient {
       description: string;
     }>
   > {
-    const response = await this.makeUnaryCall('/torii.Torii/ListTopics', {});
-    const topics = (response as any).topics ?? [];
-    return topics.map((t: any) => ({
-      name: t.name,
-      sinkName: t.sink_name,
+    const response = await this._transport.unaryCall<{
+      topics?: Array<{
+        name?: string;
+        sink_name?: string;
+        available_filters?: string[];
+        description?: string;
+      }>;
+    }>('/torii.Torii/ListTopics', {});
+
+    return (response.topics ?? []).map((t) => ({
+      name: t.name ?? '',
+      sinkName: t.sink_name ?? '',
       availableFilters: t.available_filters ?? [],
       description: t.description ?? '',
     }));
   }
 
-  async subscribe(
+  /**
+   * Subscribe to topics with server-side streaming
+   */
+  async subscribeTopics(
     clientId: string,
     topics: TopicSubscription[],
     onUpdate: (update: TopicUpdate) => void,
     onError?: (error: Error) => void,
     onConnected?: () => void
   ): Promise<() => void> {
-    this.abortController = new AbortController();
+    this._abortController = new AbortController();
 
     const request = {
       client_id: clientId,
@@ -72,144 +140,82 @@ export class BaseToriiClient {
       unsubscribe_topics: [],
     };
 
-    const body = this.encodeMessage(request);
-
-    try {
-      const response = await fetch(
-        `${this.baseUrl}/torii.Torii/SubscribeToTopicsStream`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/grpc-web+proto',
-            Accept: 'application/grpc-web+proto',
-            'x-grpc-web': '1',
-          },
-          body,
-          signal: this.abortController.signal,
+    (async () => {
+      try {
+        onConnected?.();
+        for await (const response of this._transport.streamCall<{
+          topic?: string;
+          update_type?: number;
+          timestamp?: string | number;
+          type_id?: string;
+          data?: unknown;
+        }>('/torii.Torii/SubscribeToTopicsStream', request, {
+          abort: this._abortController?.signal,
+        })) {
+          onUpdate({
+            topic: response.topic ?? '',
+            updateType: response.update_type ?? 0,
+            timestamp: Number(response.timestamp ?? 0),
+            typeId: response.type_id ?? '',
+            data: response.data,
+          });
         }
-      );
-
-      if (!response.ok) {
-        throw new Error(`Subscribe failed: ${response.status}`);
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name !== 'AbortError') {
+          onError?.(err);
+        }
       }
+    })();
 
-      onConnected?.();
-
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('No response body');
-
-      (async () => {
-        let buffer = new Uint8Array(0);
-
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const newBuffer = new Uint8Array(buffer.length + value.length);
-            newBuffer.set(buffer);
-            newBuffer.set(value, buffer.length);
-            buffer = newBuffer;
-
-            while (buffer.length >= 5) {
-              const messageLength =
-                (buffer[1] << 24) |
-                (buffer[2] << 16) |
-                (buffer[3] << 8) |
-                buffer[4];
-              const totalLength = 5 + messageLength;
-
-              if (buffer.length < totalLength) break;
-
-              const messageFrame = buffer.slice(0, totalLength);
-              buffer = buffer.slice(totalLength);
-
-              if (messageFrame[0] === 0x00) {
-                const decoded = this.decodeMessage(messageFrame);
-                onUpdate({
-                  topic: (decoded as any).topic ?? '',
-                  updateType: (decoded as any).update_type ?? 0,
-                  timestamp: Number((decoded as any).timestamp ?? 0),
-                  typeId: (decoded as any).type_id ?? '',
-                  data: (decoded as any).data,
-                });
-              }
-            }
-          }
-        } catch (err: any) {
-          if (err.name !== 'AbortError') {
-            onError?.(err);
-          }
-        }
-      })();
-
-      return () => {
-        this.abortController?.abort();
-        this.abortController = null;
-      };
-    } catch (error: any) {
-      onError?.(error);
-      return () => {};
-    }
+    return () => {
+      this._abortController?.abort();
+      this._abortController = null;
+    };
   }
 
-  protected async makeUnaryCall(
-    path: string,
-    request: Record<string, unknown>
-  ): Promise<Record<string, unknown>> {
-    const body = this.encodeMessage(request);
-
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/grpc-web+proto',
-        Accept: 'application/grpc-web+proto',
-        'x-grpc-web': '1',
-      },
-      body,
-    });
-
-    if (!response.ok) {
-      throw new Error(`gRPC call failed: ${response.status} ${response.statusText}`);
-    }
-
-    const responseBody = await response.arrayBuffer();
-    return this.decodeMessage(new Uint8Array(responseBody));
-  }
-
-  protected encodeMessage(message: Record<string, unknown>): Uint8Array {
-    const json = JSON.stringify(message);
-    const messageBytes = new TextEncoder().encode(json);
-
-    const frame = new Uint8Array(5 + messageBytes.length);
-    frame[0] = 0x00;
-    const len = messageBytes.length;
-    frame[1] = (len >> 24) & 0xff;
-    frame[2] = (len >> 16) & 0xff;
-    frame[3] = (len >> 8) & 0xff;
-    frame[4] = len & 0xff;
-    frame.set(messageBytes, 5);
-
-    return frame;
-  }
-
-  protected decodeMessage(data: Uint8Array): Record<string, unknown> {
-    if (data.length < 5) return {};
-
-    const messageLength =
-      (data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4];
-    const message = data.slice(5, 5 + messageLength);
-
-    try {
-      const text = new TextDecoder().decode(message);
-      return JSON.parse(text);
-    } catch {
-      return { _raw: Array.from(message) };
-    }
-  }
-
+  /**
+   * Disconnect any active subscriptions
+   */
   disconnect(): void {
-    this.abortController?.abort();
-    this.abortController = null;
+    this._abortController?.abort();
+    this._abortController = null;
   }
 }
+
+// Create the ToriiClient with Proxy for plugin access
+export function createToriiClient<T extends ClientMap>(
+  baseUrl: string,
+  plugins?: T
+): ToriiClientImpl<T> & InstantiatedClients<T> {
+  const client = new ToriiClientImpl(baseUrl, plugins);
+
+  return new Proxy(client, {
+    get(target, prop, receiver) {
+      // First check if it's a property of the client itself
+      if (prop in target) {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value === 'function') {
+          return value.bind(target);
+        }
+        return value;
+      }
+      // Then check if it's a plugin
+      if (prop in (target as any)._clients) {
+        return (target as any)._clients[prop];
+      }
+      return undefined;
+    },
+  }) as ToriiClientImpl<T> & InstantiatedClients<T>;
+}
+
+// Export a class-like interface for familiar usage pattern
+export const ToriiClient = createToriiClient as unknown as {
+  new <T extends ClientMap = {}>(
+    baseUrl: string,
+    plugins?: T
+  ): ToriiClientImpl<T> & InstantiatedClients<T>;
+};
+
+// Type declaration to make ToriiClient work as a class
+export type ToriiClient<T extends ClientMap = {}> = ToriiClientImpl<T> &
+  InstantiatedClients<T>;

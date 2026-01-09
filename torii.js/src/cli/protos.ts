@@ -1,4 +1,4 @@
-import { generateClientCode, type ServiceDefinition } from './generator';
+import { generateClientCode, type ServiceDefinition, type GeneratorOptions } from './generator';
 import { Glob } from 'bun';
 import { resolve, basename, dirname, relative } from 'path';
 
@@ -38,7 +38,8 @@ interface ParsedProto {
 
 export async function generateFromProtos(
   protoPath: string,
-  outputDir: string
+  outputDir: string,
+  options: Partial<GeneratorOptions> = {}
 ): Promise<void> {
   console.log('Searching for proto files...');
 
@@ -73,7 +74,7 @@ export async function generateFromProtos(
 
   console.log(`\nParsed ${serviceDefinitions.length} services from proto files`);
 
-  await generateClientCode(serviceDefinitions, outputDir);
+  await generateClientCode(serviceDefinitions, outputDir, options);
 }
 
 async function discoverProtos(basePath: string): Promise<string[]> {

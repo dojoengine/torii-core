@@ -1,4 +1,4 @@
-import { generateClientCode, type ServiceDefinition } from './generator';
+import { generateClientCode, type ServiceDefinition, type GeneratorOptions } from './generator';
 
 interface ReflectionResponse {
   listServicesResponse?: {
@@ -15,7 +15,8 @@ interface ReflectionResponse {
 
 export async function generateFromReflection(
   serverUrl: string,
-  outputDir: string
+  outputDir: string,
+  options: Partial<GeneratorOptions> = {}
 ): Promise<void> {
   console.log('Connecting to server for reflection...');
 
@@ -42,7 +43,7 @@ export async function generateFromReflection(
     }
   }
 
-  await generateClientCode(serviceDefinitions, outputDir);
+  await generateClientCode(serviceDefinitions, outputDir, options);
 }
 
 async function listServices(serverUrl: string): Promise<string[]> {
