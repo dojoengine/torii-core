@@ -1,0 +1,108 @@
+syntax = "proto3";
+
+package torii;
+
+import "google/protobuf/any.proto";
+
+// The Torii service provides topic-based subscriptions for indexed blockchain data
+service Torii {
+  // Get the server version
+  rpc GetVersion (GetVersionRequest) returns (GetVersionResponse);
+
+  // List all available topics from registered sinks
+  rpc ListTopics (ListTopicsRequest) returns (ListTopicsResponse);
+
+  // Subscribe to multiple topics with filters (server-side streaming for browser compatibility)
+  // Use this from web browsers with grpc-web
+  rpc SubscribeToTopicsStream (SubscriptionRequest) returns (stream TopicUpdate);
+
+  // Subscribe to multiple topics with filters (bidirectional streaming for native clients)
+  // Client can update subscriptions through the same stream
+  // IMPORTANT: One connection per client - reuse stream for subscription updates
+  // Use this from native clients (grpcurl, Go, Python, Rust, etc.)
+  rpc SubscribeToTopics (stream SubscriptionRequest) returns (stream TopicUpdate);
+}
+
+// Version request
+message GetVersionRequest {}
+
+// Version response
+message GetVersionResponse {
+  string version = 1;
+  string build_time = 2;
+}
+
+// List topics request
+message ListTopicsRequest {}
+
+// Topic information
+message TopicInfo {
+  // Topic name (e.g., "sql", "logs")
+  string name = 1;
+
+  // Sink that provides this topic
+  string sink_name = 2;
+
+  // Available filters for this topic
+  repeated string available_filters = 3;
+
+  // Description of what this topic contains
+  string description = 4;
+}
+
+// List topics response
+message ListTopicsResponse {
+  repeated TopicInfo topics = 1;
+}
+
+// Subscription request - can be sent multiple times on same stream to update subscriptions
+message SubscriptionRequest {
+  // Unique client ID - used to track client connection
+  string client_id = 1;
+
+  // Topics to subscribe to (will replace existing subscriptions)
+  repeated TopicSubscription topics = 2;
+
+  // Topics to unsubscribe from (by topic name)
+  repeated string unsubscribe_topics = 3;
+}
+
+// Topic subscription with optional filters
+message TopicSubscription {
+  // Topic name (e.g., "sql", "logs")
+  string topic = 1;
+
+  // Optional filters for this topic (generic key-value)
+  // Empty map = subscribe to all updates in this topic
+  map<string, string> filters = 2;
+
+  // Optional: Sink-specific structured filter (protobuf Any)
+  // Allows sinks to define rich filter schemas
+  google.protobuf.Any filter_data = 3;
+}
+
+// Update sent to subscribed clients
+message TopicUpdate {
+  // Topic this update belongs to
+  string topic = 1;
+
+  // Type of update
+  UpdateType update_type = 2;
+
+  // Timestamp of the update
+  int64 timestamp = 3;
+
+  // Type identifier for the data (e.g., "sql.row_inserted", "log.entry")
+  // Used by client to determine how to deserialize data
+  string type_id = 4;
+
+  // Sink-specific structured data (protobuf Any)
+  // Contains the actual update data from the sink
+  google.protobuf.Any data = 5;
+}
+
+enum UpdateType {
+  CREATED = 0;
+  UPDATED = 1;
+  DELETED = 2;
+}

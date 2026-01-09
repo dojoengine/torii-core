@@ -1,0 +1,265 @@
+//! Simplified Engine database for demo.
+//!
+//! Tracks basic state and statistics for the Torii engine.
+//! This will be enhanced with actual Torii features in the future.
+
+use anyhow::{Context, Result};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    Pool, Row, Sqlite,
+};
+use std::path::Path;
+use std::str::FromStr;
+
+/// Embedded SQL schema
+const SCHEMA_SQL: &str = include_str!("../../sql/engine_schema.sql");
+
+/// Engine database configuration
+#[derive(Debug, Clone)]
+pub struct EngineDbConfig {
+    pub path: String,
+}
+
+/// Engine database for tracking state
+pub struct EngineDb {
+    pool: Pool<Sqlite>,
+}
+
+impl EngineDb {
+    /// Create a new engine database
+    pub async fn new(config: EngineDbConfig) -> Result<Self> {
+        // Handle special case for in-memory database
+        let is_memory = config.path == ":memory:" || config.path == "sqlite::memory:";
+
+        // Ensure parent directory exists (skip for in-memory)
+        if !is_memory {
+            if let Some(parent) = Path::new(&config.path).parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .context(format!("Failed to create directory: {}", parent.display()))?;
+            }
+        }
+
+        tracing::debug!(target: "torii::etl::engine_db", "Connecting to database: {}", config.path);
+
+        // Create SQLite connection options
+        let opts = SqliteConnectOptions::from_str(&config.path)?.create_if_missing(true);
+
+        // Create connection pool
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_with(opts)
+            .await
+            .context("Failed to connect to engine database")?;
+
+        let db = Self { pool };
+
+        // Initialize schema
+        db.init_schema().await?;
+
+        Ok(db)
+    }
+
+    /// Initialize database with PRAGMAs and schema
+    async fn init_schema(&self) -> Result<()> {
+        // Apply PRAGMAs for performance
+        self.apply_pragmas().await?;
+
+        // Load tables from SQL file
+        self.load_schema_from_sql().await?;
+
+        tracing::info!(target: "torii::etl::engine_db", "Engine database schema initialized");
+
+        Ok(())
+    }
+
+    /// Apply SQLite PRAGMAs for performance
+    async fn apply_pragmas(&self) -> Result<()> {
+        sqlx::query("PRAGMA journal_mode=WAL")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("PRAGMA synchronous=NORMAL")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&self.pool)
+            .await?;
+
+        tracing::debug!(target: "torii::etl::engine_db", "Applied SQLite PRAGMAs");
+
+        Ok(())
+    }
+
+    /// Load schema from SQL file
+    async fn load_schema_from_sql(&self) -> Result<()> {
+        for statement in SCHEMA_SQL.split(';') {
+            let statement = statement.trim();
+
+            // Skip empty statements
+            if statement.is_empty() {
+                continue;
+            }
+
+            // Remove comment lines
+            let sql_lines: Vec<&str> = statement
+                .lines()
+                .filter(|line| {
+                    let trimmed = line.trim();
+                    !trimmed.is_empty() && !trimmed.starts_with("--")
+                })
+                .collect();
+
+            if sql_lines.is_empty() {
+                continue;
+            }
+
+            let clean_sql = sql_lines.join("\n");
+
+            tracing::debug!(
+                target: "torii::etl::engine_db",
+                "Executing SQL: {}",
+                clean_sql.lines().next().unwrap_or("")
+            );
+
+            sqlx::query(&clean_sql)
+                .execute(&self.pool)
+                .await
+                .context(format!(
+                    "Failed to execute SQL: {}",
+                    clean_sql.lines().next().unwrap_or("")
+                ))?;
+        }
+
+        tracing::debug!(target: "torii::etl::engine_db", "Schema loaded successfully");
+        Ok(())
+    }
+
+    /// Get the current head (block number and event count)
+    pub async fn get_head(&self) -> Result<(u64, u64)> {
+        let row = sqlx::query("SELECT block_number, event_count FROM head WHERE id = 'main'")
+            .fetch_one(&self.pool)
+            .await?;
+
+        let block_number: i64 = row.get(0);
+        let event_count: i64 = row.get(1);
+
+        Ok((block_number as u64, event_count as u64))
+    }
+
+    /// Update the head (increment block and event count)
+    pub async fn update_head(&self, block_number: u64, events_processed: u64) -> Result<()> {
+        sqlx::query(
+            "UPDATE head SET block_number = ?, event_count = event_count + ? WHERE id = 'main'",
+        )
+        .bind(block_number as i64)
+        .bind(events_processed as i64)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get a stat value
+    pub async fn get_stat(&self, key: &str) -> Result<Option<String>> {
+        let row = sqlx::query("SELECT value FROM stats WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        Ok(row.map(|r| r.get(0)))
+    }
+
+    /// Set a stat value
+    pub async fn set_stat(&self, key: &str, value: &str) -> Result<()> {
+        sqlx::query("INSERT OR REPLACE INTO stats (key, value) VALUES (?, ?)")
+            .bind(key)
+            .bind(value)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Get engine statistics as a JSON-friendly struct
+    pub async fn get_stats(&self) -> Result<EngineStats> {
+        let (block_number, event_count) = self.get_head().await?;
+        let start_time = self.get_stat("start_time").await?.unwrap_or_default();
+
+        Ok(EngineStats {
+            current_block: block_number,
+            total_events: event_count,
+            start_time,
+        })
+    }
+}
+
+/// Engine statistics
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EngineStats {
+    pub current_block: u64,
+    pub total_events: u64,
+    pub start_time: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_engine_db_initialization() {
+        let config = EngineDbConfig {
+            path: ":memory:".to_string(),
+        };
+
+        let db = EngineDb::new(config).await.unwrap();
+        let (block, events) = db.get_head().await.unwrap();
+
+        assert_eq!(block, 0);
+        assert_eq!(events, 0);
+    }
+
+    #[tokio::test]
+    async fn test_update_head() {
+        let config = EngineDbConfig {
+            path: ":memory:".to_string(),
+        };
+
+        let db = EngineDb::new(config).await.unwrap();
+
+        // Update head
+        db.update_head(100, 50).await.unwrap();
+
+        let (block, events) = db.get_head().await.unwrap();
+        assert_eq!(block, 100);
+        assert_eq!(events, 50);
+
+        // Update again (events should accumulate)
+        db.update_head(200, 30).await.unwrap();
+
+        let (block, events) = db.get_head().await.unwrap();
+        assert_eq!(block, 200);
+        assert_eq!(events, 80); // 50 + 30
+    }
+
+    #[tokio::test]
+    async fn test_stats() {
+        let config = EngineDbConfig {
+            path: ":memory:".to_string(),
+        };
+
+        let db = EngineDb::new(config).await.unwrap();
+
+        // Set custom stat
+        db.set_stat("last_sync", "2026-01-08").await.unwrap();
+
+        // Get stat
+        let value = db.get_stat("last_sync").await.unwrap();
+        assert_eq!(value, Some("2026-01-08".to_string()));
+
+        // Get missing stat
+        let missing = db.get_stat("nonexistent").await.unwrap();
+        assert_eq!(missing, None);
+    }
+}
