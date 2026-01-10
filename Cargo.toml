@@ -27,6 +27,10 @@ path = "examples/eventbus_only_sink/main.rs"
 name = "http_only_sink"
 path = "examples/http_only_sink/main.rs"
 
+[[example]]
+name = "test_block_extractor"
+path = "examples/test_block_extractor/main.rs"
+
 [dependencies]
 # Core async runtime
 tokio = { version = "1.41", features = ["full"] }
@@ -67,6 +71,7 @@ futures-util = "0.3"
 futures = "0.3"
 async-stream = "0.3"
 hex = "0.4"
+bitflags = "2.6"
 
 [build-dependencies]
 tonic-build = "0.12"

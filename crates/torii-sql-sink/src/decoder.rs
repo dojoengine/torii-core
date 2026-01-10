@@ -93,6 +93,10 @@ impl SqlDecoder {
 /// Implementation of the Decoder trait for generic usage (not specific to the SQL sink).
 #[async_trait]
 impl Decoder for SqlDecoder {
+    fn decoder_name(&self) -> &str {
+        "sql"
+    }
+
     async fn decode(&self, events: &[EmittedEvent]) -> anyhow::Result<Vec<Envelope>> {
         let events_count = events.len();
 

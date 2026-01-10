@@ -75,6 +75,10 @@ impl SampleExtractor {
 
 #[async_trait]
 impl Extractor for SampleExtractor {
+    fn is_finished(&self) -> bool {
+        false // Sample extractor cycles infinitely, never finishes
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -140,8 +144,9 @@ impl Extractor for SampleExtractor {
             events,
             blocks,
             transactions,
+            declared_classes: Vec::new(), // Sample extractor doesn't generate these
+            deployed_contracts: Vec::new(), // Sample extractor doesn't generate these
             cursor: None,
-            has_more: true, // Always has more (cycles infinitely)
         })
     }
 }

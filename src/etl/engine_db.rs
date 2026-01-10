@@ -193,6 +193,78 @@ impl EngineDb {
             start_time,
         })
     }
+
+    /// Get extractor state value
+    ///
+    /// # Arguments
+    /// * `extractor_type` - Type of extractor (e.g., "block_range", "contract_events")
+    /// * `state_key` - State key (e.g., "last_block", "contract:0x123...")
+    ///
+    /// # Returns
+    /// The state value if it exists, None otherwise
+    pub async fn get_extractor_state(
+        &self,
+        extractor_type: &str,
+        state_key: &str,
+    ) -> Result<Option<String>> {
+        let row = sqlx::query(
+            "SELECT state_value FROM extractor_state WHERE extractor_type = ? AND state_key = ?",
+        )
+        .bind(extractor_type)
+        .bind(state_key)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| r.get(0)))
+    }
+
+    /// Set extractor state value
+    ///
+    /// # Arguments
+    /// * `extractor_type` - Type of extractor (e.g., "block_range", "contract_events")
+    /// * `state_key` - State key (e.g., "last_block", "contract:0x123...")
+    /// * `state_value` - State value to store
+    pub async fn set_extractor_state(
+        &self,
+        extractor_type: &str,
+        state_key: &str,
+        state_value: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO extractor_state (extractor_type, state_key, state_value, updated_at)
+            VALUES (?, ?, ?, strftime('%s', 'now'))
+            ON CONFLICT(extractor_type, state_key)
+            DO UPDATE SET state_value = excluded.state_value, updated_at = strftime('%s', 'now')
+            "#,
+        )
+        .bind(extractor_type)
+        .bind(state_key)
+        .bind(state_value)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Delete extractor state
+    ///
+    /// # Arguments
+    /// * `extractor_type` - Type of extractor
+    /// * `state_key` - State key to delete
+    pub async fn delete_extractor_state(
+        &self,
+        extractor_type: &str,
+        state_key: &str,
+    ) -> Result<()> {
+        sqlx::query("DELETE FROM extractor_state WHERE extractor_type = ? AND state_key = ?")
+            .bind(extractor_type)
+            .bind(state_key)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
 }
 
 /// Engine statistics

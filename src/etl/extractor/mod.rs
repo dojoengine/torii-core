@@ -1,6 +1,11 @@
 //! Extractor trait for fetching events from various sources
 
+pub mod block_range;
+pub mod contract_registry;
+pub mod identification_rules;
+pub mod retry;
 pub mod sample;
+pub mod starknet_helpers;
 
 use crate::etl::engine_db::EngineDb;
 use anyhow::Result;
@@ -8,6 +13,10 @@ use async_trait::async_trait;
 use starknet::core::types::{EmittedEvent, Felt};
 use std::collections::HashMap;
 
+pub use block_range::{BlockRangeConfig, BlockRangeExtractor};
+pub use contract_registry::{ContractIdentificationMode, ContractRegistry, DecoderId, IdentificationRule};
+pub use identification_rules::{Erc20Rule, Erc721Rule, HybridTokenRule};
+pub use retry::RetryPolicy;
 pub use sample::SampleExtractor;
 
 /// Block context information
@@ -26,6 +35,32 @@ pub struct TransactionContext {
     pub block_number: u64,
     pub sender_address: Option<Felt>,
     pub calldata: Vec<Felt>,
+}
+
+/// Declared class information
+#[derive(Debug, Clone)]
+pub struct DeclaredClass {
+    pub class_hash: Felt,
+    pub compiled_class_hash: Option<Felt>, // Only for Cairo 1.0+ (V2+)
+    pub transaction_hash: Felt,
+}
+
+/// Deployed contract information
+#[derive(Debug, Clone)]
+pub struct DeployedContract {
+    pub contract_address: Felt,
+    pub class_hash: Felt,
+    pub transaction_hash: Felt,
+}
+
+/// Complete block data with all extracted information
+#[derive(Debug, Clone)]
+pub struct BlockData {
+    pub block_context: BlockContext,
+    pub transactions: Vec<TransactionContext>,
+    pub events: Vec<EmittedEvent>,
+    pub declared_classes: Vec<DeclaredClass>,
+    pub deployed_contracts: Vec<DeployedContract>,
 }
 
 /// Enriched extraction batch with events and context
@@ -65,35 +100,26 @@ pub struct ExtractionBatch {
     /// Transaction context (deduplicated by tx_hash for memory efficiency)
     pub transactions: HashMap<Felt, TransactionContext>,
 
-    /// Opaque cursor for pagination (continuation token or cursor string)
-    /// None means no more data available
-    pub cursor: Option<String>,
+    /// Declared classes from Declare transactions
+    pub declared_classes: Vec<DeclaredClass>,
 
-    /// Whether there is more data available
-    /// If true, the extractor should be called again with the cursor
-    pub has_more: bool,
+    /// Deployed contracts from Deploy and DeployAccount transactions
+    pub deployed_contracts: Vec<DeployedContract>,
+
+    /// Opaque cursor for pagination (continuation token or cursor string)
+    pub cursor: Option<String>,
 }
 
 impl ExtractionBatch {
-    /// Create an empty batch with no more data
+    /// Create an empty batch
     pub fn empty() -> Self {
         Self {
             events: Vec::new(),
             blocks: HashMap::new(),
             transactions: HashMap::new(),
+            declared_classes: Vec::new(),
+            deployed_contracts: Vec::new(),
             cursor: None,
-            has_more: false,
-        }
-    }
-
-    /// Create an empty batch but signal that more data is available
-    pub fn empty_with_more(cursor: Option<String>) -> Self {
-        Self {
-            events: Vec::new(),
-            blocks: HashMap::new(),
-            transactions: HashMap::new(),
-            cursor,
-            has_more: true,
         }
     }
 
@@ -120,13 +146,51 @@ pub trait Extractor: Send + Sync {
     /// Returns an ExtractionBatch with:
     /// - events: The extracted events
     /// - blocks/transactions: Deduplicated context
-    /// - cursor: Opaque cursor for next extraction (None if no more data)
-    /// - has_more: Whether there is more data available
+    /// - cursor: Opaque cursor for next extraction
+    ///
+    /// # Return Value Semantics
+    ///
+    /// - Non-empty batch: Process events, call `extract()` again
+    /// - Empty batch + `is_finished() = false`: Waiting for new blocks, sleep and retry
+    /// - Empty batch + `is_finished() = true`: Extractor reached its end, stop calling
     async fn extract(
         &mut self,
         cursor: Option<String>,
         engine_db: &EngineDb,
     ) -> Result<ExtractionBatch>;
+
+    /// Check if the extractor has finished its configured range
+    ///
+    /// Returns `true` when the extractor has reached its configured end point
+    /// and will not produce more data, even if called again.
+    ///
+    /// Returns `false` when the extractor can potentially produce more data:
+    /// - Still has blocks to fetch in the configured range
+    /// - Following chain head indefinitely (no end block configured)
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// loop {
+    ///     let batch = extractor.extract(cursor, engine_db).await?;
+    ///
+    ///     if !batch.is_empty() {
+    ///         process_batch(batch);
+    ///     }
+    ///
+    ///     if extractor.is_finished() {
+    ///         break; // Done, reached configured end
+    ///     }
+    ///
+    ///     if batch.is_empty() {
+    ///         // Waiting for new blocks, sleep and retry
+    ///         tokio::time::sleep(Duration::from_secs(5)).await;
+    ///     }
+    ///
+    ///     cursor = batch.cursor;
+    /// }
+    /// ```
+    fn is_finished(&self) -> bool;
 
     /// Downcast to Any for type checking
     fn as_any(&self) -> &dyn std::any::Any;

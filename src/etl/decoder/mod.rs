@@ -5,7 +5,7 @@ use starknet::core::types::EmittedEvent;
 
 use super::envelope::Envelope;
 
-pub use multi::{DecodeMode, MultiDecoder};
+pub use multi::MultiDecoder;
 
 /// Decoder transforms blockchain events into typed envelopes
 ///
@@ -90,6 +90,23 @@ pub use multi::{DecodeMode, MultiDecoder};
 /// - Multiple decoders process the same slice concurrently without memory duplication.
 #[async_trait]
 pub trait Decoder: Send + Sync {
+    /// Returns the unique name of this decoder
+    ///
+    /// This name is used to generate a deterministic `DecoderId` that identifies
+    /// this decoder in the contract registry. The name should be:
+    /// - Unique across all decoders in the system
+    /// - Stable (never change it, or contract mappings will break)
+    /// - Lowercase and descriptive (e.g., "erc20", "erc721", "custom_game_events")
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// fn decoder_name(&self) -> &str {
+    ///     "erc20" // DecoderId will be hash("erc20")
+    /// }
+    /// ```
+    fn decoder_name(&self) -> &str;
+
     /// Decode a slice of events into typed envelopes
     ///
     /// # Arguments

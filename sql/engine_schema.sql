@@ -14,6 +14,16 @@ CREATE TABLE IF NOT EXISTS stats (
     value TEXT NOT NULL
 );
 
+-- Extractor state tracking (for cursor persistence)
+CREATE TABLE IF NOT EXISTS extractor_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    extractor_type TEXT NOT NULL,    -- 'block_range', 'contract_events', etc.
+    state_key TEXT NOT NULL,         -- 'last_block', 'contract:0x123...', etc.
+    state_value TEXT NOT NULL,       -- Cursor value (block number, continuation token, etc.)
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+    UNIQUE(extractor_type, state_key)
+);
+
 -- Initialize default values
 INSERT OR IGNORE INTO head (id, block_number, event_count) VALUES ('main', 0, 0);
 INSERT OR IGNORE INTO stats (key, value) VALUES ('start_time', strftime('%s', 'now'));

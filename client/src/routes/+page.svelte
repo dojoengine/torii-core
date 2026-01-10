@@ -6,12 +6,19 @@
 	import { decodeAny, formatSqlOperation, formatLogEntry } from '$lib/protobuf-decoder';
 	import type { SqlOperation } from '$lib/../generated/sinks/sql';
 	import type { LogEntry as ProtoLogEntry } from '$lib/../generated/sinks/log';
+	import { ToriiClient } from '../generated/torii.client';
 
 	// Server config
 	const SERVER_URL = 'http://localhost:8080';
-	const client = new ToriiGrpcClient(SERVER_URL);
+	/* const client = new ToriiGrpcClient(SERVER_URL);
 	const sqlClient = new ToriiSqlSinkClient(SERVER_URL);
-	const logClient = new ToriiLogSinkClient(SERVER_URL);
+	const logClient = new ToriiLogSinkClient(SERVER_URL); */
+
+	import { sinkLogClient, sinkSqlClient } from '../generated/sinks';
+
+	let toriiClient = new ToriiClient(SERVER_URL, [{
+		"log": logClient, "sql": sqlClient}]);
+	toriiClient.sql.query('SELECT * FROM sql_operation ORDER BY id DESC LIMIT 10');
 
 	// State
 	let clientId = $state(`browser-${Math.random().toString(36).substring(7)}`);

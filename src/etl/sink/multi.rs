@@ -174,8 +174,9 @@ mod tests {
             events: vec![],
             blocks: HashMap::new(),
             transactions: HashMap::new(),
+            declared_classes: Vec::new(),
+            deployed_contracts: Vec::new(),
             cursor: None,
-            has_more: false,
         };
 
         multi_sink.process(&[], &batch).await.unwrap();

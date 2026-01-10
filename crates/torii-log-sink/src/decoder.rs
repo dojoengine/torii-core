@@ -46,6 +46,10 @@ impl LogDecoder {
 
 #[async_trait]
 impl Decoder for LogDecoder {
+    fn decoder_name(&self) -> &str {
+        "log"
+    }
+
     async fn decode(&self, events: &[EmittedEvent]) -> Result<Vec<Envelope>> {
         let mut envelopes = Vec::new();
 
