@@ -1,0 +1,37 @@
+[package]
+name = "torii-erc20"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Core dependencies
+torii = { path = "../../" }
+anyhow = "1.0"
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Starknet
+starknet = "0.17"
+url = "2.5"
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# HTTP
+axum = "0.7"
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Profiling (optional, enable with --features profiling)
+[dependencies.pprof]
+version = "0.13"
+features = ["flamegraph", "prost-codec"]
+optional = true
+
+[features]
+profiling = ["pprof"]

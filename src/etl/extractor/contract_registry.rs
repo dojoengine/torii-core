@@ -327,11 +327,7 @@ impl ContractRegistry {
     /// 2. Fetch class hash and ABI from provider
     /// 3. Run all identification rules
     /// 4. Cache the results
-    pub async fn identify_contract<P>(
-        &mut self,
-        contract: Felt,
-        provider: &P,
-    ) -> Result<()>
+    pub async fn identify_contract<P>(&mut self, contract: Felt, provider: &P) -> Result<()>
     where
         P: Provider,
     {
@@ -353,36 +349,14 @@ impl ContractRegistry {
             return Ok(());
         }
 
-        // Fetch class hash
-        let class_hash = provider
-            .get_class_hash_at(starknet::core::types::BlockId::Tag(
-                starknet::core::types::BlockTag::Latest,
-            ), contract)
-            .await
-            .context("Failed to fetch class hash")?;
-
-        // Fetch ABI (use cache if available)
-        let abi = if let Some(cached_abi) = self.abi_cache.get(&class_hash) {
-            cached_abi.clone()
-        } else {
-            let class = provider
-                .get_class(
-                    starknet::core::types::BlockId::Tag(starknet::core::types::BlockTag::Latest),
-                    class_hash,
-                )
-                .await
-                .context("Failed to fetch contract class")?;
-
-            let abi = ContractAbi::from_contract_class(class)?;
-            self.abi_cache.insert(class_hash, abi.clone());
-            abi
-        };
-
         // Use BTreeSet to automatically deduplicate and maintain sorted order
         let mut all_decoders = BTreeSet::new();
 
         // Run SRC-5 checks first if enabled
-        if self.identification_mode.contains(ContractIdentificationMode::SRC5) {
+        if self
+            .identification_mode
+            .contains(ContractIdentificationMode::SRC5)
+        {
             for rule in &self.identification_rules {
                 if let Some((interface_id, decoder_ids)) = rule.src5_interface() {
                     // Check if contract supports this interface
@@ -420,7 +394,51 @@ impl ContractRegistry {
         }
 
         // Run ABI heuristics if enabled
-        if self.identification_mode.contains(ContractIdentificationMode::ABI_HEURISTICS) {
+        if self
+            .identification_mode
+            .contains(ContractIdentificationMode::ABI_HEURISTICS)
+        {
+            // Fetch class hash
+            tracing::debug!(
+                target: "torii::contract_registry",
+                "Fetching class hash for contract {:?}",
+                contract
+            );
+            let class_hash = provider
+                .get_class_hash_at(
+                    starknet::core::types::BlockId::Tag(starknet::core::types::BlockTag::Latest),
+                    contract,
+                )
+                .await
+                .context("Failed to fetch class hash")?;
+
+            // TODO: the ABI cache must be done in a database... let's see if we need to connect the engine db here..
+            // because having this common to all rules would be better to ensure that the cache is better.
+            // since the ABI of a class hash can't change.
+            // Fetch ABI (use cache if available)
+            tracing::debug!(
+                target: "torii::contract_registry",
+                "Fetching ABI for contract {:?}",
+                contract
+            );
+            let abi = if let Some(cached_abi) = self.abi_cache.get(&class_hash) {
+                cached_abi.clone()
+            } else {
+                let class = provider
+                    .get_class(
+                        starknet::core::types::BlockId::Tag(
+                            starknet::core::types::BlockTag::Latest,
+                        ),
+                        class_hash,
+                    )
+                    .await
+                    .context("Failed to fetch contract class")?;
+
+                let abi = ContractAbi::from_contract_class(class)?;
+                self.abi_cache.insert(class_hash, abi.clone());
+                abi
+            };
+
             for rule in &self.identification_rules {
                 match rule.identify_by_abi(contract, class_hash, &abi) {
                     Ok(decoders) => {

@@ -1,5 +1,10 @@
 [workspace]
-members = [".", "crates/torii-sql-sink", "crates/torii-log-sink"]
+members = [
+    ".",
+    "crates/torii-sql-sink",
+    "crates/torii-log-sink",
+    "bins/torii-erc20",
+]
 resolver = "2"
 
 [package]
