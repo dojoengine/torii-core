@@ -48,7 +48,7 @@ export class GrpcTransport {
         'x-grpc-web': '1',
         ...options?.headers,
       },
-      body,
+      body: body as BodyInit,
       signal: options?.abort,
     });
 
@@ -81,7 +81,7 @@ export class GrpcTransport {
         'x-grpc-web': '1',
         ...options?.headers,
       },
-      body,
+      body: body as BodyInit,
       signal: options?.abort,
     });
 

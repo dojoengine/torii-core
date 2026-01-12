@@ -1,5 +1,5 @@
 import { ToriiClient } from "@toriijs/sdk";
-import { SqlSinkClient } from "./generated";
+import { SqlSinkClient, LogSinkClient, ToriiClient as GeneratedToriiClient } from "./generated";
 
 const SERVER_URL = process.env.TORII_URL || "http://localhost:8080";
 
@@ -8,6 +8,8 @@ async function main() {
 
   const client = new ToriiClient(SERVER_URL, {
     sql: SqlSinkClient,
+    log: LogSinkClient,
+    torii: GeneratedToriiClient,
   });
 
   // Get server version
@@ -18,29 +20,63 @@ async function main() {
   const topics = await client.listTopics();
   console.log("Available topics:", topics);
 
-  // Get database schema
+  // --- SQL Sink ---
+  console.log("\n--- SQL Sink ---");
+
   const schema = await client.sql.getSchema({});
   console.log("Schema:", schema);
 
-  // Query data
   const result = await client.sql.query({
     query: "SELECT * FROM sql_operation LIMIT 3",
   });
   console.log("Query result:", result);
 
-  // Subscribe to real-time updates
   console.log("\nSubscribing to SQL updates...");
-  const unsubscribe = await client.sql.onSubscribe(
+  const unsubscribeSql = await client.sql.onSubscribe(
     { clientId: "example-client" },
-    (update) => console.log("Update:", update),
-    (error) => console.error("Error:", error),
-    () => console.log("Connected!")
+    (update) => console.log("SQL update:", update),
+    (error) => console.error("SQL error:", error),
+    () => console.log("SQL subscription connected!")
+  );
+
+  // --- Log Sink ---
+  console.log("\n--- Log Sink ---");
+
+  const logs = await client.log.queryLogs({ limit: 5 });
+  console.log("Recent logs:", logs);
+
+  console.log("\nSubscribing to log updates...");
+  const unsubscribeLogs = await client.log.onSubscribeLogs(
+    { limit: 10 },
+    (update) => console.log("Log update:", update),
+    (error) => console.error("Log error:", error),
+    () => console.log("Log subscription connected!")
+  );
+
+  // --- Generic Topic Subscription (with schema-aware decoding) ---
+  console.log("\n--- Generic Topic Subscription ---");
+  console.log("Subscribing to multiple topics with filters...");
+
+  const unsubscribeTopics = await client.torii.onSubscribeToTopicsStream(
+    {
+      clientId: "example-client",
+      topics: [
+        { topic: "sql", filters: { table: "user" }, filterData: { typeUrl: "", value: null } },
+        { topic: "logs", filters: {}, filterData: { typeUrl: "", value: null } },
+      ],
+      unsubscribeTopics: [],
+    },
+    (update) => console.log(`Topic [${update.topic}]:`, update.data),
+    (error) => console.error("Topic error:", error),
+    () => console.log("Topic subscription connected!")
   );
 
   // Run for 10 seconds
   await new Promise((resolve) => setTimeout(resolve, 10000));
 
-  unsubscribe();
+  unsubscribeSql();
+  unsubscribeLogs();
+  unsubscribeTopics();
   console.log("Done");
 }
 

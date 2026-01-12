@@ -23,13 +23,3 @@ export {
   type MessageSchema,
   type FieldSchema,
 } from './client/protobuf';
-
-// CLI utilities (for programmatic usage)
-export { generateFromReflection } from './cli/reflection';
-export { generateFromProtos } from './cli/protos';
-export {
-  generateClientCode,
-  type ServiceDefinition,
-  type MethodDefinition,
-  type GeneratorOptions,
-} from './cli/generator';

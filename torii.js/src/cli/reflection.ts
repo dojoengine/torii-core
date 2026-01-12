@@ -140,7 +140,7 @@ async function callReflection(serverUrl: string, request: Uint8Array): Promise<U
       'Accept': 'application/grpc-web+proto',
       'x-grpc-web': '1',
     },
-    body: request,
+    body: request as BodyInit,
   });
 
   if (!response.ok) {

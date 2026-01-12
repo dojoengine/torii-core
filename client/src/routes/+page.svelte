@@ -1,22 +1,23 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { ToriiGrpcClient, type EntityUpdate } from '$lib/grpc-client';
-	import { ToriiSqlSinkClient, type QueryRow, type TableSchema } from '$lib/sql-sink-client';
-	import { ToriiLogSinkClient, type LogEntry, type LogUpdate } from '$lib/log-sink-client';
-	import { decodeAny, formatSqlOperation, formatLogEntry } from '$lib/protobuf-decoder';
-	import type { SqlOperation } from '$lib/../generated/sinks/sql';
-	import type { LogEntry as ProtoLogEntry } from '$lib/../generated/sinks/log';
+	import { createClient, SERVER_URL } from '$lib/torii-client';
+	import type {
+		TopicUpdate,
+		TopicInfo,
+		LogEntry,
+		LogUpdate,
+		QueryRow,
+		TableSchema,
+		SqlOperationUpdate
+	} from '../generated';
 
-	// Server config
-	const SERVER_URL = 'http://localhost:8080';
-	const client = new ToriiGrpcClient(SERVER_URL);
-	const sqlClient = new ToriiSqlSinkClient(SERVER_URL);
-	const logClient = new ToriiLogSinkClient(SERVER_URL);
+	// Create unified client
+	const client = createClient(SERVER_URL);
 
 	// State
 	let clientId = $state(`browser-${Math.random().toString(36).substring(7)}`);
 	let connected = $state(false);
-	let updates: EntityUpdate[] = $state([]);
+	let updates: TopicUpdate[] = $state([]);
 	let error = $state('');
 	let serverHealth = $state<any>(null);
 	let unsubscribe: (() => void) | null = null;
@@ -33,12 +34,6 @@
 	let topicsToUnsubscribe = $state<string[]>([]);
 
 	// Topics discovery
-	interface TopicInfo {
-		name: string;
-		sinkName: string;
-		availableFilters: string[];
-		description: string;
-	}
 	let availableTopics = $state<TopicInfo[]>([]);
 	let topicsLoading = $state(false);
 	let topicsError = $state('');
@@ -51,17 +46,17 @@
 
 	// SQL Sink gRPC service state
 	let grpcSqlQuery = $state('SELECT * FROM sql_operation LIMIT 5');
-	let grpcSqlResults = $state<Array<{ [key: string]: string }>>([]);
+	let grpcSqlResults = $state<QueryRow[]>([]);
 	let grpcSqlError = $state('');
 	let grpcSqlLoading = $state(false);
 	let sqlSchema = $state<TableSchema[]>([]);
 	let schemaLoading = $state(false);
-	let streamingRows = $state<Array<{ [key: string]: string }>>([]);
+	let streamingRows = $state<QueryRow[]>([]);
 	let isStreaming = $state(false);
 
 	// SQL Sink subscription state (persistent stream)
 	let sqlSinkSubscribed = $state(false);
-	let sqlSinkUpdates = $state<any[]>([]);
+	let sqlSinkUpdates = $state<SqlOperationUpdate[]>([]);
 	let sqlSinkUnsubscribe: (() => void) | null = null;
 
 	// Log Sink state
@@ -154,7 +149,8 @@
 				.filter((t) => !topicsToUnsubscribe.includes(t.topic))
 				.map((t) => ({
 					topic: t.topic,
-					filters: t.filters
+					filters: t.filters,
+					filterData: { typeUrl: '', value: null }
 				}));
 
 			console.log('🚀 Applying subscription...', {
@@ -162,57 +158,39 @@
 				unsubscribe: topicsToUnsubscribe
 			});
 
-		unsubscribe = await client.subscribeToTopics(
-			clientId,
-			topicsToSend,
-			topicsToUnsubscribe,
-			(update: EntityUpdate) => {
+		unsubscribe = await client.torii.onSubscribeToTopicsStream(
+			{
+				clientId,
+				topics: topicsToSend,
+				unsubscribeTopics: topicsToUnsubscribe
+			},
+			(update: TopicUpdate) => {
 				console.log('📬 Update received:', update);
-
-				// Decode protobuf data if present
-				if (update.data) {
-					const decoded = decodeAny(update.data);
-					console.log('🔓 Decoded protobuf:', decoded);
-
-					if (decoded && decoded.typeName === 'SqlOperation') {
-						const formatted = formatSqlOperation(decoded.data as SqlOperation);
-						console.log('✨ Formatted SQL operation:', formatted);
-						// Attach decoded data to update for display
-						(update as any).decodedData = formatted;
-						(update as any).decodedType = 'SqlOperation';
-					} else if (decoded && decoded.typeName === 'LogEntry') {
-						const formatted = formatLogEntry(decoded.data as ProtoLogEntry);
-						console.log('✨ Formatted Log entry:', formatted);
-						// Attach decoded data to update for display
-						(update as any).decodedData = formatted;
-						(update as any).decodedType = 'LogEntry';
-					}
-				}
-
+				// Data is automatically decoded by torii.js
 				updates = [update, ...updates].slice(0, 50);
 			},
-				(err: Error) => {
-					// Ignore "missing trailers" errors when we intentionally close streams
-					if (err.message.includes('missing trailers')) {
-						console.log('ℹ️ Stream closed (expected during update)');
-						return;
-					}
-					error = `Subscription error: ${err.message}`;
-					console.error('Subscription error:', err);
-					connected = false;
-				},
-				() => {
-					connected = true;
-					// Remove unsubscribed topics from active list
-					if (topicsToUnsubscribe.length > 0) {
-						activeTopics = activeTopics.filter(
-							(t) => !topicsToUnsubscribe.includes(t.topic)
-						);
-					}
-					topicsToUnsubscribe = [];
-					console.log('✅ Subscription applied!');
+			(err: Error) => {
+				// Ignore "missing trailers" errors when we intentionally close streams
+				if (err.message.includes('missing trailers')) {
+					console.log('ℹ️ Stream closed (expected during update)');
+					return;
 				}
-			);
+				error = `Subscription error: ${err.message}`;
+				console.error('Subscription error:', err);
+				connected = false;
+			},
+			() => {
+				connected = true;
+				// Remove unsubscribed topics from active list
+				if (topicsToUnsubscribe.length > 0) {
+					activeTopics = activeTopics.filter(
+						(t) => !topicsToUnsubscribe.includes(t.topic)
+					);
+				}
+				topicsToUnsubscribe = [];
+				console.log('✅ Subscription applied!');
+			}
+		);
 		} catch (err: any) {
 			error = `Failed to apply subscription: ${err.message}`;
 			console.error('Subscription error:', err);
@@ -236,7 +214,7 @@
 			availableTopics = [];
 
 			const topics = await client.listTopics();
-			availableTopics = topics;
+			availableTopics = topics as TopicInfo[];
 			console.log('✅ Topics loaded:', topics);
 		} catch (err: any) {
 			topicsError = `Failed to load topics: ${err.message}`;
@@ -260,9 +238,10 @@
 	async function healthCheck() {
 		try {
 			error = '';
-			const health = await client.getHealth();
-			serverHealth = health;
-			console.log('Server health:', health);
+			// Use getVersion as health check
+			const version = await client.getVersion();
+			serverHealth = { status: 'healthy', version: version.version };
+			console.log('Server health:', serverHealth);
 		} catch (err: any) {
 			error = `Health check failed: ${err.message}`;
 			serverHealth = null;
@@ -329,7 +308,7 @@
 			grpcSqlResults = [];
 
 			console.log('📊 Executing gRPC query:', grpcSqlQuery);
-			const result = await sqlClient.query(grpcSqlQuery);
+			const result = await client.sql.query({ query: grpcSqlQuery });
 			grpcSqlResults = result.rows;
 			console.log(`✅ gRPC SQL query executed: ${result.totalRows} rows`);
 			console.log('📋 First row sample:', result.rows[0]);
@@ -346,9 +325,9 @@
 			grpcSqlError = '';
 			schemaLoading = true;
 
-			const schema = await sqlClient.getSchema();
-			sqlSchema = schema;
-			console.log(`✅ Schema loaded: ${schema.length} tables`);
+			const result = await client.sql.getSchema({});
+			sqlSchema = result.tables;
+			console.log(`✅ Schema loaded: ${result.tables.length} tables`);
 		} catch (err: any) {
 			grpcSqlError = `Schema load failed: ${err.message}`;
 			console.error('Schema load error:', err);
@@ -365,21 +344,21 @@
 
 			console.log('🔄 Starting stream query...');
 
-			await sqlClient.streamQuery(
-				grpcSqlQuery,
-				(row) => {
+			await client.sql.onStreamQuery(
+				{ query: grpcSqlQuery },
+				(row: QueryRow) => {
 					console.log('📥 Received row:', row);
 					streamingRows = [...streamingRows, row];
 					console.log(`📊 Total streaming rows: ${streamingRows.length}`);
 				},
-				() => {
-					isStreaming = false;
-					console.log(`✅ Stream completed: ${streamingRows.length} rows`);
-				},
-				(error) => {
+				(error: Error) => {
 					console.error('❌ Stream error:', error);
 					grpcSqlError = `Stream failed: ${error.message}`;
 					isStreaming = false;
+				},
+				() => {
+					isStreaming = false;
+					console.log(`✅ Stream completed: ${streamingRows.length} rows`);
 				}
 			);
 		} catch (err: any) {
@@ -393,13 +372,13 @@
 	async function subscribeSqlSink() {
 		try {
 			grpcSqlError = '';
-			sqlSinkUnsubscribe = await sqlClient.subscribe(
-				clientId,
-				(update) => {
+			sqlSinkUnsubscribe = await client.sql.onSubscribe(
+				{ clientId },
+				(update: SqlOperationUpdate) => {
 					console.log('📥 SQL Sink update:', update);
 					sqlSinkUpdates = [update, ...sqlSinkUpdates].slice(0, 50); // Keep last 50
 				},
-				(error) => {
+				(error: Error) => {
 					grpcSqlError = `Subscription error: ${error.message}`;
 					sqlSinkSubscribed = false;
 				},
@@ -428,9 +407,9 @@
 			logLoading = true;
 			logResults = [];
 
-			const result = await logClient.queryLogs(logLimit);
+			const result = await client.log.queryLogs({ limit: logLimit });
 			logResults = result.logs;
-			console.log(`✅ Queried ${result.total} logs`);
+			console.log(`✅ Queried ${result.logs.length} logs`);
 		} catch (err: any) {
 			logError = `Query failed: ${err.message}`;
 			console.error('Log query error:', err);
@@ -442,13 +421,13 @@
 	async function subscribeLogSink() {
 		try {
 			logError = '';
-			logSinkUnsubscribe = await logClient.subscribeLogs(
-				logLimit,
-				(update) => {
+			logSinkUnsubscribe = await client.log.onSubscribeLogs(
+				{ limit: logLimit },
+				(update: LogUpdate) => {
 					console.log('📥 Log Sink update:', update);
 					logSinkUpdates = [update, ...logSinkUpdates].slice(0, 50); // Keep last 50
 				},
-				(error) => {
+				(error: Error) => {
 					logError = `Subscription error: ${error.message}`;
 					logSinkSubscribed = false;
 				},
@@ -733,79 +712,16 @@
 									<span class="type-badge">{update.typeId}</span>
 								{/if}
 								<span class="update-time">
-									{new Date(update.timestamp * 1000).toLocaleTimeString()}
+									{new Date(Number(update.timestamp) * 1000).toLocaleTimeString()}
 								</span>
 							</div>
 							<div class="update-body">
-								{#if (update as any).decodedData}
-									<!-- Show decoded protobuf data -->
+								{#if update.data?.value}
 									<div class="protobuf-data">
-										{#if (update as any).decodedType === 'SqlOperation'}
-											<div class="data-label">🔓 Decoded: SqlOperation</div>
-											<div class="data-grid">
-												<div class="data-row">
-													<span class="data-key">Table:</span>
-													<span class="data-value">{(update as any).decodedData.table}</span>
-												</div>
-												<div class="data-row">
-													<span class="data-key">Operation:</span>
-													<span class="data-value operation-badge {(update as any).decodedData.operation}">
-														{(update as any).decodedData.operation}
-													</span>
-												</div>
-												<div class="data-row">
-													<span class="data-key">Value:</span>
-													<span class="data-value">{(update as any).decodedData.value}</span>
-												</div>
-											</div>
-										{:else if (update as any).decodedType === 'LogEntry'}
-											<div class="data-label">🔓 Decoded: LogEntry</div>
-											<div class="data-grid">
-												<div class="data-row">
-													<span class="data-key">ID:</span>
-													<span class="data-value">{(update as any).decodedData.id}</span>
-												</div>
-												<div class="data-row">
-													<span class="data-key">Message:</span>
-													<span class="data-value">{(update as any).decodedData.message}</span>
-												</div>
-												<div class="data-row">
-													<span class="data-key">Block:</span>
-													<span class="data-value">{(update as any).decodedData.blockNumber}</span>
-												</div>
-												<div class="data-row">
-													<span class="data-key">Event Key:</span>
-													<span class="data-value" style="font-family: monospace; font-size: 0.8rem; word-break: break-all;">
-														{(update as any).decodedData.eventKey}
-													</span>
-												</div>
-											</div>
-										{/if}
-									</div>
-								{:else if update.data}
-									<!-- Show raw protobuf data if not decoded -->
-									<div class="protobuf-data">
-										<div class="data-label">🔒 Raw Protobuf Data</div>
-										<div class="data-grid">
-											<div class="data-row">
-												<span class="data-key">Type URL:</span>
-												<span class="data-value" style="font-size: 0.85rem; word-break: break-all;">
-													{update.data.type_url || 'unknown'}
-												</span>
-											</div>
-											<div class="data-row">
-												<span class="data-key">Data Size:</span>
-												<span class="data-value">
-													{update.data.value?.length || 0} bytes
-												</span>
-											</div>
-										</div>
-										<p class="hint" style="margin-top: 0.5rem; color: #999;">
-											Decoder not available for this data type
-										</p>
+										<div class="data-label">🔓 {update.data.typeUrl}</div>
+										<pre style="margin: 0.5rem 0; padding: 0.5rem; background: #f5f5f5; border-radius: 4px; font-size: 0.85rem; overflow-x: auto;">{JSON.stringify(update.data.value, null, 2)}</pre>
 									</div>
 								{:else}
-									<!-- No data available -->
 									<div class="empty-state" style="padding: 1rem;">
 										<p style="margin: 0; color: #999; font-size: 0.9rem;">
 											No data payload in this update
@@ -922,7 +838,7 @@
 				</div>
 
 				{#if grpcSqlResults.length > 0}
-					{@const columns = Object.keys(grpcSqlResults[0]).sort()}
+					{@const columns = Object.keys(grpcSqlResults[0].columns).sort()}
 					<div class="result-section">
 						<h3>Query Results ({grpcSqlResults.length} rows):</h3>
 						<div class="table-container">
@@ -938,7 +854,7 @@
 									{#each grpcSqlResults as row}
 										<tr>
 											{#each columns as col}
-												<td>{row[col] ?? ''}</td>
+												<td>{row.columns[col] ?? ''}</td>
 											{/each}
 										</tr>
 									{/each}
@@ -949,7 +865,7 @@
 				{/if}
 
 				{#if streamingRows.length > 0}
-					{@const streamColumns = Object.keys(streamingRows[0]).sort()}
+					{@const streamColumns = Object.keys(streamingRows[0].columns).sort()}
 					<div class="result-section">
 						<h3>
 							Streaming Results ({streamingRows.length} rows)
@@ -970,7 +886,7 @@
 									{#each streamingRows as row}
 										<tr>
 											{#each streamColumns as col}
-												<td>{row[col] ?? ''}</td>
+												<td>{row.columns[col] ?? ''}</td>
 											{/each}
 										</tr>
 									{/each}
@@ -1196,9 +1112,9 @@
 										<tr>
 											<td>{log.id}</td>
 											<td>{log.message}</td>
-											<td>{log.block_number}</td>
+											<td>{log.blockNumber}</td>
 											<td style="font-family: monospace; font-size: 0.8rem;">
-												{log.event_key}
+												{log.eventKey}
 											</td>
 											<td>{new Date(Number(log.timestamp) * 1000).toLocaleString()}</td>
 										</tr>
@@ -1218,7 +1134,7 @@
 									<div style="display: flex; justify-content: space-between; margin-bottom: 0.5rem;">
 										<strong>Log #{update.log?.id || 'N/A'}</strong>
 										<span style="color: #666; font-size: 0.9rem;">
-											Block {update.log?.block_number || 'N/A'}
+											Block {update.log?.blockNumber || 'N/A'}
 										</span>
 									</div>
 									<div style="margin-bottom: 0.5rem;">
@@ -1227,9 +1143,9 @@
 									<div style="font-size: 0.85rem; color: #888;">
 										{new Date(Number(update.timestamp) * 1000).toLocaleString()}
 									</div>
-									{#if update.log?.event_key}
+									{#if update.log?.eventKey}
 										<div style="font-size: 0.75rem; color: #999; font-family: monospace; margin-top: 0.25rem;">
-											Event: {update.log.event_key}
+											Event: {update.log.eventKey}
 										</div>
 									{/if}
 								</div>

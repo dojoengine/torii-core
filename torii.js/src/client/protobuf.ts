@@ -367,6 +367,30 @@ function mapFieldNumbersToNames<T>(
       continue;
     }
 
+    // Handle google.protobuf.Any specially
+    if (fieldSchema.messageType === 'Any' && typeof value === 'object' && value !== null) {
+      const anyValue = value as Record<string, unknown>;
+      const typeUrl = String(anyValue.f1 ?? '');
+      const innerValue = anyValue.f2;
+
+      // Extract type name from URL: "type.googleapis.com/torii.sinks.log.LogEntry" → "LogEntry"
+      const typeName = typeUrl.split('/').pop()?.split('.').pop() ?? '';
+      const fullTypeName = typeUrl.split('/').pop() ?? '';
+
+      // Try to find schema by short name or full name
+      const innerSchema = schemaRegistry[typeName] || schemaRegistry[fullTypeName];
+
+      if (innerSchema && typeof innerValue === 'object' && innerValue !== null) {
+        result[fieldName] = {
+          typeUrl,
+          value: mapFieldNumbersToNames(innerValue as Record<string, unknown>, innerSchema),
+        };
+      } else {
+        result[fieldName] = { typeUrl, value: innerValue };
+      }
+      continue;
+    }
+
     // Handle nested messages recursively
     if (fieldSchema.type === 'message' && fieldSchema.messageType) {
       const nestedSchema = schemaRegistry[fieldSchema.messageType];

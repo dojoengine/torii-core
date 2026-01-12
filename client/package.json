@@ -12,15 +12,12 @@
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"format": "prettier --write .",
 		"lint": "prettier --check .",
-		"proto:generate": "./generate-proto.sh"
+		"generate": "bun run ../torii.js/src/cli/index.ts --url http://localhost:8080 --output ./src/generated"
 	},
 	"dependencies": {
-		"@protobuf-ts/runtime": "^2.9.4",
-		"@protobuf-ts/runtime-rpc": "^2.9.4",
-		"@protobuf-ts/grpcweb-transport": "^2.9.4"
+		"@toriijs/sdk": "workspace:*"
 	},
 	"devDependencies": {
-		"@protobuf-ts/plugin": "^2.9.4",
 		"@sveltejs/adapter-auto": "^7.0.0",
 		"@sveltejs/kit": "^2.47.1",
 		"@sveltejs/vite-plugin-svelte": "^6.2.1",
@@ -30,10 +27,5 @@
 		"svelte-check": "^4.3.3",
 		"typescript": "^5.9.3",
 		"vite": "^7.1.10"
-	},
-	"pnpm": {
-		"onlyBuiltDependencies": [
-			"esbuild"
-		]
 	}
 }

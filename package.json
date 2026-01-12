@@ -1,5 +1,5 @@
 {
   "name": "torii-core",
   "private": true,
-  "workspaces": ["torii.js", "examples/*"]
+  "workspaces": ["torii.js", "client", "examples/*"]
 }

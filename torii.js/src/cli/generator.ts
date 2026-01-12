@@ -112,7 +112,7 @@ function generateServiceClient(
     request: ${inputType} = {} as ${inputType},
     options?: CallOptions
   ): AsyncGenerator<${outputType}> {
-    yield* this.streamCall<${outputType}>('${rpcPath}', request as Record<string, unknown>, ${schemaOptions});
+    yield* this.streamCall<${outputType}>('${rpcPath}', request as unknown as Record<string, unknown>, ${schemaOptions});
   }
 
   /**
@@ -124,7 +124,7 @@ function generateServiceClient(
     onError?: (error: Error) => void,
     onConnected?: () => void
   ): Promise<() => void> {
-    return this._subscribeWithCallbacks<${outputType}>('${rpcPath}', request as Record<string, unknown>, onMessage, onError, onConnected, ${hasTypes && outputSchemaName ? outputSchemaName : 'undefined'});
+    return this._subscribeWithCallbacks<${outputType}>('${rpcPath}', request as unknown as Record<string, unknown>, onMessage, onError, onConnected, ${hasTypes && outputSchemaName ? outputSchemaName : 'undefined'});
   }`;
       } else if (method.clientStreaming && method.serverStreaming) {
         return `
@@ -143,7 +143,7 @@ function generateServiceClient(
     request: ${inputType} = {} as ${inputType},
     options?: CallOptions
   ): Promise<${outputType}> {
-    return this.unaryCall<${outputType}>('${rpcPath}', request as Record<string, unknown>, ${schemaOptions});
+    return this.unaryCall<${outputType}>('${rpcPath}', request as unknown as Record<string, unknown>, ${schemaOptions});
   }`;
       }
     })

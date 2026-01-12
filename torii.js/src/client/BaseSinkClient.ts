@@ -6,7 +6,7 @@
 import { GrpcTransport, type CallOptions } from './GrpcTransport';
 import type { MessageSchema } from './protobuf';
 
-export { CallOptions };
+export type { CallOptions };
 
 export abstract class BaseSinkClient {
   protected baseUrl: string;

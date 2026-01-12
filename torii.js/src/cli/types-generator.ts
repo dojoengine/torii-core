@@ -267,6 +267,13 @@ export async function generateTypesFile(
     lines.push('');
   }
 
+  // Add google.protobuf.Any type
+  lines.push('export interface Any {');
+  lines.push('  typeUrl: string;');
+  lines.push('  value: unknown;');
+  lines.push('}');
+  lines.push('');
+
   // Generate interfaces (skip map entry types)
   for (const [, msgDef] of messages) {
     if (msgDef.isMapEntry) continue;
