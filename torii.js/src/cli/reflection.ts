@@ -1,6 +1,13 @@
 import { generateClientCode, type ServiceDefinition, type GeneratorOptions } from './generator';
 import { fromBinary } from '@bufbuild/protobuf';
 import { FileDescriptorProtoSchema, type FileDescriptorProto } from '@bufbuild/protobuf/wkt';
+import {
+  extractTypesFromFileDescriptor,
+  generateTypesFile,
+  generateSchemaFile,
+  type MessageDefinition,
+  type EnumDefinition,
+} from './types-generator';
 
 export async function generateFromReflection(
   serverUrl: string,
@@ -22,17 +29,38 @@ export async function generateFromReflection(
     throw new Error('No application services found via reflection');
   }
 
-  console.log(`\nGenerating clients for ${filteredServices.length} services...`);
+  // Collect all FileDescriptorProtos
+  const allFileDescriptors = new Map<string, FileDescriptorProto>();
+  const allMessages = new Map<string, MessageDefinition>();
+  const allEnums = new Map<string, EnumDefinition>();
+
+  console.log(`\nCollecting type definitions...`);
 
   const serviceDefinitions: ServiceDefinition[] = [];
   for (const serviceName of filteredServices) {
-    const definition = await getServiceDefinition(serverUrl, serviceName);
+    const { definition, fileDescriptors } = await getServiceDefinitionWithTypes(serverUrl, serviceName);
     if (definition) {
       serviceDefinitions.push(definition);
     }
+    // Collect file descriptors (deduplicated by name)
+    for (const fd of fileDescriptors) {
+      if (fd.name && !allFileDescriptors.has(fd.name)) {
+        allFileDescriptors.set(fd.name, fd);
+        extractTypesFromFileDescriptor(fd, allMessages, allEnums);
+      }
+    }
   }
 
-  await generateClientCode(serviceDefinitions, outputDir, options);
+  console.log(`Found ${allMessages.size} message types, ${allEnums.size} enums`);
+
+  // Generate types and schema files
+  console.log(`\nGenerating type definitions...`);
+  await generateTypesFile(allMessages, allEnums, outputDir);
+  await generateSchemaFile(allMessages, allEnums, outputDir);
+
+  // Generate client code with type information
+  console.log(`\nGenerating clients for ${filteredServices.length} services...`);
+  await generateClientCode(serviceDefinitions, outputDir, options, allMessages);
 }
 
 async function listServices(serverUrl: string): Promise<string[]> {
@@ -45,10 +73,15 @@ async function listServices(serverUrl: string): Promise<string[]> {
   return services;
 }
 
-async function getServiceDefinition(
+interface ServiceDefinitionResult {
+  definition: ServiceDefinition | null;
+  fileDescriptors: FileDescriptorProto[];
+}
+
+async function getServiceDefinitionWithTypes(
   serverUrl: string,
   serviceName: string
-): Promise<ServiceDefinition | null> {
+): Promise<ServiceDefinitionResult> {
   try {
     const request = createFileContainingSymbolRequest(serviceName);
     const response = await callReflection(serverUrl, request);
@@ -60,16 +93,21 @@ async function getServiceDefinition(
         const fullName = fd.package ? `${fd.package}.${service.name}` : service.name;
         if (fullName === serviceName) {
           return {
-            name: service.name,
-            fullName,
-            package: fd.package,
-            methods: service.method.map((m) => ({
-              name: m.name,
-              inputType: m.inputType.split('.').pop() || m.inputType,
-              outputType: m.outputType.split('.').pop() || m.outputType,
-              clientStreaming: m.clientStreaming ?? false,
-              serverStreaming: m.serverStreaming ?? false,
-            })),
+            definition: {
+              name: service.name,
+              fullName,
+              package: fd.package,
+              methods: service.method.map((m) => ({
+                name: m.name,
+                inputType: m.inputType.replace(/^\./, ''),
+                outputType: m.outputType.replace(/^\./, ''),
+                inputTypeShort: m.inputType.split('.').pop() || m.inputType,
+                outputTypeShort: m.outputType.split('.').pop() || m.outputType,
+                clientStreaming: m.clientStreaming ?? false,
+                serverStreaming: m.serverStreaming ?? false,
+              })),
+            },
+            fileDescriptors,
           };
         }
       }
@@ -78,14 +116,17 @@ async function getServiceDefinition(
     // Fallback: return service without methods if not found in descriptors
     const parts = serviceName.split('.');
     return {
-      name: parts[parts.length - 1],
-      fullName: serviceName,
-      package: parts.slice(0, -1).join('.'),
-      methods: [],
+      definition: {
+        name: parts[parts.length - 1],
+        fullName: serviceName,
+        package: parts.slice(0, -1).join('.'),
+        methods: [],
+      },
+      fileDescriptors,
     };
   } catch (error) {
     console.warn(`Warning: Failed to get service definition for ${serviceName}`);
-    return null;
+    return { definition: null, fileDescriptors: [] };
   }
 }
 

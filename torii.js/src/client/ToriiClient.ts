@@ -16,7 +16,7 @@
  * ```
  */
 
-import { BaseSinkClient, type CallOptions } from './BaseSinkClient';
+import { BaseSinkClient } from './BaseSinkClient';
 import { GrpcTransport } from './GrpcTransport';
 
 // Type for a client class constructor
@@ -81,13 +81,14 @@ class ToriiClientImpl<T extends ClientMap = {}> {
    * Get server version
    */
   async getVersion(): Promise<{ version: string; buildTime: string }> {
-    const response = await this._transport.unaryCall<{
-      version?: string;
-      build_time?: string;
-    }>('/torii.Torii/GetVersion', {});
+    const response = await this._transport.unaryCall<Record<string, unknown>>(
+      '/torii.Torii/GetVersion',
+      {}
+    );
+    // Proto fields: f1 = version, f2 = build_time
     return {
-      version: response.version ?? '',
-      buildTime: response.build_time ?? '',
+      version: String(response.f1 ?? ''),
+      buildTime: String(response.f2 ?? ''),
     };
   }
 
@@ -102,20 +103,22 @@ class ToriiClientImpl<T extends ClientMap = {}> {
       description: string;
     }>
   > {
-    const response = await this._transport.unaryCall<{
-      topics?: Array<{
-        name?: string;
-        sink_name?: string;
-        available_filters?: string[];
-        description?: string;
-      }>;
-    }>('/torii.Torii/ListTopics', {});
+    const response = await this._transport.unaryCall<Record<string, unknown>>(
+      '/torii.Torii/ListTopics',
+      {}
+    );
 
-    return (response.topics ?? []).map((t) => ({
-      name: t.name ?? '',
-      sinkName: t.sink_name ?? '',
-      availableFilters: t.available_filters ?? [],
-      description: t.description ?? '',
+    // Proto fields: f1 = topics (repeated)
+    // TopicInfo: f1 = name, f2 = sink_name, f3 = available_filters, f4 = description
+    const topics = response.f1;
+    if (!topics) return [];
+
+    const topicList = Array.isArray(topics) ? topics : [topics];
+    return topicList.map((t: Record<string, unknown>) => ({
+      name: String(t.f1 ?? ''),
+      sinkName: String(t.f2 ?? ''),
+      availableFilters: Array.isArray(t.f3) ? t.f3.map(String) : [],
+      description: String(t.f4 ?? ''),
     }));
   }
 
@@ -143,21 +146,18 @@ class ToriiClientImpl<T extends ClientMap = {}> {
     (async () => {
       try {
         onConnected?.();
-        for await (const response of this._transport.streamCall<{
-          topic?: string;
-          update_type?: number;
-          timestamp?: string | number;
-          type_id?: string;
-          data?: unknown;
-        }>('/torii.Torii/SubscribeToTopicsStream', request, {
-          abort: this._abortController?.signal,
-        })) {
+        // Proto fields: f1 = topic, f2 = update_type, f3 = timestamp, f4 = type_id, f5 = data
+        for await (const response of this._transport.streamCall<Record<string, unknown>>(
+          '/torii.Torii/SubscribeToTopicsStream',
+          request,
+          { abort: this._abortController?.signal }
+        )) {
           onUpdate({
-            topic: response.topic ?? '',
-            updateType: response.update_type ?? 0,
-            timestamp: Number(response.timestamp ?? 0),
-            typeId: response.type_id ?? '',
-            data: response.data,
+            topic: String(response.f1 ?? ''),
+            updateType: Number(response.f2 ?? 0),
+            timestamp: Number(response.f3 ?? 0),
+            typeId: String(response.f4 ?? ''),
+            data: response.f5,
           });
         }
       } catch (err: unknown) {

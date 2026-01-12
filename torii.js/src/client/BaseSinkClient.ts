@@ -4,6 +4,7 @@
  */
 
 import { GrpcTransport, type CallOptions } from './GrpcTransport';
+import type { MessageSchema } from './protobuf';
 
 export { CallOptions };
 
@@ -20,7 +21,7 @@ export abstract class BaseSinkClient {
    * Make a unary RPC call
    * @param path - Full RPC path like '/package.Service/Method'
    * @param request - Request payload
-   * @param options - Call options (abort, timeout, headers)
+   * @param options - Call options (abort, timeout, headers, schemas)
    */
   protected async unaryCall<T = Record<string, unknown>>(
     path: string,
@@ -34,7 +35,7 @@ export abstract class BaseSinkClient {
    * Make a server-streaming RPC call
    * @param path - Full RPC path like '/package.Service/Method'
    * @param request - Request payload
-   * @param options - Call options (abort, timeout, headers)
+   * @param options - Call options (abort, timeout, headers, schemas)
    */
   protected async *streamCall<T = Record<string, unknown>>(
     path: string,
@@ -47,12 +48,13 @@ export abstract class BaseSinkClient {
   /**
    * Helper for subscription-style streaming with callbacks
    */
-  protected async subscribeWithCallbacks<T>(
+  protected async _subscribeWithCallbacks<T>(
     path: string,
     request: Record<string, unknown>,
     onMessage: (message: T) => void,
     onError?: (error: Error) => void,
-    onConnected?: () => void
+    onConnected?: () => void,
+    responseSchema?: MessageSchema
   ): Promise<() => void> {
     const abortController = new AbortController();
 
@@ -61,6 +63,7 @@ export abstract class BaseSinkClient {
         onConnected?.();
         for await (const message of this.streamCall<T>(path, request, {
           abort: abortController.signal,
+          responseSchema,
         })) {
           onMessage(message);
         }

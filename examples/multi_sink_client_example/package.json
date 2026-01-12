@@ -1,0 +1,8 @@
+{
+  "name": "multi-sink-client-example",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@toriijs/sdk": "workspace:*"
+  }
+}

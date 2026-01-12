@@ -3,10 +3,21 @@
  * Handles encoding/decoding and HTTP communication
  */
 
+import {
+  encodeProtobufObject,
+  decodeProtobufObject,
+  encodeWithSchema,
+  decodeWithSchema,
+  frameMessage,
+  type MessageSchema,
+} from './protobuf';
+
 export interface CallOptions {
   abort?: AbortSignal;
   timeout?: number;
   headers?: Record<string, string>;
+  requestSchema?: MessageSchema;
+  responseSchema?: MessageSchema;
 }
 
 export class GrpcTransport {
@@ -24,7 +35,10 @@ export class GrpcTransport {
     request: Record<string, unknown>,
     options?: CallOptions
   ): Promise<T> {
-    const body = this.encodeMessage(request);
+    const messageBytes = options?.requestSchema
+      ? encodeWithSchema(request, options.requestSchema)
+      : encodeProtobufObject(request);
+    const body = frameMessage(messageBytes);
 
     const response = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
@@ -43,7 +57,7 @@ export class GrpcTransport {
     }
 
     const responseBody = await response.arrayBuffer();
-    return this.decodeMessage(new Uint8Array(responseBody)) as T;
+    return this.decodeMessageWithSchema<T>(new Uint8Array(responseBody), options?.responseSchema);
   }
 
   /**
@@ -54,7 +68,10 @@ export class GrpcTransport {
     request: Record<string, unknown>,
     options?: CallOptions
   ): AsyncGenerator<T> {
-    const body = this.encodeMessage(request);
+    const messageBytes = options?.requestSchema
+      ? encodeWithSchema(request, options.requestSchema)
+      : encodeProtobufObject(request);
+    const body = frameMessage(messageBytes);
 
     const response = await fetch(`${this.baseUrl}${path}`, {
       method: 'POST',
@@ -100,48 +117,31 @@ export class GrpcTransport {
 
         // Only yield data frames (0x00), skip trailers (0x80)
         if (messageFrame[0] === 0x00) {
-          yield this.decodeMessage(messageFrame) as T;
+          yield this.decodeMessageWithSchema<T>(messageFrame, options?.responseSchema);
         }
       }
     }
   }
 
   /**
-   * Encode a message for gRPC-Web transport
+   * Decode a gRPC-Web frame with optional schema
    */
-  private encodeMessage(message: Record<string, unknown>): Uint8Array {
-    const json = JSON.stringify(message);
-    const messageBytes = new TextEncoder().encode(json);
-
-    // gRPC-Web frame: 1 byte flag + 4 bytes length + message
-    const frame = new Uint8Array(5 + messageBytes.length);
-    frame[0] = 0x00; // Data frame
-    const len = messageBytes.length;
-    frame[1] = (len >> 24) & 0xff;
-    frame[2] = (len >> 16) & 0xff;
-    frame[3] = (len >> 8) & 0xff;
-    frame[4] = len & 0xff;
-    frame.set(messageBytes, 5);
-
-    return frame;
-  }
-
-  /**
-   * Decode a gRPC-Web frame
-   */
-  private decodeMessage(data: Uint8Array): Record<string, unknown> {
-    if (data.length < 5) return {};
+  private decodeMessageWithSchema<T>(data: Uint8Array, schema?: MessageSchema): T {
+    if (data.length < 5) return {} as T;
 
     const messageLength =
       (data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4];
     const message = data.slice(5, 5 + messageLength);
 
+    if (message.length === 0) return {} as T;
+
     try {
-      const text = new TextDecoder().decode(message);
-      return JSON.parse(text);
+      if (schema) {
+        return decodeWithSchema<T>(message, schema);
+      }
+      return decodeProtobufObject(message) as T;
     } catch {
-      // Return raw bytes if not JSON
-      return { _raw: Array.from(message) };
+      return { _raw: Array.from(message) } as T;
     }
   }
 }
