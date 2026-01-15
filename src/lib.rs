@@ -24,16 +24,16 @@ pub use tonic;
 pub use grpc::UpdateType;
 
 use axum::Router as AxumRouter;
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tonic::transport::Server;
 use tower_http::cors::{Any as CorsAny, CorsLayer};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
-use etl::extractor::Extractor;
+use etl::extractor::{ContractIdentificationMode, DecoderId, Extractor, IdentificationRule};
 use etl::sink::{EventBus, Sink};
-use etl::{Decoder, MultiDecoder, MultiSink, SampleExtractor};
+use etl::{Decoder, DecoderContext, MultiSink, SampleExtractor};
 use grpc::{create_grpc_service, GrpcState, SubscriptionManager};
 use http::create_http_router;
 
@@ -97,6 +97,27 @@ pub struct ToriiConfig {
 
     /// Sample events for testing (provided by sinks).
     pub sample_events: Vec<starknet::core::types::EmittedEvent>,
+
+    /// Extractor for fetching blockchain events.
+    ///
+    /// If None, a SampleExtractor will be used for testing.
+    pub extractor: Option<Box<dyn Extractor>>,
+
+    /// Root directory for all databases (engine, sinks, registry).
+    ///
+    /// Defaults to current directory if not specified.
+    pub database_root: PathBuf,
+
+    /// Contract identification mode (SRC5, ABI heuristics, etc.).
+    pub identification_mode: ContractIdentificationMode,
+
+    /// Explicit contract-to-decoder mappings.
+    ///
+    /// These take precedence over auto-identification rules.
+    pub contract_mappings: HashMap<starknet::core::types::Felt, Vec<DecoderId>>,
+
+    /// Identification rules for auto-discovering contracts.
+    pub identification_rules: Vec<Box<dyn IdentificationRule>>,
 }
 
 impl ToriiConfig {
@@ -116,6 +137,11 @@ pub struct ToriiConfigBuilder {
     cycle_interval: Option<u64>,
     events_per_cycle: Option<usize>,
     sample_events: Vec<starknet::core::types::EmittedEvent>,
+    extractor: Option<Box<dyn Extractor>>,
+    database_root: Option<PathBuf>,
+    identification_mode: Option<ContractIdentificationMode>,
+    contract_mappings: HashMap<starknet::core::types::Felt, Vec<DecoderId>>,
+    identification_rules: Vec<Box<dyn IdentificationRule>>,
 }
 
 impl Default for ToriiConfigBuilder {
@@ -130,6 +156,11 @@ impl Default for ToriiConfigBuilder {
             cycle_interval: None,
             events_per_cycle: None,
             sample_events: Vec::new(),
+            extractor: None,
+            database_root: None,
+            identification_mode: None,
+            contract_mappings: HashMap::new(),
+            identification_rules: Vec::new(),
         }
     }
 }
@@ -239,6 +270,49 @@ impl ToriiConfigBuilder {
         self
     }
 
+    /// Sets the extractor for fetching blockchain events.
+    ///
+    /// If not set, a SampleExtractor will be used for testing.
+    pub fn with_extractor(mut self, extractor: Box<dyn Extractor>) -> Self {
+        self.extractor = Some(extractor);
+        self
+    }
+
+    /// Sets the root directory for all databases.
+    ///
+    /// All Torii databases (engine, sinks, registry) will be placed in this directory.
+    /// Defaults to current directory if not specified.
+    pub fn database_root(mut self, path: impl Into<PathBuf>) -> Self {
+        self.database_root = Some(path.into());
+        self
+    }
+
+    /// Sets the contract identification mode.
+    ///
+    /// Defaults to SRC5 if not specified.
+    pub fn identification_mode(mut self, mode: ContractIdentificationMode) -> Self {
+        self.identification_mode = Some(mode);
+        self
+    }
+
+    /// Adds an explicit contract-to-decoder mapping.
+    ///
+    /// These mappings take precedence over auto-identification rules.
+    pub fn map_contract(
+        mut self,
+        contract_address: starknet::core::types::Felt,
+        decoders: Vec<DecoderId>,
+    ) -> Self {
+        self.contract_mappings.insert(contract_address, decoders);
+        self
+    }
+
+    /// Adds an identification rule for auto-discovering contracts.
+    pub fn with_identification_rule(mut self, rule: Box<dyn IdentificationRule>) -> Self {
+        self.identification_rules.push(rule);
+        self
+    }
+
     /// Builds the Torii configuration.
     pub fn build(self) -> ToriiConfig {
         ToriiConfig {
@@ -251,40 +325,101 @@ impl ToriiConfigBuilder {
             cycle_interval: self.cycle_interval.unwrap_or(3),
             events_per_cycle: self.events_per_cycle.unwrap_or(5),
             sample_events: self.sample_events,
+            extractor: self.extractor,
+            database_root: self.database_root.unwrap_or_else(|| PathBuf::from(".")),
+            identification_mode: self
+                .identification_mode
+                .unwrap_or(ContractIdentificationMode::SRC5),
+            contract_mappings: self.contract_mappings,
+            identification_rules: self.identification_rules,
         }
     }
 }
 
 /// Starts the Torii server with custom configuration.
 ///
+/// NOTE: The caller is responsible for initializing the tracing subscriber before calling this function.
+///
 /// TODO: this function is just too big. But it has the whole workflow.
 /// This will be split into smaller functions in the future with associated configuration for each step.
 pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "torii=info,tower_http=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
     tracing::info!(target: "torii::main", "Starting Torii with {} sink(s) and {} decoder(s)",
         config.sinks.len(), config.decoders.len());
 
     let subscription_manager = Arc::new(SubscriptionManager::new());
     let event_bus = Arc::new(EventBus::new(subscription_manager.clone()));
 
+    // Create SinkContext for initialization
+    let sink_context = etl::sink::SinkContext {
+        database_root: config.database_root.clone(),
+    };
+
     let mut initialized_sinks: Vec<Arc<dyn Sink>> = Vec::new();
 
     for mut sink in config.sinks {
         // Box is used for sinks since we need to call initialize (mutable reference).
-        sink.initialize(event_bus.clone()).await?;
+        sink.initialize(event_bus.clone(), &sink_context).await?;
         // Convert Box<dyn Sink> to Arc<dyn Sink> since now we can use it immutably.
         initialized_sinks.push(Arc::from(sink));
     }
 
     let multi_sink = Arc::new(MultiSink::new(initialized_sinks));
-    let multi_decoder = Arc::new(MultiDecoder::new(config.decoders));
+
+    // Create EngineDb (needed by DecoderContext)
+    let engine_db_path = config.database_root.join("engine.db");
+    let engine_db_config = etl::engine_db::EngineDbConfig {
+        path: engine_db_path.to_string_lossy().to_string(),
+    };
+    let engine_db = etl::EngineDb::new(engine_db_config).await?;
+    let engine_db = Arc::new(engine_db);
+
+    // Create extractor early so we can get the provider for contract identification
+    let extractor: Box<dyn Extractor> = if let Some(extractor) = config.extractor {
+        tracing::info!(target: "torii::etl", "Using configured extractor");
+        extractor
+    } else {
+        tracing::info!(target: "torii::etl", "No extractor configured, using SampleExtractor for testing");
+        if config.sample_events.is_empty() {
+            tracing::warn!(target: "torii::etl", "No sample events provided, ETL loop will idle");
+        } else {
+            tracing::info!(
+                target: "torii::etl",
+                "Loaded {} sample event types (will cycle through them)",
+                config.sample_events.len()
+            );
+        }
+        Box::new(SampleExtractor::new(config.sample_events, config.events_per_cycle))
+    };
+
+    // Get provider from extractor for contract identification
+    let provider = extractor.provider();
+
+    // Create DecoderContext with integrated contract identification
+    let mut decoder_context = if config.identification_mode.is_empty()
+        && config.contract_mappings.is_empty()
+        && config.identification_rules.is_empty()
+    {
+        // Simple mode: no identification, all events to all decoders
+        DecoderContext::new(config.decoders, engine_db.clone())
+    } else {
+        // With identification: provider from extractor enables SRC-5 and ABI heuristics
+        DecoderContext::with_identification(
+            config.decoders,
+            engine_db.clone(),
+            config.identification_mode,
+            provider,
+        )
+    };
+
+    // Apply explicit contract mappings
+    for (address, decoders) in config.contract_mappings {
+        decoder_context.add_explicit_mapping(address, decoders);
+    }
+
+    // Add identification rules
+    for rule in config.identification_rules {
+        decoder_context.add_rule(rule);
+    }
 
     let topics = multi_sink.topics();
 
@@ -352,19 +487,16 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
         tracing::info!(target: "torii::main", "   + User-provided sink gRPC services");
     }
 
-    let engine_db_config = etl::engine_db::EngineDbConfig {
-        path: ":memory:".to_string(),
-    };
-    let engine_db = etl::EngineDb::new(engine_db_config).await?;
-    let engine_db = Arc::new(engine_db);
-
     // Setup and start the ETL pipeline.
     let etl_multi_sink = multi_sink.clone();
-    let etl_multi_decoder = multi_decoder.clone();
     let etl_engine_db = engine_db.clone();
     let cycle_interval = config.cycle_interval;
-    let events_per_cycle = config.events_per_cycle;
-    let sample_events = config.sample_events;
+
+    // Move multi_decoder into the task (can't clone since it owns the registry)
+    let etl_decoder_context = decoder_context;
+
+    // Extractor was already created earlier (to get provider), make it mutable for the ETL loop
+    let mut extractor = extractor;
 
     tokio::spawn(async move {
         tracing::info!(target: "torii::etl", "Starting ETL pipeline...");
@@ -372,34 +504,30 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
         // Wait a bit for the server to be ready.
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-        if sample_events.is_empty() {
-            tracing::warn!(target: "torii::etl", "No sample events provided, ETL loop will idle");
-            return;
-        }
-
-        tracing::info!(
-            target: "torii::etl",
-            "Loaded {} sample event types (will cycle through them)",
-            sample_events.len()
-        );
-
-        let mut extractor = SampleExtractor::new(sample_events, events_per_cycle);
-
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(cycle_interval));
+        let mut cursor: Option<String> = None;
 
         loop {
-            interval.tick().await;
-
             // Extract the events from the source.
-            let batch = match extractor.extract(None, &etl_engine_db).await {
+            let batch = match extractor.extract(cursor.clone(), &etl_engine_db).await {
                 Ok(batch) => batch,
                 Err(e) => {
                     tracing::error!(target: "torii::etl", "Extract failed: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(cycle_interval)).await;
                     continue;
                 }
             };
 
+            // Update cursor from batch
+            cursor = batch.cursor.clone();
+
             if batch.is_empty() {
+                if extractor.is_finished() {
+                    tracing::info!(target: "torii::etl", "Extractor finished, stopping ETL loop");
+                    break;
+                }
+
+                // Wait before polling again
+                tokio::time::sleep(tokio::time::Duration::from_secs(cycle_interval)).await;
                 continue;
             }
 
@@ -419,7 +547,7 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
             }
 
             // Transform the events into envelopes.
-            let envelopes = match etl_multi_decoder.decode(&batch.events).await {
+            let envelopes = match etl_decoder_context.decode(&batch.events).await {
                 Ok(envelopes) => envelopes,
                 Err(e) => {
                     tracing::error!(target: "torii::etl", "Decode failed: {}", e);

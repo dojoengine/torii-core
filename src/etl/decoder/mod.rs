@@ -1,11 +1,11 @@
-pub mod multi;
+pub mod context;
 
 use async_trait::async_trait;
 use starknet::core::types::EmittedEvent;
 
 use super::envelope::Envelope;
 
-pub use multi::MultiDecoder;
+pub use context::DecoderContext;
 
 /// Decoder transforms blockchain events into typed envelopes
 ///
@@ -38,7 +38,7 @@ pub use multi::MultiDecoder;
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// use crate::etl::decoder::Decoder;
 /// use crate::etl::envelope::{Envelope, TypeId, TypedBody};
 /// use starknet::core::types::EmittedEvent;
@@ -58,36 +58,36 @@ pub use multi::MultiDecoder;
 ///
 /// #[async_trait]
 /// impl Decoder for MyDecoder {
-///     async fn decode(&self, events: &[EmittedEvent]) -> anyhow::Result<Vec<Envelope>> {
-///         let envelopes = events
-///             .iter()
-///             .filter(|e| self.is_interested(e))
-///             .map(|e| {
-///                 // Only clone event data you actually need
-///                 let body = MyEventType { /* decoded fields */ };
+///     fn decoder_name(&self) -> &str {
+///         "my_decoder"
+///     }
 ///
-///                 // Add event-specific data to metadata for sink access
-///                 let mut metadata = HashMap::new();
-///                 metadata.insert("block_number".to_string(),
-///                     e.block_number.unwrap_or(0).to_string());
-///                 metadata.insert("from_address".to_string(),
-///                     format!("{:#x}", e.from_address));
-///                 // Add any other fields the sink might need.
+///     async fn decode_event(&self, event: &EmittedEvent) -> anyhow::Result<Vec<Envelope>> {
+///         if !self.is_interested(event) {
+///             return Ok(Vec::new());
+///         }
 ///
-///                 Envelope::new("my_key", Box::new(body), metadata)
-///             })
-///             .collect();
-///         Ok(envelopes)
+///         // Extract only the data you need from the event
+///         let body = MyEventType { /* decoded fields */ };
+///
+///         // Add event-specific data to metadata for sink access
+///         let mut metadata = HashMap::new();
+///         metadata.insert("block_number".to_string(),
+///             event.block_number.unwrap_or(0).to_string());
+///         metadata.insert("from_address".to_string(),
+///             format!("{:#x}", event.from_address));
+///
+///         Ok(vec![Envelope::new("my_key", Box::new(body), metadata)])
 ///     }
 /// }
 /// ```
 ///
 /// # Performance
 ///
-/// **Zero-copy filtering**: Decoders receive `&[EmittedEvent]` (reference slice), allowing:
-/// - Filter events without cloning (`iter()` instead of `into_iter()`).
-/// - Only clone data for events the decoder is interested in.
-/// - Multiple decoders process the same slice concurrently without memory duplication.
+/// **Zero-copy filtering**: Decoders receive `&EmittedEvent` (reference), allowing:
+/// - Process events without cloning.
+/// - Only extract data for events the decoder is interested in.
+/// - Multiple decoders process the same events without memory duplication.
 #[async_trait]
 pub trait Decoder: Send + Sync {
     /// Returns the unique name of this decoder
@@ -100,19 +100,41 @@ pub trait Decoder: Send + Sync {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// fn decoder_name(&self) -> &str {
     ///     "erc20" // DecoderId will be hash("erc20")
     /// }
     /// ```
     fn decoder_name(&self) -> &str;
 
-    /// Decode a slice of events into typed envelopes
+    /// Decode a single event into typed envelopes
+    ///
+    /// This is the primary method that decoders should implement.
+    /// Returns an empty Vec if the decoder is not interested in this event.
     ///
     /// # Arguments
-    /// * `events` - Reference to event slice (zero-copy, no cloning needed for filtering).
+    /// * `event` - Reference to the event to decode.
     ///
     /// # Returns
-    /// Vector of envelopes (only for events this decoder is interested in).
-    async fn decode(&self, events: &[EmittedEvent]) -> anyhow::Result<Vec<Envelope>>;
+    /// Vector of envelopes produced from this event (empty if not interested).
+    async fn decode_event(&self, event: &EmittedEvent) -> anyhow::Result<Vec<Envelope>>;
+
+    /// Decode multiple events into typed envelopes (convenience method)
+    ///
+    /// Default implementation calls `decode_event` for each event.
+    /// Override only if batch processing provides meaningful optimization.
+    ///
+    /// # Arguments
+    /// * `events` - Reference to event slice.
+    ///
+    /// # Returns
+    /// Vector of all envelopes produced from all events.
+    async fn decode(&self, events: &[EmittedEvent]) -> anyhow::Result<Vec<Envelope>> {
+        let mut all_envelopes = Vec::new();
+        for event in events {
+            let envelopes = self.decode_event(event).await?;
+            all_envelopes.extend(envelopes);
+        }
+        Ok(all_envelopes)
+    }
 }

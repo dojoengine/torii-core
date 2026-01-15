@@ -4,6 +4,7 @@
 [ ] - Implement the SRC5 detection.
 [ ] - Implement the ABI heuristics detection.
 [ ] - Finalize the ERC20 example with some nice queries + subscriptions. Working on events from torii archive will be way faster.
+[ ] - Ignore reverted transactions!
 
 # NOTES
 

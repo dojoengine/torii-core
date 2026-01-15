@@ -50,53 +50,51 @@ impl Decoder for LogDecoder {
         "log"
     }
 
-    async fn decode(&self, events: &[EmittedEvent]) -> Result<Vec<Envelope>> {
-        let mut envelopes = Vec::new();
-
-        for (idx, event) in events.iter().enumerate() {
-            // Apply key filter if specified
-            if let Some(ref filter) = self.key_filter {
-                let matches = event.keys.iter().any(|k| {
-                    let key_hex = format!("{:#x}", k);
-                    key_hex.contains(filter)
-                });
-                if !matches {
-                    continue;
-                }
+    async fn decode_event(&self, event: &EmittedEvent) -> Result<Vec<Envelope>> {
+        // Apply key filter if specified
+        if let Some(ref filter) = self.key_filter {
+            let matches = event.keys.iter().any(|k| {
+                let key_hex = format!("{:#x}", k);
+                key_hex.contains(filter)
+            });
+            if !matches {
+                return Ok(Vec::new());
             }
-
-            // Extract log message from event data.
-            // For this example, we'll convert the first data field to a string representation.
-            let message = if !event.data.is_empty() {
-                format!("Event data: {:#x}", event.data[0])
-            } else {
-                "Empty event data".to_string()
-            };
-
-            let event_key = if !event.keys.is_empty() {
-                format!("{:#x}", event.keys[0])
-            } else {
-                "no-key".to_string()
-            };
-
-            let log_entry = LogEntry {
-                message,
-                block_number: event.block_number.unwrap_or(0),
-                event_key,
-            };
-
-            // Create envelope with unique ID
-            let envelope_id = format!("log_{}_{}", event.block_number.unwrap_or(0), idx);
-            let envelope = Envelope::new(
-                envelope_id,
-                Box::new(log_entry),
-                std::collections::HashMap::new(),
-            );
-
-            envelopes.push(envelope);
         }
 
-        Ok(envelopes)
+        // Extract log message from event data.
+        // For this example, we'll convert the first data field to a string representation.
+        let message = if !event.data.is_empty() {
+            format!("Event data: {:#x}", event.data[0])
+        } else {
+            "Empty event data".to_string()
+        };
+
+        let event_key = if !event.keys.is_empty() {
+            format!("{:#x}", event.keys[0])
+        } else {
+            "no-key".to_string()
+        };
+
+        let log_entry = LogEntry {
+            message,
+            block_number: event.block_number.unwrap_or(0),
+            event_key: event_key.clone(),
+        };
+
+        // Create envelope with unique ID
+        let envelope_id = format!(
+            "log_{}_{}",
+            event.block_number.unwrap_or(0),
+            format!("{:#x}", event.transaction_hash)
+        );
+        let envelope = Envelope::new(
+            envelope_id,
+            Box::new(log_entry),
+            std::collections::HashMap::new(),
+        );
+
+        Ok(vec![envelope])
     }
 }
 
@@ -118,8 +116,7 @@ mod tests {
             transaction_hash: Felt::from(0xabcdu64),
         };
 
-        let events = vec![event];
-        let envelopes = decoder.decode(&events).await.unwrap();
+        let envelopes = decoder.decode_event(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
         assert_eq!(envelopes[0].type_id, TypeId::new("log.entry"));
     }

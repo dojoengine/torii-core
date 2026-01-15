@@ -97,92 +97,72 @@ impl Decoder for SqlDecoder {
         "sql"
     }
 
-    async fn decode(&self, events: &[EmittedEvent]) -> anyhow::Result<Vec<Envelope>> {
-        let events_count = events.len();
+    async fn decode_event(&self, event: &EmittedEvent) -> anyhow::Result<Vec<Envelope>> {
+        if !self.is_interested(event) {
+            return Ok(Vec::new());
+        }
 
         let insert_selector = selector!("insert");
         let update_selector = selector!("update");
 
-        let envelopes: Vec<Envelope> = events
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, event)| {
-                if !self.is_interested(event) {
-                    return None;
-                }
+        // We could add additional checks for example length of keys etc..
+        // In this case, we're going to assume they are present already.
+        let selector = match event.keys.get(0) {
+            Some(s) => s,
+            None => return Ok(Vec::new()),
+        };
 
-                // We could add additional checks for example length of keys etc..
-                // In this case, we're going to assume they are present already.
+        let table_name = match event.keys.get(1).and_then(|k| parse_cairo_short_string(k).ok()) {
+            Some(name) => name,
+            None => return Ok(Vec::new()),
+        };
 
-                let selector = event.keys.get(0)?;
-                // Same here as above.. we shouldn't expect, it must be handled with error types later.
-                let table_name = parse_cairo_short_string(event.keys.get(1)?)
-                    .expect("Table name should be valid");
+        let value: u64 = match event.data.get(0).and_then(|v| (*v).try_into().ok()) {
+            Some(v) => v,
+            None => return Ok(Vec::new()),
+        };
 
-                let value: u64 = event
-                    .data
-                    .get(0)
-                    .and_then(|v| (*v).try_into().ok())?;
-
-                let (body, operation): (Box<dyn TypedBody>, &str) = if *selector == insert_selector
-                {
-                    (
-                        Box::new(SqlInsert {
-                            table: table_name.clone(),
-                            value,
-                        }),
-                        "insert",
-                    )
-                } else if *selector == update_selector {
-                    (
-                        Box::new(SqlUpdate {
-                            table: table_name.clone(),
-                            value,
-                        }),
-                        "update",
-                    )
-                } else {
-                    tracing::debug!(
-                        target: "torii::sinks::sql::decoder",
-                        "Unknown selector: {:#x}, skipping event",
-                        selector
-                    );
-
-                    // Could be skipped, or we could return an error if it's not expected.
-                    return None;
-                };
-
-                // Create metadata, they are optional, but currently they can give more context to the envelope
-                // without adding this information to the envelope body.
-                let mut metadata = HashMap::new();
-                metadata.insert("source".to_string(), "starknet".to_string());
-                metadata.insert("operation".to_string(), operation.to_string());
-                metadata.insert("table".to_string(), table_name.clone());
-                metadata.insert("value".to_string(), value.to_string());
-                metadata.insert(
-                    "from_address".to_string(),
-                    format!("{:#x}", event.from_address),
-                );
-
-                Some(Envelope::new(
-                    format!("{}_{}_{}", operation, table_name, idx),
-                    body,
-                    metadata,
-                ))
-            })
-            .collect();
-
-        if !envelopes.is_empty() {
+        let (body, operation): (Box<dyn TypedBody>, &str) = if *selector == insert_selector {
+            (
+                Box::new(SqlInsert {
+                    table: table_name.clone(),
+                    value,
+                }),
+                "insert",
+            )
+        } else if *selector == update_selector {
+            (
+                Box::new(SqlUpdate {
+                    table: table_name.clone(),
+                    value,
+                }),
+                "update",
+            )
+        } else {
             tracing::debug!(
                 target: "torii::sinks::sql::decoder",
-                "SqlDecoder: Decoded {} events into {} envelopes ({} inserts, {} updates)",
-                events_count,
-                envelopes.len(),
-                envelopes.iter().filter(|e| e.id.starts_with("insert")).count(),
-                envelopes.iter().filter(|e| e.id.starts_with("update")).count()
+                "Unknown selector: {:#x}, skipping event",
+                selector
             );
-        }
+            return Ok(Vec::new());
+        };
 
-        Ok(envelopes)
+        // Create metadata, they are optional, but currently they can give more context to the envelope
+        // without adding this information to the envelope body.
+        let mut metadata = HashMap::new();
+        metadata.insert("source".to_string(), "starknet".to_string());
+        metadata.insert("operation".to_string(), operation.to_string());
+        metadata.insert("table".to_string(), table_name.clone());
+        metadata.insert("value".to_string(), value.to_string());
+        metadata.insert(
+            "from_address".to_string(),
+            format!("{:#x}", event.from_address),
+        );
+
+        Ok(vec![Envelope::new(
+            format!("{}_{}", operation, table_name),
+            body,
+            metadata,
+        )])
     }
 }

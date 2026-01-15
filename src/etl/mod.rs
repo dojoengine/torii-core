@@ -4,7 +4,7 @@ pub mod envelope;
 pub mod extractor;
 pub mod sink;
 
-pub use decoder::{Decoder, MultiDecoder};
+pub use decoder::{Decoder, DecoderContext};
 pub use engine_db::{EngineDb, EngineStats};
 pub use envelope::{Envelope, TypeId, TypedBody};
 pub use extractor::{BlockContext, Extractor, ExtractionBatch, SampleExtractor, TransactionContext};

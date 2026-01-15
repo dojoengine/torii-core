@@ -11,13 +11,17 @@ use crate::etl::engine_db::EngineDb;
 use anyhow::Result;
 use async_trait::async_trait;
 use starknet::core::types::{EmittedEvent, Felt};
+use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub use block_range::{BlockRangeConfig, BlockRangeExtractor};
-pub use contract_registry::{ContractIdentificationMode, ContractRegistry, DecoderId, IdentificationRule};
+pub use contract_registry::{ContractIdentificationMode, DecoderId, IdentificationRule};
+// Note: ContractRegistry has been merged into DecoderContext
 pub use identification_rules::{Erc20Rule, Erc721Rule, HybridTokenRule};
 pub use retry::RetryPolicy;
 pub use sample::SampleExtractor;
+pub use starknet_helpers::ContractAbi;
 
 /// Block context information
 #[derive(Debug, Clone)]
@@ -194,4 +198,14 @@ pub trait Extractor: Send + Sync {
 
     /// Downcast to Any for type checking
     fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Get the RPC provider used by this extractor (if any)
+    ///
+    /// Returns the provider for contract identification purposes.
+    /// DecoderContext uses this provider for SRC-5 checks and ABI fetching.
+    ///
+    /// Default implementation returns None (for extractors without RPC, like SampleExtractor).
+    fn provider(&self) -> Option<Arc<JsonRpcClient<HttpTransport>>> {
+        None
+    }
 }

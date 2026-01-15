@@ -39,7 +39,11 @@ impl Sink for Erc20Sink {
         vec![TypeId::new("erc20.transfer")]
     }
 
-    async fn initialize(&mut self, event_bus: Arc<EventBus>) -> Result<()> {
+    async fn initialize(
+        &mut self,
+        event_bus: Arc<EventBus>,
+        _context: &torii::etl::sink::SinkContext,
+    ) -> Result<()> {
         self.event_bus = Some(event_bus);
         tracing::info!("ERC20 sink initialized");
         Ok(())

@@ -6,7 +6,7 @@
 use anyhow::Result;
 use starknet::core::types::Felt;
 
-use super::contract_registry::{ContractAbi, DecoderId, IdentificationRule};
+use super::{ContractAbi, DecoderId, IdentificationRule};
 
 /// ERC20 token identification rule
 ///

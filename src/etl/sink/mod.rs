@@ -3,6 +3,7 @@ pub mod multi;
 use async_trait::async_trait;
 use axum::Router;
 use prost_types::Any;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::envelope::{Envelope, TypeId};
@@ -12,6 +13,24 @@ pub use multi::MultiSink;
 
 // Re-export for external sink authors
 pub use tonic;
+
+/// Context provided to sinks during initialization
+///
+/// This struct can be extended in the future with additional resources
+/// without breaking the Sink trait API.
+#[derive(Clone)]
+pub struct SinkContext {
+    /// Root directory where sinks should place their databases
+    ///
+    /// Sinks can create databases at `{database_root}/{sink_name}.db`
+    /// to co-locate all Torii databases for easy backup and management.
+    pub database_root: PathBuf,
+
+    // Future extensions:
+    // pub metrics: Arc<Metrics>,
+    // pub config: Arc<Config>,
+    // etc.
+}
 
 /// Topic information provided by a sink
 #[derive(Debug, Clone)]
@@ -141,11 +160,21 @@ pub trait Sink: Send + Sync {
     /// ```
     fn build_routes(&self) -> Router;
 
-    /// Initialize the sink with access to the event bus
+    /// Initialize the sink with access to the event bus and context
     ///
     /// This is called once during server startup, before the ETL pipeline starts.
-    /// Sinks can use the event bus to publish updates to subscribers.
-    async fn initialize(&mut self, event_bus: Arc<EventBus>) -> anyhow::Result<()>;
+    ///
+    /// # Arguments
+    /// - `event_bus`: Publish updates to subscribers
+    /// - `context`: Configuration and resources (database_root, etc.)
+    ///
+    /// Sinks can use `context.database_root` to co-locate their databases
+    /// for easy backup and management.
+    async fn initialize(
+        &mut self,
+        event_bus: Arc<EventBus>,
+        context: &SinkContext,
+    ) -> anyhow::Result<()>;
 }
 
 /// EventBus allows sinks to publish updates to gRPC subscribers

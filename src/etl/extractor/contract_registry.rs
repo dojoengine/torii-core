@@ -15,7 +15,7 @@
 //!    generic methods, making `Arc<dyn Provider>` impossible.
 //!
 //! 2. **Generics cascade**: Making registry generic (`ContractRegistry<P>`)
-//!    would force `MultiDecoder<P>`, `ToriiConfig<P>`, and all downstream
+//!    would force `DecoderContext<P>`, `ToriiConfig<P>`, and all downstream
 //!    code to become generic, significantly complicating the API.
 //!
 //! 3. **Pragmatic choice**: 99% of users will use `JsonRpcClient<HttpTransport>`.
@@ -53,13 +53,15 @@
 
 use anyhow::{Context, Result};
 use bitflags::bitflags;
-use starknet::core::types::{ContractClass, Felt};
+use starknet::core::types::Felt;
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use starknet::providers::Provider;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+
+use super::starknet_helpers::ContractAbi;
 
 bitflags! {
     /// Contract identification mode configuration
@@ -105,76 +107,14 @@ impl DecoderId {
         DecoderId(hasher.finish())
     }
 
+    /// Creates a DecoderId from a u64 value (for deserialization)
+    pub fn from_u64(value: u64) -> Self {
+        DecoderId(value)
+    }
+
     /// Returns the DecoderId as a u64
     pub fn as_u64(&self) -> u64 {
         self.0
-    }
-}
-
-/// Parsed contract ABI
-///
-/// Simplified representation of a contract's ABI for identification purposes.
-/// Contains function and event signatures extracted from the contract class.
-#[derive(Debug, Clone)]
-pub struct ContractAbi {
-    /// Function names present in the contract
-    pub functions: HashSet<String>,
-
-    /// Event names present in the contract
-    pub events: HashSet<String>,
-
-    /// Raw contract class (for advanced inspection)
-    pub raw_class: ContractClass,
-}
-
-impl ContractAbi {
-    /// Parse ABI from a contract class
-    pub fn from_contract_class(class: ContractClass) -> Result<Self> {
-        let mut functions = HashSet::new();
-        let mut events = HashSet::new();
-
-        match &class {
-            ContractClass::Sierra(sierra) => {
-                // Parse Sierra ABI (it's a JSON string)
-                // For now, we'll just store empty sets and rely on explicit mapping
-                // TODO: Parse the ABI JSON string to extract function and event names
-                // This requires deserializing the ABI JSON
-                let _ = sierra; // Suppress unused warning
-            }
-            ContractClass::Legacy(legacy) => {
-                // Parse legacy ABI
-                if let Some(abi) = &legacy.abi {
-                    for item in abi {
-                        use starknet::core::types::LegacyContractAbiEntry;
-                        match item {
-                            LegacyContractAbiEntry::Function(f) => {
-                                functions.insert(f.name.clone());
-                            }
-                            LegacyContractAbiEntry::Event(e) => {
-                                events.insert(e.name.clone());
-                            }
-                            LegacyContractAbiEntry::Struct(_) => {}
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(Self {
-            functions,
-            events,
-            raw_class: class,
-        })
-    }
-
-    /// Check if a function exists in the ABI
-    pub fn has_function(&self, name: &str) -> bool {
-        self.functions.contains(name)
-    }
-
-    /// Check if an event exists in the ABI
-    pub fn has_event(&self, name: &str) -> bool {
-        self.events.contains(name)
     }
 }
 
@@ -394,16 +334,23 @@ impl ContractRegistry {
         }
 
         // Run ABI heuristics if enabled
+        //
+        // NOTE: ABI heuristics is a fallback identification mechanism where the core
+        // fetches the contract's ABI and delegates pattern matching to identification rules.
+        //
+        // The core provides infrastructure (fetching class hash, ABI, caching), while
+        // the actual identification logic is implemented by each rule's `identify_by_abi()` method.
+        // This keeps the core simple and flexible.
         if self
             .identification_mode
             .contains(ContractIdentificationMode::ABI_HEURISTICS)
         {
-            // Fetch class hash
             tracing::debug!(
                 target: "torii::contract_registry",
                 "Fetching class hash for contract {:?}",
                 contract
             );
+
             let class_hash = provider
                 .get_class_hash_at(
                     starknet::core::types::BlockId::Tag(starknet::core::types::BlockTag::Latest),
@@ -412,15 +359,12 @@ impl ContractRegistry {
                 .await
                 .context("Failed to fetch class hash")?;
 
-            // TODO: the ABI cache must be done in a database... let's see if we need to connect the engine db here..
-            // because having this common to all rules would be better to ensure that the cache is better.
-            // since the ABI of a class hash can't change.
-            // Fetch ABI (use cache if available)
             tracing::debug!(
                 target: "torii::contract_registry",
                 "Fetching ABI for contract {:?}",
                 contract
             );
+
             let abi = if let Some(cached_abi) = self.abi_cache.get(&class_hash) {
                 cached_abi.clone()
             } else {

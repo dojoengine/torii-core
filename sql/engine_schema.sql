@@ -24,6 +24,13 @@ CREATE TABLE IF NOT EXISTS extractor_state (
     UNIQUE(extractor_type, state_key)
 );
 
+-- Contract identification cache (contract address -> decoder IDs)
+CREATE TABLE IF NOT EXISTS contract_decoders (
+    contract_address TEXT PRIMARY KEY NOT NULL,  -- Hex string of contract address
+    decoder_ids TEXT NOT NULL,                   -- Comma-separated list of decoder IDs (u64)
+    identified_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+);
+
 -- Initialize default values
 INSERT OR IGNORE INTO head (id, block_number, event_count) VALUES ('main', 0, 0);
 INSERT OR IGNORE INTO stats (key, value) VALUES ('start_time', strftime('%s', 'now'));

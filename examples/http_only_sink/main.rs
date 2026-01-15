@@ -19,7 +19,7 @@ use torii::axum::{
 };
 use torii::etl::envelope::{Envelope, TypeId, TypedBody};
 use torii::etl::extractor::ExtractionBatch;
-use torii::etl::sink::{EventBus, Sink, TopicInfo};
+use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
 use torii::etl::Decoder;
 use torii::{async_trait, run, ToriiConfig};
 use anyhow::Result;
@@ -144,7 +144,7 @@ impl Sink for HttpSink {
         vec![]
     }
 
-    async fn initialize(&mut self, _event_bus: Arc<EventBus>) -> Result<()> {
+    async fn initialize(&mut self, _event_bus: Arc<EventBus>, _context: &SinkContext) -> Result<()> {
         tracing::info!("HttpSink initialized (HTTP-only, no EventBus publishing)");
         Ok(())
     }
@@ -244,28 +244,27 @@ impl HttpDecoder {
 
 #[async_trait]
 impl Decoder for HttpDecoder {
-    async fn decode(&self, events: &[EmittedEvent]) -> Result<Vec<Envelope>> {
-        Ok(events
-            .iter()
-            .map(|event| {
-                let id = self
-                    .counter
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    fn decoder_name(&self) -> &str {
+        "http"
+    }
 
-                let stored_event = StoredEvent {
-                    id,
-                    from_address: format!("{:#x}", event.from_address),
-                    block_number: event.block_number.unwrap_or(0),
-                    timestamp: chrono::Utc::now().timestamp(),
-                };
+    async fn decode_event(&self, event: &EmittedEvent) -> Result<Vec<Envelope>> {
+        let id = self
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-                Envelope::new(
-                    format!("http_event_{}", id),
-                    Box::new(stored_event),
-                    Default::default(),
-                )
-            })
-            .collect())
+        let stored_event = StoredEvent {
+            id,
+            from_address: format!("{:#x}", event.from_address),
+            block_number: event.block_number.unwrap_or(0),
+            timestamp: chrono::Utc::now().timestamp(),
+        };
+
+        Ok(vec![Envelope::new(
+            format!("http_event_{}", id),
+            Box::new(stored_event),
+            Default::default(),
+        )])
     }
 }
 

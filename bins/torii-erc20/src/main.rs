@@ -36,11 +36,7 @@ use decoder::Erc20Decoder;
 use sink::Erc20Sink;
 use std::sync::Arc;
 use storage::Erc20Storage;
-use tokio::sync::Mutex;
-use torii::etl::extractor::{
-    BlockRangeConfig, BlockRangeExtractor, ContractRegistry, DecoderId, Erc20Rule, Extractor,
-};
-use torii::etl::{Decoder, MultiDecoder, Sink};
+use torii::etl::extractor::{BlockRangeConfig, BlockRangeExtractor, DecoderId, Erc20Rule};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -57,7 +53,7 @@ async fn main() -> Result<()> {
 
     // Initialize logging
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_max_level(tracing::Level::INFO)
         .with_target(true)
         .init();
 
@@ -67,7 +63,11 @@ async fn main() -> Result<()> {
     tracing::info!("Database: {}", config.db_path);
     tracing::info!(
         "Auto-discovery: {}",
-        if config.no_auto_discovery { "disabled" } else { "enabled" }
+        if config.no_auto_discovery {
+            "disabled"
+        } else {
+            "enabled"
+        }
     );
 
     // Create storage
@@ -80,163 +80,63 @@ async fn main() -> Result<()> {
             url::Url::parse(&config.rpc_url).expect("Invalid RPC URL"),
         ),
     ));
-    tracing::info!("✓ Connected to Starknet RPC");
 
-    // Create ContractRegistry with provider
-    let identification_mode = config.identification_mode();
-    let registry = Arc::new(Mutex::new(ContractRegistry::with_provider(
-        identification_mode,
-        provider.clone(),
-    )));
-
-    // Configure registry
-    {
-        let mut registry_lock = registry.lock().await;
-
-        // Add ERC20 identification rule (if auto-discovery enabled)
-        if !config.no_auto_discovery {
-            registry_lock.add_rule(Box::new(Erc20Rule));
-            tracing::info!("✓ ERC20 auto-discovery rule registered");
-        }
-
-        // Add well-known contracts (ETH, STRK)
-        let well_known = config.well_known_contracts();
-        for (addr, name) in &well_known {
-            registry_lock.add_explicit_mapping(*addr, vec![DecoderId::new("erc20")]);
-            tracing::info!("✓ Explicit mapping: {} at {:#x}", name, addr);
-        }
-
-        // Add user-specified contracts
-        if !config.contracts.is_empty() {
-            let contracts = config.parse_contracts()?;
-            for addr in contracts {
-                registry_lock.add_explicit_mapping(addr, vec![DecoderId::new("erc20")]);
-                tracing::info!("✓ Explicit mapping: custom contract at {:#x}", addr);
-            }
-        }
-    }
-
-    // Create ERC20 decoder
-    let erc20_decoder = Arc::new(Erc20Decoder::new());
-    let decoders: Vec<Arc<dyn Decoder>> = vec![erc20_decoder];
-
-    // Create MultiDecoder with registry
-    let multi_decoder = Arc::new(MultiDecoder::with_registry(decoders, registry.clone()));
-    tracing::info!("✓ Decoder configured");
-
-    // Create ERC20 sink (needs to be mutable for initialization)
-    let mut erc20_sink = Erc20Sink::new(storage.clone());
-
-    // Initialize sink (normally done by Torii, but we're doing ETL manually)
-    let subscription_manager = Arc::new(torii::grpc::SubscriptionManager::new());
-    let event_bus = Arc::new(torii::etl::sink::EventBus::new(subscription_manager));
-    erc20_sink.initialize(event_bus).await?;
-
-    tracing::info!("✓ Sink initialized");
-
-    // Create BlockRangeExtractor
+    // Create extractor
     let extractor_config = BlockRangeConfig {
         rpc_url: config.rpc_url.clone(),
         from_block: config.from_block,
         to_block: config.to_block,
-        batch_size: 1000,
+        batch_size: 5000,
         retry_policy: torii::etl::extractor::RetryPolicy::default(),
     };
 
-    let mut extractor = BlockRangeExtractor::new(provider.clone(), extractor_config);
-    tracing::info!("✓ Extractor initialized");
+    let extractor = Box::new(BlockRangeExtractor::new(provider.clone(), extractor_config));
+    tracing::info!("✓ Extractor configured");
 
-    tracing::info!("🎯 Starting ETL loop...");
+    // Create decoder
+    let decoder = Arc::new(Erc20Decoder::new());
 
-    // ETL loop
-    let engine_db_config = torii::etl::engine_db::EngineDbConfig {
-        path: ":memory:".to_string(),
-    };
-    let engine_db = torii::etl::engine_db::EngineDb::new(engine_db_config).await?;
+    // Create sink (will be initialized by Torii)
+    let sink = Box::new(Erc20Sink::new(storage.clone()));
 
-    let mut cursor: Option<String> = None;
-    let mut batch_count = 0u64;
+    // Build Torii configuration
+    let mut torii_config = torii::ToriiConfig::builder()
+        .port(config.port)
+        .database_root(&config.db_path.replace("/erc20-data.db", ""))
+        .identification_mode(config.identification_mode())
+        .with_extractor(extractor)
+        .add_decoder(decoder)
+        .add_sink_boxed(sink);
 
-    loop {
-        let loop_start = std::time::Instant::now();
-
-        // Extract batch
-        let extract_start = std::time::Instant::now();
-        let batch = match extractor.extract(cursor.clone(), &engine_db).await {
-            Ok(batch) => batch,
-            Err(e) => {
-                tracing::error!("Extraction failed: {}", e);
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-        let extract_duration = extract_start.elapsed();
-
-        // Update cursor
-        cursor = batch.cursor.clone();
-
-        if batch.is_empty() {
-            if extractor.is_finished() {
-                tracing::info!("✓ Extraction complete");
-                break;
-            }
-
-            // Wait for new blocks
-            tracing::debug!("Waiting for new blocks...");
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-            continue;
-        }
-
-        batch_count += 1;
-
-        tracing::info!(
-            "📦 Batch #{}: Extracted {} events from {} blocks (extract_time: {:.2}ms)",
-            batch_count,
-            batch.events.len(),
-            batch.blocks.len(),
-            extract_duration.as_secs_f64() * 1000.0
-        );
-
-        // Update engine stats
-        if let Some(&latest_block) = batch.blocks.keys().max() {
-            if let Err(e) = engine_db.update_head(latest_block, batch.events.len() as u64).await {
-                tracing::warn!("Failed to update engine DB: {}", e);
-            }
-        }
-
-        // Decode events (identification happens automatically inside)
-        // No need to pre-iterate events!
-        let decode_start = std::time::Instant::now();
-        let envelopes = match multi_decoder.decode(&batch.events).await {
-            Ok(envelopes) => envelopes,
-            Err(e) => {
-                tracing::error!("Decode failed: {}", e);
-                continue;
-            }
-        };
-        let decode_duration = decode_start.elapsed();
-
-        tracing::info!(
-            "   ✓ Decoded into {} envelopes (decode_time: {:.2}ms)",
-            envelopes.len(),
-            decode_duration.as_secs_f64() * 1000.0
-        );
-
-        // Process envelopes through sink
-        let sink_start = std::time::Instant::now();
-        if let Err(e) = erc20_sink.process(&envelopes, &batch).await {
-            tracing::error!("Sink processing failed: {}", e);
-            continue;
-        }
-        let sink_duration = sink_start.elapsed();
-        let loop_duration = loop_start.elapsed();
-
-        tracing::info!(
-            "   ✓ Processed through sink (sink_time: {:.2}ms) | Total loop: {:.2}ms",
-            sink_duration.as_secs_f64() * 1000.0,
-            loop_duration.as_secs_f64() * 1000.0
-        );
+    // Add well-known contracts (ETH, STRK)
+    for (address, name) in config.well_known_contracts() {
+        tracing::info!("Mapping {} at {:#x}", name, address);
+        torii_config = torii_config.map_contract(address, vec![DecoderId::new("erc20")]);
     }
+
+    // Add custom contracts
+    for contract_str in &config.contracts {
+        let address = starknet::core::types::Felt::from_hex(contract_str)?;
+        tracing::info!("Mapping custom contract {:#x}", address);
+        torii_config = torii_config.map_contract(address, vec![DecoderId::new("erc20")]);
+    }
+
+    // Add ERC20 identification rule (if auto-discovery enabled)
+    if !config.no_auto_discovery {
+        torii_config = torii_config.with_identification_rule(Box::new(Erc20Rule));
+        tracing::info!("✓ Auto-discovery enabled with ERC20 rule");
+    } else {
+        tracing::info!("✓ Auto-discovery disabled (strict mode)");
+    }
+
+    let torii_config = torii_config.build();
+
+    tracing::info!("✓ Torii configured, starting ETL pipeline...");
+
+    // Run Torii (blocks until shutdown)
+    torii::run(torii_config)
+        .await
+        .map_err(|e| anyhow::anyhow!("Torii error: {}", e))?;
 
     // Print final statistics
     tracing::info!("📊 Final Statistics:");

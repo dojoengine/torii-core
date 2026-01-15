@@ -189,7 +189,11 @@ impl Sink for LogSink {
             .with_state(state)
     }
 
-    async fn initialize(&mut self, event_bus: Arc<EventBus>) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        event_bus: Arc<EventBus>,
+        _context: &torii::etl::sink::SinkContext,
+    ) -> anyhow::Result<()> {
         self.event_bus = Some(event_bus);
         tracing::info!(target: "torii::sinks::log", "LogSink initialized with event bus");
         Ok(())

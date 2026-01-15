@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use axum::Router;
 use std::sync::Arc;
 
-use super::{EventBus, Sink};
+use super::{EventBus, Sink, SinkContext};
 use crate::etl::extractor::ExtractionBatch;
 use crate::etl::envelope::Envelope;
 
@@ -90,7 +90,11 @@ impl Sink for MultiSink {
         router
     }
 
-    async fn initialize(&mut self, _event_bus: Arc<EventBus>) -> anyhow::Result<()> {
+    async fn initialize(
+        &mut self,
+        _event_bus: Arc<EventBus>,
+        _context: &SinkContext,
+    ) -> anyhow::Result<()> {
         // Initialize all sinks with the event bus
         for _sink in &mut self.sinks {
             // We need to get mutable access, but sinks are Arc'd
@@ -147,7 +151,11 @@ mod tests {
             Router::new()
         }
 
-        async fn initialize(&mut self, _event_bus: Arc<EventBus>) -> anyhow::Result<()> {
+        async fn initialize(
+            &mut self,
+            _event_bus: Arc<EventBus>,
+            _context: &SinkContext,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
     }

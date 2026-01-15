@@ -14,7 +14,7 @@ pub struct Config {
     #[arg(
         long,
         env = "STARKNET_RPC_URL",
-        default_value = "https://api.cartridge.gg/x/starknet/mainnet"
+        default_value = "https://api.cartridge.gg/x/starknet/sepolia"
     )]
     pub rpc_url: String,
 
@@ -62,17 +62,6 @@ impl Config {
             // Full auto-discovery: use both SRC-5 and ABI heuristics
             ContractIdentificationMode::SRC5 | ContractIdentificationMode::ABI_HEURISTICS
         }
-    }
-
-    /// Parse explicit contract addresses
-    pub fn parse_contracts(&self) -> anyhow::Result<Vec<Felt>> {
-        self.contracts
-            .iter()
-            .map(|addr| {
-                Felt::from_hex(addr)
-                    .map_err(|e| anyhow::anyhow!("Invalid contract address '{}': {}", addr, e))
-            })
-            .collect()
     }
 
     /// Get well-known ERC20 contracts (ETH, STRK) based on network

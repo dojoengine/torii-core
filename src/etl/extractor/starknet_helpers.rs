@@ -1,13 +1,15 @@
 use anyhow::{Context, Result};
+use starknet::core::types::contract::{AbiEntry, TypedAbiEvent};
 use starknet::core::types::requests::GetClassAtRequest;
+use starknet::core::types::LegacyContractAbiEntry;
 use starknet::core::types::{
-    requests::GetBlockWithReceiptsRequest, BlockId, ContractClass, DeclareTransactionContent, DeployAccountTransactionContent, EmittedEvent, Felt, InvokeTransactionContent,
+    requests::GetBlockWithReceiptsRequest, BlockId, ContractClass, DeclareTransactionContent,
+    DeployAccountTransactionContent, EmittedEvent, Felt, InvokeTransactionContent,
     MaybePreConfirmedBlockWithReceipts, TransactionContent, TransactionReceipt,
 };
 use starknet::providers::{Provider, ProviderRequestData, ProviderResponseData};
 
 use super::{BlockContext, BlockData, DeclaredClass, DeployedContract, TransactionContext};
-
 
 /// Builds a batch of `GetBlockWithReceipts` requests for a range of block numbers.
 ///
@@ -19,7 +21,10 @@ use super::{BlockContext, BlockData, DeclaredClass, DeployedContract, Transactio
 /// # Returns
 ///
 /// A vector of `ProviderRequestData` requests.
-pub fn block_with_receipts_batch_from_block_range(from_block: u64, to_block: u64) -> Vec<ProviderRequestData> {
+pub fn block_with_receipts_batch_from_block_range(
+    from_block: u64,
+    to_block: u64,
+) -> Vec<ProviderRequestData> {
     let requests = (from_block..=to_block)
         .map(|block_num| {
             ProviderRequestData::GetBlockWithReceipts(GetBlockWithReceiptsRequest {
@@ -71,10 +76,12 @@ where
     // Build batch request
     let requests: Vec<ProviderRequestData> = class_hashes
         .iter()
-        .map(|&class_hash| ProviderRequestData::GetClassAt(GetClassAtRequest {
-            block_id: BlockId::Tag(starknet::core::types::BlockTag::Latest),
-            contract_address: class_hash,
-        }))
+        .map(|&class_hash| {
+            ProviderRequestData::GetClassAt(GetClassAtRequest {
+                block_id: BlockId::Tag(starknet::core::types::BlockTag::Latest),
+                contract_address: class_hash,
+            })
+        })
         .collect();
 
     // Execute batch request
@@ -132,7 +139,9 @@ pub fn block_into_contexts(block: MaybePreConfirmedBlockWithReceipts) -> Result<
                 "Skipping pre-confirmed block"
             );
             // TODO: implement custom error type for the extractor module.
-            return Err(anyhow::anyhow!("pre-confirmed block not supported by block_into_context"));
+            return Err(anyhow::anyhow!(
+                "pre-confirmed block not supported by block_into_context"
+            ));
         }
     };
 
@@ -176,12 +185,18 @@ pub fn block_into_contexts(block: MaybePreConfirmedBlockWithReceipts) -> Result<
                 (Some(content.contract_address), content.calldata, None, None)
             }
             TransactionContent::Declare(content) => match content {
-                DeclareTransactionContent::V0(c) => {
-                    (Some(c.sender_address), Vec::new(), Some((c.class_hash, None)), None)
-                }
-                DeclareTransactionContent::V1(c) => {
-                    (Some(c.sender_address), Vec::new(), Some((c.class_hash, None)), None)
-                }
+                DeclareTransactionContent::V0(c) => (
+                    Some(c.sender_address),
+                    Vec::new(),
+                    Some((c.class_hash, None)),
+                    None,
+                ),
+                DeclareTransactionContent::V1(c) => (
+                    Some(c.sender_address),
+                    Vec::new(),
+                    Some((c.class_hash, None)),
+                    None,
+                ),
                 DeclareTransactionContent::V2(c) => (
                     Some(c.sender_address),
                     Vec::new(),
@@ -274,4 +289,110 @@ pub fn block_into_contexts(block: MaybePreConfirmedBlockWithReceipts) -> Result<
         declared_classes,
         deployed_contracts,
     })
+}
+
+/// Parsed contract ABI
+///
+/// Simplified representation of a contract's ABI for identification purposes.
+/// Contains function and event signatures extracted from the contract class.
+#[derive(Debug, Clone)]
+pub struct ContractAbi {
+    pub abi: Option<Vec<AbiEntry>>,
+    pub legacy_abi: Option<Vec<LegacyContractAbiEntry>>,
+}
+
+impl ContractAbi {
+    /// Parse ABI from a contract class, consume the class to avoid copying the ABI which
+    /// could be quite large.
+    pub fn from_contract_class(class: ContractClass) -> Result<Self> {
+        let mut abi: Option<Vec<AbiEntry>> = None;
+        let mut legacy_abi: Option<Vec<LegacyContractAbiEntry>> = None;
+
+        match class {
+            ContractClass::Sierra(sierra) => {
+                abi = Some(serde_json::from_str(&sierra.abi)?);
+            }
+            ContractClass::Legacy(legacy) => {
+                legacy_abi = legacy.abi;
+            }
+        }
+
+        Ok(Self { abi, legacy_abi })
+    }
+
+    /// Check if ABI contains a function with the given name,
+    /// recursively checking interfaces.
+    pub fn has_function(&self, name: &str) -> bool {
+        if let Some(abi) = &self.abi {
+            for entry in abi {
+                if let AbiEntry::Function(func) = entry {
+                    if func.name == name {
+                        return true;
+                    }
+                }
+
+                if let AbiEntry::Interface(interface) = entry {
+                    for function in &interface.items {
+                        if let AbiEntry::Function(func) = function {
+                            if func.name == name {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(legacy_abi) = &self.legacy_abi {
+            for entry in legacy_abi {
+                if let LegacyContractAbiEntry::Function(func) = entry {
+                    if func.name == name {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Check if ABI contains an event with the given name.
+    pub fn has_event(&self, name: &str) -> bool {
+        if let Some(abi) = &self.abi {
+            for entry in abi {
+                if let AbiEntry::Event(event) = entry {
+                    use starknet::core::types::contract::AbiEvent;
+                    match event {
+                        AbiEvent::Typed(TypedAbiEvent::Struct(s)) => {
+                            if s.name == name {
+                                return true;
+                            }
+                        }
+                        AbiEvent::Typed(TypedAbiEvent::Enum(e)) => {
+                            if e.name == name {
+                                return true;
+                            }
+                        }
+                        AbiEvent::Untyped(u) => {
+                            if u.name == name {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(legacy_abi) = &self.legacy_abi {
+            for entry in legacy_abi {
+                if let LegacyContractAbiEntry::Event(event) = entry {
+                    if event.name == name {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
 }

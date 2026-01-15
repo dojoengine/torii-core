@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use starknet::core::types::MaybePreConfirmedBlockWithReceipts;
+use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use starknet::providers::{Provider, ProviderResponseData};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -65,10 +66,11 @@ impl Default for BlockRangeConfig {
 /// - Returns empty batch (with `is_finished() = false`)
 /// - Caller should wait and retry (the mainloop handles this)
 /// - On next call, checks for new blocks
-#[derive(Debug, Default)]
-pub struct BlockRangeExtractor<P> {
+/// Block range extractor using JsonRpcClient with HTTP transport.
+#[derive(Debug)]
+pub struct BlockRangeExtractor {
     /// Provider to fetch data from.
-    provider: Arc<P>,
+    provider: Arc<JsonRpcClient<HttpTransport>>,
 
     /// Configuration.
     config: BlockRangeConfig,
@@ -80,10 +82,7 @@ pub struct BlockRangeExtractor<P> {
     reached_end: bool,
 }
 
-impl<P> BlockRangeExtractor<P>
-where
-    P: Provider,
-{
+impl BlockRangeExtractor {
     /// Creates a new block range extractor with the given provider.
     ///
     /// # Example
@@ -94,7 +93,7 @@ where
     /// let provider = JsonRpcClient::new(HttpTransport::new(url));
     /// let extractor = BlockRangeExtractor::new(Arc::new(provider), config);
     /// ```
-    pub fn new(provider: Arc<P>, config: BlockRangeConfig) -> Self {
+    pub fn new(provider: Arc<JsonRpcClient<HttpTransport>>, config: BlockRangeConfig) -> Self {
         Self {
             provider,
             config,
@@ -214,10 +213,7 @@ where
 }
 
 #[async_trait]
-impl<P> Extractor for BlockRangeExtractor<P>
-where
-    P: Provider + Send + Sync + 'static,
-{
+impl Extractor for BlockRangeExtractor {
     fn is_finished(&self) -> bool {
         self.reached_end
     }
@@ -226,13 +222,18 @@ where
         self
     }
 
+    fn provider(&self) -> Option<Arc<JsonRpcClient<HttpTransport>>> {
+        Some(self.provider.clone())
+    }
+
     async fn extract(
         &mut self,
         cursor: Option<String>,
         engine_db: &EngineDb,
     ) -> Result<ExtractionBatch> {
-        // Initialize on first call or when cursor changes
-        if self.current_block == 0 || cursor.is_some() {
+        // Initialize only on first call - after that, extractor maintains its own state
+        // The cursor parameter is for initial resume from checkpoint, not every iteration
+        if self.current_block == 0 {
             self.initialize(cursor, engine_db).await?;
         }
 

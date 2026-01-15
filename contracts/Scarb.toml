@@ -1,0 +1,9 @@
+[package]
+name = "torii_contracts"
+version = "0.1.0"
+edition = "2024_07"
+
+[dependencies]
+starknet = "2.13.1"
+
+[[target.starknet-contract]]

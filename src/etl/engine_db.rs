@@ -8,6 +8,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     Pool, Row, Sqlite,
 };
+use starknet::core::types::Felt;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -264,6 +265,92 @@ impl EngineDb {
             .await?;
 
         Ok(())
+    }
+
+    /// Store contract→decoder mapping (contract identification result)
+    ///
+    /// # Arguments
+    /// * `contract_address` - The contract address
+    /// * `decoder_ids` - List of decoder IDs that handle this contract
+    ///
+    /// # Returns
+    /// Result indicating success or failure
+    pub async fn store_contract_decoders(
+        &self,
+        contract_address: Felt,
+        decoder_ids: &[u64],
+    ) -> Result<()> {
+        // Format address as padded hex string (0x + 64 hex chars)
+        let contract_address_str = format!("{:#066x}", contract_address);
+
+        // Convert decoder IDs to comma-separated string
+        let decoder_ids_str = decoder_ids
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        sqlx::query(
+            r#"
+            INSERT INTO contract_decoders (contract_address, decoder_ids, identified_at)
+            VALUES (?, ?, strftime('%s', 'now'))
+            ON CONFLICT(contract_address)
+            DO UPDATE SET decoder_ids = excluded.decoder_ids, identified_at = strftime('%s', 'now')
+            "#,
+        )
+        .bind(&contract_address_str)
+        .bind(decoder_ids_str)
+        .execute(&self.pool)
+        .await?;
+
+        tracing::debug!(
+            target: "torii::etl::engine_db",
+            "Stored contract decoders: {} -> {:?}",
+            contract_address_str,
+            decoder_ids
+        );
+
+        Ok(())
+    }
+
+    /// Load contract→decoder mapping
+    ///
+    /// # Arguments
+    /// * `contract_address` - The contract address
+    ///
+    /// # Returns
+    /// Vector of decoder IDs if mapping exists, None otherwise
+    pub async fn load_contract_decoders(&self, contract_address: Felt) -> Result<Option<Vec<u64>>> {
+        // Format address as padded hex string (0x + 64 hex chars)
+        let contract_address_str = format!("{:#066x}", contract_address);
+
+        let row = sqlx::query("SELECT decoder_ids FROM contract_decoders WHERE contract_address = ?")
+            .bind(&contract_address_str)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        match row {
+            Some(row) => {
+                let decoder_ids_str: String = row.get(0);
+
+                // Parse comma-separated string to Vec<u64>
+                let decoder_ids: Vec<u64> = decoder_ids_str
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+
+                tracing::trace!(
+                    target: "torii::etl::engine_db",
+                    "Loaded contract decoders: {} -> {:?}",
+                    contract_address_str,
+                    decoder_ids
+                );
+
+                Ok(Some(decoder_ids))
+            }
+            None => Ok(None),
+        }
     }
 }
 
