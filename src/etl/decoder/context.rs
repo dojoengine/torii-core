@@ -129,16 +129,14 @@ impl Decoder for DecoderContext {
     }
 
     async fn decode_event(&self, event: &EmittedEvent) -> anyhow::Result<Vec<Envelope>> {
-        // Check blacklist (fast discard)
         if !self.contract_filter.allows(event.from_address) {
             return Ok(Vec::new());
         }
 
         let mut all_envelopes = Vec::new();
 
-        // Check for explicit mapping
+        // Check for explicit mapping first.
         if let Some(decoder_ids) = self.contract_filter.get_decoders(event.from_address) {
-            // Explicit mapping exists - try ONLY these decoders (O(k))
             for decoder_id in decoder_ids {
                 if let Some(decoder) = self.decoders.get(decoder_id) {
                     match decoder.decode_event(event).await {
@@ -173,7 +171,7 @@ impl Decoder for DecoderContext {
                 }
             }
         } else {
-            // No explicit mapping - try ALL decoders (O(n))
+            // No explicit mapping, fallback on auto-discovery sending to all decoders.
             for decoder in self.decoders.values() {
                 match decoder.decode_event(event).await {
                     Ok(envelopes) => {
