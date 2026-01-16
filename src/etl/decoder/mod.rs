@@ -1,7 +1,9 @@
 pub mod context;
 
 use async_trait::async_trait;
-use starknet::core::types::EmittedEvent;
+use starknet::core::types::{EmittedEvent, Felt};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 
 use super::envelope::Envelope;
 
@@ -136,5 +138,140 @@ pub trait Decoder: Send + Sync {
             all_envelopes.extend(envelopes);
         }
         Ok(all_envelopes)
+    }
+}
+
+/// Decoder identifier based on decoder name hash
+///
+/// Similar to `EnvelopeTypeId`, this uses a hash of the decoder's name
+/// to create a unique, deterministic identifier. This ensures that decoder
+/// IDs remain consistent across restarts and don't depend on registration order.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let erc20_decoder_id = DecoderId::new("erc20");
+/// let erc721_decoder_id = DecoderId::new("erc721");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DecoderId(u64);
+
+impl DecoderId {
+    /// Creates a DecoderId from a decoder name (deterministic)
+    pub fn new(name: &str) -> Self {
+        let mut hasher = DefaultHasher::new();
+        name.hash(&mut hasher);
+        DecoderId(hasher.finish())
+    }
+
+    /// Creates a DecoderId from a u64 value (for deserialization)
+    pub fn from_u64(value: u64) -> Self {
+        DecoderId(value)
+    }
+
+    /// Returns the DecoderId as a u64
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+}
+
+/// Contract filtering strategy (explicit mappings + blacklist)
+///
+/// Provides two mechanisms for controlling decoder execution:
+///
+/// 1. **Explicit mappings** (contract → Vec<DecoderId>):
+///    - Most efficient: O(k) where k = number of mapped decoders
+///    - Use for known contracts where you know exactly which decoders apply
+///    - Example: USDC contract → [ERC20 decoder]
+///
+/// 2. **Blacklist** (HashSet<Felt>):
+///    - Fast discard: O(1) lookup before any decoder logic
+///    - Use for noisy contracts that emit many irrelevant events
+///    - Can coexist with mappings (but contract can't be in both)
+///
+/// 3. **Auto-discovery** (default for unmapped contracts):
+///    - Unmapped contracts try ALL decoders: O(n)
+///    - Provides flexibility for multi-interface contracts
+///
+/// # Validation
+///
+/// The `validate()` method ensures no contract appears in both mappings and blacklist.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use crate::etl::decoder::{ContractFilter, DecoderId};
+/// use starknet::core::types::Felt;
+///
+/// let usdc = Felt::from_hex("0x123...").unwrap();
+/// let noisy = Felt::from_hex("0xabc...").unwrap();
+/// let erc20_id = DecoderId::new("erc20");
+///
+/// let filter = ContractFilter::new()
+///     .map_contract(usdc, vec![erc20_id])  // Explicit mapping
+///     .blacklist_contract(noisy);          // Blacklist noisy contract
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct ContractFilter {
+    /// Explicit mappings: contract → list of decoder IDs
+    pub mappings: HashMap<Felt, Vec<DecoderId>>,
+
+    /// Blacklist: contracts to ignore entirely
+    pub blacklist: HashSet<Felt>,
+}
+
+impl ContractFilter {
+    /// Create empty filter (process all contracts with all decoders)
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if a contract should be processed
+    ///
+    /// # Returns
+    /// - `true` if the contract is not blacklisted
+    /// - `false` if the contract is explicitly blacklisted
+    pub fn allows(&self, contract: Felt) -> bool {
+        !self.blacklist.contains(&contract)
+    }
+
+    /// Get decoders for a contract
+    ///
+    /// # Returns
+    /// - `Some(&Vec<DecoderId>)` if explicit mapping exists (use ONLY these decoders)
+    /// - `None` if no mapping exists (try ALL decoders - auto-discovery)
+    pub fn get_decoders(&self, contract: Felt) -> Option<&Vec<DecoderId>> {
+        self.mappings.get(&contract)
+    }
+
+    /// Validate configuration (no contract in both mapping and blacklist)
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for addr in self.mappings.keys() {
+            if self.blacklist.contains(addr) {
+                anyhow::bail!(
+                    "Contract {:#x} appears in both mapping and blacklist",
+                    addr
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Add explicit mapping: contract → decoders
+    pub fn map_contract(mut self, contract: Felt, decoder_ids: Vec<DecoderId>) -> Self {
+        self.mappings.insert(contract, decoder_ids);
+        self
+    }
+
+    /// Add contract to blacklist
+    pub fn blacklist_contract(mut self, contract: Felt) -> Self {
+        self.blacklist.insert(contract);
+        self
+    }
+
+    /// Add multiple contracts to blacklist
+    pub fn blacklist_contracts(mut self, contracts: Vec<Felt>) -> Self {
+        self.blacklist.extend(contracts);
+        self
     }
 }

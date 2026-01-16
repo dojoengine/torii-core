@@ -1,8 +1,6 @@
 //! Extractor trait for fetching events from various sources
 
 pub mod block_range;
-pub mod contract_registry;
-pub mod identification_rules;
 pub mod retry;
 pub mod sample;
 pub mod starknet_helpers;
@@ -16,9 +14,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use block_range::{BlockRangeConfig, BlockRangeExtractor};
-pub use contract_registry::{ContractIdentificationMode, DecoderId, IdentificationRule};
-// Note: ContractRegistry has been merged into DecoderContext
-pub use identification_rules::{Erc20Rule, Erc721Rule, HybridTokenRule};
 pub use retry::RetryPolicy;
 pub use sample::SampleExtractor;
 pub use starknet_helpers::ContractAbi;
@@ -198,14 +193,4 @@ pub trait Extractor: Send + Sync {
 
     /// Downcast to Any for type checking
     fn as_any(&self) -> &dyn std::any::Any;
-
-    /// Get the RPC provider used by this extractor (if any)
-    ///
-    /// Returns the provider for contract identification purposes.
-    /// DecoderContext uses this provider for SRC-5 checks and ABI fetching.
-    ///
-    /// Default implementation returns None (for extractors without RPC, like SampleExtractor).
-    fn provider(&self) -> Option<Arc<JsonRpcClient<HttpTransport>>> {
-        None
-    }
 }

@@ -2,7 +2,8 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use starknet::{core::types::{EmittedEvent, Felt}, macros::selector};
+use starknet::core::types::{EmittedEvent, Felt, U256};
+use starknet::macros::selector;
 use std::any::Any;
 use std::collections::HashMap;
 use torii::etl::{Decoder, Envelope, TypedBody};
@@ -12,7 +13,8 @@ use torii::etl::{Decoder, Envelope, TypedBody};
 pub struct Transfer {
     pub from: Felt,
     pub to: Felt,
-    pub amount: Felt,
+    /// Amount as U256 (256-bit), properly representing ERC20 token amounts
+    pub amount: U256,
     pub token: Felt,
     pub block_number: u64,
     pub transaction_hash: Felt,
@@ -79,19 +81,24 @@ impl Decoder for Erc20Decoder {
 
         let from;
         let to;
-        let amount;
+        let amount: U256;
 
-        // TODO: this is ugly.. need something better...!
         if event.keys.len() == 1 && event.data.len() == 4 {
-            // Legacy ERC20
+            // Legacy ERC20: from, to, amount_low, amount_high in data
             from = event.data[0];
             to = event.data[1];
-            amount = event.data[2] + event.data[3] * Felt::from(2).pow(128u32);
+            // Build U256 from low (128 bits) and high (128 bits) parts
+            let low: u128 = event.data[2].try_into().unwrap_or(0);
+            let high: u128 = event.data[3].try_into().unwrap_or(0);
+            amount = U256::from_words(low, high);
         } else if event.keys.len() == 3 && event.data.len() == 2 {
-            // Normal ERC20
+            // Normal ERC20: from, to in keys; amount_low, amount_high in data
             from = event.keys[1];
             to = event.keys[2];
-            amount = event.data[0] + event.data[1] * Felt::from(2).pow(128u32);
+            // Build U256 from low (128 bits) and high (128 bits) parts
+            let low: u128 = event.data[0].try_into().unwrap_or(0);
+            let high: u128 = event.data[1].try_into().unwrap_or(0);
+            amount = U256::from_words(low, high);
         } else {
             tracing::warn!(
                 "Malformed Transfer event from contract {:?} -> {:?}",
@@ -161,7 +168,7 @@ mod tests {
 
         assert_eq!(transfer.from, Felt::from(0x1u64));
         assert_eq!(transfer.to, Felt::from(0x2u64));
-        assert_eq!(transfer.amount, Felt::from(1000u64));
+        assert_eq!(transfer.amount, U256::from(1000u64));
         assert_eq!(transfer.token, Felt::from(0x123u64));
     }
 }

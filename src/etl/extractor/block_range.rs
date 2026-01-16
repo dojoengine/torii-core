@@ -222,10 +222,6 @@ impl Extractor for BlockRangeExtractor {
         self
     }
 
-    fn provider(&self) -> Option<Arc<JsonRpcClient<HttpTransport>>> {
-        Some(self.provider.clone())
-    }
-
     async fn extract(
         &mut self,
         cursor: Option<String>,

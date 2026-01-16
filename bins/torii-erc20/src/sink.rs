@@ -1,7 +1,7 @@
 //! ERC20 sink for processing transfers and maintaining balances
 
 use crate::decoder::Transfer;
-use crate::storage::Erc20Storage;
+use crate::storage::{Erc20Storage, TransferData};
 use anyhow::Result;
 use async_trait::async_trait;
 use axum::Router;
@@ -50,7 +50,8 @@ impl Sink for Erc20Sink {
     }
 
     async fn process(&self, envelopes: &[Envelope], batch: &ExtractionBatch) -> Result<()> {
-        let mut transfer_count = 0;
+        // Collect all transfers for batch insertion
+        let mut transfers: Vec<TransferData> = Vec::with_capacity(envelopes.len());
 
         for envelope in envelopes {
             // Filter for erc20.transfer envelopes
@@ -67,41 +68,38 @@ impl Sink for Erc20Sink {
                 }
             };
 
-            // Store transfer and update balances
-            if let Err(e) = self.storage.insert_transfer(
-                transfer.token,
-                transfer.from,
-                transfer.to,
-                transfer.amount,
-                transfer.block_number,
-                transfer.transaction_hash,
-            ) {
+            transfers.push(TransferData {
+                token: transfer.token,
+                from: transfer.from,
+                to: transfer.to,
+                amount: transfer.amount,
+                block_number: transfer.block_number,
+                tx_hash: transfer.transaction_hash,
+            });
+        }
+
+        if transfers.is_empty() {
+            return Ok(());
+        }
+
+        // Batch insert all transfers in a single transaction
+        let transfer_count = match self.storage.insert_transfers_batch(&transfers) {
+            Ok(count) => count,
+            Err(e) => {
                 tracing::error!(
-                    "Failed to store transfer from {:?} to {:?}: {}",
-                    transfer.from,
-                    transfer.to,
+                    target: "torii_erc20::sink",
+                    "Failed to batch insert {} transfers: {}",
+                    transfers.len(),
                     e
                 );
-                continue;
+                return Err(e);
             }
-
-            transfer_count += 1;
-
-            tracing::debug!(
-                target: "torii_erc20::sink",
-                "Stored transfer: token={:#x}, from={:#x}, to={:#x}, amount={:#x}, block={}",
-                transfer.token,
-                transfer.from,
-                transfer.to,
-                transfer.amount,
-                transfer.block_number
-            );
-        }
+        };
 
         if transfer_count > 0 {
             tracing::info!(
                 target: "torii_erc20::sink",
-                "Processed {} transfers from {} envelopes across {} blocks",
+                "Batch inserted {} transfers ({} envelopes) across {} blocks",
                 transfer_count,
                 envelopes.len(),
                 batch.blocks.len()

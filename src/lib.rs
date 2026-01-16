@@ -31,7 +31,8 @@ use std::sync::Arc;
 use tonic::transport::Server;
 use tower_http::cors::{Any as CorsAny, CorsLayer};
 
-use etl::extractor::{ContractIdentificationMode, DecoderId, Extractor, IdentificationRule};
+use etl::decoder::{ContractFilter, DecoderId};
+use etl::extractor::Extractor;
 use etl::sink::{EventBus, Sink};
 use etl::{Decoder, DecoderContext, MultiSink, SampleExtractor};
 use grpc::{create_grpc_service, GrpcState, SubscriptionManager};
@@ -108,16 +109,8 @@ pub struct ToriiConfig {
     /// Defaults to current directory if not specified.
     pub database_root: PathBuf,
 
-    /// Contract identification mode (SRC5, ABI heuristics, etc.).
-    pub identification_mode: ContractIdentificationMode,
-
-    /// Explicit contract-to-decoder mappings.
-    ///
-    /// These take precedence over auto-identification rules.
-    pub contract_mappings: HashMap<starknet::core::types::Felt, Vec<DecoderId>>,
-
-    /// Identification rules for auto-discovering contracts.
-    pub identification_rules: Vec<Box<dyn IdentificationRule>>,
+    /// Contract filter (whitelist/blacklist/none).
+    pub contract_filter: ContractFilter,
 }
 
 impl ToriiConfig {
@@ -139,9 +132,7 @@ pub struct ToriiConfigBuilder {
     sample_events: Vec<starknet::core::types::EmittedEvent>,
     extractor: Option<Box<dyn Extractor>>,
     database_root: Option<PathBuf>,
-    identification_mode: Option<ContractIdentificationMode>,
-    contract_mappings: HashMap<starknet::core::types::Felt, Vec<DecoderId>>,
-    identification_rules: Vec<Box<dyn IdentificationRule>>,
+    contract_filter: Option<ContractFilter>,
 }
 
 impl Default for ToriiConfigBuilder {
@@ -158,9 +149,7 @@ impl Default for ToriiConfigBuilder {
             sample_events: Vec::new(),
             extractor: None,
             database_root: None,
-            identification_mode: None,
-            contract_mappings: HashMap::new(),
-            identification_rules: Vec::new(),
+            contract_filter: None,
         }
     }
 }
@@ -287,34 +276,54 @@ impl ToriiConfigBuilder {
         self
     }
 
-    /// Sets the contract identification mode.
-    ///
-    /// Defaults to SRC5 if not specified.
-    pub fn identification_mode(mut self, mode: ContractIdentificationMode) -> Self {
-        self.identification_mode = Some(mode);
+    /// Sets the contract filter (mappings + blacklist).
+    pub fn with_contract_filter(mut self, filter: ContractFilter) -> Self {
+        self.contract_filter = Some(filter);
         self
     }
 
-    /// Adds an explicit contract-to-decoder mapping.
+    /// Add explicit contract→decoder mapping (most efficient).
     ///
-    /// These mappings take precedence over auto-identification rules.
-    pub fn map_contract(
-        mut self,
-        contract_address: starknet::core::types::Felt,
-        decoders: Vec<DecoderId>,
-    ) -> Self {
-        self.contract_mappings.insert(contract_address, decoders);
+    /// Events from this contract will ONLY be tried with the specified decoders.
+    /// This provides O(k) performance where k is the number of mapped decoders.
+    pub fn map_contract(mut self, contract: starknet::core::types::Felt, decoder_ids: Vec<DecoderId>) -> Self {
+        self.contract_filter.get_or_insert_with(ContractFilter::new)
+            .mappings.insert(contract, decoder_ids);
         self
     }
 
-    /// Adds an identification rule for auto-discovering contracts.
-    pub fn with_identification_rule(mut self, rule: Box<dyn IdentificationRule>) -> Self {
-        self.identification_rules.push(rule);
+    /// Add contract to blacklist (fast discard).
+    ///
+    /// Events from this contract will be discarded immediately (O(1) check).
+    pub fn blacklist_contract(mut self, contract: starknet::core::types::Felt) -> Self {
+        self.contract_filter.get_or_insert_with(ContractFilter::new)
+            .blacklist.insert(contract);
+        self
+    }
+
+    /// Add multiple contracts to blacklist.
+    ///
+    /// Events from these contracts will be discarded immediately (O(1) check).
+    pub fn blacklist_contracts(mut self, contracts: Vec<starknet::core::types::Felt>) -> Self {
+        self.contract_filter.get_or_insert_with(ContractFilter::new)
+            .blacklist.extend(contracts);
         self
     }
 
     /// Builds the Torii configuration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the contract filter configuration is invalid (e.g., a contract appears
+    /// in both the mapping and blacklist).
     pub fn build(self) -> ToriiConfig {
+        let contract_filter = self.contract_filter.unwrap_or_else(ContractFilter::new);
+
+        // Validate contract filter
+        if let Err(e) = contract_filter.validate() {
+            panic!("Invalid contract filter configuration: {}", e);
+        }
+
         ToriiConfig {
             port: self.port.unwrap_or(8080),
             host: self.host.unwrap_or_else(|| "0.0.0.0".to_string()),
@@ -327,11 +336,7 @@ impl ToriiConfigBuilder {
             sample_events: self.sample_events,
             extractor: self.extractor,
             database_root: self.database_root.unwrap_or_else(|| PathBuf::from(".")),
-            identification_mode: self
-                .identification_mode
-                .unwrap_or(ContractIdentificationMode::SRC5),
-            contract_mappings: self.contract_mappings,
-            identification_rules: self.identification_rules,
+            contract_filter,
         }
     }
 }
@@ -391,35 +396,12 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
         Box::new(SampleExtractor::new(config.sample_events, config.events_per_cycle))
     };
 
-    // Get provider from extractor for contract identification
-    let provider = extractor.provider();
-
-    // Create DecoderContext with integrated contract identification
-    let mut decoder_context = if config.identification_mode.is_empty()
-        && config.contract_mappings.is_empty()
-        && config.identification_rules.is_empty()
-    {
-        // Simple mode: no identification, all events to all decoders
-        DecoderContext::new(config.decoders, engine_db.clone())
-    } else {
-        // With identification: provider from extractor enables SRC-5 and ABI heuristics
-        DecoderContext::with_identification(
-            config.decoders,
-            engine_db.clone(),
-            config.identification_mode,
-            provider,
-        )
-    };
-
-    // Apply explicit contract mappings
-    for (address, decoders) in config.contract_mappings {
-        decoder_context.add_explicit_mapping(address, decoders);
-    }
-
-    // Add identification rules
-    for rule in config.identification_rules {
-        decoder_context.add_rule(rule);
-    }
+    // Create DecoderContext with contract filtering
+    let decoder_context = DecoderContext::new(
+        config.decoders,
+        engine_db.clone(),
+        config.contract_filter,
+    );
 
     let topics = multi_sink.topics();
 

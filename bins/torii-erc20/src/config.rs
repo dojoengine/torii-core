@@ -14,7 +14,7 @@ pub struct Config {
     #[arg(
         long,
         env = "STARKNET_RPC_URL",
-        default_value = "https://api.cartridge.gg/x/starknet/sepolia"
+        default_value = "https://api.cartridge.gg/x/starknet/mainnet"
     )]
     pub rpc_url: String,
 
@@ -50,18 +50,12 @@ pub struct Config {
 }
 
 impl Config {
-    /// Get the identification mode based on auto-discovery setting
-    pub fn identification_mode(&self) -> torii::etl::extractor::ContractIdentificationMode {
-        use torii::etl::extractor::ContractIdentificationMode;
-
-        if self.no_auto_discovery {
-            // Strict mode: no auto-discovery, only explicit mappings work
-            // We set an empty mode (no flags), so rules are registered but won't trigger
-            ContractIdentificationMode::empty()
-        } else {
-            // Full auto-discovery: use both SRC-5 and ABI heuristics
-            ContractIdentificationMode::SRC5 | ContractIdentificationMode::ABI_HEURISTICS
-        }
+    /// Parse explicitly configured contracts from CLI args
+    pub fn parse_contracts(&self) -> Result<Vec<Felt>, String> {
+        self.contracts
+            .iter()
+            .map(|s| Felt::from_hex(s).map_err(|e| format!("Invalid contract address '{}': {}", s, e)))
+            .collect()
     }
 
     /// Get well-known ERC20 contracts (ETH, STRK) based on network

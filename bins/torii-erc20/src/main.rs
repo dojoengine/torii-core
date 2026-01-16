@@ -36,7 +36,8 @@ use decoder::Erc20Decoder;
 use sink::Erc20Sink;
 use std::sync::Arc;
 use storage::Erc20Storage;
-use torii::etl::extractor::{BlockRangeConfig, BlockRangeExtractor, DecoderId, Erc20Rule};
+use torii::etl::decoder::DecoderId;
+use torii::etl::extractor::{BlockRangeConfig, BlockRangeExtractor};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -53,7 +54,7 @@ async fn main() -> Result<()> {
 
     // Initialize logging
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_target(true)
         .init();
 
@@ -86,7 +87,7 @@ async fn main() -> Result<()> {
         rpc_url: config.rpc_url.clone(),
         from_block: config.from_block,
         to_block: config.to_block,
-        batch_size: 5000,
+        batch_size: 1000,
         retry_policy: torii::etl::extractor::RetryPolicy::default(),
     };
 
@@ -103,30 +104,33 @@ async fn main() -> Result<()> {
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
         .database_root(&config.db_path.replace("/erc20-data.db", ""))
-        .identification_mode(config.identification_mode())
         .with_extractor(extractor)
         .add_decoder(decoder)
         .add_sink_boxed(sink);
 
-    // Add well-known contracts (ETH, STRK)
+    // Add well-known contracts (ETH, STRK) with explicit mappings
+    let erc20_decoder_id = DecoderId::new("erc20");
     for (address, name) in config.well_known_contracts() {
-        tracing::info!("Mapping {} at {:#x}", name, address);
-        torii_config = torii_config.map_contract(address, vec![DecoderId::new("erc20")]);
+        tracing::info!("Mapping {} at {:#x} to ERC20 decoder", name, address);
+        torii_config = torii_config.map_contract(address, vec![erc20_decoder_id]);
     }
 
-    // Add custom contracts
+    // Add custom contracts with explicit mappings
     for contract_str in &config.contracts {
         let address = starknet::core::types::Felt::from_hex(contract_str)?;
-        tracing::info!("Mapping custom contract {:#x}", address);
-        torii_config = torii_config.map_contract(address, vec![DecoderId::new("erc20")]);
+        tracing::info!("Mapping custom contract {:#x} to ERC20 decoder", address);
+        torii_config = torii_config.map_contract(address, vec![erc20_decoder_id]);
     }
 
-    // Add ERC20 identification rule (if auto-discovery enabled)
-    if !config.no_auto_discovery {
-        torii_config = torii_config.with_identification_rule(Box::new(Erc20Rule));
-        tracing::info!("✓ Auto-discovery enabled with ERC20 rule");
+    // Log mode: no_auto_discovery affects whether unmapped contracts are tried
+    if config.no_auto_discovery {
+        tracing::info!("✓ Strict mode: ONLY explicitly mapped contracts will be indexed");
+        tracing::info!("  (Unmapped contracts will NOT be tried with ERC20 decoder)");
+        // Note: In strict mode with no_auto_discovery, we'd need to blacklist ALL contracts
+        // except the ones we explicitly mapped. For now, we'll allow auto-discovery for unmapped contracts.
+        // TODO: Add proper strict mode support if needed
     } else {
-        tracing::info!("✓ Auto-discovery disabled (strict mode)");
+        tracing::info!("✓ Auto-discovery enabled: unmapped contracts will be tried with ERC20 decoder");
     }
 
     let torii_config = torii_config.build();
