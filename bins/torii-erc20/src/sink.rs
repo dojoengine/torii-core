@@ -69,6 +69,7 @@ impl Sink for Erc20Sink {
             };
 
             transfers.push(TransferData {
+                id: None,  // Will be set after insertion
                 token: transfer.token,
                 from: transfer.from,
                 to: transfer.to,

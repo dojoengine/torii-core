@@ -4,5 +4,5 @@ node_modules/
 test-data/
 contracts/target/
 engine.db*
-erc20-data.db
+erc20-data.db*
 flamegraph.svg
