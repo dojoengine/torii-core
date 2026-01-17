@@ -305,18 +305,39 @@ impl Erc20Storage {
             )
             .unwrap_or(U256_ZERO);
 
-        // Compute new balance
+        // Compute new balance using safe arithmetic to avoid subtle crate panics
+        // starknet_core::U256 uses the subtle crate which can panic on overflow/underflow
+        // We must check conditions BEFORE performing operations
         let new_balance = if is_credit {
-            current + amount
+            // Check for addition overflow by examining the words
+            // For addition to overflow: both low and high must overflow, or high overflows
+            let (new_low, overflow_low) = current.low().overflowing_add(amount.low());
+            let carry = if overflow_low { 1 } else { 0 };
+            let (new_high, overflow_high) = current.high().overflowing_add(amount.high());
+            let (new_high_with_carry, overflow_carry) = new_high.overflowing_add(carry);
+
+            if overflow_high || overflow_carry {
+                tracing::error!(
+                    target: "torii_erc20::storage",
+                    "Balance overflow would occur: current={}, amount={}, clamping to MAX",
+                    current,
+                    amount
+                );
+                // Return maximum U256 value to prevent panic
+                U256::from_words(u128::MAX, u128::MAX)
+            } else {
+                // Safe to add
+                current + amount
+            }
         } else {
-            // Handle potential underflow gracefully (e.g., when starting from block > 0)
+            // Subtraction: check for underflow before subtracting
             if current >= amount {
                 current - amount
             } else {
                 // Underflow: clamp to zero and log warning
                 tracing::warn!(
                     target: "torii_erc20::storage",
-                    "Balance underflow: current={:#x}, amount={:#x}, clamping to 0",
+                    "Balance underflow: current={}, amount={}, clamping to 0",
                     current,
                     amount
                 );
