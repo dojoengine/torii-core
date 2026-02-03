@@ -1,6 +1,6 @@
 //! ERC721 sink for processing NFT transfers, approvals, and ownership
 
-use crate::decoder::{NftApproval as DecodedNftApproval, NftTransfer as DecodedNftTransfer, OperatorApproval as DecodedOperatorApproval};
+use crate::decoder::{NftTransfer as DecodedNftTransfer, OperatorApproval as DecodedOperatorApproval};
 use crate::grpc_service::Erc721Service;
 use crate::proto;
 use crate::storage::{Erc721Storage, NftTransferData, OperatorApprovalData};
@@ -14,6 +14,7 @@ use std::sync::Arc;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
+use torii_common::u256_to_bytes;
 
 /// ERC721 NFT sink
 ///
@@ -94,27 +95,6 @@ impl Erc721Sink {
         true
     }
 
-    /// Convert U256 to bytes (big-endian, compact)
-    fn u256_to_bytes(value: starknet::core::types::U256) -> Vec<u8> {
-        let high = value.high();
-        let low = value.low();
-        if high == 0 {
-            if low == 0 {
-                vec![0u8]
-            } else {
-                let bytes = low.to_be_bytes();
-                let start = bytes.iter().position(|&b| b != 0).unwrap_or(15);
-                bytes[start..].to_vec()
-            }
-        } else {
-            let mut result = Vec::with_capacity(32);
-            let high_bytes = high.to_be_bytes();
-            let high_start = high_bytes.iter().position(|&b| b != 0).unwrap_or(15);
-            result.extend_from_slice(&high_bytes[high_start..]);
-            result.extend_from_slice(&low.to_be_bytes());
-            result
-        }
-    }
 }
 
 #[async_trait]
@@ -137,7 +117,7 @@ impl Sink for Erc721Sink {
         _context: &torii::etl::sink::SinkContext,
     ) -> Result<()> {
         self.event_bus = Some(event_bus);
-        tracing::info!("ERC721 sink initialized");
+        tracing::info!(target: "torii_erc721::sink", "ERC721 sink initialized");
         Ok(())
     }
 
@@ -196,9 +176,9 @@ impl Sink for Erc721Sink {
                 Err(e) => {
                     tracing::error!(
                         target: "torii_erc721::sink",
-                        "Failed to batch insert {} transfers: {}",
-                        transfers.len(),
-                        e
+                        count = transfers.len(),
+                        error = %e,
+                        "Failed to batch insert transfers"
                     );
                     return Err(e);
                 }
@@ -207,15 +187,15 @@ impl Sink for Erc721Sink {
             if transfer_count > 0 {
                 tracing::info!(
                     target: "torii_erc721::sink",
-                    "Batch inserted {} NFT transfers",
-                    transfer_count
+                    count = transfer_count,
+                    "Batch inserted NFT transfers"
                 );
 
                 // Publish transfer events
                 for transfer in &transfers {
                     let proto_transfer = proto::NftTransfer {
                         token: transfer.token.to_bytes_be().to_vec(),
-                        token_id: Self::u256_to_bytes(transfer.token_id),
+                        token_id: u256_to_bytes(transfer.token_id),
                         from: transfer.from.to_bytes_be().to_vec(),
                         to: transfer.to.to_bytes_be().to_vec(),
                         block_number: transfer.block_number,
@@ -256,8 +236,8 @@ impl Sink for Erc721Sink {
                 Ok(count) => {
                     tracing::info!(
                         target: "torii_erc721::sink",
-                        "Batch inserted {} operator approvals",
-                        count
+                        count = count,
+                        "Batch inserted operator approvals"
                     );
                 }
                 Err(e) => {
@@ -279,11 +259,11 @@ impl Sink for Erc721Sink {
                     if let Ok(token_count) = self.storage.get_token_count() {
                         tracing::info!(
                             target: "torii_erc721::sink",
-                            "Total: {} transfers, {} unique NFTs across {} collections ({} blocks)",
-                            total_transfers,
-                            nft_count,
-                            token_count,
-                            batch.blocks.len()
+                            transfers = total_transfers,
+                            nfts = nft_count,
+                            collections = token_count,
+                            blocks = batch.blocks.len(),
+                            "Total statistics"
                         );
                     }
                 }

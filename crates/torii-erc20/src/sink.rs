@@ -23,6 +23,7 @@ use std::sync::Arc;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
+use torii_common::u256_to_bytes;
 
 /// ERC20 transfer and approval sink
 ///
@@ -162,27 +163,6 @@ impl Erc20Sink {
         true
     }
 
-    /// Convert U256 amount to bytes (big-endian, compact)
-    fn u256_to_bytes(amount: starknet::core::types::U256) -> Vec<u8> {
-        let high = amount.high();
-        let low = amount.low();
-        if high == 0 {
-            if low == 0 {
-                vec![0u8]
-            } else {
-                let bytes = low.to_be_bytes();
-                let start = bytes.iter().position(|&b| b != 0).unwrap_or(15);
-                bytes[start..].to_vec()
-            }
-        } else {
-            let mut result = Vec::with_capacity(32);
-            let high_bytes = high.to_be_bytes();
-            let high_start = high_bytes.iter().position(|&b| b != 0).unwrap_or(15);
-            result.extend_from_slice(&high_bytes[high_start..]);
-            result.extend_from_slice(&low.to_be_bytes());
-            result
-        }
-    }
 }
 
 #[async_trait]
@@ -204,7 +184,7 @@ impl Sink for Erc20Sink {
         _context: &torii::etl::sink::SinkContext,
     ) -> Result<()> {
         self.event_bus = Some(event_bus);
-        tracing::info!("ERC20 sink initialized");
+        tracing::info!(target: "torii_erc20::sink", "ERC20 sink initialized");
         Ok(())
     }
 
@@ -262,9 +242,9 @@ impl Sink for Erc20Sink {
                 Err(e) => {
                     tracing::error!(
                         target: "torii_erc20::sink",
-                        "Failed to batch insert {} transfers: {}",
-                        transfers.len(),
-                        e
+                        count = transfers.len(),
+                        error = %e,
+                        "Failed to batch insert transfers"
                     );
                     return Err(e);
                 }
@@ -273,8 +253,8 @@ impl Sink for Erc20Sink {
             if transfer_count > 0 {
                 tracing::info!(
                     target: "torii_erc20::sink",
-                    "Batch inserted {} transfers",
-                    transfer_count
+                    count = transfer_count,
+                    "Batch inserted transfers"
                 );
 
                 // Publish transfer events
@@ -283,7 +263,7 @@ impl Sink for Erc20Sink {
                         token: transfer.token.to_bytes_be().to_vec(),
                         from: transfer.from.to_bytes_be().to_vec(),
                         to: transfer.to.to_bytes_be().to_vec(),
-                        amount: Self::u256_to_bytes(transfer.amount),
+                        amount: u256_to_bytes(transfer.amount),
                         block_number: transfer.block_number,
                         tx_hash: transfer.tx_hash.to_bytes_be().to_vec(),
                         timestamp: transfer.timestamp.unwrap_or(0),
@@ -323,9 +303,9 @@ impl Sink for Erc20Sink {
                 Err(e) => {
                     tracing::error!(
                         target: "torii_erc20::sink",
-                        "Failed to batch insert {} approvals: {}",
-                        approvals.len(),
-                        e
+                        count = approvals.len(),
+                        error = %e,
+                        "Failed to batch insert approvals"
                     );
                     return Err(e);
                 }
@@ -334,8 +314,8 @@ impl Sink for Erc20Sink {
             if approval_count > 0 {
                 tracing::info!(
                     target: "torii_erc20::sink",
-                    "Batch inserted {} approvals",
-                    approval_count
+                    count = approval_count,
+                    "Batch inserted approvals"
                 );
 
                 // Publish approval events
@@ -344,7 +324,7 @@ impl Sink for Erc20Sink {
                         token: approval.token.to_bytes_be().to_vec(),
                         owner: approval.owner.to_bytes_be().to_vec(),
                         spender: approval.spender.to_bytes_be().to_vec(),
-                        amount: Self::u256_to_bytes(approval.amount),
+                        amount: u256_to_bytes(approval.amount),
                         block_number: approval.block_number,
                         tx_hash: approval.tx_hash.to_bytes_be().to_vec(),
                         timestamp: approval.timestamp.unwrap_or(0),
@@ -384,11 +364,11 @@ impl Sink for Erc20Sink {
                     if let Ok(token_count) = self.storage.get_token_count() {
                         tracing::info!(
                             target: "torii_erc20::sink",
-                            "Total: {} transfers, {} approvals across {} tokens ({} blocks)",
-                            total_transfers,
-                            total_approvals,
-                            token_count,
-                            batch.blocks.len()
+                            transfers = total_transfers,
+                            approvals = total_approvals,
+                            tokens = token_count,
+                            blocks = batch.blocks.len(),
+                            "Total statistics"
                         );
                     }
                 }

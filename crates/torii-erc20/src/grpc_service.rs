@@ -16,11 +16,12 @@ use crate::storage::{
 };
 use async_trait::async_trait;
 use futures::stream::Stream;
-use starknet::core::types::Felt;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tonic::{Request, Response, Status};
+use starknet::core::types::Felt;
+use torii_common::{bytes_to_felt, u256_to_bytes};
 
 /// gRPC service implementation for ERC20
 #[derive(Clone)]
@@ -197,38 +198,6 @@ impl Erc20Service {
 
         true
     }
-}
-
-/// Convert U256 to bytes for proto (big-endian, compact)
-fn u256_to_bytes(value: starknet::core::types::U256) -> Vec<u8> {
-    let high = value.high();
-    let low = value.low();
-
-    if high == 0 {
-        if low == 0 {
-            return vec![0u8];
-        }
-        let bytes = low.to_be_bytes();
-        let start = bytes.iter().position(|&b| b != 0).unwrap_or(15);
-        return bytes[start..].to_vec();
-    }
-
-    let mut result = Vec::with_capacity(32);
-    let high_bytes = high.to_be_bytes();
-    let high_start = high_bytes.iter().position(|&b| b != 0).unwrap_or(15);
-    result.extend_from_slice(&high_bytes[high_start..]);
-    result.extend_from_slice(&low.to_be_bytes());
-    result
-}
-
-/// Parse bytes to Felt (returns None if invalid)
-fn bytes_to_felt(bytes: &[u8]) -> Option<Felt> {
-    if bytes.len() > 32 {
-        return None;
-    }
-    let mut arr = [0u8; 32];
-    arr[32 - bytes.len()..].copy_from_slice(bytes);
-    Some(Felt::from_bytes_be(&arr))
 }
 
 #[async_trait]

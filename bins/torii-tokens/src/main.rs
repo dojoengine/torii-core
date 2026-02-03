@@ -64,15 +64,19 @@ async fn main() -> Result<()> {
     // Parse CLI arguments
     let config = Config::parse();
 
-    // Initialize logging
+    // Initialize logging with default INFO level, overridable via RUST_LOG
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(env_filter)
         .with_target(true)
         .init();
 
     tracing::info!("Starting Torii Unified Token Indexer");
     tracing::info!("RPC URL: {}", config.rpc_url);
     tracing::info!("From block: {}", config.from_block);
+    tracing::info!("Batch size: {}", config.batch_size);
     tracing::info!("Database: {}", config.db_path);
 
     // Validate configuration
@@ -94,7 +98,7 @@ async fn main() -> Result<()> {
         rpc_url: config.rpc_url.clone(),
         from_block: config.from_block,
         to_block: config.to_block,
-        batch_size: 1000,
+        batch_size: config.batch_size,
         retry_policy: torii::etl::extractor::RetryPolicy::default(),
     };
 

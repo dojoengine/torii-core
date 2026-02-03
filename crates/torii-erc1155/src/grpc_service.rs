@@ -8,11 +8,13 @@ use crate::proto::{
 use crate::storage::{Erc1155Storage, TokenTransferData, TransferCursor};
 use async_trait::async_trait;
 use futures::stream::Stream;
-use starknet::core::types::{Felt, U256};
+use starknet::core::types::U256;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tonic::{Request, Response, Status};
+use starknet::core::types::Felt;
+use torii_common::{bytes_to_felt, bytes_to_u256, u256_to_bytes};
 
 /// gRPC service implementation for ERC1155
 #[derive(Clone)]
@@ -115,64 +117,6 @@ impl Erc1155Service {
         }
 
         true
-    }
-}
-
-/// Convert U256 to bytes for proto (big-endian, compact)
-fn u256_to_bytes(value: U256) -> Vec<u8> {
-    let high = value.high();
-    let low = value.low();
-
-    if high == 0 {
-        if low == 0 {
-            return vec![0u8];
-        }
-        let bytes = low.to_be_bytes();
-        let start = bytes.iter().position(|&b| b != 0).unwrap_or(15);
-        return bytes[start..].to_vec();
-    }
-
-    let mut result = Vec::with_capacity(32);
-    let high_bytes = high.to_be_bytes();
-    let high_start = high_bytes.iter().position(|&b| b != 0).unwrap_or(15);
-    result.extend_from_slice(&high_bytes[high_start..]);
-    result.extend_from_slice(&low.to_be_bytes());
-    result
-}
-
-/// Parse bytes to Felt (returns None if invalid)
-fn bytes_to_felt(bytes: &[u8]) -> Option<Felt> {
-    if bytes.len() > 32 {
-        return None;
-    }
-    let mut arr = [0u8; 32];
-    arr[32 - bytes.len()..].copy_from_slice(bytes);
-    Some(Felt::from_bytes_be(&arr))
-}
-
-/// Parse bytes to U256
-fn bytes_to_u256(bytes: &[u8]) -> U256 {
-    let len = bytes.len();
-    if len == 0 {
-        return U256::from(0u64);
-    }
-
-    if len <= 16 {
-        let mut low_bytes = [0u8; 16];
-        low_bytes[16 - len..].copy_from_slice(bytes);
-        let low = u128::from_be_bytes(low_bytes);
-        U256::from_words(low, 0)
-    } else {
-        let high_len = len - 16;
-        let mut high_bytes = [0u8; 16];
-        high_bytes[16 - high_len..].copy_from_slice(&bytes[..high_len]);
-        let high = u128::from_be_bytes(high_bytes);
-
-        let mut low_bytes = [0u8; 16];
-        low_bytes.copy_from_slice(&bytes[high_len..]);
-        let low = u128::from_be_bytes(low_bytes);
-
-        U256::from_words(low, high)
     }
 }
 

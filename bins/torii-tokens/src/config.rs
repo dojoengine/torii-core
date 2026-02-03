@@ -55,6 +55,13 @@ pub struct Config {
     /// Include well-known ERC20 contracts (ETH, STRK)
     #[arg(long)]
     pub include_well_known: bool,
+
+    /// Number of blocks to fetch per batch
+    ///
+    /// Higher values improve throughput but use more memory.
+    /// Lower values reduce memory usage but may slow down indexing.
+    #[arg(long, default_value = "1000")]
+    pub batch_size: u64,
 }
 
 impl Config {

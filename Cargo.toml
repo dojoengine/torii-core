@@ -1,6 +1,7 @@
 [workspace]
 members = [
     ".",
+    "crates/torii-common",
     "crates/torii-sql-sink",
     "crates/torii-log-sink",
     "crates/torii-erc20",
