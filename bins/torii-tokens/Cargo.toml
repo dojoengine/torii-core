@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 # Core dependencies
 torii = { path = "../../" }
+torii-common = { path = "../../crates/torii-common" }
 torii-erc20 = { path = "../../crates/torii-erc20" }
 torii-erc721 = { path = "../../crates/torii-erc721" }
 torii-erc1155 = { path = "../../crates/torii-erc1155" }

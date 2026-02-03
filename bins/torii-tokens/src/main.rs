@@ -16,23 +16,29 @@
 //!
 //! ```bash
 //! # Index ETH and STRK as ERC20
-//! torii-tokens --include-well-known --from-block 100000
+//! torii-tokens run --include-well-known --from-block 100000
 //!
 //! # Index specific ERC20 contracts
-//! torii-tokens --erc20 0x049D36570D4e46f48e99674bd3fcc84644DdD6b96F7C741B1562B82f9e004dC7,0x04718f5a0Fc34cC1AF16A1cdee98fFB20C31f5cD61D6Ab07201858f4287c938D
+//! torii-tokens run --erc20 0x049D36570D4e46f48e99674bd3fcc84644DdD6b96F7C741B1562B82f9e004dC7,0x04718f5a0Fc34cC1AF16A1cdee98fFB20C31f5cD61D6Ab07201858f4287c938D
 //!
 //! # Index multiple token types
-//! torii-tokens \
+//! torii-tokens run \
 //!   --erc20 0x...eth,0x...strk \
 //!   --erc721 0x...nft_contract \
 //!   --erc1155 0x...game_items \
 //!   --from-block 100000
+//!
+//! # Backfill historical data for specific contracts
+//! torii-tokens backfill \
+//!   --erc20 0x...eth:100000 \
+//!   --to-block 500000
 //! ```
 
+mod backfill;
 mod config;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use config::Config;
 use std::path::Path;
 use std::sync::Arc;
@@ -51,19 +57,31 @@ use torii_erc721::{Erc721Decoder, Erc721Service, Erc721Sink, Erc721Storage, FILE
 use torii_erc1155::proto::erc1155_server::Erc1155Server;
 use torii_erc1155::{Erc1155Decoder, Erc1155Service, Erc1155Sink, Erc1155Storage, FILE_DESCRIPTOR_SET as ERC1155_DESCRIPTOR_SET};
 
+/// Root CLI with subcommands
+#[derive(Parser, Debug)]
+#[command(name = "torii-tokens")]
+#[command(about = "Unified Starknet token indexer for ERC20, ERC721, and ERC1155")]
+#[command(version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    /// For backward compatibility: these args are passed to 'run' when no subcommand is given
+    #[command(flatten)]
+    run_args: Config,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Run the indexer (continuous operation)
+    Run(Config),
+
+    /// Backfill historical data for specific contracts
+    Backfill(backfill::BackfillArgs),
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Start profiler if enabled
-    #[cfg(feature = "profiling")]
-    let guard = pprof::ProfilerGuardBuilder::default()
-        .frequency(1000)
-        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
-        .build()
-        .unwrap();
-
-    // Parse CLI arguments
-    let config = Config::parse();
-
     // Initialize logging with default INFO level, overridable via RUST_LOG
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -72,6 +90,34 @@ async fn main() -> Result<()> {
         .with_env_filter(env_filter)
         .with_target(true)
         .init();
+
+    // Parse CLI arguments
+    let cli = Cli::parse();
+
+    // Dispatch to appropriate command
+    match cli.command {
+        Some(Commands::Backfill(args)) => {
+            backfill::run_backfill(args).await
+        }
+        Some(Commands::Run(config)) => {
+            run_indexer(config).await
+        }
+        None => {
+            // Backward compatibility: if no subcommand, run the indexer with root args
+            run_indexer(cli.run_args).await
+        }
+    }
+}
+
+/// Run the main indexer
+async fn run_indexer(config: Config) -> Result<()> {
+    // Start profiler if enabled
+    #[cfg(feature = "profiling")]
+    let guard = pprof::ProfilerGuardBuilder::default()
+        .frequency(1000)
+        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+        .build()
+        .unwrap();
 
     tracing::info!("Starting Torii Unified Token Indexer");
     tracing::info!("RPC URL: {}", config.rpc_url);

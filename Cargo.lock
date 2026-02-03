@@ -3720,7 +3720,9 @@ dependencies = [
 name = "torii-common"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "starknet",
+ "tracing",
 ]
 
 [[package]]
@@ -3872,6 +3874,7 @@ dependencies = [
  "tonic",
  "tonic-reflection",
  "torii",
+ "torii-common",
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",

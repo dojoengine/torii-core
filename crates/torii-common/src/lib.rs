@@ -1,6 +1,14 @@
 //! Common utilities for Torii token indexers
 //!
-//! Provides efficient conversions between Starknet types and storage/wire formats.
+//! Provides efficient conversions between Starknet types and storage/wire formats,
+//! as well as shared components like the event backfill engine.
+
+pub mod backfill;
+
+pub use backfill::{
+    BackfillProgress, BackfillResult, BackfillStats, ContractBackfillConfig, EventBackfill,
+    TokenType,
+};
 
 use starknet::core::types::{Felt, U256};
 
