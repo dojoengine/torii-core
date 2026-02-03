@@ -3,7 +3,15 @@ members = [
     ".",
     "crates/torii-sql-sink",
     "crates/torii-log-sink",
+    "crates/torii-erc20",
+    "crates/torii-erc721",
+    "crates/torii-erc1155",
     "bins/torii-erc20",
+    "bins/torii-tokens",
+]
+default-members = [
+    "bins/torii-erc20",
+    "bins/torii-tokens",
 ]
 resolver = "2"
 

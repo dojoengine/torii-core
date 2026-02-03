@@ -25,23 +25,18 @@
 //! ```
 
 mod config;
-mod decoder;
-mod grpc_service;
-mod sink;
-mod storage;
 
 use anyhow::Result;
 use clap::Parser;
 use config::Config;
-use decoder::Erc20Decoder;
-use grpc_service::Erc20Service;
-use sink::proto::erc20_server::Erc20Server;
-use sink::{Erc20Sink, FILE_DESCRIPTOR_SET};
 use std::path::Path;
 use std::sync::Arc;
-use storage::Erc20Storage;
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{BlockRangeConfig, BlockRangeExtractor};
+
+// Import from the library crate
+use torii_erc20::proto::erc20_server::Erc20Server;
+use torii_erc20::{Erc20Decoder, Erc20Service, Erc20Sink, Erc20Storage, FILE_DESCRIPTOR_SET};
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -5,6 +5,12 @@
 //! - Real-time subscriptions with filtering (SubscribeTransfers, SubscribeApprovals)
 //! - Indexer statistics (GetStats)
 
+use crate::proto::{
+    erc20_server::Erc20 as Erc20Trait, Approval, ApprovalFilter, ApprovalUpdate, Cursor,
+    GetApprovalsRequest, GetApprovalsResponse, GetStatsRequest, GetStatsResponse,
+    GetTransfersRequest, GetTransfersResponse, SubscribeApprovalsRequest, SubscribeTransfersRequest,
+    Transfer, TransferFilter, TransferUpdate,
+};
 use crate::storage::{
     ApprovalCursor, ApprovalData, Erc20Storage, TransferCursor, TransferData, TransferDirection,
 };
@@ -15,13 +21,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tonic::{Request, Response, Status};
-
-use crate::sink::proto::{
-    erc20_server::Erc20 as Erc20Trait, Approval, ApprovalFilter, ApprovalUpdate, Cursor,
-    GetApprovalsRequest, GetApprovalsResponse, GetStatsRequest, GetStatsResponse,
-    GetTransfersRequest, GetTransfersResponse, SubscribeApprovalsRequest, SubscribeTransfersRequest,
-    Transfer, TransferFilter, TransferUpdate,
-};
 
 /// gRPC service implementation for ERC20
 #[derive(Clone)]
@@ -105,13 +104,13 @@ impl Erc20Service {
             }
 
             // Apply direction filter when wallet is set
-            match crate::sink::proto::TransferDirection::try_from(filter.direction) {
-                Ok(crate::sink::proto::TransferDirection::DirectionSent) => {
+            match crate::proto::TransferDirection::try_from(filter.direction) {
+                Ok(crate::proto::TransferDirection::DirectionSent) => {
                     if !matches_from {
                         return false;
                     }
                 }
-                Ok(crate::sink::proto::TransferDirection::DirectionReceived) => {
+                Ok(crate::proto::TransferDirection::DirectionReceived) => {
                     if !matches_to {
                         return false;
                     }
@@ -252,9 +251,9 @@ impl Erc20Trait for Erc20Service {
             .filter_map(|b| bytes_to_felt(b))
             .collect();
 
-        let direction = match crate::sink::proto::TransferDirection::try_from(filter.direction) {
-            Ok(crate::sink::proto::TransferDirection::DirectionSent) => TransferDirection::Sent,
-            Ok(crate::sink::proto::TransferDirection::DirectionReceived) => {
+        let direction = match crate::proto::TransferDirection::try_from(filter.direction) {
+            Ok(crate::proto::TransferDirection::DirectionSent) => TransferDirection::Sent,
+            Ok(crate::proto::TransferDirection::DirectionReceived) => {
                 TransferDirection::Received
             }
             _ => TransferDirection::All,

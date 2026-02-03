@@ -318,6 +318,12 @@ impl Erc20Decoder {
     }
 }
 
+impl Default for Erc20Decoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl Decoder for Erc20Decoder {
     fn decoder_name(&self) -> &str {
@@ -494,9 +500,7 @@ mod tests {
         // Felt-based legacy format: keys=1 (selector), data=3 (from, to, amount)
         let event = EmittedEvent {
             from_address: Felt::from(0x456u64), // Token contract
-            keys: vec![
-                Erc20Decoder::transfer_selector(),
-            ],
+            keys: vec![Erc20Decoder::transfer_selector()],
             data: vec![
                 Felt::from(0xau64),  // from
                 Felt::from(0xbu64),  // to
@@ -529,9 +533,7 @@ mod tests {
         // Legacy format: keys=1 (selector), data=4 (owner, spender, amount_low, amount_high)
         let event = EmittedEvent {
             from_address: Felt::from(0x789u64), // Token contract
-            keys: vec![
-                Erc20Decoder::approval_selector(),
-            ],
+            keys: vec![Erc20Decoder::approval_selector()],
             data: vec![
                 Felt::from(0xcu64),   // owner
                 Felt::from(0xdu64),   // spender
@@ -600,9 +602,7 @@ mod tests {
         // Felt-based legacy format: keys=1 (selector), data=3 (owner, spender, amount)
         let event = EmittedEvent {
             from_address: Felt::from(0xbbbu64), // Token contract
-            keys: vec![
-                Erc20Decoder::approval_selector(),
-            ],
+            keys: vec![Erc20Decoder::approval_selector()],
             data: vec![
                 Felt::from(0x10u64),  // owner
                 Felt::from(0x11u64),  // spender
@@ -627,5 +627,4 @@ mod tests {
         assert_eq!(approval.amount, U256::from(12000u64));
         assert_eq!(approval.token, Felt::from(0xbbbu64));
     }
-
 }

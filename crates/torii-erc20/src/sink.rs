@@ -11,6 +11,7 @@
 
 use crate::decoder::{Approval as DecodedApproval, Transfer as DecodedTransfer};
 use crate::grpc_service::Erc20Service;
+use crate::proto;
 use crate::storage::{ApprovalData, Erc20Storage, TransferData};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -22,14 +23,6 @@ use std::sync::Arc;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
-
-// Include generated protobuf code
-pub mod proto {
-    include!("generated/torii.sinks.erc20.rs");
-}
-
-// File descriptor set for gRPC reflection (used by consumers for reflection setup)
-pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/erc20_descriptor.bin");
 
 /// ERC20 transfer and approval sink
 ///
@@ -56,6 +49,11 @@ impl Erc20Sink {
     pub fn with_grpc_service(mut self, service: Erc20Service) -> Self {
         self.grpc_service = Some(service);
         self
+    }
+
+    /// Get a reference to the storage
+    pub fn storage(&self) -> &Arc<Erc20Storage> {
+        &self.storage
     }
 
     /// Filter function for ERC20 transfer events

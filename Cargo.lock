@@ -3717,7 +3717,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "torii-erc20"
+name = "torii-erc1155"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3725,10 +3725,8 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
- "clap",
  "futures",
  "hex",
- "pprof",
  "prost 0.13.5",
  "prost-types 0.13.5",
  "rusqlite",
@@ -3738,11 +3736,74 @@ dependencies = [
  "tokio",
  "tonic",
  "tonic-build",
+ "torii",
+ "tracing",
+]
+
+[[package]]
+name = "torii-erc20"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum",
+ "chrono",
+ "futures",
+ "hex",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "starknet",
+ "tokio",
+ "tonic",
+ "tonic-build",
+ "torii",
+ "tracing",
+]
+
+[[package]]
+name = "torii-erc20-bin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "pprof",
+ "starknet",
+ "tokio",
+ "tonic",
  "tonic-reflection",
  "torii",
+ "torii-erc20",
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "torii-erc721"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum",
+ "chrono",
+ "futures",
+ "hex",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "starknet",
+ "tokio",
+ "tonic",
+ "tonic-build",
+ "torii",
+ "tracing",
 ]
 
 [[package]]
@@ -3787,6 +3848,26 @@ dependencies = [
  "tonic-web",
  "torii",
  "tracing",
+]
+
+[[package]]
+name = "torii-tokens"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "pprof",
+ "starknet",
+ "tokio",
+ "tonic",
+ "tonic-reflection",
+ "torii",
+ "torii-erc1155",
+ "torii-erc20",
+ "torii-erc721",
+ "tracing",
+ "tracing-subscriber",
+ "url",
 ]
 
 [[package]]
