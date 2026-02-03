@@ -34,6 +34,7 @@ use clap::Parser;
 use config::Config;
 use decoder::Erc20Decoder;
 use sink::Erc20Sink;
+use std::path::Path;
 use std::sync::Arc;
 use storage::Erc20Storage;
 use torii::etl::decoder::DecoderId;
@@ -101,9 +102,16 @@ async fn main() -> Result<()> {
     let sink = Box::new(Erc20Sink::new(storage.clone()));
 
     // Build Torii configuration
+    // Get database root from db_path's parent directory
+    let db_path = Path::new(&config.db_path);
+    let database_root = db_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .to_string_lossy();
+
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
-        .database_root(&config.db_path.replace("/erc20-data.db", ""))
+        .database_root(database_root.as_ref())
         .with_extractor(extractor)
         .add_decoder(decoder)
         .add_sink_boxed(sink);

@@ -218,6 +218,22 @@ impl Extractor for BlockRangeExtractor {
         self.reached_end
     }
 
+    async fn commit_cursor(&mut self, cursor: &str, engine_db: &EngineDb) -> Result<()> {
+        if let Some(block_str) = cursor.strip_prefix("block:") {
+            let block_num: u64 = block_str.parse().context("Invalid cursor format")?;
+            engine_db
+                .set_extractor_state(EXTRACTOR_TYPE, STATE_KEY, &block_num.to_string())
+                .await
+                .context("Failed to commit cursor")?;
+            tracing::debug!(
+                target: "torii::etl::block_range",
+                "Committed cursor: block {}",
+                block_num
+            );
+        }
+        Ok(())
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -320,11 +336,9 @@ impl Extractor for BlockRangeExtractor {
         // Update cursor
         let cursor = format!("block:{}", batch_end);
 
-        // Save state to EngineDb for persistence across restarts
-        engine_db
-            .set_extractor_state(EXTRACTOR_TYPE, STATE_KEY, &batch_end.to_string())
-            .await
-            .context("Failed to save extractor state")?;
+        // NOTE: Cursor persistence is now handled by commit_cursor() which is called
+        // AFTER sink processing completes. This ensures no data loss if the process
+        // is killed between extraction and sink processing.
 
         // Update internal state
         self.current_block = batch_end + 1;

@@ -3703,6 +3703,7 @@ dependencies = [
  "starknet",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tonic",
  "tonic-build",
  "tonic-reflection",

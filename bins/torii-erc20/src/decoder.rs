@@ -109,6 +109,9 @@ impl Erc20Decoder {
     /// - data[1]: to address
     /// - data[2]: amount_low (u128)
     /// - data[3]: amount_high (u128)
+    ///
+    /// Some old tokens are using `felt` as amount, and not `u256`, which reduce by one the number of values.
+    /// Currently not handled, but may be added if some old tokens are required to be indexed.
     async fn decode_transfer(&self, event: &EmittedEvent) -> Result<Option<Envelope>> {
         let from;
         let to;

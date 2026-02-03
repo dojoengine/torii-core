@@ -191,6 +191,25 @@ pub trait Extractor: Send + Sync {
     /// ```
     fn is_finished(&self) -> bool;
 
+    /// Commit the cursor after successful processing.
+    ///
+    /// This method is called AFTER sink processing completes successfully.
+    /// By separating cursor persistence from extraction, we ensure no data loss
+    /// if the process is killed between extraction and sink processing.
+    ///
+    /// # Arguments
+    ///
+    /// * `cursor` - The cursor string to commit (e.g., "block:12345")
+    /// * `engine_db` - The engine database for state persistence
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation does nothing (no-op). Extractors that need
+    /// cursor persistence should override this method.
+    async fn commit_cursor(&mut self, _cursor: &str, _engine_db: &EngineDb) -> Result<()> {
+        Ok(())
+    }
+
     /// Downcast to Any for type checking
     fn as_any(&self) -> &dyn std::any::Any;
 }

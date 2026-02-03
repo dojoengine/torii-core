@@ -28,7 +28,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tonic::transport::Server;
+use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any as CorsAny, CorsLayer};
 
 use etl::decoder::{ContractFilter, DecoderId};
@@ -111,6 +113,12 @@ pub struct ToriiConfig {
 
     /// Contract filter (whitelist/blacklist/none).
     pub contract_filter: ContractFilter,
+
+    /// Graceful shutdown timeout in seconds (default: 30).
+    ///
+    /// When a shutdown signal is received, the system will wait up to this
+    /// duration for the current ETL batch to complete before forcing shutdown.
+    pub shutdown_timeout: u64,
 }
 
 impl ToriiConfig {
@@ -133,6 +141,7 @@ pub struct ToriiConfigBuilder {
     extractor: Option<Box<dyn Extractor>>,
     database_root: Option<PathBuf>,
     contract_filter: Option<ContractFilter>,
+    shutdown_timeout: Option<u64>,
 }
 
 impl Default for ToriiConfigBuilder {
@@ -150,6 +159,7 @@ impl Default for ToriiConfigBuilder {
             extractor: None,
             database_root: None,
             contract_filter: None,
+            shutdown_timeout: None,
         }
     }
 }
@@ -310,6 +320,16 @@ impl ToriiConfigBuilder {
         self
     }
 
+    /// Sets the graceful shutdown timeout in seconds.
+    ///
+    /// When a shutdown signal (SIGINT/SIGTERM) is received, the system will wait
+    /// up to this duration for the current ETL batch to complete before forcing
+    /// shutdown. Default is 30 seconds.
+    pub fn shutdown_timeout(mut self, seconds: u64) -> Self {
+        self.shutdown_timeout = Some(seconds);
+        self
+    }
+
     /// Builds the Torii configuration.
     ///
     /// # Panics
@@ -337,6 +357,7 @@ impl ToriiConfigBuilder {
             extractor: self.extractor,
             database_root: self.database_root.unwrap_or_else(|| PathBuf::from(".")),
             contract_filter,
+            shutdown_timeout: self.shutdown_timeout.unwrap_or(30),
         }
     }
 }
@@ -469,10 +490,14 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
         tracing::info!(target: "torii::main", "   + User-provided sink gRPC services");
     }
 
+    // Create cancellation token for graceful shutdown coordination.
+    let shutdown_token = CancellationToken::new();
+
     // Setup and start the ETL pipeline.
     let etl_multi_sink = multi_sink.clone();
     let etl_engine_db = engine_db.clone();
     let cycle_interval = config.cycle_interval;
+    let etl_shutdown_token = shutdown_token.clone();
 
     // Move multi_decoder into the task (can't clone since it owns the registry)
     let etl_decoder_context = decoder_context;
@@ -480,7 +505,7 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
     // Extractor was already created earlier (to get provider), make it mutable for the ETL loop
     let mut extractor = extractor;
 
-    tokio::spawn(async move {
+    let etl_handle = tokio::spawn(async move {
         tracing::info!(target: "torii::etl", "Starting ETL pipeline...");
 
         // Wait a bit for the server to be ready.
@@ -489,22 +514,39 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
         let mut cursor: Option<String> = None;
 
         loop {
+            // Check for shutdown signal BEFORE starting extraction
+            if etl_shutdown_token.is_cancelled() {
+                tracing::info!(target: "torii::etl", "Shutdown requested, stopping ETL loop");
+                break;
+            }
+
             // Extract the events from the source.
             let batch = match extractor.extract(cursor.clone(), &etl_engine_db).await {
                 Ok(batch) => batch,
                 Err(e) => {
                     tracing::error!(target: "torii::etl", "Extract failed: {}", e);
+                    // Check shutdown before sleeping
+                    if etl_shutdown_token.is_cancelled() {
+                        tracing::info!(target: "torii::etl", "Shutdown requested during error recovery");
+                        break;
+                    }
                     tokio::time::sleep(tokio::time::Duration::from_secs(cycle_interval)).await;
                     continue;
                 }
             };
 
-            // Update cursor from batch
-            cursor = batch.cursor.clone();
+            // Save cursor for later commit (AFTER successful sink processing)
+            let new_cursor = batch.cursor.clone();
 
             if batch.is_empty() {
                 if extractor.is_finished() {
                     tracing::info!(target: "torii::etl", "Extractor finished, stopping ETL loop");
+                    break;
+                }
+
+                // Check shutdown before sleeping
+                if etl_shutdown_token.is_cancelled() {
+                    tracing::info!(target: "torii::etl", "Shutdown requested while waiting for blocks");
                     break;
                 }
 
@@ -543,12 +585,83 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
                 continue;
             }
 
+            // CRITICAL: Commit cursor ONLY AFTER successful sink processing.
+            // This ensures no data loss if the process is killed during extraction or sink processing.
+            if let Some(ref cursor_str) = new_cursor {
+                if let Err(e) = extractor.commit_cursor(cursor_str, &etl_engine_db).await {
+                    tracing::error!(target: "torii::etl", "Failed to commit cursor: {}", e);
+                    // Continue anyway - cursor will be re-processed on restart (safe, just duplicate work)
+                }
+            }
+
+            cursor = new_cursor;
+
             tracing::info!(target: "torii::etl", "ETL cycle complete");
         }
+
+        tracing::info!(target: "torii::etl", "ETL loop completed gracefully");
     });
 
+    // Setup signal handlers for graceful shutdown
+    let server_shutdown_token = shutdown_token.clone();
+    let shutdown_timeout = config.shutdown_timeout;
+
+    let shutdown_signal = async move {
+        let ctrl_c = async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to install Ctrl+C handler");
+        };
+
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("Failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => {
+                tracing::info!(target: "torii::main", "Received SIGINT (Ctrl+C), initiating graceful shutdown...");
+            }
+            _ = terminate => {
+                tracing::info!(target: "torii::main", "Received SIGTERM, initiating graceful shutdown...");
+            }
+        }
+
+        // Signal shutdown to ETL loop
+        server_shutdown_token.cancel();
+    };
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal)
+        .await?;
+
+    tracing::info!(target: "torii::main", "HTTP/gRPC server stopped, waiting for ETL loop to complete...");
+
+    // Wait for ETL loop to finish with timeout
+    match tokio::time::timeout(Duration::from_secs(shutdown_timeout), etl_handle).await {
+        Ok(Ok(())) => {
+            tracing::info!(target: "torii::main", "ETL loop completed successfully");
+        }
+        Ok(Err(e)) => {
+            tracing::error!(target: "torii::main", "ETL loop panicked: {}", e);
+        }
+        Err(_) => {
+            tracing::warn!(
+                target: "torii::main",
+                "ETL loop did not complete within {}s timeout, forcing shutdown",
+                shutdown_timeout
+            );
+        }
+    }
+
+    tracing::info!(target: "torii::main", "Torii shutdown complete");
 
     Ok(())
 }
