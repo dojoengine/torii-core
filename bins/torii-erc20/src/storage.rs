@@ -1,23 +1,38 @@
-//! SQLite storage for ERC20 transfers and balances
+//! SQLite storage for ERC20 transfers and approvals
 //!
 //! Uses binary (BLOB) storage for efficiency (~51% size reduction vs hex strings).
-//! Uses U256 for amounts (proper 256-bit arithmetic for ERC20 token balances).
-//! Properly tracks running balances with add/subtract arithmetic.
+//! Uses U256 for amounts (proper 256-bit arithmetic for ERC20 token amounts).
+//!
+//! Note: Balance tracking was intentionally removed because balances computed from
+//! transfers are inherently incorrect - some addresses have initial balances without
+//! transfer history (genesis allocations, airdrops). Clients should fetch actual
+//! balances from the chain when needed.
 
 use anyhow::Result;
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection};
 use starknet::core::types::{Felt, U256};
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Storage for ERC20 transfers and balances
+/// Direction filter for transfer queries
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransferDirection {
+    /// All transfers (sent and received)
+    #[default]
+    All,
+    /// Only sent transfers (wallet is sender)
+    Sent,
+    /// Only received transfers (wallet is receiver)
+    Received,
+}
+
+/// Storage for ERC20 transfers and approvals
 pub struct Erc20Storage {
     conn: Arc<Mutex<Connection>>,
 }
 
 /// Transfer data for batch insertion
 pub struct TransferData {
-    pub id: Option<i64>,  // SQLite rowid (set after insertion, None before)
+    pub id: Option<i64>,
     pub token: Felt,
     pub from: Felt,
     pub to: Felt,
@@ -25,13 +40,34 @@ pub struct TransferData {
     pub amount: U256,
     pub block_number: u64,
     pub tx_hash: Felt,
+    pub timestamp: Option<i64>,
+}
+
+/// Approval data for batch insertion
+pub struct ApprovalData {
+    pub id: Option<i64>,
+    pub token: Felt,
+    pub owner: Felt,
+    pub spender: Felt,
+    /// Amount as U256 (256-bit) for proper ERC20 token amounts
+    pub amount: U256,
+    pub block_number: u64,
+    pub tx_hash: Felt,
+    pub timestamp: Option<i64>,
 }
 
 /// Cursor for paginated transfer queries
 #[derive(Debug, Clone, Copy)]
 pub struct TransferCursor {
     pub block_number: u64,
-    pub id: i64,  // Last transfer ID from previous page
+    pub id: i64,
+}
+
+/// Cursor for paginated approval queries
+#[derive(Debug, Clone, Copy)]
+pub struct ApprovalCursor {
+    pub block_number: u64,
+    pub id: i64,
 }
 
 /// Convert Felt to 32-byte BLOB for storage (big-endian for easier inspection)
@@ -55,11 +91,6 @@ fn blob_to_felt(bytes: &[u8]) -> Felt {
 /// - Values < 2^128: 1-16 bytes (minimal encoding of low word)
 /// - Values >= 2^128: Full encoding (17-32 bytes, both high and low words)
 ///
-/// This is safe because:
-/// 1. blob_to_u256() already handles variable-length (right-aligns shorter BLOBs)
-/// 2. SQLite memcmp() compares correctly for partial index WHERE balance > 0
-/// 3. All comparisons use U256 after decoding (not raw BLOB comparison)
-///
 /// Space savings: 78-95% compression for typical ERC20 transfer distributions
 fn u256_to_blob(value: U256) -> Vec<u8> {
     let high = value.high();
@@ -68,7 +99,7 @@ fn u256_to_blob(value: U256) -> Vec<u8> {
     // If high word is zero, only encode low word
     if high == 0 {
         if low == 0 {
-            return vec![0u8];  // Zero value: 1 byte
+            return vec![0u8]; // Zero value: 1 byte
         }
 
         // Encode low word with minimal bytes (remove leading zeros)
@@ -96,26 +127,32 @@ fn u256_to_blob(value: U256) -> Vec<u8> {
 
 /// Convert BLOB back to U256 (big-endian)
 fn blob_to_u256(bytes: &[u8]) -> U256 {
-    let mut high_bytes = [0u8; 16];
-    let mut low_bytes = [0u8; 16];
+    let len = bytes.len();
 
-    let len = bytes.len().min(32);
-    if len >= 16 {
-        // Big-endian: first 16 bytes are high, remaining are low
-        high_bytes.copy_from_slice(&bytes[..16]);
-        low_bytes[..len - 16].copy_from_slice(&bytes[16..len]);
-    } else {
-        // Less than 16 bytes - all goes into low, right-aligned
-        low_bytes[16 - len..].copy_from_slice(&bytes[..len]);
+    if len == 0 {
+        return U256::from(0u64);
     }
 
-    let high = u128::from_be_bytes(high_bytes);
-    let low = u128::from_be_bytes(low_bytes);
-    U256::from_words(low, high)
-}
+    if len <= 16 {
+        // Only low word
+        let mut low_bytes = [0u8; 16];
+        low_bytes[16 - len..].copy_from_slice(bytes);
+        let low = u128::from_be_bytes(low_bytes);
+        U256::from_words(low, 0)
+    } else {
+        // Both high and low words
+        let high_len = len - 16;
+        let mut high_bytes = [0u8; 16];
+        high_bytes[16 - high_len..].copy_from_slice(&bytes[..high_len]);
+        let high = u128::from_be_bytes(high_bytes);
 
-/// Zero value for U256
-const U256_ZERO: U256 = U256::from_words(0, 0);
+        let mut low_bytes = [0u8; 16];
+        low_bytes.copy_from_slice(&bytes[high_len..]);
+        let low = u128::from_be_bytes(low_bytes);
+
+        U256::from_words(low, high)
+    }
+}
 
 impl Erc20Storage {
     /// Create or open the database
@@ -136,14 +173,12 @@ impl Erc20Storage {
              PRAGMA temp_store=MEMORY;
              PRAGMA mmap_size=268435456;
              PRAGMA page_size=4096;
-             PRAGMA busy_timeout=5000;"
+             PRAGMA busy_timeout=5000;",
         )?;
 
-        tracing::info!(
-            "SQLite configured: WAL mode, 64MB cache, 256MB mmap, NORMAL sync"
-        );
+        tracing::info!("SQLite configured: WAL mode, 64MB cache, 256MB mmap, NORMAL sync");
 
-        // Create tables with BLOB columns for efficient storage
+        // Create transfers table with BLOB columns for efficient storage
         conn.execute(
             "CREATE TABLE IF NOT EXISTS transfers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -179,7 +214,7 @@ impl Erc20Storage {
             [],
         )?;
 
-        // Composite indexes for efficient queries (Phase 1.1 optimizations)
+        // Composite indexes for efficient queries
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_transfers_token_block ON transfers(token, block_number DESC)",
             [],
@@ -195,35 +230,34 @@ impl Erc20Storage {
             [],
         )?;
 
-        // Balances table - maintains current balance for each (token, address) pair
+        // Create approvals table
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS balances (
+            "CREATE TABLE IF NOT EXISTS approvals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 token BLOB NOT NULL,
-                address BLOB NOT NULL,
-                balance BLOB NOT NULL,
-                updated_at INTEGER DEFAULT (strftime('%s', 'now')),
-                PRIMARY KEY (token, address)
+                owner BLOB NOT NULL,
+                spender BLOB NOT NULL,
+                amount BLOB NOT NULL,
+                block_number INTEGER NOT NULL,
+                tx_hash BLOB NOT NULL,
+                timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                UNIQUE(token, tx_hash, owner, spender)
             )",
             [],
         )?;
 
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_balances_token ON balances(token)",
+            "CREATE INDEX IF NOT EXISTS idx_approvals_owner ON approvals(owner, block_number DESC)",
             [],
         )?;
 
-        // Critical: Add address index for wallet-centric queries (Phase 1.1 optimization)
-        // Without this, "get all balances for wallet" does full table scan!
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_balances_address ON balances(address)",
+            "CREATE INDEX IF NOT EXISTS idx_approvals_spender ON approvals(spender, block_number DESC)",
             [],
         )?;
 
-        // Partial index for non-zero balances (optimal for wallet portfolio queries)
-        // Only indexes rows where balance > 0, saving space and query time
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_balances_address_nonzero
-             ON balances(address, token) WHERE balance > X'0000000000000000000000000000000000000000000000000000000000000000'",
+            "CREATE INDEX IF NOT EXISTS idx_approvals_token ON approvals(token, block_number DESC)",
             [],
         )?;
 
@@ -236,7 +270,7 @@ impl Erc20Storage {
             [],
         )?;
 
-        // Wallet activity table - denormalized for efficient wallet queries (Phase 1.2 optimization)
+        // Wallet activity table - denormalized for efficient wallet queries
         // Solves the OR query problem: "get all transfers where wallet is sender OR receiver"
         // Instead of: WHERE from_addr = ? OR to_addr = ? (can only use one index)
         // We use: JOIN wallet_activity WHERE wallet_address = ? (uses this table's index)
@@ -274,88 +308,43 @@ impl Erc20Storage {
             [],
         )?;
 
+        // Approval activity table - similar pattern for approvals
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS approval_activity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_address BLOB NOT NULL,
+                token BLOB NOT NULL,
+                approval_id INTEGER NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('owner', 'spender', 'both')),
+                block_number INTEGER NOT NULL,
+                FOREIGN KEY (approval_id) REFERENCES approvals(id)
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_approval_activity_account_block
+             ON approval_activity(account_address, block_number DESC)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_approval_activity_account_token
+             ON approval_activity(account_address, token, block_number DESC)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_approval_activity_approval
+             ON approval_activity(approval_id)",
+            [],
+        )?;
+
         tracing::info!("Database initialized at {}", db_path);
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
-    }
-
-    /// Update balance for an address with proper U256 arithmetic
-    ///
-    /// - For credits (is_credit=true): adds amount to current balance
-    /// - For debits (is_credit=false): subtracts amount from current balance
-    /// - Handles underflow gracefully by clamping to zero (for when indexer starts from block > 0)
-    fn update_balance(
-        tx: &Transaction,
-        token: &[u8],
-        address: &[u8],
-        amount: U256,
-        is_credit: bool,
-    ) -> Result<()> {
-        // Get current balance (default to 0 if not exists)
-        let current: U256 = tx
-            .query_row(
-                "SELECT balance FROM balances WHERE token = ?1 AND address = ?2",
-                params![token, address],
-                |row| {
-                    let bytes: Vec<u8> = row.get(0)?;
-                    Ok(blob_to_u256(&bytes))
-                },
-            )
-            .unwrap_or(U256_ZERO);
-
-        // Compute new balance using safe arithmetic to avoid subtle crate panics
-        // starknet_core::U256 uses the subtle crate which can panic on overflow/underflow
-        // We must check conditions BEFORE performing operations
-        let new_balance = if is_credit {
-            // Check for addition overflow by examining the words
-            // For addition to overflow: both low and high must overflow, or high overflows
-            let (new_low, overflow_low) = current.low().overflowing_add(amount.low());
-            let carry = if overflow_low { 1 } else { 0 };
-            let (new_high, overflow_high) = current.high().overflowing_add(amount.high());
-            let (new_high_with_carry, overflow_carry) = new_high.overflowing_add(carry);
-
-            if overflow_high || overflow_carry {
-                tracing::error!(
-                    target: "torii_erc20::storage",
-                    "Balance overflow would occur: current={}, amount={}, clamping to MAX",
-                    current,
-                    amount
-                );
-                // Return maximum U256 value to prevent panic
-                U256::from_words(u128::MAX, u128::MAX)
-            } else {
-                // Safe to add
-                current + amount
-            }
-        } else {
-            // Subtraction: check for underflow before subtracting
-            if current >= amount {
-                current - amount
-            } else {
-                // Underflow: clamp to zero and log warning
-                tracing::warn!(
-                    target: "torii_erc20::storage",
-                    "Balance underflow: current={}, amount={}, clamping to 0",
-                    current,
-                    amount
-                );
-                U256_ZERO
-            }
-        };
-
-        // Upsert new balance
-        tx.execute(
-            "INSERT INTO balances (token, address, balance, updated_at)
-             VALUES (?1, ?2, ?3, strftime('%s', 'now'))
-             ON CONFLICT(token, address) DO UPDATE SET
-               balance = ?3,
-               updated_at = strftime('%s', 'now')",
-            params![token, address, u256_to_blob(new_balance)],
-        )?;
-
-        Ok(())
     }
 
     /// Insert multiple transfers in a single transaction
@@ -364,7 +353,6 @@ impl Erc20Storage {
     /// - Single lock acquisition
     /// - Single transaction (all-or-nothing commit)
     /// - Prepared statement reuse
-    /// - Proper balance arithmetic (debit sender, credit receiver)
     pub fn insert_transfers_batch(&self, transfers: &[TransferData]) -> Result<usize> {
         if transfers.is_empty() {
             return Ok(0);
@@ -377,8 +365,8 @@ impl Erc20Storage {
 
         {
             let mut transfer_stmt = tx.prepare_cached(
-                "INSERT OR IGNORE INTO transfers (token, from_addr, to_addr, amount, block_number, tx_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR IGNORE INTO transfers (token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, strftime('%s', 'now')))",
             )?;
 
             for transfer in transfers {
@@ -396,20 +384,24 @@ impl Erc20Storage {
                     &amount_blob,
                     transfer.block_number,
                     &tx_hash_blob,
+                    transfer.timestamp,
                 ])?;
 
                 if rows > 0 {
                     inserted += 1;
                     let transfer_id = tx.last_insert_rowid();
 
-                    // Insert wallet activity records (Phase 1.2 optimization)
+                    // Insert wallet activity records
                     // This enables O(log n) wallet queries instead of O(n) OR scans
-                    if transfer.from != Felt::ZERO && transfer.to != Felt::ZERO && transfer.from == transfer.to {
+                    if transfer.from != Felt::ZERO
+                        && transfer.to != Felt::ZERO
+                        && transfer.from == transfer.to
+                    {
                         // Self-transfer (one record with 'both' direction)
                         tx.execute(
                             "INSERT INTO wallet_activity (wallet_address, token, transfer_id, direction, block_number)
                              VALUES (?, ?, ?, 'both', ?)",
-                            params![&from_blob, &token_blob, transfer_id, transfer.block_number]
+                            params![&from_blob, &token_blob, transfer_id, transfer.block_number],
                         )?;
                     } else {
                         // Sender record
@@ -417,7 +409,7 @@ impl Erc20Storage {
                             tx.execute(
                                 "INSERT INTO wallet_activity (wallet_address, token, transfer_id, direction, block_number)
                                  VALUES (?, ?, ?, 'sent', ?)",
-                                params![&from_blob, &token_blob, transfer_id, transfer.block_number]
+                                params![&from_blob, &token_blob, transfer_id, transfer.block_number],
                             )?;
                         }
                         // Receiver record
@@ -425,19 +417,9 @@ impl Erc20Storage {
                             tx.execute(
                                 "INSERT INTO wallet_activity (wallet_address, token, transfer_id, direction, block_number)
                                  VALUES (?, ?, ?, 'received', ?)",
-                                params![&to_blob, &token_blob, transfer_id, transfer.block_number]
+                                params![&to_blob, &token_blob, transfer_id, transfer.block_number],
                             )?;
                         }
-                    }
-
-                    // Debit sender (subtract from balance)
-                    if transfer.from != Felt::ZERO {
-                        Self::update_balance(&tx, &token_blob, &from_blob, transfer.amount, false)?;
-                    }
-
-                    // Credit receiver (add to balance)
-                    if transfer.to != Felt::ZERO {
-                        Self::update_balance(&tx, &token_blob, &to_blob, transfer.amount, true)?;
                     }
                 }
             }
@@ -448,72 +430,390 @@ impl Erc20Storage {
         Ok(inserted)
     }
 
-    /// Insert a transfer and update balances (single transfer, for backwards compatibility)
-    #[allow(dead_code)]
-    pub fn insert_transfer(
+    /// Insert multiple approvals in a single transaction
+    pub fn insert_approvals_batch(&self, approvals: &[ApprovalData]) -> Result<usize> {
+        if approvals.is_empty() {
+            return Ok(0);
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        let mut inserted = 0;
+
+        {
+            let mut approval_stmt = tx.prepare_cached(
+                "INSERT OR IGNORE INTO approvals (token, owner, spender, amount, block_number, tx_hash, timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, strftime('%s', 'now')))",
+            )?;
+
+            for approval in approvals {
+                let token_blob = felt_to_blob(approval.token);
+                let owner_blob = felt_to_blob(approval.owner);
+                let spender_blob = felt_to_blob(approval.spender);
+                let amount_blob = u256_to_blob(approval.amount);
+                let tx_hash_blob = felt_to_blob(approval.tx_hash);
+
+                // Insert approval
+                let rows = approval_stmt.execute(params![
+                    &token_blob,
+                    &owner_blob,
+                    &spender_blob,
+                    &amount_blob,
+                    approval.block_number,
+                    &tx_hash_blob,
+                    approval.timestamp,
+                ])?;
+
+                if rows > 0 {
+                    inserted += 1;
+                    let approval_id = tx.last_insert_rowid();
+
+                    // Insert approval activity records
+                    if approval.owner != Felt::ZERO
+                        && approval.spender != Felt::ZERO
+                        && approval.owner == approval.spender
+                    {
+                        // Self-approval (one record with 'both' role)
+                        tx.execute(
+                            "INSERT INTO approval_activity (account_address, token, approval_id, role, block_number)
+                             VALUES (?, ?, ?, 'both', ?)",
+                            params![
+                                &owner_blob,
+                                &token_blob,
+                                approval_id,
+                                approval.block_number
+                            ],
+                        )?;
+                    } else {
+                        // Owner record
+                        if approval.owner != Felt::ZERO {
+                            tx.execute(
+                                "INSERT INTO approval_activity (account_address, token, approval_id, role, block_number)
+                                 VALUES (?, ?, ?, 'owner', ?)",
+                                params![
+                                    &owner_blob,
+                                    &token_blob,
+                                    approval_id,
+                                    approval.block_number
+                                ],
+                            )?;
+                        }
+                        // Spender record
+                        if approval.spender != Felt::ZERO {
+                            tx.execute(
+                                "INSERT INTO approval_activity (account_address, token, approval_id, role, block_number)
+                                 VALUES (?, ?, ?, 'spender', ?)",
+                                params![
+                                    &spender_blob,
+                                    &token_blob,
+                                    approval_id,
+                                    approval.block_number
+                                ],
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+
+        tx.commit()?;
+
+        Ok(inserted)
+    }
+
+    /// Get filtered transfers with cursor-based pagination
+    ///
+    /// Supports:
+    /// - `wallet`: Matches from OR to (uses wallet_activity table for efficient OR queries)
+    /// - `from`: Exact from address match
+    /// - `to`: Exact to address match
+    /// - `tokens`: Token whitelist (empty = all tokens)
+    /// - `direction`: Filter by sent/received/all (only applies with wallet)
+    /// - `block_from`/`block_to`: Block range filter
+    /// - `cursor`: Cursor from previous page
+    /// - `limit`: Maximum results
+    pub fn get_transfers_filtered(
         &self,
-        token: Felt,
-        from: Felt,
-        to: Felt,
-        amount: U256,
-        block_number: u64,
-        tx_hash: Felt,
-    ) -> Result<()> {
-        self.insert_transfers_batch(&[TransferData {
-            id: None,  // Will be set after insertion
-            token,
-            from,
-            to,
-            amount,
-            block_number,
-            tx_hash,
-        }])?;
-        Ok(())
-    }
-
-    /// Get balance for an address (returns U256)
-    #[allow(dead_code)]
-    pub fn get_balance(&self, token: Felt, address: Felt) -> Result<Option<U256>> {
+        wallet: Option<Felt>,
+        from: Option<Felt>,
+        to: Option<Felt>,
+        tokens: &[Felt],
+        direction: TransferDirection,
+        block_from: Option<u64>,
+        block_to: Option<u64>,
+        cursor: Option<TransferCursor>,
+        limit: u32,
+    ) -> Result<(Vec<TransferData>, Option<TransferCursor>)> {
         let conn = self.conn.lock().unwrap();
 
-        let balance = conn
-            .query_row(
-                "SELECT balance FROM balances WHERE token = ?1 AND address = ?2",
-                params![felt_to_blob(token), felt_to_blob(address)],
-                |row| {
-                    let bytes: Vec<u8> = row.get(0)?;
-                    Ok(blob_to_u256(&bytes))
-                },
-            )
-            .ok();
+        // Build dynamic query based on filters
+        let mut query = String::new();
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-        Ok(balance)
+        if let Some(wallet_addr) = wallet {
+            // Use wallet_activity table for efficient OR queries
+            query.push_str(
+                "SELECT DISTINCT t.id, t.token, t.from_addr, t.to_addr, t.amount, t.block_number, t.tx_hash, t.timestamp
+                 FROM wallet_activity wa
+                 JOIN transfers t ON wa.transfer_id = t.id
+                 WHERE wa.wallet_address = ?",
+            );
+            params_vec.push(Box::new(felt_to_blob(wallet_addr)));
+
+            // Apply direction filter
+            match direction {
+                TransferDirection::All => {}
+                TransferDirection::Sent => {
+                    query.push_str(" AND wa.direction IN ('sent', 'both')");
+                }
+                TransferDirection::Received => {
+                    query.push_str(" AND wa.direction IN ('received', 'both')");
+                }
+            }
+
+            // Token filter on wallet_activity for efficiency
+            if !tokens.is_empty() {
+                let placeholders: Vec<&str> = tokens.iter().map(|_| "?").collect();
+                query.push_str(&format!(" AND wa.token IN ({})", placeholders.join(",")));
+                for token in tokens {
+                    params_vec.push(Box::new(felt_to_blob(*token)));
+                }
+            }
+        } else {
+            // Standard query without wallet optimization
+            query.push_str(
+                "SELECT t.id, t.token, t.from_addr, t.to_addr, t.amount, t.block_number, t.tx_hash, t.timestamp
+                 FROM transfers t
+                 WHERE 1=1",
+            );
+
+            if let Some(from_addr) = from {
+                query.push_str(" AND t.from_addr = ?");
+                params_vec.push(Box::new(felt_to_blob(from_addr)));
+            }
+
+            if let Some(to_addr) = to {
+                query.push_str(" AND t.to_addr = ?");
+                params_vec.push(Box::new(felt_to_blob(to_addr)));
+            }
+
+            if !tokens.is_empty() {
+                let placeholders: Vec<&str> = tokens.iter().map(|_| "?").collect();
+                query.push_str(&format!(" AND t.token IN ({})", placeholders.join(",")));
+                for token in tokens {
+                    params_vec.push(Box::new(felt_to_blob(*token)));
+                }
+            }
+        }
+
+        // Block range filters
+        if let Some(block_min) = block_from {
+            query.push_str(" AND t.block_number >= ?");
+            params_vec.push(Box::new(block_min as i64));
+        }
+
+        if let Some(block_max) = block_to {
+            query.push_str(" AND t.block_number <= ?");
+            params_vec.push(Box::new(block_max as i64));
+        }
+
+        // Cursor-based pagination
+        if let Some(c) = cursor {
+            query.push_str(" AND (t.block_number < ? OR (t.block_number = ? AND t.id < ?))");
+            params_vec.push(Box::new(c.block_number as i64));
+            params_vec.push(Box::new(c.block_number as i64));
+            params_vec.push(Box::new(c.id));
+        }
+
+        query.push_str(" ORDER BY t.block_number DESC, t.id DESC LIMIT ?");
+        params_vec.push(Box::new(limit as i64));
+
+        let mut stmt = conn.prepare(&query)?;
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            let id: i64 = row.get(0)?;
+            let token_bytes: Vec<u8> = row.get(1)?;
+            let from_bytes: Vec<u8> = row.get(2)?;
+            let to_bytes: Vec<u8> = row.get(3)?;
+            let amount_bytes: Vec<u8> = row.get(4)?;
+            let block_number: i64 = row.get(5)?;
+            let tx_hash_bytes: Vec<u8> = row.get(6)?;
+            let timestamp: Option<i64> = row.get(7)?;
+
+            Ok(TransferData {
+                id: Some(id),
+                token: blob_to_felt(&token_bytes),
+                from: blob_to_felt(&from_bytes),
+                to: blob_to_felt(&to_bytes),
+                amount: blob_to_u256(&amount_bytes),
+                block_number: block_number as u64,
+                tx_hash: blob_to_felt(&tx_hash_bytes),
+                timestamp,
+            })
+        })?;
+
+        let transfers: Vec<TransferData> = rows.collect::<Result<_, _>>()?;
+
+        // Compute next cursor if there might be more pages
+        let next_cursor = if transfers.len() == limit as usize {
+            transfers.last().map(|t| TransferCursor {
+                block_number: t.block_number,
+                id: t.id.unwrap(),
+            })
+        } else {
+            None
+        };
+
+        Ok((transfers, next_cursor))
     }
 
-    /// Get all balances for a token (returns map of address -> balance as U256)
-    #[allow(dead_code)]
-    pub fn get_token_balances(&self, token: Felt) -> Result<HashMap<Felt, U256>> {
+    /// Get filtered approvals with cursor-based pagination
+    ///
+    /// Supports:
+    /// - `account`: Matches owner OR spender (uses approval_activity table)
+    /// - `owner`: Exact owner address match
+    /// - `spender`: Exact spender address match
+    /// - `tokens`: Token whitelist (empty = all tokens)
+    /// - `block_from`/`block_to`: Block range filter
+    /// - `cursor`: Cursor from previous page
+    /// - `limit`: Maximum results
+    pub fn get_approvals_filtered(
+        &self,
+        account: Option<Felt>,
+        owner: Option<Felt>,
+        spender: Option<Felt>,
+        tokens: &[Felt],
+        block_from: Option<u64>,
+        block_to: Option<u64>,
+        cursor: Option<ApprovalCursor>,
+        limit: u32,
+    ) -> Result<(Vec<ApprovalData>, Option<ApprovalCursor>)> {
         let conn = self.conn.lock().unwrap();
 
-        let mut stmt = conn.prepare(
-            "SELECT address, balance FROM balances WHERE token = ?1",
-        )?;
+        // Build dynamic query based on filters
+        let mut query = String::new();
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-        let balances = stmt
-            .query_map(params![felt_to_blob(token)], |row| {
-                let addr_bytes: Vec<u8> = row.get(0)?;
-                let balance_bytes: Vec<u8> = row.get(1)?;
-                Ok((blob_to_felt(&addr_bytes), blob_to_u256(&balance_bytes)))
-            })?
-            .collect::<Result<HashMap<_, _>, _>>()?;
+        if let Some(account_addr) = account {
+            // Use approval_activity table for efficient OR queries
+            query.push_str(
+                "SELECT DISTINCT a.id, a.token, a.owner, a.spender, a.amount, a.block_number, a.tx_hash, a.timestamp
+                 FROM approval_activity aa
+                 JOIN approvals a ON aa.approval_id = a.id
+                 WHERE aa.account_address = ?",
+            );
+            params_vec.push(Box::new(felt_to_blob(account_addr)));
 
-        Ok(balances)
+            // Token filter on approval_activity for efficiency
+            if !tokens.is_empty() {
+                let placeholders: Vec<&str> = tokens.iter().map(|_| "?").collect();
+                query.push_str(&format!(" AND aa.token IN ({})", placeholders.join(",")));
+                for token in tokens {
+                    params_vec.push(Box::new(felt_to_blob(*token)));
+                }
+            }
+        } else {
+            // Standard query without account optimization
+            query.push_str(
+                "SELECT a.id, a.token, a.owner, a.spender, a.amount, a.block_number, a.tx_hash, a.timestamp
+                 FROM approvals a
+                 WHERE 1=1",
+            );
+
+            if let Some(owner_addr) = owner {
+                query.push_str(" AND a.owner = ?");
+                params_vec.push(Box::new(felt_to_blob(owner_addr)));
+            }
+
+            if let Some(spender_addr) = spender {
+                query.push_str(" AND a.spender = ?");
+                params_vec.push(Box::new(felt_to_blob(spender_addr)));
+            }
+
+            if !tokens.is_empty() {
+                let placeholders: Vec<&str> = tokens.iter().map(|_| "?").collect();
+                query.push_str(&format!(" AND a.token IN ({})", placeholders.join(",")));
+                for token in tokens {
+                    params_vec.push(Box::new(felt_to_blob(*token)));
+                }
+            }
+        }
+
+        // Block range filters
+        if let Some(block_min) = block_from {
+            query.push_str(" AND a.block_number >= ?");
+            params_vec.push(Box::new(block_min as i64));
+        }
+
+        if let Some(block_max) = block_to {
+            query.push_str(" AND a.block_number <= ?");
+            params_vec.push(Box::new(block_max as i64));
+        }
+
+        // Cursor-based pagination
+        if let Some(c) = cursor {
+            query.push_str(" AND (a.block_number < ? OR (a.block_number = ? AND a.id < ?))");
+            params_vec.push(Box::new(c.block_number as i64));
+            params_vec.push(Box::new(c.block_number as i64));
+            params_vec.push(Box::new(c.id));
+        }
+
+        query.push_str(" ORDER BY a.block_number DESC, a.id DESC LIMIT ?");
+        params_vec.push(Box::new(limit as i64));
+
+        let mut stmt = conn.prepare(&query)?;
+        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            let id: i64 = row.get(0)?;
+            let token_bytes: Vec<u8> = row.get(1)?;
+            let owner_bytes: Vec<u8> = row.get(2)?;
+            let spender_bytes: Vec<u8> = row.get(3)?;
+            let amount_bytes: Vec<u8> = row.get(4)?;
+            let block_number: i64 = row.get(5)?;
+            let tx_hash_bytes: Vec<u8> = row.get(6)?;
+            let timestamp: Option<i64> = row.get(7)?;
+
+            Ok(ApprovalData {
+                id: Some(id),
+                token: blob_to_felt(&token_bytes),
+                owner: blob_to_felt(&owner_bytes),
+                spender: blob_to_felt(&spender_bytes),
+                amount: blob_to_u256(&amount_bytes),
+                block_number: block_number as u64,
+                tx_hash: blob_to_felt(&tx_hash_bytes),
+                timestamp,
+            })
+        })?;
+
+        let approvals: Vec<ApprovalData> = rows.collect::<Result<_, _>>()?;
+
+        // Compute next cursor if there might be more pages
+        let next_cursor = if approvals.len() == limit as usize {
+            approvals.last().map(|a| ApprovalCursor {
+                block_number: a.block_number,
+                id: a.id.unwrap(),
+            })
+        } else {
+            None
+        };
+
+        Ok((approvals, next_cursor))
     }
 
     /// Get transfer count
     pub fn get_transfer_count(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM transfers", [], |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
+    /// Get approval count
+    pub fn get_approval_count(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM approvals", [], |row| row.get(0))?;
         Ok(count as u64)
     }
 
@@ -539,212 +839,5 @@ impl Erc20Storage {
             )
             .ok();
         Ok(block.map(|b| b as u64))
-    }
-
-    /// Get paginated transfers for a wallet (using cursor-based pagination)
-    ///
-    /// This method uses cursor-based pagination which provides O(log n) performance
-    /// per page regardless of page depth, unlike OFFSET-based pagination which
-    /// degrades to O(n) for deep pages.
-    ///
-    /// # Arguments
-    /// * `wallet` - The wallet address to query
-    /// * `token` - Optional token filter (None = all tokens)
-    /// * `cursor` - Optional cursor from previous page (None = start from beginning)
-    /// * `limit` - Maximum number of transfers to return
-    ///
-    /// # Returns
-    /// Tuple of (transfers, next_cursor) where next_cursor is Some if more pages exist
-    pub fn get_wallet_transfers_paginated(
-        &self,
-        wallet: Felt,
-        token: Option<Felt>,
-        cursor: Option<TransferCursor>,
-        limit: u32,
-    ) -> Result<(Vec<TransferData>, Option<TransferCursor>)> {
-        let conn = self.conn.lock().unwrap();
-        let wallet_blob = felt_to_blob(wallet);
-
-        let (query, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = match (token, cursor) {
-            (Some(token_felt), Some(c)) => {
-                // Token-specific query with cursor
-                let token_blob = felt_to_blob(token_felt);
-                (
-                    "SELECT t.id, t.token, t.from_addr, t.to_addr, t.amount, t.block_number, t.tx_hash
-                     FROM wallet_activity wa
-                     JOIN transfers t ON wa.transfer_id = t.id
-                     WHERE wa.wallet_address = ? AND wa.token = ?
-                       AND (wa.block_number < ? OR (wa.block_number = ? AND t.id < ?))
-                     ORDER BY wa.block_number DESC, t.id DESC
-                     LIMIT ?",
-                    vec![
-                        Box::new(wallet_blob) as Box<dyn rusqlite::ToSql>,
-                        Box::new(token_blob),
-                        Box::new(c.block_number as i64),
-                        Box::new(c.block_number as i64),
-                        Box::new(c.id),
-                        Box::new(limit as i64),
-                    ],
-                )
-            }
-            (Some(token_felt), None) => {
-                // Token-specific query without cursor
-                let token_blob = felt_to_blob(token_felt);
-                (
-                    "SELECT t.id, t.token, t.from_addr, t.to_addr, t.amount, t.block_number, t.tx_hash
-                     FROM wallet_activity wa
-                     JOIN transfers t ON wa.transfer_id = t.id
-                     WHERE wa.wallet_address = ? AND wa.token = ?
-                     ORDER BY wa.block_number DESC, t.id DESC
-                     LIMIT ?",
-                    vec![
-                        Box::new(wallet_blob) as Box<dyn rusqlite::ToSql>,
-                        Box::new(token_blob),
-                        Box::new(limit as i64),
-                    ],
-                )
-            }
-            (None, Some(c)) => {
-                // All tokens query with cursor
-                (
-                    "SELECT t.id, t.token, t.from_addr, t.to_addr, t.amount, t.block_number, t.tx_hash
-                     FROM wallet_activity wa
-                     JOIN transfers t ON wa.transfer_id = t.id
-                     WHERE wa.wallet_address = ?
-                       AND (wa.block_number < ? OR (wa.block_number = ? AND t.id < ?))
-                     ORDER BY wa.block_number DESC, t.id DESC
-                     LIMIT ?",
-                    vec![
-                        Box::new(wallet_blob) as Box<dyn rusqlite::ToSql>,
-                        Box::new(c.block_number as i64),
-                        Box::new(c.block_number as i64),
-                        Box::new(c.id),
-                        Box::new(limit as i64),
-                    ],
-                )
-            }
-            (None, None) => {
-                // All tokens query without cursor
-                (
-                    "SELECT t.id, t.token, t.from_addr, t.to_addr, t.amount, t.block_number, t.tx_hash
-                     FROM wallet_activity wa
-                     JOIN transfers t ON wa.transfer_id = t.id
-                     WHERE wa.wallet_address = ?
-                     ORDER BY wa.block_number DESC, t.id DESC
-                     LIMIT ?",
-                    vec![
-                        Box::new(wallet_blob) as Box<dyn rusqlite::ToSql>,
-                        Box::new(limit as i64),
-                    ],
-                )
-            }
-        };
-
-        let mut stmt = conn.prepare(query)?;
-        let params_refs: Vec<&dyn rusqlite::ToSql> =
-            params.iter().map(|p| p.as_ref()).collect();
-
-        let rows = stmt.query_map(params_refs.as_slice(), |row| {
-            let id: i64 = row.get(0)?;
-            let token_bytes: Vec<u8> = row.get(1)?;
-            let from_bytes: Vec<u8> = row.get(2)?;
-            let to_bytes: Vec<u8> = row.get(3)?;
-            let amount_bytes: Vec<u8> = row.get(4)?;
-            let block_number: i64 = row.get(5)?;
-            let tx_hash_bytes: Vec<u8> = row.get(6)?;
-
-            Ok(TransferData {
-                id: Some(id),
-                token: blob_to_felt(&token_bytes),
-                from: blob_to_felt(&from_bytes),
-                to: blob_to_felt(&to_bytes),
-                amount: blob_to_u256(&amount_bytes),
-                block_number: block_number as u64,
-                tx_hash: blob_to_felt(&tx_hash_bytes),
-            })
-        })?;
-
-        let transfers: Vec<TransferData> = rows.collect::<Result<_, _>>()?;
-
-        // Compute next cursor if there might be more pages
-        let next_cursor = if transfers.len() == limit as usize {
-            transfers.last().map(|t| TransferCursor {
-                block_number: t.block_number,
-                id: t.id.unwrap(),
-            })
-        } else {
-            None
-        };
-
-        Ok((transfers, next_cursor))
-    }
-
-    /// Get all non-zero balances for a wallet (paginated by token address)
-    ///
-    /// This method uses cursor-based pagination for efficient iteration through
-    /// a wallet's token holdings.
-    ///
-    /// # Arguments
-    /// * `wallet` - The wallet address to query
-    /// * `cursor` - Optional cursor (last token address from previous page)
-    /// * `limit` - Maximum number of balances to return
-    ///
-    /// # Returns
-    /// Tuple of (balances, next_cursor) where next_cursor is Some if more pages exist
-    pub fn get_wallet_balances_paginated(
-        &self,
-        wallet: Felt,
-        cursor: Option<Felt>,
-        limit: u32,
-    ) -> Result<(Vec<(Felt, U256)>, Option<Felt>)> {
-        let conn = self.conn.lock().unwrap();
-        let wallet_blob = felt_to_blob(wallet);
-
-        let (query, params): (&str, Vec<Box<dyn rusqlite::ToSql>>) = if let Some(cursor_token) = cursor {
-            let cursor_blob = felt_to_blob(cursor_token);
-            (
-                "SELECT token, balance FROM balances
-                 WHERE address = ? AND balance > X'0000000000000000000000000000000000000000000000000000000000000000' AND token > ?
-                 ORDER BY token ASC
-                 LIMIT ?",
-                vec![
-                    Box::new(wallet_blob) as Box<dyn rusqlite::ToSql>,
-                    Box::new(cursor_blob),
-                    Box::new(limit as i64),
-                ],
-            )
-        } else {
-            (
-                "SELECT token, balance FROM balances
-                 WHERE address = ? AND balance > X'0000000000000000000000000000000000000000000000000000000000000000'
-                 ORDER BY token ASC
-                 LIMIT ?",
-                vec![
-                    Box::new(wallet_blob) as Box<dyn rusqlite::ToSql>,
-                    Box::new(limit as i64),
-                ],
-            )
-        };
-
-        let mut stmt = conn.prepare(query)?;
-        let params_refs: Vec<&dyn rusqlite::ToSql> =
-            params.iter().map(|p| p.as_ref()).collect();
-
-        let rows = stmt.query_map(params_refs.as_slice(), |row| {
-            let token_bytes: Vec<u8> = row.get(0)?;
-            let balance_bytes: Vec<u8> = row.get(1)?;
-            Ok((blob_to_felt(&token_bytes), blob_to_u256(&balance_bytes)))
-        })?;
-
-        let balances: Vec<(Felt, U256)> = rows.collect::<Result<_, _>>()?;
-
-        // Compute next cursor if there might be more pages
-        let next_cursor = if balances.len() == limit as usize {
-            balances.last().map(|(token, _)| *token)
-        } else {
-            None
-        };
-
-        Ok((balances, next_cursor))
     }
 }

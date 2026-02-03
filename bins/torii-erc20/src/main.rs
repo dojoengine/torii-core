@@ -6,10 +6,10 @@
 //!
 //! - Explicit contract mapping (ETH, STRK, custom tokens)
 //! - Auto-discovery of ERC20 contracts (can be disabled)
-//! - Real-time transfer tracking
-//! - Balance maintenance per address
+//! - Real-time transfer and approval tracking
 //! - SQLite persistence
 //! - gRPC subscriptions for real-time updates
+//! - Historical queries with pagination
 //!
 //! # Usage
 //!
@@ -26,6 +26,7 @@
 
 mod config;
 mod decoder;
+mod grpc_service;
 mod sink;
 mod storage;
 
@@ -33,7 +34,9 @@ use anyhow::Result;
 use clap::Parser;
 use config::Config;
 use decoder::Erc20Decoder;
-use sink::Erc20Sink;
+use grpc_service::Erc20Service;
+use sink::proto::erc20_server::Erc20Server;
+use sink::{Erc20Sink, FILE_DESCRIPTOR_SET};
 use std::path::Path;
 use std::sync::Arc;
 use storage::Erc20Storage;
@@ -59,7 +62,7 @@ async fn main() -> Result<()> {
         .with_target(true)
         .init();
 
-    tracing::info!("🚀 Starting Torii ERC20 Indexer");
+    tracing::info!("Starting Torii ERC20 Indexer");
     tracing::info!("RPC URL: {}", config.rpc_url);
     tracing::info!("From block: {}", config.from_block);
     tracing::info!("Database: {}", config.db_path);
@@ -74,7 +77,7 @@ async fn main() -> Result<()> {
 
     // Create storage
     let storage = Arc::new(Erc20Storage::new(&config.db_path)?);
-    tracing::info!("✓ Database initialized");
+    tracing::info!("Database initialized");
 
     // Create Starknet provider
     let provider = Arc::new(starknet::providers::jsonrpc::JsonRpcClient::new(
@@ -93,13 +96,27 @@ async fn main() -> Result<()> {
     };
 
     let extractor = Box::new(BlockRangeExtractor::new(provider.clone(), extractor_config));
-    tracing::info!("✓ Extractor configured");
+    tracing::info!("Extractor configured");
 
     // Create decoder
     let decoder = Arc::new(Erc20Decoder::new());
 
-    // Create sink (will be initialized by Torii)
-    let sink = Box::new(Erc20Sink::new(storage.clone()));
+    // Create gRPC service
+    let grpc_service = Erc20Service::new(storage.clone());
+
+    // Create sink with gRPC service for dual publishing
+    let sink = Box::new(Erc20Sink::new(storage.clone()).with_grpc_service(grpc_service.clone()));
+
+    // Build gRPC router with Erc20 service and reflection
+    let reflection = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(torii::TORII_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
+        .build_v1()
+        .expect("Failed to build gRPC reflection service");
+
+    let grpc_router = tonic::transport::Server::builder()
+        .add_service(Erc20Server::new(grpc_service))
+        .add_service(reflection);
 
     // Build Torii configuration
     // Get database root from db_path's parent directory
@@ -114,7 +131,9 @@ async fn main() -> Result<()> {
         .database_root(database_root.as_ref())
         .with_extractor(extractor)
         .add_decoder(decoder)
-        .add_sink_boxed(sink);
+        .add_sink_boxed(sink)
+        .with_grpc_router(grpc_router)
+        .with_custom_reflection(true); // We've added our own reflection
 
     // Add well-known contracts (ETH, STRK) with explicit mappings
     let erc20_decoder_id = DecoderId::new("erc20");
@@ -132,18 +151,21 @@ async fn main() -> Result<()> {
 
     // Log mode: no_auto_discovery affects whether unmapped contracts are tried
     if config.no_auto_discovery {
-        tracing::info!("✓ Strict mode: ONLY explicitly mapped contracts will be indexed");
+        tracing::info!("Strict mode: ONLY explicitly mapped contracts will be indexed");
         tracing::info!("  (Unmapped contracts will NOT be tried with ERC20 decoder)");
-        // Note: In strict mode with no_auto_discovery, we'd need to blacklist ALL contracts
-        // except the ones we explicitly mapped. For now, we'll allow auto-discovery for unmapped contracts.
-        // TODO: Add proper strict mode support if needed
     } else {
-        tracing::info!("✓ Auto-discovery enabled: unmapped contracts will be tried with ERC20 decoder");
+        tracing::info!("Auto-discovery enabled: unmapped contracts will be tried with ERC20 decoder");
     }
 
     let torii_config = torii_config.build();
 
-    tracing::info!("✓ Torii configured, starting ETL pipeline...");
+    tracing::info!("Torii configured, starting ETL pipeline...");
+    tracing::info!(
+        "gRPC service available at localhost:{}",
+        config.port
+    );
+    tracing::info!("  - torii.Torii (EventBus subscriptions)");
+    tracing::info!("  - torii.sinks.erc20.Erc20 (queries and rich subscriptions)");
 
     // Run Torii (blocks until shutdown)
     torii::run(torii_config)
@@ -151,9 +173,12 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Torii error: {}", e))?;
 
     // Print final statistics
-    tracing::info!("📊 Final Statistics:");
+    tracing::info!("Final Statistics:");
     if let Ok(transfer_count) = storage.get_transfer_count() {
         tracing::info!("  Total transfers: {}", transfer_count);
+    }
+    if let Ok(approval_count) = storage.get_approval_count() {
+        tracing::info!("  Total approvals: {}", approval_count);
     }
     if let Ok(token_count) = storage.get_token_count() {
         tracing::info!("  Unique tokens: {}", token_count);
@@ -168,7 +193,7 @@ async fn main() -> Result<()> {
         if let Ok(report) = guard.report().build() {
             let file = std::fs::File::create("flamegraph.svg").unwrap();
             report.flamegraph(file).unwrap();
-            tracing::info!("🔥 Flamegraph generated: flamegraph.svg");
+            tracing::info!("Flamegraph generated: flamegraph.svg");
         }
     }
 

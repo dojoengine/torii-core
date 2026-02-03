@@ -50,14 +50,6 @@ pub struct Config {
 }
 
 impl Config {
-    /// Parse explicitly configured contracts from CLI args
-    pub fn parse_contracts(&self) -> Result<Vec<Felt>, String> {
-        self.contracts
-            .iter()
-            .map(|s| Felt::from_hex(s).map_err(|e| format!("Invalid contract address '{}': {}", s, e)))
-            .collect()
-    }
-
     /// Get well-known ERC20 contracts (ETH, STRK) based on network
     pub fn well_known_contracts(&self) -> Vec<(Felt, &'static str)> {
         vec![
