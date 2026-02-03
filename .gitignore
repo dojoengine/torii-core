@@ -6,3 +6,4 @@ contracts/target/
 engine.db*
 erc20-data.db*
 flamegraph.svg
+.claude-modified-files
