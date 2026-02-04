@@ -6,15 +6,16 @@
 //! # Design
 //!
 //! - Decoders are identified by their `decoder_name()` (hashed to DecoderId)
-//! - All events are passed to all decoders (no identification caching)
-//! - Each decoder decides if it can decode an event (structural filtering)
-//! - Optional contract filtering (whitelist/blacklist) for efficiency
+//! - Explicit contract mappings take highest priority
+//! - Registry mappings (from auto-identification) take second priority
+//! - Unmapped contracts with no registry fall back to all decoders
 //! - Deterministic ordering: decoders are always called in sorted DecoderId order
 
 use async_trait::async_trait;
-use starknet::core::types::EmittedEvent;
+use starknet::core::types::{EmittedEvent, Felt};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use super::{ContractFilter, Decoder, DecoderId};
 use crate::etl::engine_db::EngineDb;
@@ -22,7 +23,10 @@ use crate::etl::envelope::Envelope;
 
 /// DecoderContext manages multiple decoders with contract filtering.
 ///
-/// Routes all events to all decoders, with optional contract filtering for efficiency.
+/// Routes events to decoders based on:
+/// 1. Explicit mappings (highest priority, from ContractFilter)
+/// 2. Registry mappings (from ContractRegistry auto-identification)
+/// 3. All decoders (fallback when no registry is configured)
 pub struct DecoderContext {
     /// Decoders indexed by their ID (hash of name)
     decoders: HashMap<DecoderId, Arc<dyn Decoder>>,
@@ -30,8 +34,17 @@ pub struct DecoderContext {
     /// EngineDb for ETL state persistence (cursor, not contract mappings)
     engine_db: Arc<EngineDb>,
 
-    /// Contract filter (whitelist/blacklist/none)
+    /// Contract filter (explicit mappings + blacklist)
     contract_filter: ContractFilter,
+
+    /// Cached mappings from ContractRegistry (populated externally via batch identification)
+    /// Key: contract address, Value: list of decoder IDs
+    /// Empty Vec means "identified but no decoders match"
+    /// None value means "not yet identified" (will try all decoders)
+    registry_cache: Arc<RwLock<HashMap<Felt, Vec<DecoderId>>>>,
+
+    /// Whether a registry is configured (affects fallback behavior)
+    has_registry: bool,
 }
 
 impl DecoderContext {
@@ -41,7 +54,7 @@ impl DecoderContext {
     ///
     /// * `decoders` - List of decoders to manage
     /// * `engine_db` - Database for ETL state persistence
-    /// * `contract_filter` - Whitelist/blacklist/none filter
+    /// * `contract_filter` - Explicit mappings + blacklist
     pub fn new(
         decoders: Vec<Arc<dyn Decoder>>,
         engine_db: Arc<EngineDb>,
@@ -50,14 +63,14 @@ impl DecoderContext {
         let decoder_map = Self::build_decoder_map(&decoders);
 
         let filter_desc = if contract_filter.mappings.is_empty() && contract_filter.blacklist.is_empty() {
-            "none (auto-discovery for all contracts)".to_string()
+            "none (will try all decoders for all contracts)".to_string()
         } else {
             let mut parts = Vec::new();
             if !contract_filter.mappings.is_empty() {
-                parts.push(format!("{} mapped contracts", contract_filter.mappings.len()));
+                parts.push(format!("{} explicit mappings", contract_filter.mappings.len()));
             }
             if !contract_filter.blacklist.is_empty() {
-                parts.push(format!("{} blacklisted contracts", contract_filter.blacklist.len()));
+                parts.push(format!("{} blacklisted", contract_filter.blacklist.len()));
             }
             parts.join(", ")
         };
@@ -73,7 +86,70 @@ impl DecoderContext {
             decoders: decoder_map,
             engine_db,
             contract_filter,
+            registry_cache: Arc::new(RwLock::new(HashMap::new())),
+            has_registry: false,
         }
+    }
+
+    /// Create a new DecoderContext with registry support
+    ///
+    /// When a registry is configured:
+    /// - Contracts in explicit mappings use those specific decoders
+    /// - Contracts in registry_cache use their cached decoders
+    /// - Contracts not in either fall back to trying all decoders (auto-discovery)
+    ///
+    /// # Arguments
+    ///
+    /// * `decoders` - List of decoders to manage
+    /// * `engine_db` - Database for ETL state persistence
+    /// * `contract_filter` - Explicit mappings + blacklist
+    /// * `registry_cache` - Shared cache from ContractRegistry
+    pub fn with_registry(
+        decoders: Vec<Arc<dyn Decoder>>,
+        engine_db: Arc<EngineDb>,
+        contract_filter: ContractFilter,
+        registry_cache: Arc<RwLock<HashMap<Felt, Vec<DecoderId>>>>,
+    ) -> Self {
+        let decoder_map = Self::build_decoder_map(&decoders);
+
+        let filter_desc = if contract_filter.mappings.is_empty() && contract_filter.blacklist.is_empty() {
+            "none (using registry for contract identification)".to_string()
+        } else {
+            let mut parts = Vec::new();
+            if !contract_filter.mappings.is_empty() {
+                parts.push(format!("{} explicit mappings", contract_filter.mappings.len()));
+            }
+            if !contract_filter.blacklist.is_empty() {
+                parts.push(format!("{} blacklisted", contract_filter.blacklist.len()));
+            }
+            parts.push("+ registry".to_string());
+            parts.join(", ")
+        };
+
+        tracing::info!(
+            target: "torii::etl::decoder_context",
+            "Initialized DecoderContext with {} decoders, registry enabled, and filter: {}",
+            decoder_map.len(),
+            filter_desc
+        );
+
+        Self {
+            decoders: decoder_map,
+            engine_db,
+            contract_filter,
+            registry_cache,
+            has_registry: true,
+        }
+    }
+
+    /// Get the shared registry cache (for external updates)
+    pub fn registry_cache(&self) -> Arc<RwLock<HashMap<Felt, Vec<DecoderId>>>> {
+        self.registry_cache.clone()
+    }
+
+    /// Check if registry is configured
+    pub fn has_registry(&self) -> bool {
+        self.has_registry
     }
 
     /// Build decoder map from list (helper for constructor)
@@ -120,73 +196,23 @@ impl DecoderContext {
     pub fn engine_db(&self) -> &Arc<EngineDb> {
         &self.engine_db
     }
-}
 
-#[async_trait]
-impl Decoder for DecoderContext {
-    fn decoder_name(&self) -> &str {
-        "context"
-    }
-
-    async fn decode_event(&self, event: &EmittedEvent) -> anyhow::Result<Vec<Envelope>> {
-        if !self.contract_filter.allows(event.from_address) {
-            return Ok(Vec::new());
-        }
-
+    /// Decode an event using specific decoders
+    async fn decode_with_decoders(
+        &self,
+        event: &EmittedEvent,
+        decoder_ids: &[DecoderId],
+    ) -> anyhow::Result<Vec<Envelope>> {
         let mut all_envelopes = Vec::new();
 
-        // Check for explicit mapping first.
-        if let Some(decoder_ids) = self.contract_filter.get_decoders(event.from_address) {
-            for decoder_id in decoder_ids {
-                if let Some(decoder) = self.decoders.get(decoder_id) {
-                    match decoder.decode_event(event).await {
-                        Ok(envelopes) => {
-                            if !envelopes.is_empty() {
-                                tracing::trace!(
-                                    target: "torii::etl::decoder_context",
-                                    "Mapped decoder '{}' decoded event from {:?} into {} envelope(s)",
-                                    decoder.decoder_name(),
-                                    event.from_address,
-                                    envelopes.len()
-                                );
-                            }
-                            all_envelopes.extend(envelopes);
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "torii::etl::decoder_context",
-                                "Mapped decoder '{}' failed: {}",
-                                decoder.decoder_name(),
-                                e
-                            );
-                        }
-                    }
-                } else {
-                    tracing::warn!(
-                        target: "torii::etl::decoder_context",
-                        "Mapped decoder ID {:?} not found for contract {:?}",
-                        decoder_id,
-                        event.from_address
-                    );
-                }
-            }
-        } else if self.contract_filter.skip_unmapped {
-            // No mapping and skip_unmapped enabled -> skip this contract
-            tracing::trace!(
-                target: "torii::etl::decoder_context",
-                contract = %format!("{:#x}", event.from_address),
-                "Skipping unmapped contract (auto-discovery disabled)"
-            );
-            // Return empty - no envelopes
-        } else {
-            // No explicit mapping, fallback on auto-discovery sending to all decoders.
-            for decoder in self.decoders.values() {
+        for decoder_id in decoder_ids {
+            if let Some(decoder) = self.decoders.get(decoder_id) {
                 match decoder.decode_event(event).await {
                     Ok(envelopes) => {
                         if !envelopes.is_empty() {
                             tracing::trace!(
                                 target: "torii::etl::decoder_context",
-                                "Decoder '{}' decoded event from {:?} into {} envelope(s)",
+                                "Decoder '{}' decoded event from {:#x} into {} envelope(s)",
                                 decoder.decoder_name(),
                                 event.from_address,
                                 envelopes.len()
@@ -203,10 +229,98 @@ impl Decoder for DecoderContext {
                         );
                     }
                 }
+            } else {
+                tracing::warn!(
+                    target: "torii::etl::decoder_context",
+                    "Decoder ID {:?} not found for contract {:#x}",
+                    decoder_id,
+                    event.from_address
+                );
             }
         }
 
         Ok(all_envelopes)
+    }
+
+    /// Decode an event using all registered decoders (fallback)
+    async fn decode_with_all_decoders(
+        &self,
+        event: &EmittedEvent,
+    ) -> anyhow::Result<Vec<Envelope>> {
+        let mut all_envelopes = Vec::new();
+
+        for decoder in self.decoders.values() {
+            match decoder.decode_event(event).await {
+                Ok(envelopes) => {
+                    if !envelopes.is_empty() {
+                        tracing::trace!(
+                            target: "torii::etl::decoder_context",
+                            "Decoder '{}' decoded event from {:#x} into {} envelope(s)",
+                            decoder.decoder_name(),
+                            event.from_address,
+                            envelopes.len()
+                        );
+                    }
+                    all_envelopes.extend(envelopes);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "torii::etl::decoder_context",
+                        "Decoder '{}' failed: {}",
+                        decoder.decoder_name(),
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(all_envelopes)
+    }
+}
+
+#[async_trait]
+impl Decoder for DecoderContext {
+    fn decoder_name(&self) -> &str {
+        "context"
+    }
+
+    async fn decode_event(&self, event: &EmittedEvent) -> anyhow::Result<Vec<Envelope>> {
+        // 1. Check blacklist first
+        if !self.contract_filter.allows(event.from_address) {
+            return Ok(Vec::new());
+        }
+
+        // 2. Check explicit mappings (highest priority)
+        if let Some(decoder_ids) = self.contract_filter.get_decoders(event.from_address) {
+            return self.decode_with_decoders(event, decoder_ids).await;
+        }
+
+        // 3. Check registry cache (if registry is configured)
+        if self.has_registry {
+            let cache = self.registry_cache.read().await;
+            if let Some(decoder_ids) = cache.get(&event.from_address) {
+                if decoder_ids.is_empty() {
+                    // Contract was identified but no decoders match - skip silently
+                    return Ok(Vec::new());
+                }
+                // Clone to release lock before async decode
+                let decoder_ids = decoder_ids.clone();
+                drop(cache);
+                return self.decode_with_decoders(event, &decoder_ids).await;
+            }
+            // Not in registry cache = not yet identified, try all decoders
+            // This enables auto-discovery: decoders can identify events they understand
+            tracing::trace!(
+                target: "torii::etl::decoder_context",
+                contract = %format!("{:#x}", event.from_address),
+                "Contract not in registry cache, trying all decoders"
+            );
+            drop(cache);
+            return self.decode_with_all_decoders(event).await;
+        }
+
+        // 4. No registry: try all decoders (fallback for non-block-range extractors)
+        self.decode_with_all_decoders(event).await
     }
 
     async fn decode(&self, events: &[EmittedEvent]) -> anyhow::Result<Vec<Envelope>> {

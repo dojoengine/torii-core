@@ -72,9 +72,11 @@ pub struct Config {
     #[arg(long)]
     pub to_block: Option<u64>,
 
-    /// Database path for storing token data
-    #[arg(long, default_value = "./tokens-data.db")]
-    pub db_path: String,
+    /// Directory where all databases will be stored
+    ///
+    /// Creates: engine.db, erc20.db, erc721.db, erc1155.db
+    #[arg(long, default_value = "./torii-data")]
+    pub db_dir: String,
 
     /// Port for the HTTP/gRPC API
     #[arg(long, default_value = "3000")]
@@ -116,14 +118,6 @@ pub struct Config {
     /// Block range to query per iteration in event mode
     #[arg(long, default_value = "10000")]
     pub event_block_batch_size: u64,
-
-    /// Enable auto-discovery for unmapped contracts (block-range mode only)
-    ///
-    /// When enabled, events from contracts not in --erc20/--erc721/--erc1155 lists
-    /// will be tried against all decoders. This has a performance cost.
-    /// Ignored in event mode (always disabled).
-    #[arg(long, default_value = "false")]
-    pub auto_discover: bool,
 }
 
 impl Config {

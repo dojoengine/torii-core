@@ -37,6 +37,7 @@
 
 pub mod decoder;
 pub mod grpc_service;
+pub mod identification;
 pub mod sink;
 pub mod storage;
 
@@ -51,5 +52,6 @@ pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/erc20_descripto
 // Re-export main types for convenience
 pub use decoder::{Approval, Erc20Decoder, Transfer};
 pub use grpc_service::Erc20Service;
+pub use identification::Erc20Rule;
 pub use sink::Erc20Sink;
 pub use storage::{ApprovalCursor, ApprovalData, Erc20Storage, TransferCursor, TransferData, TransferDirection};

@@ -34,6 +34,7 @@ use tower_http::cors::{Any as CorsAny, CorsLayer};
 
 use etl::decoder::{ContractFilter, DecoderId};
 use etl::extractor::Extractor;
+use etl::identification::{ContractIdentifier, IdentificationRule};
 use etl::sink::{EventBus, Sink};
 use etl::{Decoder, DecoderContext, MultiSink, SampleExtractor};
 use grpc::{create_grpc_service, GrpcState, SubscriptionManager};
@@ -110,8 +111,33 @@ pub struct ToriiConfig {
     /// Defaults to current directory if not specified.
     pub database_root: PathBuf,
 
-    /// Contract filter (whitelist/blacklist/none).
+    /// Contract filter (explicit mappings + blacklist).
     pub contract_filter: ContractFilter,
+
+    /// Identification rules for auto-discovery of contract types.
+    ///
+    /// When a contract is encountered that's not in the explicit mappings,
+    /// these rules are used to identify the contract type by inspecting its ABI.
+    /// The identified mapping is then cached for future events.
+    ///
+    /// NOTE: Rules alone don't enable auto-identification. You must also provide
+    /// a registry cache via `with_registry_cache()` for identification to work.
+    pub identification_rules: Vec<Box<dyn IdentificationRule>>,
+
+    /// Optional shared registry cache from ContractRegistry.
+    ///
+    /// If provided, the DecoderContext will use this cache to look up
+    /// contract→decoder mappings for contracts not in explicit mappings.
+    /// The cache is typically populated by a ContractRegistry running batch
+    /// identification before decoding.
+    pub registry_cache: Option<Arc<tokio::sync::RwLock<std::collections::HashMap<starknet::core::types::Felt, Vec<DecoderId>>>>>,
+
+    /// Optional contract identifier for runtime identification.
+    ///
+    /// If provided (via `with_contract_identifier()`), unknown contracts
+    /// will be identified by fetching their ABIs during the ETL loop.
+    /// This enables auto-discovery of token contracts without explicit mapping.
+    pub contract_identifier: Option<Arc<dyn ContractIdentifier>>,
 
     /// Graceful shutdown timeout in seconds (default: 30).
     ///
@@ -140,6 +166,9 @@ pub struct ToriiConfigBuilder {
     extractor: Option<Box<dyn Extractor>>,
     database_root: Option<PathBuf>,
     contract_filter: Option<ContractFilter>,
+    identification_rules: Vec<Box<dyn IdentificationRule>>,
+    registry_cache: Option<Arc<tokio::sync::RwLock<std::collections::HashMap<starknet::core::types::Felt, Vec<DecoderId>>>>>,
+    contract_identifier: Option<Arc<dyn ContractIdentifier>>,
     shutdown_timeout: Option<u64>,
 }
 
@@ -158,6 +187,9 @@ impl Default for ToriiConfigBuilder {
             extractor: None,
             database_root: None,
             contract_filter: None,
+            identification_rules: Vec::new(),
+            registry_cache: None,
+            contract_identifier: None,
             shutdown_timeout: None,
         }
     }
@@ -319,15 +351,91 @@ impl ToriiConfigBuilder {
         self
     }
 
-    /// Skip events from contracts not in the mapping (disable auto-discovery).
+    /// Add identification rule for auto-discovery.
     ///
-    /// When `true`, events from contracts not in the mapping will be skipped entirely.
-    /// When `false` (default), unmapped contracts will try ALL decoders (auto-discovery).
+    /// Identification rules are used to automatically identify contract types
+    /// by inspecting their ABI. When a contract is encountered that's not in
+    /// the explicit mappings, the registry will:
+    /// 1. Fetch the contract's ABI from the chain
+    /// 2. Run all identification rules
+    /// 3. Cache the contract→decoder mapping for future events
     ///
-    /// Use this to improve performance when indexing specific contracts only.
-    pub fn skip_unmapped_contracts(mut self, skip: bool) -> Self {
-        self.contract_filter.get_or_insert_with(ContractFilter::new)
-            .skip_unmapped = skip;
+    /// NOTE: Rules alone don't enable auto-identification. You must also provide
+    /// a registry cache via `with_registry_cache()` for identification to work.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let config = ToriiConfig::builder()
+    ///     .with_identification_rule(Box::new(Erc20Rule::new()))
+    ///     .with_identification_rule(Box::new(Erc721Rule::new()))
+    ///     .build();
+    /// ```
+    pub fn with_identification_rule(mut self, rule: Box<dyn IdentificationRule>) -> Self {
+        self.identification_rules.push(rule);
+        self
+    }
+
+    /// Set the shared registry cache from a ContractRegistry.
+    ///
+    /// When a registry cache is provided, the DecoderContext will:
+    /// - Look up contract→decoder mappings from the cache
+    /// - Skip events from contracts not in the cache (they should have been identified before decode)
+    ///
+    /// Without a registry cache, events from unmapped contracts are tried against all decoders.
+    ///
+    /// # Usage Pattern
+    ///
+    /// ```rust,ignore
+    /// // Create registry with your provider and rules
+    /// let registry = ContractRegistry::new(provider, engine_db)
+    ///     .with_rule(Box::new(Erc20Rule::new()))
+    ///     .with_rule(Box::new(Erc721Rule::new()));
+    ///
+    /// // Load cached mappings from database
+    /// registry.load_from_db().await?;
+    ///
+    /// // Pass the cache to config
+    /// let config = ToriiConfig::builder()
+    ///     .with_registry_cache(registry.shared_cache())
+    ///     .build();
+    /// ```
+    pub fn with_registry_cache(
+        mut self,
+        cache: Arc<tokio::sync::RwLock<std::collections::HashMap<starknet::core::types::Felt, Vec<DecoderId>>>>,
+    ) -> Self {
+        self.registry_cache = Some(cache);
+        self
+    }
+
+    /// Set a contract identifier for runtime identification.
+    ///
+    /// When a contract identifier is provided, unknown contracts in each batch
+    /// will be automatically identified by fetching their ABIs and running
+    /// identification rules. This enables auto-discovery without explicit mapping.
+    ///
+    /// This method automatically extracts the registry cache for the DecoderContext.
+    ///
+    /// # Usage Pattern
+    ///
+    /// ```rust,ignore
+    /// // Create registry with your provider and rules
+    /// let registry = Arc::new(ContractRegistry::new(provider, engine_db)
+    ///     .with_rule(Box::new(Erc20Rule::new()))
+    ///     .with_rule(Box::new(Erc721Rule::new())));
+    ///
+    /// // Load cached mappings from database
+    /// registry.load_from_db().await?;
+    ///
+    /// // Pass the full registry (enables runtime identification)
+    /// let config = ToriiConfig::builder()
+    ///     .with_contract_identifier(registry)
+    ///     .build();
+    /// ```
+    pub fn with_contract_identifier(mut self, identifier: Arc<dyn ContractIdentifier>) -> Self {
+        // Extract cache for DecoderContext
+        self.registry_cache = Some(identifier.shared_cache());
+        self.contract_identifier = Some(identifier);
         self
     }
 
@@ -368,6 +476,9 @@ impl ToriiConfigBuilder {
             extractor: self.extractor,
             database_root: self.database_root.unwrap_or_else(|| PathBuf::from(".")),
             contract_filter,
+            identification_rules: self.identification_rules,
+            registry_cache: self.registry_cache,
+            contract_identifier: self.contract_identifier,
             shutdown_timeout: self.shutdown_timeout.unwrap_or(30),
         }
     }
@@ -428,12 +539,29 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
         Box::new(SampleExtractor::new(config.sample_events, config.events_per_cycle))
     };
 
-    // Create DecoderContext with contract filtering
-    let decoder_context = DecoderContext::new(
-        config.decoders,
-        engine_db.clone(),
-        config.contract_filter,
-    );
+    // Create DecoderContext with contract filtering and optional registry
+    let decoder_context = if let Some(registry_cache) = config.registry_cache {
+        tracing::info!(
+            target: "torii::etl",
+            "Creating DecoderContext with registry cache (auto-identification enabled)"
+        );
+        DecoderContext::with_registry(
+            config.decoders,
+            engine_db.clone(),
+            config.contract_filter,
+            registry_cache,
+        )
+    } else {
+        tracing::info!(
+            target: "torii::etl",
+            "Creating DecoderContext without registry (all decoders for unmapped contracts)"
+        );
+        DecoderContext::new(
+            config.decoders,
+            engine_db.clone(),
+            config.contract_filter,
+        )
+    };
 
     let topics = multi_sink.topics();
 
@@ -513,6 +641,9 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
     // Move multi_decoder into the task (can't clone since it owns the registry)
     let etl_decoder_context = decoder_context;
 
+    // Optional contract identifier for runtime identification
+    let contract_identifier = config.contract_identifier;
+
     // Extractor was already created earlier (to get provider), make it mutable for the ETL loop
     let mut extractor = extractor;
 
@@ -579,6 +710,26 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
                 .await
             {
                 tracing::warn!(target: "torii::etl", "Failed to update engine DB: {}", e);
+            }
+
+            // Identify unknown contracts (if identifier is configured)
+            if let Some(ref identifier) = contract_identifier {
+                // Extract unique contract addresses from batch
+                let contract_addresses: Vec<starknet::core::types::Felt> = batch
+                    .events
+                    .iter()
+                    .map(|e| e.from_address)
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+
+                if let Err(e) = identifier.identify_contracts(&contract_addresses).await {
+                    tracing::warn!(
+                        target: "torii::etl",
+                        error = %e,
+                        "Contract identification failed"
+                    );
+                }
             }
 
             // Transform the events into envelopes.

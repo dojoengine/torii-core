@@ -38,6 +38,7 @@
 
 pub mod decoder;
 pub mod grpc_service;
+pub mod identification;
 pub mod sink;
 pub mod storage;
 
@@ -52,5 +53,6 @@ pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/erc1155_descrip
 // Re-export main types for convenience
 pub use decoder::{Erc1155Decoder, OperatorApproval, TransferBatch, TransferSingle};
 pub use grpc_service::Erc1155Service;
+pub use identification::Erc1155Rule;
 pub use sink::Erc1155Sink;
 pub use storage::{Erc1155Storage, TokenTransferData, TransferCursor};

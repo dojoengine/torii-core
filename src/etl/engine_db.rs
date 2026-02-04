@@ -350,6 +350,117 @@ impl EngineDb {
         }))
     }
 
+    // ===== Contract Decoder Persistence =====
+
+    /// Get all contract decoder mappings from database.
+    ///
+    /// # Returns
+    /// Vector of (contract_address, decoder_ids, identified_at_timestamp)
+    pub async fn get_all_contract_decoders(
+        &self,
+    ) -> Result<Vec<(starknet::core::types::Felt, Vec<crate::etl::decoder::DecoderId>, i64)>> {
+        let rows = sqlx::query(
+            "SELECT contract_address, decoder_ids, identified_at FROM contract_decoders",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut results = Vec::new();
+        for row in rows {
+            let addr_hex: String = row.get(0);
+            let decoder_ids_str: String = row.get(1);
+            let identified_at: i64 = row.get(2);
+
+            // Parse contract address
+            let contract_address = starknet::core::types::Felt::from_hex(&addr_hex)
+                .context(format!("Invalid contract address: {}", addr_hex))?;
+
+            // Parse decoder IDs (comma-separated u64 values)
+            let decoder_ids: Vec<crate::etl::decoder::DecoderId> = if decoder_ids_str.is_empty() {
+                Vec::new()
+            } else {
+                decoder_ids_str
+                    .split(',')
+                    .filter_map(|s| s.trim().parse::<u64>().ok())
+                    .map(crate::etl::decoder::DecoderId::from_u64)
+                    .collect()
+            };
+
+            results.push((contract_address, decoder_ids, identified_at));
+        }
+
+        Ok(results)
+    }
+
+    /// Set decoder IDs for a contract.
+    ///
+    /// # Arguments
+    /// * `contract` - Contract address
+    /// * `decoder_ids` - List of decoder IDs (can be empty)
+    pub async fn set_contract_decoders(
+        &self,
+        contract: starknet::core::types::Felt,
+        decoder_ids: &[crate::etl::decoder::DecoderId],
+    ) -> Result<()> {
+        let addr_hex = format!("{:#x}", contract);
+        let decoder_ids_str: String = decoder_ids
+            .iter()
+            .map(|id| id.as_u64().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        sqlx::query(
+            r#"
+            INSERT INTO contract_decoders (contract_address, decoder_ids, identified_at)
+            VALUES (?, ?, strftime('%s', 'now'))
+            ON CONFLICT(contract_address)
+            DO UPDATE SET decoder_ids = excluded.decoder_ids, identified_at = strftime('%s', 'now')
+            "#,
+        )
+        .bind(&addr_hex)
+        .bind(&decoder_ids_str)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    /// Get decoder IDs for a specific contract.
+    ///
+    /// # Arguments
+    /// * `contract` - Contract address
+    ///
+    /// # Returns
+    /// Some(decoder_ids) if found, None otherwise
+    pub async fn get_contract_decoders(
+        &self,
+        contract: starknet::core::types::Felt,
+    ) -> Result<Option<Vec<crate::etl::decoder::DecoderId>>> {
+        let addr_hex = format!("{:#x}", contract);
+
+        let row = sqlx::query("SELECT decoder_ids FROM contract_decoders WHERE contract_address = ?")
+            .bind(&addr_hex)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        match row {
+            Some(r) => {
+                let decoder_ids_str: String = r.get(0);
+                let decoder_ids: Vec<crate::etl::decoder::DecoderId> = if decoder_ids_str.is_empty()
+                {
+                    Vec::new()
+                } else {
+                    decoder_ids_str
+                        .split(',')
+                        .filter_map(|s| s.trim().parse::<u64>().ok())
+                        .map(crate::etl::decoder::DecoderId::from_u64)
+                        .collect()
+                };
+                Ok(Some(decoder_ids))
+            }
+            None => Ok(None),
+        }
+    }
 }
 
 /// Engine statistics

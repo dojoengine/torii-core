@@ -37,6 +37,7 @@
 
 pub mod decoder;
 pub mod grpc_service;
+pub mod identification;
 pub mod sink;
 pub mod storage;
 
@@ -51,5 +52,6 @@ pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/erc721_descript
 // Re-export main types for convenience
 pub use decoder::{Erc721Decoder, NftApproval, NftTransfer, OperatorApproval};
 pub use grpc_service::Erc721Service;
+pub use identification::Erc721Rule;
 pub use sink::Erc721Sink;
 pub use storage::{Erc721Storage, NftOwnershipData, NftTransferData, TransferCursor};

@@ -46,24 +46,25 @@ use torii::etl::extractor::{
     BlockRangeConfig, BlockRangeExtractor, ContractEventConfig, EventExtractor,
     EventExtractorConfig, Extractor, RetryPolicy,
 };
+use torii::etl::identification::ContractRegistry;
 
 // Import from ERC20 library crate
 use torii_erc20::proto::erc20_server::Erc20Server;
 use torii_erc20::{
-    Erc20Decoder, Erc20Service, Erc20Sink, Erc20Storage, FILE_DESCRIPTOR_SET as ERC20_DESCRIPTOR_SET,
+    Erc20Decoder, Erc20Rule, Erc20Service, Erc20Sink, Erc20Storage, FILE_DESCRIPTOR_SET as ERC20_DESCRIPTOR_SET,
 };
 
 // Import from ERC721 library crate
 use torii_erc721::proto::erc721_server::Erc721Server;
 use torii_erc721::{
-    Erc721Decoder, Erc721Service, Erc721Sink, Erc721Storage,
+    Erc721Decoder, Erc721Rule, Erc721Service, Erc721Sink, Erc721Storage,
     FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
 };
 
 // Import from ERC1155 library crate
 use torii_erc1155::proto::erc1155_server::Erc1155Server;
 use torii_erc1155::{
-    Erc1155Decoder, Erc1155Service, Erc1155Sink, Erc1155Storage,
+    Erc1155Decoder, Erc1155Rule, Erc1155Service, Erc1155Sink, Erc1155Storage,
     FILE_DESCRIPTOR_SET as ERC1155_DESCRIPTOR_SET,
 };
 
@@ -102,15 +103,26 @@ async fn run_indexer(config: Config) -> Result<()> {
     } else {
         tracing::info!("To block: following chain head");
     }
-    tracing::info!("Database: {}", config.db_path);
+    tracing::info!("Database directory: {}", config.db_dir);
 
-    // Validate configuration
-    if !config.has_tokens() {
-        tracing::warn!(
-            "No token contracts specified. Use --erc20, --erc721, --erc1155, or --include-well-known"
+    // Validate configuration based on mode
+    // In event mode, contracts are required (can't auto-discover without knowing which contracts to query)
+    // In block-range mode, auto-discovery is enabled - no contracts required
+    if config.mode == ExtractionMode::Event && !config.has_tokens() {
+        tracing::error!(
+            "Event mode requires explicit contracts. Use --erc20, --erc721, --erc1155, or --include-well-known"
         );
-        tracing::warn!("Example: torii-tokens --include-well-known --from-block 100000");
+        tracing::error!("Example: torii-tokens --mode event --include-well-known --from-block 100000");
         return Ok(());
+    }
+
+    // Log the discovery mode
+    if config.mode == ExtractionMode::BlockRange {
+        if config.has_tokens() {
+            tracing::info!("Block-range mode with explicit contracts (will also auto-discover)");
+        } else {
+            tracing::info!("Block-range mode with full auto-discovery enabled");
+        }
     }
 
     // Create Starknet provider
@@ -218,39 +230,45 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     tracing::info!("Extractor configured");
 
-    // Determine whether to skip unmapped contracts
-    // In block-range mode: controlled by --auto-discover flag (default: disabled, so skip_unmapped=true)
-    // In event mode: always skip (auto-discovery not applicable since we filter by contract address)
-    let skip_unmapped = match config.mode {
-        ExtractionMode::BlockRange => !config.auto_discover,
-        ExtractionMode::Event => true, // Always skip in event mode
-    };
+    // Build Torii configuration
+    // Ensure the database directory exists
+    let db_dir = Path::new(&config.db_dir);
+    std::fs::create_dir_all(db_dir)?;
 
-    // Log the behavior
-    if config.mode == ExtractionMode::BlockRange {
-        if config.auto_discover {
-            tracing::info!("Auto-discovery enabled: will try all decoders on unmapped contracts");
-        } else {
-            tracing::info!("Auto-discovery disabled: only processing mapped contracts");
-        }
+    // Create EngineDb early for ContractRegistry
+    // (Will be created again inside torii::run(), but that's OK - same path)
+    let engine_db_path = db_dir.join("engine.db").to_string_lossy().to_string();
+    let engine_db_config = torii::etl::engine_db::EngineDbConfig {
+        path: engine_db_path,
+    };
+    let engine_db = Arc::new(torii::etl::EngineDb::new(engine_db_config).await?);
+
+    // Create ContractRegistry with identification rules (for block-range mode)
+    // This enables auto-discovery of token contracts by inspecting their ABIs
+    let registry = Arc::new(
+        ContractRegistry::new(provider.clone(), engine_db.clone())
+            .with_rule(Box::new(Erc20Rule::new()))
+            .with_rule(Box::new(Erc721Rule::new()))
+            .with_rule(Box::new(Erc1155Rule::new())),
+    );
+
+    // Load any previously identified contracts from database
+    let loaded_count = registry.load_from_db().await?;
+    if loaded_count > 0 {
+        tracing::info!("Loaded {} contract mappings from database", loaded_count);
     }
 
     // Build gRPC reflection with all descriptor sets
     let mut reflection_builder = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(torii::TORII_DESCRIPTOR_SET);
 
-    // Build Torii configuration
-    let db_path = Path::new(&config.db_path);
-    let database_root = db_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_string_lossy();
-
+    // Build Torii configuration with contract identifier for runtime auto-identification
+    // This enables auto-discovery of token contracts by fetching their ABIs during the ETL loop
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
-        .database_root(database_root.as_ref())
+        .database_root(&config.db_dir)
         .with_extractor(extractor)
-        .skip_unmapped_contracts(skip_unmapped);
+        .with_contract_identifier(registry);
 
     // Track which token types are enabled
     let mut enabled_types: Vec<&str> = Vec::new();
@@ -260,12 +278,20 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut erc721_grpc_service: Option<Erc721Service> = None;
     let mut erc1155_grpc_service: Option<Erc1155Service> = None;
 
-    // Configure ERC20 if any addresses
-    if !all_erc20_addresses.is_empty() {
+    // Determine which token types to enable based on mode:
+    // - In block-range mode: always create all token infrastructure (for auto-discovery)
+    // - In event mode: only create for explicitly specified token types
+    let is_block_range = config.mode == ExtractionMode::BlockRange;
+    let create_erc20 = is_block_range || !all_erc20_addresses.is_empty();
+    let create_erc721 = is_block_range || !all_erc721_addresses.is_empty();
+    let create_erc1155 = is_block_range || !all_erc1155_addresses.is_empty();
+
+    // Configure ERC20 if enabled
+    if create_erc20 {
         enabled_types.push("ERC20");
 
         // Create storage with unique database file
-        let erc20_db_path = format!("{}-erc20.db", config.db_path.trim_end_matches(".db"));
+        let erc20_db_path = db_dir.join("erc20.db").to_string_lossy().to_string();
         let storage = Arc::new(Erc20Storage::new(&erc20_db_path)?);
         tracing::info!("ERC20 database initialized: {}", erc20_db_path);
 
@@ -285,21 +311,29 @@ async fn run_indexer(config: Config) -> Result<()> {
         reflection_builder =
             reflection_builder.register_encoded_file_descriptor_set(ERC20_DESCRIPTOR_SET);
 
-        // Map contracts to decoder
+        // Map explicit contracts to decoder (auto-discovered ones go through registry)
         let erc20_decoder_id = DecoderId::new("erc20");
         for address in &all_erc20_addresses {
             torii_config = torii_config.map_contract(*address, vec![erc20_decoder_id]);
         }
 
-        tracing::info!("ERC20 configured with {} contracts", all_erc20_addresses.len());
+        // Log configuration
+        if all_erc20_addresses.is_empty() {
+            tracing::info!("ERC20 configured for auto-discovery");
+        } else {
+            tracing::info!(
+                "ERC20 configured with {} explicit contracts (plus auto-discovery in block-range mode)",
+                all_erc20_addresses.len()
+            );
+        }
     }
 
-    // Configure ERC721 if any addresses
-    if !all_erc721_addresses.is_empty() {
+    // Configure ERC721 if enabled
+    if create_erc721 {
         enabled_types.push("ERC721");
 
         // Create storage with unique database file
-        let erc721_db_path = format!("{}-erc721.db", config.db_path.trim_end_matches(".db"));
+        let erc721_db_path = db_dir.join("erc721.db").to_string_lossy().to_string();
         let storage = Arc::new(Erc721Storage::new(&erc721_db_path)?);
         tracing::info!("ERC721 database initialized: {}", erc721_db_path);
 
@@ -319,24 +353,29 @@ async fn run_indexer(config: Config) -> Result<()> {
         reflection_builder =
             reflection_builder.register_encoded_file_descriptor_set(ERC721_DESCRIPTOR_SET);
 
-        // Map contracts to decoder
+        // Map explicit contracts to decoder (auto-discovered ones go through registry)
         let erc721_decoder_id = DecoderId::new("erc721");
         for address in &all_erc721_addresses {
             torii_config = torii_config.map_contract(*address, vec![erc721_decoder_id]);
         }
 
-        tracing::info!(
-            "ERC721 configured with {} contracts",
-            all_erc721_addresses.len()
-        );
+        // Log configuration
+        if all_erc721_addresses.is_empty() {
+            tracing::info!("ERC721 configured for auto-discovery");
+        } else {
+            tracing::info!(
+                "ERC721 configured with {} explicit contracts (plus auto-discovery in block-range mode)",
+                all_erc721_addresses.len()
+            );
+        }
     }
 
-    // Configure ERC1155 if any addresses
-    if !all_erc1155_addresses.is_empty() {
+    // Configure ERC1155 if enabled
+    if create_erc1155 {
         enabled_types.push("ERC1155");
 
         // Create storage with unique database file
-        let erc1155_db_path = format!("{}-erc1155.db", config.db_path.trim_end_matches(".db"));
+        let erc1155_db_path = db_dir.join("erc1155.db").to_string_lossy().to_string();
         let storage = Arc::new(Erc1155Storage::new(&erc1155_db_path)?);
         tracing::info!("ERC1155 database initialized: {}", erc1155_db_path);
 
@@ -356,16 +395,21 @@ async fn run_indexer(config: Config) -> Result<()> {
         reflection_builder =
             reflection_builder.register_encoded_file_descriptor_set(ERC1155_DESCRIPTOR_SET);
 
-        // Map contracts to decoder
+        // Map explicit contracts to decoder (auto-discovered ones go through registry)
         let erc1155_decoder_id = DecoderId::new("erc1155");
         for address in &all_erc1155_addresses {
             torii_config = torii_config.map_contract(*address, vec![erc1155_decoder_id]);
         }
 
-        tracing::info!(
-            "ERC1155 configured with {} contracts",
-            all_erc1155_addresses.len()
-        );
+        // Log configuration
+        if all_erc1155_addresses.is_empty() {
+            tracing::info!("ERC1155 configured for auto-discovery");
+        } else {
+            tracing::info!(
+                "ERC1155 configured with {} explicit contracts (plus auto-discovery in block-range mode)",
+                all_erc1155_addresses.len()
+            );
+        }
     }
 
     // Build reflection service
@@ -427,13 +471,13 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("gRPC service available at localhost:{}", config.port);
     tracing::info!("  - torii.Torii (EventBus subscriptions)");
 
-    if !all_erc20_addresses.is_empty() {
+    if create_erc20 {
         tracing::info!("  - torii.sinks.erc20.Erc20 (ERC20 queries and subscriptions)");
     }
-    if !all_erc721_addresses.is_empty() {
+    if create_erc721 {
         tracing::info!("  - torii.sinks.erc721.Erc721 (ERC721 queries and subscriptions)");
     }
-    if !all_erc1155_addresses.is_empty() {
+    if create_erc1155 {
         tracing::info!("  - torii.sinks.erc1155.Erc1155 (ERC1155 queries and subscriptions)");
     }
 

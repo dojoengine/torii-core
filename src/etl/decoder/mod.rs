@@ -189,9 +189,10 @@ impl DecoderId {
 ///    - Use for noisy contracts that emit many irrelevant events
 ///    - Can coexist with mappings (but contract can't be in both)
 ///
-/// 3. **Auto-discovery** (default for unmapped contracts):
-///    - Unmapped contracts try ALL decoders: O(n)
-///    - Provides flexibility for multi-interface contracts
+/// For unmapped contracts (not in mappings or blacklist), the behavior depends on
+/// whether a `ContractRegistry` is configured:
+/// - With registry: Auto-identification via ABI inspection
+/// - Without registry: Events tried against all decoders
 ///
 /// # Validation
 ///
@@ -218,12 +219,6 @@ pub struct ContractFilter {
 
     /// Blacklist: contracts to ignore entirely
     pub blacklist: HashSet<Felt>,
-
-    /// Skip unmapped contracts (disable auto-discovery)
-    ///
-    /// When `true`, events from contracts not in the mapping will be skipped entirely.
-    /// When `false` (default), unmapped contracts will try ALL decoders (auto-discovery).
-    pub skip_unmapped: bool,
 }
 
 impl ContractFilter {
@@ -278,15 +273,6 @@ impl ContractFilter {
     /// Add multiple contracts to blacklist
     pub fn blacklist_contracts(mut self, contracts: Vec<Felt>) -> Self {
         self.blacklist.extend(contracts);
-        self
-    }
-
-    /// Skip unmapped contracts (disable auto-discovery)
-    ///
-    /// When `true`, events from contracts not in the mapping will be skipped entirely.
-    /// When `false` (default), unmapped contracts will try ALL decoders (auto-discovery).
-    pub fn skip_unmapped(mut self, skip: bool) -> Self {
-        self.skip_unmapped = skip;
         self
     }
 }
