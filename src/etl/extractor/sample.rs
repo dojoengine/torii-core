@@ -147,6 +147,7 @@ impl Extractor for SampleExtractor {
             declared_classes: Vec::new(), // Sample extractor doesn't generate these
             deployed_contracts: Vec::new(), // Sample extractor doesn't generate these
             cursor: None,
+            chain_head: None, // Sample extractor doesn't track chain head
         })
     }
 }

@@ -31,6 +31,13 @@ CREATE TABLE IF NOT EXISTS contract_decoders (
     identified_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 );
 
+-- Block timestamps cache (for event-based extraction)
+CREATE TABLE IF NOT EXISTS block_timestamps (
+    block_number INTEGER PRIMARY KEY,
+    timestamp INTEGER NOT NULL,
+    block_hash BLOB
+);
+
 -- Initialize default values
 INSERT OR IGNORE INTO head (id, block_number, event_count) VALUES ('main', 0, 0);
 INSERT OR IGNORE INTO stats (key, value) VALUES ('start_time', strftime('%s', 'now'));

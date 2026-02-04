@@ -16,14 +16,20 @@ use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
 use torii_common::u256_to_bytes;
 
+/// Default threshold for "live" detection: 100 blocks from chain head.
+/// Events from blocks older than this won't be broadcast to real-time subscribers.
+const LIVE_THRESHOLD_BLOCKS: u64 = 100;
+
 /// ERC1155 token sink
 ///
 /// Processes ERC1155 TransferSingle, TransferBatch, and ApprovalForAll events:
 /// - Stores transfer records in the database
-/// - Publishes events via EventBus for real-time subscriptions
-/// - Broadcasts events via gRPC service for rich subscriptions
+/// - Publishes events via EventBus for real-time subscriptions (only when live)
+/// - Broadcasts events via gRPC service for rich subscriptions (only when live)
 ///
 /// Note: Like ERC20, we only track transfer history - NOT balances.
+/// During historical indexing (more than 100 blocks from chain head), events are
+/// stored but not broadcast to avoid overwhelming real-time subscribers.
 pub struct Erc1155Sink {
     storage: Arc<Erc1155Storage>,
     event_bus: Option<Arc<EventBus>>,
@@ -215,44 +221,48 @@ impl Sink for Erc1155Sink {
                     "Batch inserted token transfers"
                 );
 
-                // Publish transfer events
-                for transfer in &transfers {
-                    let proto_transfer = proto::TokenTransfer {
-                        token: transfer.token.to_bytes_be().to_vec(),
-                        operator: transfer.operator.to_bytes_be().to_vec(),
-                        from: transfer.from.to_bytes_be().to_vec(),
-                        to: transfer.to.to_bytes_be().to_vec(),
-                        token_id: u256_to_bytes(transfer.token_id),
-                        amount: u256_to_bytes(transfer.amount),
-                        block_number: transfer.block_number,
-                        tx_hash: transfer.tx_hash.to_bytes_be().to_vec(),
-                        timestamp: transfer.timestamp.unwrap_or(0),
-                        is_batch: transfer.is_batch,
-                        batch_index: transfer.batch_index,
-                    };
-
-                    // Publish to EventBus
-                    if let Some(event_bus) = &self.event_bus {
-                        let mut buf = Vec::new();
-                        proto_transfer.encode(&mut buf)?;
-                        let any = Any {
-                            type_url: "type.googleapis.com/torii.sinks.erc1155.TokenTransfer".to_string(),
-                            value: buf,
+                // Only broadcast to real-time subscribers when near chain head
+                let is_live = batch.is_live(LIVE_THRESHOLD_BLOCKS);
+                if is_live {
+                    // Publish transfer events
+                    for transfer in &transfers {
+                        let proto_transfer = proto::TokenTransfer {
+                            token: transfer.token.to_bytes_be().to_vec(),
+                            operator: transfer.operator.to_bytes_be().to_vec(),
+                            from: transfer.from.to_bytes_be().to_vec(),
+                            to: transfer.to.to_bytes_be().to_vec(),
+                            token_id: u256_to_bytes(transfer.token_id),
+                            amount: u256_to_bytes(transfer.amount),
+                            block_number: transfer.block_number,
+                            tx_hash: transfer.tx_hash.to_bytes_be().to_vec(),
+                            timestamp: transfer.timestamp.unwrap_or(0),
+                            is_batch: transfer.is_batch,
+                            batch_index: transfer.batch_index,
                         };
 
-                        event_bus.publish_protobuf(
-                            "erc1155.transfer",
-                            "erc1155.transfer",
-                            &any,
-                            &proto_transfer,
-                            UpdateType::Created,
-                            Self::matches_transfer_filters,
-                        );
-                    }
+                        // Publish to EventBus
+                        if let Some(event_bus) = &self.event_bus {
+                            let mut buf = Vec::new();
+                            proto_transfer.encode(&mut buf)?;
+                            let any = Any {
+                                type_url: "type.googleapis.com/torii.sinks.erc1155.TokenTransfer".to_string(),
+                                value: buf,
+                            };
 
-                    // Broadcast to gRPC service
-                    if let Some(grpc_service) = &self.grpc_service {
-                        grpc_service.broadcast_transfer(proto_transfer);
+                            event_bus.publish_protobuf(
+                                "erc1155.transfer",
+                                "erc1155.transfer",
+                                &any,
+                                &proto_transfer,
+                                UpdateType::Created,
+                                Self::matches_transfer_filters,
+                            );
+                        }
+
+                        // Broadcast to gRPC service
+                        if let Some(grpc_service) = &self.grpc_service {
+                            grpc_service.broadcast_transfer(proto_transfer);
+                        }
                     }
                 }
             }

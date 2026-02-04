@@ -1,15 +1,61 @@
 //! Configuration for the unified token indexer
 
-use clap::Parser;
+use anyhow::Result;
+use clap::{Parser, ValueEnum};
 use starknet::core::types::Felt;
+
+/// Extraction mode for the token indexer.
+///
+/// - **BlockRange**: Fetches ALL events from each block using a single global cursor.
+///   Best for full chain indexing and auto-discovery of contracts.
+///
+/// - **Event**: Uses `starknet_getEvents` with per-contract cursors.
+///   Best for indexing specific contracts - easy to add new ones without re-indexing.
+#[derive(Clone, Debug, Default, ValueEnum, PartialEq, Eq)]
+pub enum ExtractionMode {
+    /// Fetch all events from blocks (single global cursor)
+    #[default]
+    BlockRange,
+    /// Fetch events per contract (per-contract cursors)
+    Event,
+}
 
 /// Unified Token Indexer for Starknet
 ///
 /// Indexes ERC20, ERC721, and ERC1155 token transfers and events.
+///
+/// # Extraction Modes
+///
+/// - **block-range** (default): Fetches ALL events from each block.
+///   Single global cursor. Best for full chain indexing.
+///
+/// - **event**: Uses `starknet_getEvents` with per-contract cursors.
+///   Easy to add new contracts without re-indexing existing ones.
+///
+/// # Examples
+///
+/// ```bash
+/// # Block range mode (default) - index ETH and STRK
+/// torii-tokens --include-well-known --from-block 0
+///
+/// # Event mode - per-contract cursors
+/// torii-tokens --mode event --erc20 0x...ETH,0x...STRK --from-block 0
+///
+/// # Add a new contract in event mode (just restart with updated list)
+/// torii-tokens --mode event --erc20 0x...ETH,0x...STRK,0x...USDC --from-block 0
+/// # USDC starts from block 0, ETH and STRK resume from their cursors
+/// ```
 #[derive(Parser, Debug)]
 #[command(name = "torii-tokens")]
 #[command(about = "Index ERC20, ERC721, and ERC1155 tokens on Starknet", long_about = None)]
 pub struct Config {
+    /// Extraction mode
+    ///
+    /// - block-range: Fetch all events from blocks (single global cursor)
+    /// - event: Fetch events per contract (per-contract cursors, easy to add new contracts)
+    #[arg(long, value_enum, default_value = "block-range")]
+    pub mode: ExtractionMode,
+
     /// Starknet RPC URL
     #[arg(
         long,
@@ -56,17 +102,25 @@ pub struct Config {
     #[arg(long)]
     pub include_well_known: bool,
 
-    /// Number of blocks to fetch per batch
+    /// Number of blocks to fetch per batch (block-range mode)
     ///
     /// Higher values improve throughput but use more memory.
     /// Lower values reduce memory usage but may slow down indexing.
     #[arg(long, default_value = "1000")]
     pub batch_size: u64,
+
+    /// Events per RPC request (event mode, max 1024 for most providers)
+    #[arg(long, default_value = "1000")]
+    pub event_chunk_size: u64,
+
+    /// Block range to query per iteration in event mode
+    #[arg(long, default_value = "10000")]
+    pub event_block_batch_size: u64,
 }
 
 impl Config {
     /// Parse a hex address string to Felt
-    pub fn parse_address(addr: &str) -> anyhow::Result<Felt> {
+    pub fn parse_address(addr: &str) -> Result<Felt> {
         Felt::from_hex(addr).map_err(|e| anyhow::anyhow!("Invalid address {}: {}", addr, e))
     }
 

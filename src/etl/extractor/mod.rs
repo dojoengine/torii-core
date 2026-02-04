@@ -1,6 +1,8 @@
 //! Extractor trait for fetching events from various sources
 
 pub mod block_range;
+pub mod composite;
+pub mod event;
 pub mod retry;
 pub mod sample;
 pub mod starknet_helpers;
@@ -9,11 +11,11 @@ use crate::etl::engine_db::EngineDb;
 use anyhow::Result;
 use async_trait::async_trait;
 use starknet::core::types::{EmittedEvent, Felt};
-use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 pub use block_range::{BlockRangeConfig, BlockRangeExtractor};
+pub use composite::CompositeExtractor;
+pub use event::{ContractEventConfig, EventExtractor, EventExtractorConfig};
 pub use retry::RetryPolicy;
 pub use sample::SampleExtractor;
 pub use starknet_helpers::ContractAbi;
@@ -107,6 +109,10 @@ pub struct ExtractionBatch {
 
     /// Opaque cursor for pagination (continuation token or cursor string)
     pub cursor: Option<String>,
+
+    /// Current chain head block number (if known by extractor).
+    /// Used by sinks to determine if events should be broadcast to real-time subscribers.
+    pub chain_head: Option<u64>,
 }
 
 impl ExtractionBatch {
@@ -119,6 +125,7 @@ impl ExtractionBatch {
             declared_classes: Vec::new(),
             deployed_contracts: Vec::new(),
             cursor: None,
+            chain_head: None,
         }
     }
 
@@ -130,6 +137,36 @@ impl ExtractionBatch {
     /// Get number of events
     pub fn len(&self) -> usize {
         self.events.len()
+    }
+
+    /// Get the maximum block number in this batch.
+    pub fn max_block(&self) -> Option<u64> {
+        self.blocks.keys().max().copied()
+    }
+
+    /// Check if this batch is "live" (near chain head).
+    ///
+    /// Returns true if:
+    /// - chain_head is known AND
+    /// - the max block in this batch is within `threshold` blocks of chain_head
+    ///
+    /// This is useful for sinks to decide whether to broadcast events to real-time
+    /// subscribers. During historical indexing, broadcasting millions of events
+    /// would overwhelm clients and slow down the indexer.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Only broadcast if within 100 blocks of chain head
+    /// if batch.is_live(100) {
+    ///     grpc_service.broadcast_transfer(proto_transfer);
+    /// }
+    /// ```
+    pub fn is_live(&self, threshold: u64) -> bool {
+        match (self.chain_head, self.max_block()) {
+            (Some(head), Some(max_block)) => head.saturating_sub(max_block) <= threshold,
+            // If we don't know chain head, assume not live (safer for historical indexing)
+            _ => false,
+        }
     }
 }
 

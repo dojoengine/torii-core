@@ -24,7 +24,6 @@ pub use tonic;
 pub use grpc::UpdateType;
 
 use axum::Router as AxumRouter;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -638,9 +637,30 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
     };
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal)
-        .await?;
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal);
+
+    // Give active connections 15 seconds to close gracefully, then force shutdown.
+    // This prevents hanging on long-lived gRPC streaming connections.
+    const SERVER_SHUTDOWN_TIMEOUT_SECS: u64 = 15;
+    tokio::select! {
+        result = server => {
+            if let Err(e) = result {
+                tracing::error!(target: "torii::main", "Server error: {}", e);
+            }
+        }
+        _ = async {
+            // Wait for shutdown signal + timeout
+            shutdown_token.cancelled().await;
+            tokio::time::sleep(Duration::from_secs(SERVER_SHUTDOWN_TIMEOUT_SECS)).await;
+        } => {
+            tracing::warn!(
+                target: "torii::main",
+                "Server connections did not close within {}s, forcing shutdown",
+                SERVER_SHUTDOWN_TIMEOUT_SECS
+            );
+        }
+    }
 
     tracing::info!(target: "torii::main", "HTTP/gRPC server stopped, waiting for ETL loop to complete...");
 

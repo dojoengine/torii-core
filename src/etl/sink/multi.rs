@@ -185,6 +185,7 @@ mod tests {
             declared_classes: Vec::new(),
             deployed_contracts: Vec::new(),
             cursor: None,
+            chain_head: None,
         };
 
         multi_sink.process(&[], &batch).await.unwrap();

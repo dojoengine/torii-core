@@ -263,13 +263,14 @@ impl Extractor for BlockRangeExtractor {
             return Ok(ExtractionBatch::empty());
         }
 
+        // Fetch chain head for live detection
+        let chain_head = self.provider.block_number().await?;
+
         // Determine the batch end block
         let batch_end = if let Some(to_block) = self.config.to_block {
             (self.current_block + self.config.batch_size - 1).min(to_block)
         } else {
-            // No end block configured - check chain head
-            let chain_head = self.provider.block_number().await?;
-
+            // No end block configured - follow chain head
             if self.current_block > chain_head {
                 // We're ahead of the chain - return empty batch for polling
                 tracing::debug!(
@@ -285,6 +286,7 @@ impl Extractor for BlockRangeExtractor {
                     declared_classes: Vec::new(),
                     deployed_contracts: Vec::new(),
                     cursor: Some(format!("block:{}", self.current_block.saturating_sub(1))),
+                    chain_head: Some(chain_head),
                 });
             }
 
@@ -350,6 +352,7 @@ impl Extractor for BlockRangeExtractor {
             declared_classes: all_declared_classes,
             deployed_contracts: all_deployed_contracts,
             cursor: Some(cursor),
+            chain_head: Some(chain_head),
         })
     }
 }

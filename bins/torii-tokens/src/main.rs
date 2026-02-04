@@ -12,73 +12,60 @@
 //! - gRPC subscriptions for real-time updates
 //! - Historical queries with pagination
 //!
+//! # Extraction Modes
+//!
+//! - **block-range** (default): Fetches ALL events from each block.
+//!   Single global cursor. Best for full chain indexing.
+//!
+//! - **event**: Uses `starknet_getEvents` with per-contract cursors.
+//!   Easy to add new contracts without re-indexing existing ones.
+//!
 //! # Usage
 //!
 //! ```bash
-//! # Index ETH and STRK as ERC20
-//! torii-tokens run --include-well-known --from-block 100000
+//! # Block range mode (default) - full chain indexing
+//! torii-tokens --include-well-known --from-block 0
 //!
-//! # Index specific ERC20 contracts
-//! torii-tokens run --erc20 0x049D36570D4e46f48e99674bd3fcc84644DdD6b96F7C741B1562B82f9e004dC7,0x04718f5a0Fc34cC1AF16A1cdee98fFB20C31f5cD61D6Ab07201858f4287c938D
+//! # Event mode - per-contract cursors
+//! torii-tokens --mode event --erc20 0x...ETH,0x...STRK --from-block 0
 //!
-//! # Index multiple token types
-//! torii-tokens run \
-//!   --erc20 0x...eth,0x...strk \
-//!   --erc721 0x...nft_contract \
-//!   --erc1155 0x...game_items \
-//!   --from-block 100000
-//!
-//! # Backfill historical data for specific contracts
-//! torii-tokens backfill \
-//!   --erc20 0x...eth:100000 \
-//!   --to-block 500000
+//! # Add a new contract in event mode (just restart with updated list)
+//! torii-tokens --mode event --erc20 0x...ETH,0x...STRK,0x...USDC --from-block 0
+//! # USDC starts from block 0, ETH and STRK resume from their cursors
 //! ```
 
-mod backfill;
 mod config;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
-use config::Config;
+use clap::Parser;
+use config::{Config, ExtractionMode};
 use std::path::Path;
 use std::sync::Arc;
 use torii::etl::decoder::DecoderId;
-use torii::etl::extractor::{BlockRangeConfig, BlockRangeExtractor};
+use torii::etl::extractor::{
+    BlockRangeConfig, BlockRangeExtractor, ContractEventConfig, EventExtractor,
+    EventExtractorConfig, Extractor, RetryPolicy,
+};
 
 // Import from ERC20 library crate
 use torii_erc20::proto::erc20_server::Erc20Server;
-use torii_erc20::{Erc20Decoder, Erc20Service, Erc20Sink, Erc20Storage, FILE_DESCRIPTOR_SET as ERC20_DESCRIPTOR_SET};
+use torii_erc20::{
+    Erc20Decoder, Erc20Service, Erc20Sink, Erc20Storage, FILE_DESCRIPTOR_SET as ERC20_DESCRIPTOR_SET,
+};
 
 // Import from ERC721 library crate
 use torii_erc721::proto::erc721_server::Erc721Server;
-use torii_erc721::{Erc721Decoder, Erc721Service, Erc721Sink, Erc721Storage, FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET};
+use torii_erc721::{
+    Erc721Decoder, Erc721Service, Erc721Sink, Erc721Storage,
+    FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
+};
 
 // Import from ERC1155 library crate
 use torii_erc1155::proto::erc1155_server::Erc1155Server;
-use torii_erc1155::{Erc1155Decoder, Erc1155Service, Erc1155Sink, Erc1155Storage, FILE_DESCRIPTOR_SET as ERC1155_DESCRIPTOR_SET};
-
-/// Root CLI with subcommands
-#[derive(Parser, Debug)]
-#[command(name = "torii-tokens")]
-#[command(about = "Unified Starknet token indexer for ERC20, ERC721, and ERC1155")]
-#[command(version)]
-struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
-
-    /// For backward compatibility: these args are passed to 'run' when no subcommand is given
-    #[command(flatten)]
-    run_args: Config,
-}
-
-#[derive(Subcommand, Debug)]
-enum Commands {
-    /// Run the indexer (continuous operation)
-    Run(Config),
-
-    /// Backfill historical data for specific contracts
-    Backfill(backfill::BackfillArgs),
-}
+use torii_erc1155::{
+    Erc1155Decoder, Erc1155Service, Erc1155Sink, Erc1155Storage,
+    FILE_DESCRIPTOR_SET as ERC1155_DESCRIPTOR_SET,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -92,21 +79,8 @@ async fn main() -> Result<()> {
         .init();
 
     // Parse CLI arguments
-    let cli = Cli::parse();
-
-    // Dispatch to appropriate command
-    match cli.command {
-        Some(Commands::Backfill(args)) => {
-            backfill::run_backfill(args).await
-        }
-        Some(Commands::Run(config)) => {
-            run_indexer(config).await
-        }
-        None => {
-            // Backward compatibility: if no subcommand, run the indexer with root args
-            run_indexer(cli.run_args).await
-        }
-    }
+    let config = Config::parse();
+    run_indexer(config).await
 }
 
 /// Run the main indexer
@@ -120,14 +94,21 @@ async fn run_indexer(config: Config) -> Result<()> {
         .unwrap();
 
     tracing::info!("Starting Torii Unified Token Indexer");
+    tracing::info!("Mode: {:?}", config.mode);
     tracing::info!("RPC URL: {}", config.rpc_url);
     tracing::info!("From block: {}", config.from_block);
-    tracing::info!("Batch size: {}", config.batch_size);
+    if let Some(to_block) = config.to_block {
+        tracing::info!("To block: {}", to_block);
+    } else {
+        tracing::info!("To block: following chain head");
+    }
     tracing::info!("Database: {}", config.db_path);
 
     // Validate configuration
     if !config.has_tokens() {
-        tracing::warn!("No token contracts specified. Use --erc20, --erc721, --erc1155, or --include-well-known");
+        tracing::warn!(
+            "No token contracts specified. Use --erc20, --erc721, --erc1155, or --include-well-known"
+        );
         tracing::warn!("Example: torii-tokens --include-well-known --from-block 100000");
         return Ok(());
     }
@@ -139,16 +120,102 @@ async fn run_indexer(config: Config) -> Result<()> {
         ),
     ));
 
-    // Create extractor
-    let extractor_config = BlockRangeConfig {
-        rpc_url: config.rpc_url.clone(),
-        from_block: config.from_block,
-        to_block: config.to_block,
-        batch_size: config.batch_size,
-        retry_policy: torii::etl::extractor::RetryPolicy::default(),
+    // Collect all contract addresses first (needed for Event mode)
+    let mut all_erc20_addresses: Vec<starknet::core::types::Felt> = Vec::new();
+    let mut all_erc721_addresses: Vec<starknet::core::types::Felt> = Vec::new();
+    let mut all_erc1155_addresses: Vec<starknet::core::types::Felt> = Vec::new();
+
+    // Add well-known contracts if requested
+    if config.include_well_known {
+        for (address, name) in Config::well_known_erc20_contracts() {
+            tracing::info!("Adding well-known ERC20: {} at {:#x}", name, address);
+            all_erc20_addresses.push(address);
+        }
+    }
+
+    // Add custom ERC20 contracts
+    for addr_str in &config.erc20 {
+        let address = Config::parse_address(addr_str)?;
+        tracing::info!("Adding ERC20 contract: {:#x}", address);
+        all_erc20_addresses.push(address);
+    }
+
+    // Add custom ERC721 contracts
+    for addr_str in &config.erc721 {
+        let address = Config::parse_address(addr_str)?;
+        tracing::info!("Adding ERC721 contract: {:#x}", address);
+        all_erc721_addresses.push(address);
+    }
+
+    // Add custom ERC1155 contracts
+    for addr_str in &config.erc1155 {
+        let address = Config::parse_address(addr_str)?;
+        tracing::info!("Adding ERC1155 contract: {:#x}", address);
+        all_erc1155_addresses.push(address);
+    }
+
+    // Create extractor based on mode
+    let extractor: Box<dyn Extractor> = match config.mode {
+        ExtractionMode::BlockRange => {
+            tracing::info!("Using Block Range mode (single global cursor)");
+            tracing::info!("  Batch size: {} blocks", config.batch_size);
+
+            let extractor_config = BlockRangeConfig {
+                rpc_url: config.rpc_url.clone(),
+                from_block: config.from_block,
+                to_block: config.to_block,
+                batch_size: config.batch_size,
+                retry_policy: RetryPolicy::default(),
+            };
+            Box::new(BlockRangeExtractor::new(provider.clone(), extractor_config))
+        }
+        ExtractionMode::Event => {
+            tracing::info!("Using Event mode (per-contract cursors)");
+            tracing::info!("  Chunk size: {} events", config.event_chunk_size);
+            tracing::info!("  Block batch size: {} blocks", config.event_block_batch_size);
+
+            // Collect ALL contracts for event extraction
+            let mut event_configs = Vec::new();
+
+            // Use u64::MAX when to_block is None to follow chain head
+            let to_block = config.to_block.unwrap_or(u64::MAX);
+
+            for addr in &all_erc20_addresses {
+                event_configs.push(ContractEventConfig {
+                    address: *addr,
+                    from_block: config.from_block,
+                    to_block,
+                });
+            }
+
+            for addr in &all_erc721_addresses {
+                event_configs.push(ContractEventConfig {
+                    address: *addr,
+                    from_block: config.from_block,
+                    to_block,
+                });
+            }
+
+            for addr in &all_erc1155_addresses {
+                event_configs.push(ContractEventConfig {
+                    address: *addr,
+                    from_block: config.from_block,
+                    to_block,
+                });
+            }
+
+            tracing::info!("  Configured {} contracts for event extraction", event_configs.len());
+
+            let extractor_config = EventExtractorConfig {
+                contracts: event_configs,
+                chunk_size: config.event_chunk_size,
+                block_batch_size: config.event_block_batch_size,
+                retry_policy: RetryPolicy::default(),
+            };
+            Box::new(EventExtractor::new(provider.clone(), extractor_config))
+        }
     };
 
-    let extractor = Box::new(BlockRangeExtractor::new(provider.clone(), extractor_config));
     tracing::info!("Extractor configured");
 
     // Build gRPC reflection with all descriptor sets
@@ -175,26 +242,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut erc721_grpc_service: Option<Erc721Service> = None;
     let mut erc1155_grpc_service: Option<Erc1155Service> = None;
 
-    // Collect ERC20 addresses
-    let mut erc20_addresses: Vec<starknet::core::types::Felt> = Vec::new();
-
-    // Add well-known contracts if requested
-    if config.include_well_known {
-        for (address, name) in Config::well_known_erc20_contracts() {
-            tracing::info!("Adding well-known ERC20: {} at {:#x}", name, address);
-            erc20_addresses.push(address);
-        }
-    }
-
-    // Add custom ERC20 contracts
-    for addr_str in &config.erc20 {
-        let address = Config::parse_address(addr_str)?;
-        tracing::info!("Adding ERC20 contract: {:#x}", address);
-        erc20_addresses.push(address);
-    }
-
     // Configure ERC20 if any addresses
-    if !erc20_addresses.is_empty() {
+    if !all_erc20_addresses.is_empty() {
         enabled_types.push("ERC20");
 
         // Create storage with unique database file
@@ -215,27 +264,20 @@ async fn run_indexer(config: Config) -> Result<()> {
 
         // Store gRPC service for later
         erc20_grpc_service = Some(grpc_service);
-        reflection_builder = reflection_builder.register_encoded_file_descriptor_set(ERC20_DESCRIPTOR_SET);
+        reflection_builder =
+            reflection_builder.register_encoded_file_descriptor_set(ERC20_DESCRIPTOR_SET);
 
         // Map contracts to decoder
         let erc20_decoder_id = DecoderId::new("erc20");
-        for address in &erc20_addresses {
+        for address in &all_erc20_addresses {
             torii_config = torii_config.map_contract(*address, vec![erc20_decoder_id]);
         }
 
-        tracing::info!("ERC20 configured with {} contracts", erc20_addresses.len());
-    }
-
-    // Collect ERC721 addresses
-    let mut erc721_addresses: Vec<starknet::core::types::Felt> = Vec::new();
-    for addr_str in &config.erc721 {
-        let address = Config::parse_address(addr_str)?;
-        tracing::info!("Adding ERC721 contract: {:#x}", address);
-        erc721_addresses.push(address);
+        tracing::info!("ERC20 configured with {} contracts", all_erc20_addresses.len());
     }
 
     // Configure ERC721 if any addresses
-    if !erc721_addresses.is_empty() {
+    if !all_erc721_addresses.is_empty() {
         enabled_types.push("ERC721");
 
         // Create storage with unique database file
@@ -256,27 +298,23 @@ async fn run_indexer(config: Config) -> Result<()> {
 
         // Store gRPC service for later
         erc721_grpc_service = Some(grpc_service);
-        reflection_builder = reflection_builder.register_encoded_file_descriptor_set(ERC721_DESCRIPTOR_SET);
+        reflection_builder =
+            reflection_builder.register_encoded_file_descriptor_set(ERC721_DESCRIPTOR_SET);
 
         // Map contracts to decoder
         let erc721_decoder_id = DecoderId::new("erc721");
-        for address in &erc721_addresses {
+        for address in &all_erc721_addresses {
             torii_config = torii_config.map_contract(*address, vec![erc721_decoder_id]);
         }
 
-        tracing::info!("ERC721 configured with {} contracts", erc721_addresses.len());
-    }
-
-    // Collect ERC1155 addresses
-    let mut erc1155_addresses: Vec<starknet::core::types::Felt> = Vec::new();
-    for addr_str in &config.erc1155 {
-        let address = Config::parse_address(addr_str)?;
-        tracing::info!("Adding ERC1155 contract: {:#x}", address);
-        erc1155_addresses.push(address);
+        tracing::info!(
+            "ERC721 configured with {} contracts",
+            all_erc721_addresses.len()
+        );
     }
 
     // Configure ERC1155 if any addresses
-    if !erc1155_addresses.is_empty() {
+    if !all_erc1155_addresses.is_empty() {
         enabled_types.push("ERC1155");
 
         // Create storage with unique database file
@@ -297,15 +335,19 @@ async fn run_indexer(config: Config) -> Result<()> {
 
         // Store gRPC service for later
         erc1155_grpc_service = Some(grpc_service);
-        reflection_builder = reflection_builder.register_encoded_file_descriptor_set(ERC1155_DESCRIPTOR_SET);
+        reflection_builder =
+            reflection_builder.register_encoded_file_descriptor_set(ERC1155_DESCRIPTOR_SET);
 
         // Map contracts to decoder
         let erc1155_decoder_id = DecoderId::new("erc1155");
-        for address in &erc1155_addresses {
+        for address in &all_erc1155_addresses {
             torii_config = torii_config.map_contract(*address, vec![erc1155_decoder_id]);
         }
 
-        tracing::info!("ERC1155 configured with {} contracts", erc1155_addresses.len());
+        tracing::info!(
+            "ERC1155 configured with {} contracts",
+            all_erc1155_addresses.len()
+        );
     }
 
     // Build reflection service
@@ -319,51 +361,40 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     // Add services based on what's enabled
     // We need to build this in a specific order since add_service returns Router
-    let grpc_router = match (erc20_grpc_service, erc721_grpc_service, erc1155_grpc_service) {
-        (Some(erc20), Some(erc721), Some(erc1155)) => {
-            grpc_builder
-                .add_service(Erc20Server::new(erc20))
-                .add_service(Erc721Server::new(erc721))
-                .add_service(Erc1155Server::new(erc1155))
-                .add_service(reflection)
-        }
-        (Some(erc20), Some(erc721), None) => {
-            grpc_builder
-                .add_service(Erc20Server::new(erc20))
-                .add_service(Erc721Server::new(erc721))
-                .add_service(reflection)
-        }
-        (Some(erc20), None, Some(erc1155)) => {
-            grpc_builder
-                .add_service(Erc20Server::new(erc20))
-                .add_service(Erc1155Server::new(erc1155))
-                .add_service(reflection)
-        }
-        (None, Some(erc721), Some(erc1155)) => {
-            grpc_builder
-                .add_service(Erc721Server::new(erc721))
-                .add_service(Erc1155Server::new(erc1155))
-                .add_service(reflection)
-        }
-        (Some(erc20), None, None) => {
-            grpc_builder
-                .add_service(Erc20Server::new(erc20))
-                .add_service(reflection)
-        }
-        (None, Some(erc721), None) => {
-            grpc_builder
-                .add_service(Erc721Server::new(erc721))
-                .add_service(reflection)
-        }
-        (None, None, Some(erc1155)) => {
-            grpc_builder
-                .add_service(Erc1155Server::new(erc1155))
-                .add_service(reflection)
-        }
+    let grpc_router = match (
+        erc20_grpc_service,
+        erc721_grpc_service,
+        erc1155_grpc_service,
+    ) {
+        (Some(erc20), Some(erc721), Some(erc1155)) => grpc_builder
+            .add_service(Erc20Server::new(erc20))
+            .add_service(Erc721Server::new(erc721))
+            .add_service(Erc1155Server::new(erc1155))
+            .add_service(reflection),
+        (Some(erc20), Some(erc721), None) => grpc_builder
+            .add_service(Erc20Server::new(erc20))
+            .add_service(Erc721Server::new(erc721))
+            .add_service(reflection),
+        (Some(erc20), None, Some(erc1155)) => grpc_builder
+            .add_service(Erc20Server::new(erc20))
+            .add_service(Erc1155Server::new(erc1155))
+            .add_service(reflection),
+        (None, Some(erc721), Some(erc1155)) => grpc_builder
+            .add_service(Erc721Server::new(erc721))
+            .add_service(Erc1155Server::new(erc1155))
+            .add_service(reflection),
+        (Some(erc20), None, None) => grpc_builder
+            .add_service(Erc20Server::new(erc20))
+            .add_service(reflection),
+        (None, Some(erc721), None) => grpc_builder
+            .add_service(Erc721Server::new(erc721))
+            .add_service(reflection),
+        (None, None, Some(erc1155)) => grpc_builder
+            .add_service(Erc1155Server::new(erc1155))
+            .add_service(reflection),
         (None, None, None) => {
             // No token services, just reflection
-            grpc_builder
-                .add_service(reflection)
+            grpc_builder.add_service(reflection)
         }
     };
 
@@ -378,13 +409,13 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("gRPC service available at localhost:{}", config.port);
     tracing::info!("  - torii.Torii (EventBus subscriptions)");
 
-    if !erc20_addresses.is_empty() {
+    if !all_erc20_addresses.is_empty() {
         tracing::info!("  - torii.sinks.erc20.Erc20 (ERC20 queries and subscriptions)");
     }
-    if !erc721_addresses.is_empty() {
+    if !all_erc721_addresses.is_empty() {
         tracing::info!("  - torii.sinks.erc721.Erc721 (ERC721 queries and subscriptions)");
     }
-    if !erc1155_addresses.is_empty() {
+    if !all_erc1155_addresses.is_empty() {
         tracing::info!("  - torii.sinks.erc1155.Erc1155 (ERC1155 queries and subscriptions)");
     }
 

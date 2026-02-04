@@ -8,7 +8,6 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     Pool, Row, Sqlite,
 };
-use starknet::core::types::Felt;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -265,6 +264,90 @@ impl EngineDb {
             .await?;
 
         Ok(())
+    }
+
+    /// Get block timestamps from cache
+    ///
+    /// # Arguments
+    /// * `block_numbers` - Block numbers to look up
+    ///
+    /// # Returns
+    /// HashMap of block_number -> timestamp for blocks found in cache
+    pub async fn get_block_timestamps(
+        &self,
+        block_numbers: &[u64],
+    ) -> Result<std::collections::HashMap<u64, u64>> {
+        if block_numbers.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        // Build query with IN clause
+        let placeholders: Vec<String> = block_numbers.iter().map(|_| "?".to_string()).collect();
+        let query = format!(
+            "SELECT block_number, timestamp FROM block_timestamps WHERE block_number IN ({})",
+            placeholders.join(", ")
+        );
+
+        let mut query_builder = sqlx::query(&query);
+        for block_num in block_numbers {
+            query_builder = query_builder.bind(*block_num as i64);
+        }
+
+        let rows = query_builder.fetch_all(&self.pool).await?;
+
+        let mut result = std::collections::HashMap::new();
+        for row in rows {
+            let block_number: i64 = row.get(0);
+            let timestamp: i64 = row.get(1);
+            result.insert(block_number as u64, timestamp as u64);
+        }
+
+        Ok(result)
+    }
+
+    /// Insert block timestamps into cache
+    ///
+    /// # Arguments
+    /// * `timestamps` - HashMap of block_number -> timestamp
+    pub async fn insert_block_timestamps(
+        &self,
+        timestamps: &std::collections::HashMap<u64, u64>,
+    ) -> Result<()> {
+        if timestamps.is_empty() {
+            return Ok(());
+        }
+
+        // Use INSERT OR IGNORE to avoid conflicts
+        for (block_number, timestamp) in timestamps {
+            sqlx::query(
+                "INSERT OR IGNORE INTO block_timestamps (block_number, timestamp) VALUES (?, ?)",
+            )
+            .bind(*block_number as i64)
+            .bind(*timestamp as i64)
+            .execute(&self.pool)
+            .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Get a single block timestamp from cache
+    ///
+    /// # Arguments
+    /// * `block_number` - Block number to look up
+    ///
+    /// # Returns
+    /// Timestamp if found in cache, None otherwise
+    pub async fn get_block_timestamp(&self, block_number: u64) -> Result<Option<u64>> {
+        let row = sqlx::query("SELECT timestamp FROM block_timestamps WHERE block_number = ?")
+            .bind(block_number as i64)
+            .fetch_optional(&self.pool)
+            .await?;
+
+        Ok(row.map(|r| {
+            let ts: i64 = r.get(0);
+            ts as u64
+        }))
     }
 
 }
