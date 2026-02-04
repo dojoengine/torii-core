@@ -170,6 +170,14 @@ impl Decoder for DecoderContext {
                     );
                 }
             }
+        } else if self.contract_filter.skip_unmapped {
+            // No mapping and skip_unmapped enabled -> skip this contract
+            tracing::trace!(
+                target: "torii::etl::decoder_context",
+                contract = %format!("{:#x}", event.from_address),
+                "Skipping unmapped contract (auto-discovery disabled)"
+            );
+            // Return empty - no envelopes
         } else {
             // No explicit mapping, fallback on auto-discovery sending to all decoders.
             for decoder in self.decoders.values() {

@@ -218,6 +218,12 @@ pub struct ContractFilter {
 
     /// Blacklist: contracts to ignore entirely
     pub blacklist: HashSet<Felt>,
+
+    /// Skip unmapped contracts (disable auto-discovery)
+    ///
+    /// When `true`, events from contracts not in the mapping will be skipped entirely.
+    /// When `false` (default), unmapped contracts will try ALL decoders (auto-discovery).
+    pub skip_unmapped: bool,
 }
 
 impl ContractFilter {
@@ -272,6 +278,15 @@ impl ContractFilter {
     /// Add multiple contracts to blacklist
     pub fn blacklist_contracts(mut self, contracts: Vec<Felt>) -> Self {
         self.blacklist.extend(contracts);
+        self
+    }
+
+    /// Skip unmapped contracts (disable auto-discovery)
+    ///
+    /// When `true`, events from contracts not in the mapping will be skipped entirely.
+    /// When `false` (default), unmapped contracts will try ALL decoders (auto-discovery).
+    pub fn skip_unmapped(mut self, skip: bool) -> Self {
+        self.skip_unmapped = skip;
         self
     }
 }

@@ -319,6 +319,18 @@ impl ToriiConfigBuilder {
         self
     }
 
+    /// Skip events from contracts not in the mapping (disable auto-discovery).
+    ///
+    /// When `true`, events from contracts not in the mapping will be skipped entirely.
+    /// When `false` (default), unmapped contracts will try ALL decoders (auto-discovery).
+    ///
+    /// Use this to improve performance when indexing specific contracts only.
+    pub fn skip_unmapped_contracts(mut self, skip: bool) -> Self {
+        self.contract_filter.get_or_insert_with(ContractFilter::new)
+            .skip_unmapped = skip;
+        self
+    }
+
     /// Sets the graceful shutdown timeout in seconds.
     ///
     /// When a shutdown signal (SIGINT/SIGTERM) is received, the system will wait

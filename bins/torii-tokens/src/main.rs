@@ -218,6 +218,23 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     tracing::info!("Extractor configured");
 
+    // Determine whether to skip unmapped contracts
+    // In block-range mode: controlled by --auto-discover flag (default: disabled, so skip_unmapped=true)
+    // In event mode: always skip (auto-discovery not applicable since we filter by contract address)
+    let skip_unmapped = match config.mode {
+        ExtractionMode::BlockRange => !config.auto_discover,
+        ExtractionMode::Event => true, // Always skip in event mode
+    };
+
+    // Log the behavior
+    if config.mode == ExtractionMode::BlockRange {
+        if config.auto_discover {
+            tracing::info!("Auto-discovery enabled: will try all decoders on unmapped contracts");
+        } else {
+            tracing::info!("Auto-discovery disabled: only processing mapped contracts");
+        }
+    }
+
     // Build gRPC reflection with all descriptor sets
     let mut reflection_builder = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(torii::TORII_DESCRIPTOR_SET);
@@ -232,7 +249,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
         .database_root(database_root.as_ref())
-        .with_extractor(extractor);
+        .with_extractor(extractor)
+        .skip_unmapped_contracts(skip_unmapped);
 
     // Track which token types are enabled
     let mut enabled_types: Vec<&str> = Vec::new();
