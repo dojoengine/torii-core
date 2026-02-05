@@ -3,11 +3,7 @@
 //! This module contains the HTTP endpoint handlers that expose SQL query functionality
 //! and event retrieval endpoints.
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::Json,
-};
+use axum::{extract::State, http::StatusCode, response::Json};
 use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqlitePool, Column, Row};
 use std::sync::Arc;
@@ -48,7 +44,7 @@ pub async fn sql_query_handler(
         .await
         .map_err(|e| {
             tracing::error!(target: "torii::sinks::sql::api", "Query error: {}", e);
-            (StatusCode::BAD_REQUEST, format!("Query failed: {}", e))
+            (StatusCode::BAD_REQUEST, format!("Query failed: {e}"))
         })?;
 
     let results: Vec<serde_json::Value> = rows
@@ -98,7 +94,7 @@ pub async fn sql_events_handler(
             tracing::error!(target: "torii::sinks::sql::api", "Query error: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to fetch operations: {}", e),
+                format!("Failed to fetch operations: {e}"),
             )
         })?;
 

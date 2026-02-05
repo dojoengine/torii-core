@@ -98,3 +98,81 @@ http-body-util = "0.1"
 # Example dependencies
 torii-sql-sink = { path = "crates/torii-sql-sink" }
 torii-log-sink = { path = "crates/torii-log-sink" }
+
+[workspace.lints.rust]
+# Deny unsafe code unless explicitly allowed
+unsafe_code = "warn"
+# Require documentation for public items (disabled for now - enable gradually)
+# missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Clippy lint groups (set lower priority so individual lints can override)
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Specific denies (serious issues) - disabled for now, enable gradually
+# unwrap_used = "warn"
+# expect_used = "warn"
+# panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+# Allow some pedantic lints that are too noisy
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+too_many_lines = "allow"
+
+# Documentation lints - allow for now (enable gradually)
+doc_markdown = "allow"
+missing_docs_in_private_items = "allow"
+
+# Cast lints - common in blockchain code dealing with u64/i64
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+
+# Other noisy lints
+similar_names = "allow"
+missing_const_for_fn = "allow"
+significant_drop_tightening = "allow"
+cognitive_complexity = "allow"
+too_many_arguments = "allow"
+struct_field_names = "allow"
+redundant_pub_crate = "allow"
+return_self_not_must_use = "allow"
+iter_without_into_iter = "allow"
+option_if_let_else = "allow"
+use_self = "allow"
+
+# Generated code lints (protobuf)
+default_constructed_unit_structs = "allow"
+
+# Allow for now - these need gradual fixing
+unused_async = "allow"
+future_not_send = "allow"
+result_large_err = "allow"
+type_complexity = "allow"
+needless_pass_by_value = "allow"
+
+# Code style lints - allow for now
+derive_partial_eq_without_eq = "allow"
+or_fun_call = "allow"
+format_push_string = "allow"
+format_in_format_args = "allow"
+unreadable_literal = "allow"
+needless_continue = "allow"
+manual_let_else = "allow"
+default_trait_access = "allow"
+items_after_statements = "allow"
+unnecessary_wraps = "allow"
+missing_fields_in_debug = "allow"
+unused_self = "allow"
+doc_lazy_continuation = "allow"
+
+[lints]
+workspace = true

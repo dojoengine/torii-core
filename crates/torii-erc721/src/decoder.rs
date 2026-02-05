@@ -388,7 +388,7 @@ impl Default for Erc721Decoder {
 
 #[async_trait]
 impl Decoder for Erc721Decoder {
-    fn decoder_name(&self) -> &str {
+    fn decoder_name(&self) -> &'static str {
         "erc721"
     }
 

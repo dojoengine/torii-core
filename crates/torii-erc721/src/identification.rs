@@ -42,7 +42,7 @@ impl Default for Erc721Rule {
 }
 
 impl IdentificationRule for Erc721Rule {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "erc721"
     }
 

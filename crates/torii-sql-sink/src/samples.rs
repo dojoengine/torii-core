@@ -9,7 +9,8 @@ use starknet::core::types::{EmittedEvent, Felt};
 use starknet::core::utils::cairo_short_string_to_felt;
 use starknet::macros::{felt, selector};
 
-const DUMMY_CONTRACT_ADDRESS: Felt = felt!("0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7");
+const DUMMY_CONTRACT_ADDRESS: Felt =
+    felt!("0x049d36570d4e46f48e99674bd3fcc84644ddd6b96f7c741b1562b82f9e004dc7");
 
 /// Generate sample events for testing the SQL sink
 ///
@@ -29,51 +30,40 @@ pub fn generate_sample_events() -> Vec<EmittedEvent> {
                 selector!("insert"),
                 cairo_short_string_to_felt("user").unwrap(),
             ],
-            data: vec![
-                Felt::from(100u64),
-            ],
+            data: vec![Felt::from(100u64)],
             block_hash: None,
             block_number: None,
             transaction_hash: Felt::ZERO,
         },
-
         EmittedEvent {
             from_address: DUMMY_CONTRACT_ADDRESS,
             keys: vec![
                 selector!("update"),
                 cairo_short_string_to_felt("user").unwrap(),
             ],
-            data: vec![
-                Felt::from(200u64),
-            ],
+            data: vec![Felt::from(200u64)],
             block_hash: None,
             block_number: None,
             transaction_hash: Felt::ZERO,
         },
-
         EmittedEvent {
             from_address: DUMMY_CONTRACT_ADDRESS,
             keys: vec![
                 selector!("insert"),
                 cairo_short_string_to_felt("order").unwrap(),
             ],
-            data: vec![
-                Felt::from(150u64),
-            ],
+            data: vec![Felt::from(150u64)],
             block_hash: None,
             block_number: None,
             transaction_hash: Felt::ZERO,
         },
-
         EmittedEvent {
             from_address: DUMMY_CONTRACT_ADDRESS,
             keys: vec![
                 selector!("update"),
                 cairo_short_string_to_felt("order").unwrap(),
             ],
-            data: vec![
-                Felt::from(300u64),
-            ],
+            data: vec![Felt::from(300u64)],
             block_hash: None,
             block_number: None,
             transaction_hash: Felt::ZERO,

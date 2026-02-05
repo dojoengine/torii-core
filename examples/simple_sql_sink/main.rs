@@ -9,9 +9,9 @@
 // Then: Open http://localhost:5173 in browser (after starting client)
 
 use std::sync::Arc;
-use torii::{ToriiConfig, run};
-use torii_sql_sink::{SqlDecoder, SqlSink};
 use tonic::transport::Server;
+use torii::{run, ToriiConfig};
+use torii_sql_sink::{SqlDecoder, SqlSink};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,7 +30,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Server::builder()
             .accept_http1(true)
-            .add_service(tonic_web::enable(SqlSinkServer::new((*sql_grpc_service).clone())))
+            .add_service(tonic_web::enable(SqlSinkServer::new(
+                (*sql_grpc_service).clone(),
+            )))
         // Torii will add the core service to this router
     };
 
@@ -46,10 +48,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .host("0.0.0.0".to_string())
         .add_sink_boxed(Box::new(sql_sink))
         .add_decoder(sql_decoder)
-        .with_grpc_router(grpc_router)  // Pass router with sink services
+        .with_grpc_router(grpc_router) // Pass router with sink services
         .with_sample_events(sample_events)
-        .cycle_interval(3)  // Generate events every 3 seconds
-        .events_per_cycle(2)  // 2 events per cycle
+        .cycle_interval(3) // Generate events every 3 seconds
+        .events_per_cycle(2) // 2 events per cycle
         .build();
 
     println!("Server Configuration:");

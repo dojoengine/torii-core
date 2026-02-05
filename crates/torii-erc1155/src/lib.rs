@@ -52,7 +52,7 @@ pub mod proto {
 pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/erc1155_descriptor.bin");
 
 // Re-export main types for convenience
-pub use balance_fetcher::{Erc1155BalanceFetcher, Erc1155BalanceFetchRequest};
+pub use balance_fetcher::{Erc1155BalanceFetchRequest, Erc1155BalanceFetcher};
 pub use decoder::{Erc1155Decoder, OperatorApproval, TransferBatch, TransferSingle};
 pub use grpc_service::Erc1155Service;
 pub use identification::Erc1155Rule;

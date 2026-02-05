@@ -50,8 +50,8 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use starknet::core::types::{
     requests::{GetBlockWithTxHashesRequest, GetEventsRequest},
-    BlockId, EmittedEvent, EventFilter, EventFilterWithPage, Felt, MaybePreConfirmedBlockWithTxHashes,
-    ResultPageRequest,
+    BlockId, EmittedEvent, EventFilter, EventFilterWithPage, Felt,
+    MaybePreConfirmedBlockWithTxHashes, ResultPageRequest,
 };
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use starknet::providers::{Provider, ProviderRequestData, ProviderResponseData};
@@ -226,7 +226,7 @@ impl ContractState {
         let continuation_token = parts.get(1).and_then(|token_part| {
             token_part
                 .strip_prefix("token:")
-                .map(|t| t.to_string())
+                .map(std::string::ToString::to_string)
                 .filter(|t| !t.is_empty())
         });
 
@@ -310,7 +310,7 @@ impl EventExtractor {
 
         for contract_config in &self.config.contracts {
             let address = contract_config.address;
-            let state_key = format!("{:#x}", address);
+            let state_key = format!("{address:#x}");
 
             // Try to load persisted state
             let state = if let Some(saved_state) = engine_db
@@ -323,11 +323,7 @@ impl EventExtractor {
                     saved_state = %saved_state,
                     "Resuming contract from saved state"
                 );
-                ContractState::deserialize(
-                    address,
-                    contract_config.to_block,
-                    &saved_state,
-                )?
+                ContractState::deserialize(address, contract_config.to_block, &saved_state)?
             } else {
                 tracing::info!(
                     target: "torii::etl::event",
@@ -472,7 +468,9 @@ impl EventExtractor {
             .collect();
 
         // Fetch timestamps
-        let timestamps = self.fetch_block_timestamps(&block_numbers, engine_db).await?;
+        let timestamps = self
+            .fetch_block_timestamps(&block_numbers, engine_db)
+            .await?;
 
         // Build block context map
         let mut blocks = HashMap::new();
@@ -498,7 +496,7 @@ impl EventExtractor {
             transactions,
             declared_classes: Vec::new(),
             deployed_contracts: Vec::new(),
-            cursor: None, // Will be set by extract()
+            cursor: None,     // Will be set by extract()
             chain_head: None, // Will be set by extract()
         })
     }
@@ -563,8 +561,10 @@ impl Extractor for EventExtractor {
         }
 
         let addresses: Vec<Felt> = requests_with_addresses.iter().map(|(a, _)| *a).collect();
-        let requests: Vec<ProviderRequestData> =
-            requests_with_addresses.into_iter().map(|(_, r)| r).collect();
+        let requests: Vec<ProviderRequestData> = requests_with_addresses
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect();
 
         tracing::info!(
             target: "torii::etl::event",
@@ -637,10 +637,7 @@ impl Extractor for EventExtractor {
                     }
                 }
             } else {
-                anyhow::bail!(
-                    "Unexpected response type for contract {:#x}",
-                    address
-                );
+                anyhow::bail!("Unexpected response type for contract {address:#x}");
             }
         }
 
@@ -674,10 +671,7 @@ impl Extractor for EventExtractor {
                 .set_extractor_state(EXTRACTOR_TYPE, &state.state_key(), &state.serialize())
                 .await
                 .with_context(|| {
-                    format!(
-                        "Failed to persist state for contract {}",
-                        state.state_key()
-                    )
+                    format!("Failed to persist state for contract {}", state.state_key())
                 })?;
         }
 
@@ -734,10 +728,7 @@ mod tests {
 
         let deserialized = ContractState::deserialize(address, to_block, &serialized).unwrap();
         assert_eq!(deserialized.current_block, 500);
-        assert_eq!(
-            deserialized.continuation_token,
-            Some("abc123".to_string())
-        );
+        assert_eq!(deserialized.continuation_token, Some("abc123".to_string()));
     }
 
     #[test]

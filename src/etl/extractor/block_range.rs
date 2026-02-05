@@ -12,9 +12,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::etl::engine_db::EngineDb;
-use crate::etl::extractor::starknet_helpers::{block_into_contexts, block_with_receipts_batch_from_block_range};
+use crate::etl::extractor::starknet_helpers::{
+    block_into_contexts, block_with_receipts_batch_from_block_range,
+};
 
-use super::{Extractor, ExtractionBatch, RetryPolicy};
+use super::{ExtractionBatch, Extractor, RetryPolicy};
 
 const EXTRACTOR_TYPE: &str = "block_range";
 const STATE_KEY: &str = "last_block";
@@ -118,7 +120,7 @@ impl BlockRangeExtractor {
                     self.current_block
                 );
             } else {
-                anyhow::bail!("Invalid cursor format: expected 'block:N', got '{}'", cursor_str);
+                anyhow::bail!("Invalid cursor format: expected 'block:N', got '{cursor_str}'");
             }
         } else {
             // Try loading from EngineDb
@@ -192,8 +194,7 @@ impl BlockRangeExtractor {
                 }
                 _ => {
                     anyhow::bail!(
-                        "Unexpected response type for block {}: expected GetBlockWithReceipts",
-                        block_num
+                        "Unexpected response type for block {block_num}: expected GetBlockWithReceipts"
                     );
                 }
             }
@@ -302,7 +303,9 @@ impl Extractor for BlockRangeExtractor {
         );
 
         // Fetch blocks
-        let blocks = self.fetch_blocks_batch(self.current_block, batch_end).await?;
+        let blocks = self
+            .fetch_blocks_batch(self.current_block, batch_end)
+            .await?;
 
         // Extract data from blocks and build enriched batch
         let mut all_events = Vec::new();
@@ -336,7 +339,7 @@ impl Extractor for BlockRangeExtractor {
         );
 
         // Update cursor
-        let cursor = format!("block:{}", batch_end);
+        let cursor = format!("block:{batch_end}");
 
         // NOTE: Cursor persistence is now handled by commit_cursor() which is called
         // AFTER sink processing completes. This ensures no data loss if the process

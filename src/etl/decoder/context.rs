@@ -62,18 +62,22 @@ impl DecoderContext {
     ) -> Self {
         let decoder_map = Self::build_decoder_map(&decoders);
 
-        let filter_desc = if contract_filter.mappings.is_empty() && contract_filter.blacklist.is_empty() {
-            "none (will try all decoders for all contracts)".to_string()
-        } else {
-            let mut parts = Vec::new();
-            if !contract_filter.mappings.is_empty() {
-                parts.push(format!("{} explicit mappings", contract_filter.mappings.len()));
-            }
-            if !contract_filter.blacklist.is_empty() {
-                parts.push(format!("{} blacklisted", contract_filter.blacklist.len()));
-            }
-            parts.join(", ")
-        };
+        let filter_desc =
+            if contract_filter.mappings.is_empty() && contract_filter.blacklist.is_empty() {
+                "none (will try all decoders for all contracts)".to_string()
+            } else {
+                let mut parts = Vec::new();
+                if !contract_filter.mappings.is_empty() {
+                    parts.push(format!(
+                        "{} explicit mappings",
+                        contract_filter.mappings.len()
+                    ));
+                }
+                if !contract_filter.blacklist.is_empty() {
+                    parts.push(format!("{} blacklisted", contract_filter.blacklist.len()));
+                }
+                parts.join(", ")
+            };
 
         tracing::info!(
             target: "torii::etl::decoder_context",
@@ -112,19 +116,23 @@ impl DecoderContext {
     ) -> Self {
         let decoder_map = Self::build_decoder_map(&decoders);
 
-        let filter_desc = if contract_filter.mappings.is_empty() && contract_filter.blacklist.is_empty() {
-            "none (using registry for contract identification)".to_string()
-        } else {
-            let mut parts = Vec::new();
-            if !contract_filter.mappings.is_empty() {
-                parts.push(format!("{} explicit mappings", contract_filter.mappings.len()));
-            }
-            if !contract_filter.blacklist.is_empty() {
-                parts.push(format!("{} blacklisted", contract_filter.blacklist.len()));
-            }
-            parts.push("+ registry".to_string());
-            parts.join(", ")
-        };
+        let filter_desc =
+            if contract_filter.mappings.is_empty() && contract_filter.blacklist.is_empty() {
+                "none (using registry for contract identification)".to_string()
+            } else {
+                let mut parts = Vec::new();
+                if !contract_filter.mappings.is_empty() {
+                    parts.push(format!(
+                        "{} explicit mappings",
+                        contract_filter.mappings.len()
+                    ));
+                }
+                if !contract_filter.blacklist.is_empty() {
+                    parts.push(format!("{} blacklisted", contract_filter.blacklist.len()));
+                }
+                parts.push("+ registry".to_string());
+                parts.join(", ")
+            };
 
         tracing::info!(
             target: "torii::etl::decoder_context",
@@ -160,12 +168,10 @@ impl DecoderContext {
             let name = decoder.decoder_name();
             let id = DecoderId::new(name);
 
-            if decoder_map.contains_key(&id) {
-                panic!(
-                    "Duplicate decoder name '{}' (id: {:?}). Decoder names must be unique!",
-                    name, id
-                );
-            }
+            assert!(
+                !decoder_map.contains_key(&id),
+                "Duplicate decoder name '{name}' (id: {id:?}). Decoder names must be unique!"
+            );
 
             tracing::debug!(
                 target: "torii::etl::decoder_context",
@@ -280,7 +286,7 @@ impl DecoderContext {
 
 #[async_trait]
 impl Decoder for DecoderContext {
-    fn decoder_name(&self) -> &str {
+    fn decoder_name(&self) -> &'static str {
         "context"
     }
 

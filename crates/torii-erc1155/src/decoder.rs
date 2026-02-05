@@ -425,7 +425,7 @@ impl Default for Erc1155Decoder {
 
 #[async_trait]
 impl Decoder for Erc1155Decoder {
-    fn decoder_name(&self) -> &str {
+    fn decoder_name(&self) -> &'static str {
         "erc1155"
     }
 
@@ -481,8 +481,8 @@ mod tests {
                 Felt::from(0x3u64), // to
             ],
             data: vec![
-                Felt::from(42u64), // id_low
-                Felt::ZERO,        // id_high
+                Felt::from(42u64),  // id_low
+                Felt::ZERO,         // id_high
                 Felt::from(100u64), // value_low
                 Felt::ZERO,         // value_high
             ],

@@ -123,7 +123,7 @@ pub struct Config {
 impl Config {
     /// Parse a hex address string to Felt
     pub fn parse_address(addr: &str) -> Result<Felt> {
-        Felt::from_hex(addr).map_err(|e| anyhow::anyhow!("Invalid address {}: {}", addr, e))
+        Felt::from_hex(addr).map_err(|e| anyhow::anyhow!("Invalid address {addr}: {e}"))
     }
 
     /// Get well-known ERC20 contracts (ETH, STRK)

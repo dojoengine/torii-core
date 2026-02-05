@@ -234,12 +234,12 @@ impl EngineDb {
         state_value: &str,
     ) -> Result<()> {
         sqlx::query(
-            r#"
+            r"
             INSERT INTO extractor_state (extractor_type, state_key, state_value, updated_at)
             VALUES (?, ?, ?, strftime('%s', 'now'))
             ON CONFLICT(extractor_type, state_key)
             DO UPDATE SET state_value = excluded.state_value, updated_at = strftime('%s', 'now')
-            "#,
+            ",
         )
         .bind(extractor_type)
         .bind(state_key)
@@ -359,9 +359,7 @@ impl EngineDb {
     ///
     /// # Returns
     /// Vector of (contract_address, decoder_ids, identified_at_timestamp)
-    pub async fn get_all_contract_decoders(
-        &self,
-    ) -> Result<Vec<(Felt, Vec<DecoderId>, i64)>> {
+    pub async fn get_all_contract_decoders(&self) -> Result<Vec<(Felt, Vec<DecoderId>, i64)>> {
         let rows = sqlx::query(
             "SELECT contract_address, decoder_ids, identified_at FROM contract_decoders",
         )
@@ -376,7 +374,7 @@ impl EngineDb {
 
             // Parse contract address
             let contract_address = Felt::from_hex(&addr_hex)
-                .context(format!("Invalid contract address: {}", addr_hex))?;
+                .context(format!("Invalid contract address: {addr_hex}"))?;
 
             // Parse decoder IDs (comma-separated u64 values)
             let decoder_ids: Vec<DecoderId> = if decoder_ids_str.is_empty() {
@@ -405,7 +403,7 @@ impl EngineDb {
         contract: Felt,
         decoder_ids: &[DecoderId],
     ) -> Result<()> {
-        let addr_hex = format!("{:#x}", contract);
+        let addr_hex = format!("{contract:#x}");
         let decoder_ids_str: String = decoder_ids
             .iter()
             .map(|id| id.as_u64().to_string())
@@ -413,12 +411,12 @@ impl EngineDb {
             .join(",");
 
         sqlx::query(
-            r#"
+            r"
             INSERT INTO contract_decoders (contract_address, decoder_ids, identified_at)
             VALUES (?, ?, strftime('%s', 'now'))
             ON CONFLICT(contract_address)
             DO UPDATE SET decoder_ids = excluded.decoder_ids, identified_at = strftime('%s', 'now')
-            "#,
+            ",
         )
         .bind(&addr_hex)
         .bind(&decoder_ids_str)
@@ -435,16 +433,14 @@ impl EngineDb {
     ///
     /// # Returns
     /// Some(decoder_ids) if found, None otherwise
-    pub async fn get_contract_decoders(
-        &self,
-        contract: Felt,
-    ) -> Result<Option<Vec<DecoderId>>> {
-        let addr_hex = format!("{:#x}", contract);
+    pub async fn get_contract_decoders(&self, contract: Felt) -> Result<Option<Vec<DecoderId>>> {
+        let addr_hex = format!("{contract:#x}");
 
-        let row = sqlx::query("SELECT decoder_ids FROM contract_decoders WHERE contract_address = ?")
-            .bind(&addr_hex)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row =
+            sqlx::query("SELECT decoder_ids FROM contract_decoders WHERE contract_address = ?")
+                .bind(&addr_hex)
+                .fetch_optional(&self.pool)
+                .await?;
 
         match row {
             Some(r) => {

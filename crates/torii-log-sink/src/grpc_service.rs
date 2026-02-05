@@ -76,7 +76,11 @@ impl LogSinkTrait for LogSinkService {
         request: Request<QueryLogsRequest>,
     ) -> Result<Response<QueryLogsResponse>, Status> {
         let req = request.into_inner();
-        let limit = if req.limit == 0 { 5 } else { req.limit as usize };
+        let limit = if req.limit == 0 {
+            5
+        } else {
+            req.limit as usize
+        };
 
         let logs = self.log_store.get_recent(limit);
 
@@ -117,9 +121,10 @@ impl LogSinkTrait for LogSinkService {
         // Capture count before moving.
         let initial_count = initial_updates.len();
 
-        let combined_stream = tokio_stream::iter(initial_updates).chain(stream.map(|result| {
-            result.map_err(|e| Status::internal(format!("Broadcast error: {}", e)))
-        }));
+        let combined_stream =
+            tokio_stream::iter(initial_updates).chain(stream.map(|result| {
+                result.map_err(|e| Status::internal(format!("Broadcast error: {e}")))
+            }));
 
         tracing::info!(
             target: "torii::sinks::log",

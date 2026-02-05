@@ -3,12 +3,7 @@
 //! Provides core HTTP endpoints and a simple state pattern that can be extended.
 //! Sinks can add their own routes via the `Sink::build_routes()` method.
 
-use axum::{
-    extract::State,
-    response::Json,
-    routing::get,
-    Router,
-};
+use axum::{extract::State, response::Json, routing::get, Router};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 

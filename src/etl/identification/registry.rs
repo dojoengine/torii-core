@@ -204,18 +204,15 @@ impl ContractRegistry {
 
             // Map contract → class_hash, track failures
             for (addr, response) in chunk.iter().zip(class_hash_responses) {
-                match response {
-                    ProviderResponseData::GetClassHashAt(class_hash) => {
-                        contract_to_class.insert(*addr, class_hash);
-                    }
-                    _ => {
-                        tracing::debug!(
-                            target: "torii::etl::identification",
-                            contract = %format!("{:#x}", addr),
-                            "Failed to get class hash, caching as empty"
-                        );
-                        self.cache_empty(*addr).await;
-                    }
+                if let ProviderResponseData::GetClassHashAt(class_hash) = response {
+                    contract_to_class.insert(*addr, class_hash);
+                } else {
+                    tracing::debug!(
+                        target: "torii::etl::identification",
+                        contract = %format!("{:#x}", addr),
+                        "Failed to get class hash, caching as empty"
+                    );
+                    self.cache_empty(*addr).await;
                 }
             }
         }

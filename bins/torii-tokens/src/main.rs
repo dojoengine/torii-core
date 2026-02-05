@@ -52,7 +52,8 @@ use torii::etl::identification::ContractRegistry;
 // Import from ERC20 library crate
 use torii_erc20::proto::erc20_server::Erc20Server;
 use torii_erc20::{
-    Erc20Decoder, Erc20Rule, Erc20Service, Erc20Sink, Erc20Storage, FILE_DESCRIPTOR_SET as ERC20_DESCRIPTOR_SET,
+    Erc20Decoder, Erc20Rule, Erc20Service, Erc20Sink, Erc20Storage,
+    FILE_DESCRIPTOR_SET as ERC20_DESCRIPTOR_SET,
 };
 
 // Import from ERC721 library crate
@@ -113,7 +114,9 @@ async fn run_indexer(config: Config) -> Result<()> {
         tracing::error!(
             "Event mode requires explicit contracts. Use --erc20, --erc721, --erc1155, or --include-well-known"
         );
-        tracing::error!("Example: torii-tokens --mode event --include-well-known --from-block 100000");
+        tracing::error!(
+            "Example: torii-tokens --mode event --include-well-known --from-block 100000"
+        );
         return Ok(());
     }
 
@@ -185,7 +188,10 @@ async fn run_indexer(config: Config) -> Result<()> {
         ExtractionMode::Event => {
             tracing::info!("Using Event mode (per-contract cursors)");
             tracing::info!("  Chunk size: {} events", config.event_chunk_size);
-            tracing::info!("  Block batch size: {} blocks", config.event_block_batch_size);
+            tracing::info!(
+                "  Block batch size: {} blocks",
+                config.event_block_batch_size
+            );
 
             // Collect ALL contracts for event extraction
             let mut event_configs = Vec::new();
@@ -217,7 +223,10 @@ async fn run_indexer(config: Config) -> Result<()> {
                 });
             }
 
-            tracing::info!("  Configured {} contracts for event extraction", event_configs.len());
+            tracing::info!(
+                "  Configured {} contracts for event extraction",
+                event_configs.len()
+            );
 
             let extractor_config = EventExtractorConfig {
                 contracts: event_configs,
@@ -493,7 +502,7 @@ async fn run_indexer(config: Config) -> Result<()> {
     // Run Torii (blocks until shutdown)
     torii::run(torii_config)
         .await
-        .map_err(|e| anyhow::anyhow!("Torii error: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Torii error: {e}"))?;
 
     tracing::info!("Torii shutdown complete");
 

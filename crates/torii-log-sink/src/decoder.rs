@@ -46,7 +46,7 @@ impl LogDecoder {
 
 #[async_trait]
 impl Decoder for LogDecoder {
-    fn decoder_name(&self) -> &str {
+    fn decoder_name(&self) -> &'static str {
         "log"
     }
 
@@ -54,7 +54,7 @@ impl Decoder for LogDecoder {
         // Apply key filter if specified
         if let Some(ref filter) = self.key_filter {
             let matches = event.keys.iter().any(|k| {
-                let key_hex = format!("{:#x}", k);
+                let key_hex = format!("{k:#x}");
                 key_hex.contains(filter)
             });
             if !matches {
@@ -64,22 +64,22 @@ impl Decoder for LogDecoder {
 
         // Extract log message from event data.
         // For this example, we'll convert the first data field to a string representation.
-        let message = if !event.data.is_empty() {
-            format!("Event data: {:#x}", event.data[0])
-        } else {
+        let message = if event.data.is_empty() {
             "Empty event data".to_string()
+        } else {
+            format!("Event data: {:#x}", event.data[0])
         };
 
-        let event_key = if !event.keys.is_empty() {
-            format!("{:#x}", event.keys[0])
-        } else {
+        let event_key = if event.keys.is_empty() {
             "no-key".to_string()
+        } else {
+            format!("{:#x}", event.keys[0])
         };
 
         let log_entry = LogEntry {
             message,
             block_number: event.block_number.unwrap_or(0),
-            event_key: event_key.clone(),
+            event_key,
         };
 
         // Create envelope with unique ID

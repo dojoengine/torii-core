@@ -51,7 +51,7 @@ pub mod proto {
 pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/erc20_descriptor.bin");
 
 // Re-export main types for convenience
-pub use balance_fetcher::{BalanceFetcher, BalanceFetchRequest};
+pub use balance_fetcher::{BalanceFetchRequest, BalanceFetcher};
 pub use decoder::{Approval, Erc20Decoder, Transfer};
 pub use grpc_service::Erc20Service;
 pub use identification::Erc20Rule;

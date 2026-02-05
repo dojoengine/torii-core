@@ -8,8 +8,8 @@ use axum::Router;
 use std::sync::Arc;
 
 use super::{EventBus, Sink, SinkContext};
-use crate::etl::extractor::ExtractionBatch;
 use crate::etl::envelope::Envelope;
+use crate::etl::extractor::ExtractionBatch;
 
 /// MultiSink runs multiple sinks and merges their routes
 pub struct MultiSink {
@@ -30,7 +30,7 @@ impl MultiSink {
 
 #[async_trait]
 impl Sink for MultiSink {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "multi"
     }
 
@@ -39,11 +39,7 @@ impl Sink for MultiSink {
         vec![]
     }
 
-    async fn process(
-        &self,
-        envelopes: &[Envelope],
-        batch: &ExtractionBatch,
-    ) -> anyhow::Result<()> {
+    async fn process(&self, envelopes: &[Envelope], batch: &ExtractionBatch) -> anyhow::Result<()> {
         // TODO: to optimize the performance, we can easily parallelize the processing of the envelopes by the sinks
         // since they are totally independent of each other.
         // Run each sink in sequence
@@ -140,11 +136,7 @@ mod tests {
         }
 
         fn topics(&self) -> Vec<super::super::TopicInfo> {
-            vec![super::super::TopicInfo::new(
-                "test",
-                vec![],
-                "Test topic",
-            )]
+            vec![super::super::TopicInfo::new("test", vec![], "Test topic")]
         }
 
         fn build_routes(&self) -> Router {
@@ -163,7 +155,7 @@ mod tests {
     #[tokio::test]
     async fn test_multi_sink() {
         let sub_manager = Arc::new(SubscriptionManager::new());
-        let event_bus = Arc::new(EventBus::new(sub_manager));
+        let _event_bus = Arc::new(EventBus::new(sub_manager));
 
         // Create multiple sinks
         let sinks: Vec<Arc<dyn Sink>> = vec![

@@ -8,19 +8,19 @@
 use crate::proto::{
     erc20_server::Erc20 as Erc20Trait, Approval, ApprovalFilter, ApprovalUpdate, Cursor,
     GetApprovalsRequest, GetApprovalsResponse, GetStatsRequest, GetStatsResponse,
-    GetTransfersRequest, GetTransfersResponse, SubscribeApprovalsRequest, SubscribeTransfersRequest,
-    Transfer, TransferFilter, TransferUpdate,
+    GetTransfersRequest, GetTransfersResponse, SubscribeApprovalsRequest,
+    SubscribeTransfersRequest, Transfer, TransferFilter, TransferUpdate,
 };
 use crate::storage::{
     ApprovalCursor, ApprovalData, Erc20Storage, TransferCursor, TransferData, TransferDirection,
 };
 use async_trait::async_trait;
 use futures::stream::Stream;
+use starknet::core::types::Felt;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tonic::{Request, Response, Status};
-use starknet::core::types::Felt;
 use torii_common::{bytes_to_felt, u256_to_bytes};
 
 /// gRPC service implementation for ERC20
@@ -135,7 +135,7 @@ impl Erc20Service {
         }
 
         // Token whitelist
-        if !filter.tokens.is_empty() && !filter.tokens.iter().any(|t| *t == transfer.token) {
+        if !filter.tokens.is_empty() && !filter.tokens.contains(&transfer.token) {
             return false;
         }
 
@@ -179,7 +179,7 @@ impl Erc20Service {
         }
 
         // Token whitelist
-        if !filter.tokens.is_empty() && !filter.tokens.iter().any(|t| *t == approval.token) {
+        if !filter.tokens.is_empty() && !filter.tokens.contains(&approval.token) {
             return false;
         }
 
@@ -222,9 +222,7 @@ impl Erc20Trait for Erc20Service {
 
         let direction = match crate::proto::TransferDirection::try_from(filter.direction) {
             Ok(crate::proto::TransferDirection::DirectionSent) => TransferDirection::Sent,
-            Ok(crate::proto::TransferDirection::DirectionReceived) => {
-                TransferDirection::Received
-            }
+            Ok(crate::proto::TransferDirection::DirectionReceived) => TransferDirection::Received,
             _ => TransferDirection::All,
         };
 
@@ -244,9 +242,9 @@ impl Erc20Trait for Erc20Service {
         tracing::debug!(
             target: "torii_erc20::grpc",
             "GetTransfers: wallet={:?}, from={:?}, to={:?}, tokens={}, limit={}",
-            wallet.map(|w| format!("{:#x}", w)),
-            from.map(|f| format!("{:#x}", f)),
-            to.map(|t| format!("{:#x}", t)),
+            wallet.map(|w| format!("{w:#x}")),
+            from.map(|f| format!("{f:#x}")),
+            to.map(|t| format!("{t:#x}")),
             tokens.len(),
             limit
         );
@@ -265,7 +263,7 @@ impl Erc20Trait for Erc20Service {
                 cursor,
                 limit,
             )
-            .map_err(|e| Status::internal(format!("Query failed: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
 
         let proto_transfers: Vec<Transfer> =
             transfers.iter().map(Self::transfer_data_to_proto).collect();
@@ -322,9 +320,9 @@ impl Erc20Trait for Erc20Service {
         tracing::debug!(
             target: "torii_erc20::grpc",
             "GetApprovals: account={:?}, owner={:?}, spender={:?}, tokens={}, limit={}",
-            account.map(|a| format!("{:#x}", a)),
-            owner.map(|o| format!("{:#x}", o)),
-            spender.map(|s| format!("{:#x}", s)),
+            account.map(|a| format!("{a:#x}")),
+            owner.map(|o| format!("{o:#x}")),
+            spender.map(|s| format!("{s:#x}")),
             tokens.len(),
             limit
         );
@@ -342,7 +340,7 @@ impl Erc20Trait for Erc20Service {
                 cursor,
                 limit,
             )
-            .map_err(|e| Status::internal(format!("Query failed: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
 
         let proto_approvals: Vec<Approval> =
             approvals.iter().map(Self::approval_data_to_proto).collect();
@@ -521,22 +519,22 @@ impl Erc20Trait for Erc20Service {
         let total_transfers = self
             .storage
             .get_transfer_count()
-            .map_err(|e| Status::internal(format!("Failed to get transfer count: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Failed to get transfer count: {e}")))?;
 
         let total_approvals = self
             .storage
             .get_approval_count()
-            .map_err(|e| Status::internal(format!("Failed to get approval count: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Failed to get approval count: {e}")))?;
 
         let unique_tokens = self
             .storage
             .get_token_count()
-            .map_err(|e| Status::internal(format!("Failed to get token count: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Failed to get token count: {e}")))?;
 
         let latest_block = self
             .storage
             .get_latest_block()
-            .map_err(|e| Status::internal(format!("Failed to get latest block: {}", e)))?
+            .map_err(|e| Status::internal(format!("Failed to get latest block: {e}")))?
             .unwrap_or(0);
 
         tracing::debug!(

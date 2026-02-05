@@ -10,6 +10,9 @@
 //
 // Run: cargo run --example http_only_sink
 
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use starknet::core::types::EmittedEvent;
 use std::sync::{Arc, RwLock};
 use torii::axum::{
     extract::State,
@@ -22,9 +25,6 @@ use torii::etl::extractor::ExtractionBatch;
 use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
 use torii::etl::Decoder;
 use torii::{async_trait, run, ToriiConfig};
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use starknet::core::types::EmittedEvent;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 1. DEFINE EVENT TYPE
@@ -62,6 +62,12 @@ pub struct EventStore {
     events: Arc<RwLock<Vec<StoredEvent>>>,
 }
 
+impl Default for EventStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventStore {
     pub fn new() -> Self {
         Self {
@@ -88,6 +94,12 @@ impl EventStore {
 
 pub struct HttpSink {
     store: EventStore,
+}
+
+impl Default for HttpSink {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HttpSink {
@@ -131,7 +143,7 @@ impl HttpSink {
 
 #[async_trait]
 impl Sink for HttpSink {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "http"
     }
 
@@ -144,7 +156,11 @@ impl Sink for HttpSink {
         vec![]
     }
 
-    async fn initialize(&mut self, _event_bus: Arc<EventBus>, _context: &SinkContext) -> Result<()> {
+    async fn initialize(
+        &mut self,
+        _event_bus: Arc<EventBus>,
+        _context: &SinkContext,
+    ) -> Result<()> {
         tracing::info!("HttpSink initialized (HTTP-only, no EventBus publishing)");
         Ok(())
     }
@@ -234,6 +250,12 @@ pub struct HttpDecoder {
     counter: Arc<std::sync::atomic::AtomicU64>,
 }
 
+impl Default for HttpDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HttpDecoder {
     pub fn new() -> Self {
         Self {
@@ -244,7 +266,7 @@ impl HttpDecoder {
 
 #[async_trait]
 impl Decoder for HttpDecoder {
-    fn decoder_name(&self) -> &str {
+    fn decoder_name(&self) -> &'static str {
         "http"
     }
 
@@ -261,7 +283,7 @@ impl Decoder for HttpDecoder {
         };
 
         Ok(vec![Envelope::new(
-            format!("http_event_{}", id),
+            format!("http_event_{id}"),
             Box::new(stored_event),
             Default::default(),
         )])

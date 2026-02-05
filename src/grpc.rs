@@ -192,7 +192,7 @@ impl Torii for ToriiService {
             .iter()
             .map(|topic_info| proto::TopicInfo {
                 name: topic_info.name.clone(),
-                sink_name: "".to_string(), // Can be populated by sinks if needed
+                sink_name: String::new(), // Can be populated by sinks if needed
                 available_filters: topic_info.available_filters.clone(),
                 description: topic_info.description.clone(),
             })
@@ -228,7 +228,7 @@ impl Torii for ToriiService {
         let client_id = sub_req.client_id.clone();
 
         // Register client and set up subscriptions
-        subscription_manager.register_client(client_id.clone(), tx.clone());
+        subscription_manager.register_client(client_id.clone(), tx);
         subscription_manager.update_subscriptions(
             &client_id,
             sub_req.topics,
@@ -242,8 +242,8 @@ impl Torii for ToriiService {
         );
 
         // Spawn task to clean up on disconnect
-        let cleanup_manager = subscription_manager.clone();
-        let cleanup_id = client_id.clone();
+        let cleanup_manager = subscription_manager;
+        let cleanup_id = client_id;
         tokio::spawn(async move {
             // Wait for receiver to be dropped (client disconnects)
             tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
@@ -251,7 +251,7 @@ impl Torii for ToriiService {
         });
 
         // Convert mpsc receiver to stream
-        let output_stream = ReceiverStream::new(rx).map(|update| Ok(update)).boxed();
+        let output_stream = ReceiverStream::new(rx).map(Ok).boxed();
 
         Ok(Response::new(output_stream))
     }
@@ -301,7 +301,7 @@ impl Torii for ToriiService {
         });
 
         // Convert mpsc receiver to stream
-        let output_stream = ReceiverStream::new(rx).map(|update| Ok(update)).boxed();
+        let output_stream = ReceiverStream::new(rx).map(Ok).boxed();
 
         Ok(Response::new(output_stream))
     }

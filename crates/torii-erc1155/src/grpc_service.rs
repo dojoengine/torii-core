@@ -8,12 +8,12 @@ use crate::proto::{
 use crate::storage::{Erc1155Storage, TokenTransferData, TransferCursor};
 use async_trait::async_trait;
 use futures::stream::Stream;
+use starknet::core::types::Felt;
 use starknet::core::types::U256;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tonic::{Request, Response, Status};
-use starknet::core::types::Felt;
 use torii_common::{bytes_to_felt, bytes_to_u256, u256_to_bytes};
 
 /// gRPC service implementation for ERC1155
@@ -94,12 +94,12 @@ impl Erc1155Service {
         }
 
         // Token whitelist
-        if !filter.tokens.is_empty() && !filter.tokens.iter().any(|t| *t == transfer.token) {
+        if !filter.tokens.is_empty() && !filter.tokens.contains(&transfer.token) {
             return false;
         }
 
         // Token ID whitelist
-        if !filter.token_ids.is_empty() && !filter.token_ids.iter().any(|tid| *tid == transfer.token_id) {
+        if !filter.token_ids.is_empty() && !filter.token_ids.contains(&transfer.token_id) {
             return false;
         }
 
@@ -139,11 +139,7 @@ impl Erc1155Trait for Erc1155Service {
             .iter()
             .filter_map(|b| bytes_to_felt(b))
             .collect();
-        let token_ids: Vec<U256> = filter
-            .token_ids
-            .iter()
-            .map(|b| bytes_to_u256(b))
-            .collect();
+        let token_ids: Vec<U256> = filter.token_ids.iter().map(|b| bytes_to_u256(b)).collect();
 
         let cursor = req.cursor.map(|c| TransferCursor {
             block_number: c.block_number,
@@ -170,7 +166,7 @@ impl Erc1155Trait for Erc1155Service {
                 cursor,
                 limit,
             )
-            .map_err(|e| Status::internal(format!("Query failed: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
 
         let proto_transfers: Vec<TokenTransfer> =
             transfers.iter().map(Self::transfer_data_to_proto).collect();
@@ -243,22 +239,22 @@ impl Erc1155Trait for Erc1155Service {
         let total_transfers = self
             .storage
             .get_transfer_count()
-            .map_err(|e| Status::internal(format!("Failed to get transfer count: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Failed to get transfer count: {e}")))?;
 
         let unique_tokens = self
             .storage
             .get_token_count()
-            .map_err(|e| Status::internal(format!("Failed to get token count: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Failed to get token count: {e}")))?;
 
         let unique_token_ids = self
             .storage
             .get_token_id_count()
-            .map_err(|e| Status::internal(format!("Failed to get token ID count: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Failed to get token ID count: {e}")))?;
 
         let latest_block = self
             .storage
             .get_latest_block()
-            .map_err(|e| Status::internal(format!("Failed to get latest block: {}", e)))?
+            .map_err(|e| Status::internal(format!("Failed to get latest block: {e}")))?
             .unwrap_or(0);
 
         Ok(Response::new(GetStatsResponse {

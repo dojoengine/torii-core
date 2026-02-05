@@ -120,18 +120,17 @@ impl BalanceFetcher {
             // Process responses
             for (idx, response) in responses.into_iter().enumerate() {
                 let req = &chunk[idx];
-                let balance = match response {
-                    ProviderResponseData::Call(felts) => parse_u256_result(&felts),
-                    _ => {
-                        tracing::warn!(
-                            target: "torii_erc20::balance_fetcher",
-                            token = %req.token,
-                            wallet = %req.wallet,
-                            block = req.block_number,
-                            "Unexpected response type for balance_of, using 0"
-                        );
-                        U256::from(0u64)
-                    }
+                let balance = if let ProviderResponseData::Call(felts) = response {
+                    parse_u256_result(&felts)
+                } else {
+                    tracing::warn!(
+                        target: "torii_erc20::balance_fetcher",
+                        token = %req.token,
+                        wallet = %req.wallet,
+                        block = req.block_number,
+                        "Unexpected response type for balance_of, using 0"
+                    );
+                    U256::from(0u64)
                 };
                 all_results.push((req.token, req.wallet, balance));
             }

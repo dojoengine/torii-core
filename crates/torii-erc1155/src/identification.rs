@@ -39,7 +39,7 @@ impl Default for Erc1155Rule {
 }
 
 impl IdentificationRule for Erc1155Rule {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "erc1155"
     }
 

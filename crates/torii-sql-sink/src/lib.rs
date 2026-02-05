@@ -21,13 +21,13 @@ use prost_types::Any;
 use sqlx::sqlite::SqlitePool;
 use std::sync::Arc;
 
+use starknet::core::types::EmittedEvent;
 use torii::etl::{
     envelope::{Envelope, TypeId},
     extractor::ExtractionBatch,
     sink::{EventBus, Sink, TopicInfo},
 };
 use torii::grpc::UpdateType;
-use starknet::core::types::EmittedEvent;
 
 pub use decoder::{SqlDecoder, SqlInsert, SqlUpdate};
 pub use grpc_service::SqlSinkService;
@@ -87,7 +87,7 @@ impl SqlSink {
 
         // Create tables for SQL operations
         sqlx::query(
-            r#"
+            r"
             CREATE TABLE IF NOT EXISTS sql_operation (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 table_name TEXT NOT NULL,
@@ -95,7 +95,7 @@ impl SqlSink {
                 value INTEGER NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-            "#,
+            ",
         )
         .execute(pool.as_ref())
         .await?;
@@ -192,7 +192,7 @@ impl SqlSink {
 
 #[async_trait]
 impl Sink for SqlSink {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "sql"
     }
 
@@ -205,14 +205,14 @@ impl Sink for SqlSink {
         envelopes: &[Envelope],
         _batch: &ExtractionBatch,
     ) -> anyhow::Result<()> {
-        for envelope in envelopes.iter() {
+        for envelope in envelopes {
             if envelope.type_id == TypeId::new("sql.insert") {
                 if let Some(insert) = envelope.downcast_ref::<SqlInsert>() {
                     sqlx::query(
-                        r#"
+                        r"
                         INSERT INTO sql_operation (table_name, operation, value)
                         VALUES (?, ?, ?)
-                        "#,
+                        ",
                     )
                     .bind(&insert.table)
                     .bind("insert")
@@ -260,14 +260,13 @@ impl Sink for SqlSink {
                     };
                     let _ = self.grpc_service.update_tx.send(update);
                 }
-            }
-            else if envelope.type_id == TypeId::new("sql.update") {
+            } else if envelope.type_id == TypeId::new("sql.update") {
                 if let Some(update) = envelope.downcast_ref::<SqlUpdate>() {
                     sqlx::query(
-                        r#"
+                        r"
                         INSERT INTO sql_operation (table_name, operation, value)
                         VALUES (?, ?, ?)
-                        "#,
+                        ",
                     )
                     .bind(&update.table)
                     .bind("update")

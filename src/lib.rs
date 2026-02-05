@@ -28,8 +28,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tonic::transport::Server;
 use tokio_util::sync::CancellationToken;
+use tonic::transport::Server;
 use tower_http::cors::{Any as CorsAny, CorsLayer};
 
 use etl::decoder::{ContractFilter, DecoderId};
@@ -130,7 +130,13 @@ pub struct ToriiConfig {
     /// contract→decoder mappings for contracts not in explicit mappings.
     /// The cache is typically populated by a ContractRegistry running batch
     /// identification before decoding.
-    pub registry_cache: Option<Arc<tokio::sync::RwLock<std::collections::HashMap<starknet::core::types::Felt, Vec<DecoderId>>>>>,
+    pub registry_cache: Option<
+        Arc<
+            tokio::sync::RwLock<
+                std::collections::HashMap<starknet::core::types::Felt, Vec<DecoderId>>,
+            >,
+        >,
+    >,
 
     /// Optional contract identifier for runtime identification.
     ///
@@ -153,6 +159,7 @@ impl ToriiConfig {
 }
 
 /// Builder for ToriiConfig.
+#[derive(Default)]
 pub struct ToriiConfigBuilder {
     port: Option<u16>,
     host: Option<String>,
@@ -167,32 +174,15 @@ pub struct ToriiConfigBuilder {
     database_root: Option<PathBuf>,
     contract_filter: Option<ContractFilter>,
     identification_rules: Vec<Box<dyn IdentificationRule>>,
-    registry_cache: Option<Arc<tokio::sync::RwLock<std::collections::HashMap<starknet::core::types::Felt, Vec<DecoderId>>>>>,
+    registry_cache: Option<
+        Arc<
+            tokio::sync::RwLock<
+                std::collections::HashMap<starknet::core::types::Felt, Vec<DecoderId>>,
+            >,
+        >,
+    >,
     contract_identifier: Option<Arc<dyn ContractIdentifier>>,
     shutdown_timeout: Option<u64>,
-}
-
-impl Default for ToriiConfigBuilder {
-    fn default() -> Self {
-        Self {
-            port: None,
-            host: None,
-            sinks: Vec::new(),
-            decoders: Vec::new(),
-            partial_grpc_router: None,
-            custom_reflection: false,
-            cycle_interval: None,
-            events_per_cycle: None,
-            sample_events: Vec::new(),
-            extractor: None,
-            database_root: None,
-            contract_filter: None,
-            identification_rules: Vec::new(),
-            registry_cache: None,
-            contract_identifier: None,
-            shutdown_timeout: None,
-        }
-    }
 }
 
 impl ToriiConfigBuilder {
@@ -327,9 +317,15 @@ impl ToriiConfigBuilder {
     ///
     /// Events from this contract will ONLY be tried with the specified decoders.
     /// This provides O(k) performance where k is the number of mapped decoders.
-    pub fn map_contract(mut self, contract: starknet::core::types::Felt, decoder_ids: Vec<DecoderId>) -> Self {
-        self.contract_filter.get_or_insert_with(ContractFilter::new)
-            .mappings.insert(contract, decoder_ids);
+    pub fn map_contract(
+        mut self,
+        contract: starknet::core::types::Felt,
+        decoder_ids: Vec<DecoderId>,
+    ) -> Self {
+        self.contract_filter
+            .get_or_insert_with(ContractFilter::new)
+            .mappings
+            .insert(contract, decoder_ids);
         self
     }
 
@@ -337,8 +333,10 @@ impl ToriiConfigBuilder {
     ///
     /// Events from this contract will be discarded immediately (O(1) check).
     pub fn blacklist_contract(mut self, contract: starknet::core::types::Felt) -> Self {
-        self.contract_filter.get_or_insert_with(ContractFilter::new)
-            .blacklist.insert(contract);
+        self.contract_filter
+            .get_or_insert_with(ContractFilter::new)
+            .blacklist
+            .insert(contract);
         self
     }
 
@@ -346,8 +344,10 @@ impl ToriiConfigBuilder {
     ///
     /// Events from these contracts will be discarded immediately (O(1) check).
     pub fn blacklist_contracts(mut self, contracts: Vec<starknet::core::types::Felt>) -> Self {
-        self.contract_filter.get_or_insert_with(ContractFilter::new)
-            .blacklist.extend(contracts);
+        self.contract_filter
+            .get_or_insert_with(ContractFilter::new)
+            .blacklist
+            .extend(contracts);
         self
     }
 
@@ -402,7 +402,11 @@ impl ToriiConfigBuilder {
     /// ```
     pub fn with_registry_cache(
         mut self,
-        cache: Arc<tokio::sync::RwLock<std::collections::HashMap<starknet::core::types::Felt, Vec<DecoderId>>>>,
+        cache: Arc<
+            tokio::sync::RwLock<
+                std::collections::HashMap<starknet::core::types::Felt, Vec<DecoderId>>,
+            >,
+        >,
     ) -> Self {
         self.registry_cache = Some(cache);
         self
@@ -456,11 +460,11 @@ impl ToriiConfigBuilder {
     /// Panics if the contract filter configuration is invalid (e.g., a contract appears
     /// in both the mapping and blacklist).
     pub fn build(self) -> ToriiConfig {
-        let contract_filter = self.contract_filter.unwrap_or_else(ContractFilter::new);
+        let contract_filter = self.contract_filter.unwrap_or_default();
 
         // Validate contract filter
         if let Err(e) = contract_filter.validate() {
-            panic!("Invalid contract filter configuration: {}", e);
+            panic!("Invalid contract filter configuration: {e}");
         }
 
         ToriiConfig {
@@ -536,7 +540,10 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
                 config.sample_events.len()
             );
         }
-        Box::new(SampleExtractor::new(config.sample_events, config.events_per_cycle))
+        Box::new(SampleExtractor::new(
+            config.sample_events,
+            config.events_per_cycle,
+        ))
     };
 
     // Create DecoderContext with contract filtering and optional registry
@@ -556,11 +563,7 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
             target: "torii::etl",
             "Creating DecoderContext without registry (all decoders for unmapped contracts)"
         );
-        DecoderContext::new(
-            config.decoders,
-            engine_db.clone(),
-            config.contract_filter,
-        )
+        DecoderContext::new(config.decoders, engine_db.clone(), config.contract_filter)
     };
 
     let topics = multi_sink.topics();
@@ -579,7 +582,9 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
             .add_service(tonic_web::enable(grpc_service))
     };
 
-    if !config.custom_reflection {
+    if config.custom_reflection {
+        tracing::info!(target: "torii::main", "Using custom reflection services (user-provided)");
+    } else {
         let reflection_v1 = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
             .build_v1()?;
@@ -593,8 +598,6 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
             .add_service(tonic_web::enable(reflection_v1alpha));
 
         tracing::info!(target: "torii::main", "Added reflection services (core descriptors only)");
-    } else {
-        tracing::info!(target: "torii::main", "Using custom reflection services (user-provided)");
     }
 
     let sinks_routes = multi_sink.build_routes();
@@ -787,10 +790,10 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
         let terminate = std::future::pending::<()>();
 
         tokio::select! {
-            _ = ctrl_c => {
+            () = ctrl_c => {
                 tracing::info!(target: "torii::main", "Received SIGINT (Ctrl+C), initiating graceful shutdown...");
             }
-            _ = terminate => {
+            () = terminate => {
                 tracing::info!(target: "torii::main", "Received SIGTERM, initiating graceful shutdown...");
             }
         }
@@ -800,8 +803,7 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
     };
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let server = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal);
+    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal);
 
     // Give active connections 15 seconds to close gracefully, then force shutdown.
     // This prevents hanging on long-lived gRPC streaming connections.
@@ -812,7 +814,7 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
                 tracing::error!(target: "torii::main", "Server error: {}", e);
             }
         }
-        _ = async {
+        () = async {
             // Wait for shutdown signal + timeout
             shutdown_token.cancelled().await;
             tokio::time::sleep(Duration::from_secs(SERVER_SHUTDOWN_TIMEOUT_SECS)).await;

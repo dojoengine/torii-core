@@ -33,3 +33,6 @@ tonic-build = "0.12"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+
+[lints]
+workspace = true

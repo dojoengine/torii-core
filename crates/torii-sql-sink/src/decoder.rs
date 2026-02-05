@@ -75,7 +75,7 @@ impl SqlDecoder {
     ///
     /// # Arguments
     /// * `contract_filters` - List of contract addresses to filter by.
-    ///                        If empty, processes all events.
+    ///   If empty, processes all events.
     pub fn new(contract_filters: Vec<Felt>) -> Self {
         Self { contract_filters }
     }
@@ -93,7 +93,7 @@ impl SqlDecoder {
 /// Implementation of the Decoder trait for generic usage (not specific to the SQL sink).
 #[async_trait]
 impl Decoder for SqlDecoder {
-    fn decoder_name(&self) -> &str {
+    fn decoder_name(&self) -> &'static str {
         "sql"
     }
 
@@ -107,17 +107,21 @@ impl Decoder for SqlDecoder {
 
         // We could add additional checks for example length of keys etc..
         // In this case, we're going to assume they are present already.
-        let selector = match event.keys.get(0) {
+        let selector = match event.keys.first() {
             Some(s) => s,
             None => return Ok(Vec::new()),
         };
 
-        let table_name = match event.keys.get(1).and_then(|k| parse_cairo_short_string(k).ok()) {
+        let table_name = match event
+            .keys
+            .get(1)
+            .and_then(|k| parse_cairo_short_string(k).ok())
+        {
             Some(name) => name,
             None => return Ok(Vec::new()),
         };
 
-        let value: u64 = match event.data.get(0).and_then(|v| (*v).try_into().ok()) {
+        let value: u64 = match event.data.first().and_then(|v| (*v).try_into().ok()) {
             Some(v) => v,
             None => return Ok(Vec::new()),
         };
@@ -160,7 +164,7 @@ impl Decoder for SqlDecoder {
         );
 
         Ok(vec![Envelope::new(
-            format!("{}_{}", operation, table_name),
+            format!("{operation}_{table_name}"),
             body,
             metadata,
         )])

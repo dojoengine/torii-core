@@ -25,7 +25,6 @@ pub struct SinkContext {
     /// Sinks can create databases at `{database_root}/{sink_name}.db`
     /// to co-locate all Torii databases for easy backup and management.
     pub database_root: PathBuf,
-
     // Future extensions:
     // pub metrics: Arc<Metrics>,
     // pub config: Arc<Config>,
@@ -44,7 +43,11 @@ pub struct TopicInfo {
 }
 
 impl TopicInfo {
-    pub fn new(name: impl Into<String>, available_filters: Vec<String>, description: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        available_filters: Vec<String>,
+        description: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             available_filters,

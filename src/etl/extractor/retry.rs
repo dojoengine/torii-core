@@ -132,7 +132,8 @@ impl RetryPolicy {
 
                     // Calculate next backoff with exponential growth
                     backoff = Duration::from_secs_f64(
-                        (backoff.as_secs_f64() * self.backoff_multiplier).min(self.max_backoff.as_secs_f64()),
+                        (backoff.as_secs_f64() * self.backoff_multiplier)
+                            .min(self.max_backoff.as_secs_f64()),
                     );
                 }
             }

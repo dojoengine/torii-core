@@ -423,7 +423,7 @@ impl Default for Erc20Decoder {
 
 #[async_trait]
 impl Decoder for Erc20Decoder {
-    fn decoder_name(&self) -> &str {
+    fn decoder_name(&self) -> &'static str {
         "erc20"
     }
 
@@ -734,10 +734,10 @@ mod tests {
             from_address: Felt::from(0x999u64), // Token contract
             keys: vec![
                 Erc20Decoder::transfer_selector(),
-                Felt::from(0x20u64),   // from
-                Felt::from(0x21u64),   // to
-                Felt::from(50000u64),  // amount_low
-                Felt::ZERO,            // amount_high
+                Felt::from(0x20u64),  // from
+                Felt::from(0x21u64),  // to
+                Felt::from(50000u64), // amount_low
+                Felt::ZERO,           // amount_high
             ],
             data: vec![],
             block_hash: None,

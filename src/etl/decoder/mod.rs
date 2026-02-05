@@ -249,10 +249,7 @@ impl ContractFilter {
     pub fn validate(&self) -> anyhow::Result<()> {
         for addr in self.mappings.keys() {
             if self.blacklist.contains(addr) {
-                anyhow::bail!(
-                    "Contract {:#x} appears in both mapping and blacklist",
-                    addr
-                );
+                anyhow::bail!("Contract {addr:#x} appears in both mapping and blacklist");
             }
         }
         Ok(())

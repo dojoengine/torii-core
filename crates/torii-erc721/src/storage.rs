@@ -313,7 +313,10 @@ impl Erc721Storage {
     }
 
     /// Insert operator approvals in a single transaction
-    pub fn insert_operator_approvals_batch(&self, approvals: &[OperatorApprovalData]) -> Result<usize> {
+    pub fn insert_operator_approvals_batch(
+        &self,
+        approvals: &[OperatorApprovalData],
+    ) -> Result<usize> {
         if approvals.is_empty() {
             return Ok(0);
         }
@@ -442,7 +445,8 @@ impl Erc721Storage {
         params_vec.push(Box::new(limit as i64));
 
         let mut stmt = conn.prepare(&query)?;
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(std::convert::AsRef::as_ref).collect();
 
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
             let id: i64 = row.get(0)?;
@@ -531,7 +535,8 @@ impl Erc721Storage {
         params_vec.push(Box::new(limit as i64));
 
         let mut stmt = conn.prepare(&query)?;
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(std::convert::AsRef::as_ref).collect();
 
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
             let id: i64 = row.get(0)?;
@@ -566,7 +571,8 @@ impl Erc721Storage {
     /// Get transfer count
     pub fn get_transfer_count(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM nft_transfers", [], |row| row.get(0))?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM nft_transfers", [], |row| row.get(0))?;
         Ok(count as u64)
     }
 
@@ -584,7 +590,8 @@ impl Erc721Storage {
     /// Get unique NFT count
     pub fn get_nft_count(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM nft_ownership", [], |row| row.get(0))?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM nft_ownership", [], |row| row.get(0))?;
         Ok(count as u64)
     }
 
@@ -592,11 +599,9 @@ impl Erc721Storage {
     pub fn get_latest_block(&self) -> Result<Option<u64>> {
         let conn = self.conn.lock().unwrap();
         let block: Option<i64> = conn
-            .query_row(
-                "SELECT MAX(block_number) FROM nft_transfers",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT MAX(block_number) FROM nft_transfers", [], |row| {
+                row.get(0)
+            })
             .ok();
         Ok(block.map(|b| b as u64))
     }

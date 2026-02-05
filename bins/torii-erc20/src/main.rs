@@ -117,10 +117,7 @@ async fn main() -> Result<()> {
     // Build Torii configuration
     // Get database root from db_path's parent directory
     let db_path = Path::new(&config.db_path);
-    let database_root = db_path
-        .parent()
-        .unwrap_or(Path::new("."))
-        .to_string_lossy();
+    let database_root = db_path.parent().unwrap_or(Path::new(".")).to_string_lossy();
 
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
@@ -150,23 +147,22 @@ async fn main() -> Result<()> {
         tracing::info!("Strict mode: ONLY explicitly mapped contracts will be indexed");
         tracing::info!("  (Unmapped contracts will NOT be tried with ERC20 decoder)");
     } else {
-        tracing::info!("Auto-discovery enabled: unmapped contracts will be tried with ERC20 decoder");
+        tracing::info!(
+            "Auto-discovery enabled: unmapped contracts will be tried with ERC20 decoder"
+        );
     }
 
     let torii_config = torii_config.build();
 
     tracing::info!("Torii configured, starting ETL pipeline...");
-    tracing::info!(
-        "gRPC service available at localhost:{}",
-        config.port
-    );
+    tracing::info!("gRPC service available at localhost:{}", config.port);
     tracing::info!("  - torii.Torii (EventBus subscriptions)");
     tracing::info!("  - torii.sinks.erc20.Erc20 (queries and rich subscriptions)");
 
     // Run Torii (blocks until shutdown)
     torii::run(torii_config)
         .await
-        .map_err(|e| anyhow::anyhow!("Torii error: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Torii error: {e}"))?;
 
     // Print final statistics
     tracing::info!("Final Statistics:");

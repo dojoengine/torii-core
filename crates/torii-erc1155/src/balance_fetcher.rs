@@ -118,19 +118,18 @@ impl Erc1155BalanceFetcher {
         let mut results = Vec::with_capacity(requests.len());
         for (idx, response) in responses.into_iter().enumerate() {
             let req = &requests[idx];
-            let balance = match response {
-                ProviderResponseData::Call(felts) => parse_u256_result(&felts),
-                _ => {
-                    tracing::warn!(
-                        target: "torii_erc1155::balance_fetcher",
-                        contract = %req.contract,
-                        wallet = %req.wallet,
-                        token_id = ?req.token_id,
-                        block = req.block_number,
-                        "Unexpected response type for balance_of, using 0"
-                    );
-                    U256::from(0u64)
-                }
+            let balance = if let ProviderResponseData::Call(felts) = response {
+                parse_u256_result(&felts)
+            } else {
+                tracing::warn!(
+                    target: "torii_erc1155::balance_fetcher",
+                    contract = %req.contract,
+                    wallet = %req.wallet,
+                    token_id = ?req.token_id,
+                    block = req.block_number,
+                    "Unexpected response type for balance_of, using 0"
+                );
+                U256::from(0u64)
             };
             results.push((req.contract, req.wallet, req.token_id, balance));
         }

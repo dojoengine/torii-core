@@ -341,7 +341,10 @@ impl Erc1155Storage {
     }
 
     /// Insert operator approvals in a single transaction
-    pub fn insert_operator_approvals_batch(&self, approvals: &[OperatorApprovalData]) -> Result<usize> {
+    pub fn insert_operator_approvals_batch(
+        &self,
+        approvals: &[OperatorApprovalData],
+    ) -> Result<usize> {
         if approvals.is_empty() {
             return Ok(0);
         }
@@ -476,7 +479,8 @@ impl Erc1155Storage {
         params_vec.push(Box::new(limit as i64));
 
         let mut stmt = conn.prepare(&query)?;
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(std::convert::AsRef::as_ref).collect();
 
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
             let id: i64 = row.get(0)?;
@@ -525,7 +529,8 @@ impl Erc1155Storage {
     /// Get transfer count
     pub fn get_transfer_count(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM token_transfers", [], |row| row.get(0))?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM token_transfers", [], |row| row.get(0))?;
         Ok(count as u64)
     }
 
@@ -555,11 +560,9 @@ impl Erc1155Storage {
     pub fn get_latest_block(&self) -> Result<Option<u64>> {
         let conn = self.conn.lock().unwrap();
         let block: Option<i64> = conn
-            .query_row(
-                "SELECT MAX(block_number) FROM token_transfers",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT MAX(block_number) FROM token_transfers", [], |row| {
+                row.get(0)
+            })
             .ok();
         Ok(block.map(|b| b as u64))
     }
@@ -616,7 +619,10 @@ impl Erc1155Storage {
                 params![&contract_blob, &wallet_blob, &token_id_blob],
                 |row| row.get::<_, Vec<u8>>(0),
             ) {
-                result.insert((*contract, *wallet, *token_id), blob_to_u256(&balance_bytes));
+                result.insert(
+                    (*contract, *wallet, *token_id),
+                    blob_to_u256(&balance_bytes),
+                );
             }
         }
 
@@ -661,10 +667,16 @@ impl Erc1155Storage {
             let key = (transfer.token, transfer.from, transfer.token_id);
 
             // Get current stored balance (default to 0)
-            let stored_balance = current_balances.get(&key).copied().unwrap_or(U256::from(0u64));
+            let stored_balance = current_balances
+                .get(&key)
+                .copied()
+                .unwrap_or(U256::from(0u64));
 
             // Add any pending debits from earlier in this batch
-            let total_pending = pending_debits.get(&key).copied().unwrap_or(U256::from(0u64));
+            let total_pending = pending_debits
+                .get(&key)
+                .copied()
+                .unwrap_or(U256::from(0u64));
 
             // Check if balance would go negative
             let total_needed = total_pending + transfer.amount;
@@ -675,12 +687,15 @@ impl Erc1155Storage {
             } else {
                 // Balance would go negative - need to fetch actual balance
                 let block_before = transfer.block_number.saturating_sub(1);
-                let already_requested = adjustment_requests.iter().any(|r: &Erc1155BalanceFetchRequest| {
-                    r.contract == transfer.token
-                        && r.wallet == transfer.from
-                        && r.token_id == transfer.token_id
-                        && r.block_number == block_before
-                });
+                let already_requested =
+                    adjustment_requests
+                        .iter()
+                        .any(|r: &Erc1155BalanceFetchRequest| {
+                            r.contract == transfer.token
+                                && r.wallet == transfer.from
+                                && r.token_id == transfer.token_id
+                                && r.block_number == block_before
+                        });
 
                 if !already_requested {
                     adjustment_requests.push(Erc1155BalanceFetchRequest {
@@ -735,34 +750,40 @@ impl Erc1155Storage {
                 // Load sender balance (if not zero address)
                 if transfer.from != Felt::ZERO {
                     let key = (transfer.token, transfer.from, transfer.token_id);
-                    if !balance_cache.contains_key(&key) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = balance_cache.entry(key) {
                         let contract_blob = felt_to_blob(transfer.token);
                         let wallet_blob = felt_to_blob(transfer.from);
                         let token_id_blob = u256_to_blob(transfer.token_id);
                         let balance: U256 = stmt
-                            .query_row(params![&contract_blob, &wallet_blob, &token_id_blob], |row| {
-                                let bytes: Vec<u8> = row.get(0)?;
-                                Ok(blob_to_u256(&bytes))
-                            })
+                            .query_row(
+                                params![&contract_blob, &wallet_blob, &token_id_blob],
+                                |row| {
+                                    let bytes: Vec<u8> = row.get(0)?;
+                                    Ok(blob_to_u256(&bytes))
+                                },
+                            )
                             .unwrap_or(U256::from(0u64));
-                        balance_cache.insert(key, balance);
+                        e.insert(balance);
                     }
                 }
 
                 // Load receiver balance (if not zero address)
                 if transfer.to != Felt::ZERO {
                     let key = (transfer.token, transfer.to, transfer.token_id);
-                    if !balance_cache.contains_key(&key) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = balance_cache.entry(key) {
                         let contract_blob = felt_to_blob(transfer.token);
                         let wallet_blob = felt_to_blob(transfer.to);
                         let token_id_blob = u256_to_blob(transfer.token_id);
                         let balance: U256 = stmt
-                            .query_row(params![&contract_blob, &wallet_blob, &token_id_blob], |row| {
-                                let bytes: Vec<u8> = row.get(0)?;
-                                Ok(blob_to_u256(&bytes))
-                            })
+                            .query_row(
+                                params![&contract_blob, &wallet_blob, &token_id_blob],
+                                |row| {
+                                    let bytes: Vec<u8> = row.get(0)?;
+                                    Ok(blob_to_u256(&bytes))
+                                },
+                            )
                             .unwrap_or(U256::from(0u64));
-                        balance_cache.insert(key, balance);
+                        e.insert(balance);
                     }
                 }
             }

@@ -84,7 +84,7 @@ impl SqlSinkTrait for SqlSinkService {
         tracing::info!(target: "torii::sql_sink::grpc", "Executing query: {}", query);
 
         let query_with_limit = if let Some(limit) = req.limit {
-            format!("{} LIMIT {}", query, limit)
+            format!("{query} LIMIT {limit}")
         } else {
             query
         };
@@ -92,7 +92,7 @@ impl SqlSinkTrait for SqlSinkService {
         let rows = sqlx::query(&query_with_limit)
             .fetch_all(self.pool.as_ref())
             .await
-            .map_err(|e| Status::invalid_argument(format!("Query failed: {}", e)))?;
+            .map_err(|e| Status::invalid_argument(format!("Query failed: {e}")))?;
 
         let proto_rows: Vec<QueryRow> = rows
             .iter()
@@ -131,7 +131,7 @@ impl SqlSinkTrait for SqlSinkService {
         );
 
         let query_with_limit = if let Some(limit) = req.limit {
-            format!("{} LIMIT {}", query, limit)
+            format!("{query} LIMIT {limit}")
         } else {
             query
         };
@@ -146,7 +146,7 @@ impl SqlSinkTrait for SqlSinkService {
             let mut row_count = 0;
 
             while let Some(row) = rows.try_next().await.map_err(|e| {
-                Status::internal(format!("Stream error: {}", e))
+                Status::internal(format!("Stream error: {e}"))
             })? {
                 row_count += 1;
                 let proto_row = SqlSinkService::row_to_proto(&row)?;
@@ -183,10 +183,7 @@ impl SqlSinkTrait for SqlSinkService {
         );
 
         let table_query = if let Some(table_name) = req.table_name {
-            format!(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='{}'",
-                table_name
-            )
+            format!("SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
         } else {
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
                 .to_string()
@@ -195,29 +192,29 @@ impl SqlSinkTrait for SqlSinkService {
         let table_rows = sqlx::query(&table_query)
             .fetch_all(self.pool.as_ref())
             .await
-            .map_err(|e| Status::internal(format!("Failed to fetch tables: {}", e)))?;
+            .map_err(|e| Status::internal(format!("Failed to fetch tables: {e}")))?;
 
         let mut tables = Vec::new();
 
         for table_row in table_rows {
             let table_name: String = table_row
                 .try_get(0)
-                .map_err(|e| Status::internal(format!("Failed to read table name: {}", e)))?;
+                .map_err(|e| Status::internal(format!("Failed to read table name: {e}")))?;
 
-            let column_query = format!("PRAGMA table_info({})", table_name);
+            let column_query = format!("PRAGMA table_info({table_name})");
             let column_rows = sqlx::query(&column_query)
                 .fetch_all(self.pool.as_ref())
                 .await
-                .map_err(|e| Status::internal(format!("Failed to fetch columns: {}", e)))?;
+                .map_err(|e| Status::internal(format!("Failed to fetch columns: {e}")))?;
 
             let mut columns = std::collections::HashMap::new();
             for col_row in column_rows {
                 let col_name: String = col_row
                     .try_get(1)
-                    .map_err(|e| Status::internal(format!("Failed to read column name: {}", e)))?;
+                    .map_err(|e| Status::internal(format!("Failed to read column name: {e}")))?;
                 let col_type: String = col_row
                     .try_get(2)
-                    .map_err(|e| Status::internal(format!("Failed to read column type: {}", e)))?;
+                    .map_err(|e| Status::internal(format!("Failed to read column type: {e}")))?;
                 columns.insert(col_name, col_type);
             }
 

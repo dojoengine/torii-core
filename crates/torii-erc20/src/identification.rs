@@ -40,7 +40,7 @@ impl Default for Erc20Rule {
 }
 
 impl IdentificationRule for Erc20Rule {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "erc20"
     }
 

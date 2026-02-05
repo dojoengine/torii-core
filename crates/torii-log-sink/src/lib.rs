@@ -94,7 +94,7 @@ impl LogSink {
 
 #[async_trait]
 impl Sink for LogSink {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "log"
     }
 
@@ -107,7 +107,7 @@ impl Sink for LogSink {
         envelopes: &[Envelope],
         _batch: &ExtractionBatch,
     ) -> anyhow::Result<()> {
-        for envelope in envelopes.iter() {
+        for envelope in envelopes {
             if envelope.type_id == TypeId::new("log.entry") {
                 if let Some(log_entry) = envelope.downcast_ref::<LogEntry>() {
                     // Generate unique ID.

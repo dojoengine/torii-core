@@ -1,10 +1,10 @@
+use serde::{Deserialize, Serialize};
 use torii::axum::{
     extract::{Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
 };
-use serde::{Deserialize, Serialize};
 
 use crate::grpc_service::LogStore;
 use crate::proto::LogEntry as ProtoLogEntry;

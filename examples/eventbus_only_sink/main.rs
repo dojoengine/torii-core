@@ -10,17 +10,17 @@
 //
 // Run: cargo run --example eventbus_only_sink
 
+use anyhow::Result;
+use axum::Router;
+use prost::Message;
+use prost_types::Any;
+use starknet::core::types::EmittedEvent;
 use std::sync::Arc;
 use torii::etl::envelope::{Envelope, TypeId, TypedBody};
 use torii::etl::extractor::ExtractionBatch;
 use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
 use torii::etl::Decoder;
 use torii::{async_trait, run, ToriiConfig, UpdateType};
-use anyhow::Result;
-use axum::Router;
-use prost::Message;
-use prost_types::Any;
-use starknet::core::types::EmittedEvent;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 1. DEFINE EVENT TYPE
@@ -59,6 +59,12 @@ pub struct BroadcastSink {
     event_bus: Option<Arc<EventBus>>,
 }
 
+impl Default for BroadcastSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BroadcastSink {
     pub fn new() -> Self {
         Self { event_bus: None }
@@ -90,7 +96,7 @@ impl BroadcastSink {
 
 #[async_trait]
 impl Sink for BroadcastSink {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "broadcast"
     }
 
@@ -165,6 +171,12 @@ impl Sink for BroadcastSink {
 
 pub struct BroadcastDecoder;
 
+impl Default for BroadcastDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BroadcastDecoder {
     pub fn new() -> Self {
         Self
@@ -173,7 +185,7 @@ impl BroadcastDecoder {
 
 #[async_trait]
 impl Decoder for BroadcastDecoder {
-    fn decoder_name(&self) -> &str {
+    fn decoder_name(&self) -> &'static str {
         "broadcast"
     }
 

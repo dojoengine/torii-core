@@ -627,7 +627,8 @@ impl Erc20Storage {
         params_vec.push(Box::new(limit as i64));
 
         let mut stmt = conn.prepare(&query)?;
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(std::convert::AsRef::as_ref).collect();
 
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
             let id: i64 = row.get(0)?;
@@ -761,7 +762,8 @@ impl Erc20Storage {
         params_vec.push(Box::new(limit as i64));
 
         let mut stmt = conn.prepare(&query)?;
-        let params_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(std::convert::AsRef::as_ref).collect();
 
         let rows = stmt.query_map(params_refs.as_slice(), |row| {
             let id: i64 = row.get(0)?;
@@ -817,11 +819,10 @@ impl Erc20Storage {
     /// Get indexed token count
     pub fn get_token_count(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(DISTINCT token) FROM transfers",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(DISTINCT token) FROM transfers", [], |row| {
+                row.get(0)
+            })?;
         Ok(count as u64)
     }
 
@@ -829,11 +830,9 @@ impl Erc20Storage {
     pub fn get_latest_block(&self) -> Result<Option<u64>> {
         let conn = self.conn.lock().unwrap();
         let block: Option<i64> = conn
-            .query_row(
-                "SELECT MAX(block_number) FROM transfers",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT MAX(block_number) FROM transfers", [], |row| {
+                row.get(0)
+            })
             .ok();
         Ok(block.map(|b| b as u64))
     }
@@ -871,18 +870,16 @@ impl Erc20Storage {
 
         // SQLite doesn't support batch IN with tuples well, so we query one by one
         // but we keep the connection lock to avoid repeated locking
-        let mut stmt = conn.prepare_cached(
-            "SELECT balance FROM balances WHERE token = ? AND wallet = ?",
-        )?;
+        let mut stmt =
+            conn.prepare_cached("SELECT balance FROM balances WHERE token = ? AND wallet = ?")?;
 
         for (token, wallet) in pairs {
             let token_blob = felt_to_blob(*token);
             let wallet_blob = felt_to_blob(*wallet);
 
-            if let Ok(balance_bytes) = stmt.query_row(
-                params![&token_blob, &wallet_blob],
-                |row| row.get::<_, Vec<u8>>(0),
-            ) {
+            if let Ok(balance_bytes) = stmt.query_row(params![&token_blob, &wallet_blob], |row| {
+                row.get::<_, Vec<u8>>(0)
+            }) {
                 result.insert((*token, *wallet), blob_to_u256(&balance_bytes));
             }
         }
@@ -932,10 +929,16 @@ impl Erc20Storage {
             let key = (transfer.token, transfer.from);
 
             // Get current stored balance (default to 0)
-            let stored_balance = current_balances.get(&key).copied().unwrap_or(U256::from(0u64));
+            let stored_balance = current_balances
+                .get(&key)
+                .copied()
+                .unwrap_or(U256::from(0u64));
 
             // Add any pending debits from earlier in this batch
-            let total_pending = pending_debits.get(&key).copied().unwrap_or(U256::from(0u64));
+            let total_pending = pending_debits
+                .get(&key)
+                .copied()
+                .unwrap_or(U256::from(0u64));
 
             // Check if balance would go negative
             // Since U256 doesn't have checked_add, we add and check for overflow via comparison
@@ -945,10 +948,13 @@ impl Erc20Storage {
                 // Balance is sufficient, track the debit
                 pending_debits.insert(key, total_needed);
             } else {
-                    // Balance would go negative - need to fetch actual balance
-                    // Only add one request per unique (token, wallet, block)
-                    let block_before = transfer.block_number.saturating_sub(1);
-                    let already_requested = adjustment_requests.iter().any(|r: &BalanceFetchRequest| {
+                // Balance would go negative - need to fetch actual balance
+                // Only add one request per unique (token, wallet, block)
+                let block_before = transfer.block_number.saturating_sub(1);
+                // Check if we already have a request for this (token, from_wallet, block)
+                #[allow(clippy::suspicious_operation_groupings)]
+                let already_requested =
+                    adjustment_requests.iter().any(|r: &BalanceFetchRequest| {
                         r.token == transfer.token
                             && r.wallet == transfer.from
                             && r.block_number == block_before
@@ -1003,15 +1009,14 @@ impl Erc20Storage {
 
         // Load existing balances for all affected wallets
         {
-            let mut stmt = tx.prepare_cached(
-                "SELECT balance FROM balances WHERE token = ? AND wallet = ?",
-            )?;
+            let mut stmt =
+                tx.prepare_cached("SELECT balance FROM balances WHERE token = ? AND wallet = ?")?;
 
             for transfer in transfers {
                 // Load sender balance (if not zero address)
                 if transfer.from != Felt::ZERO {
                     let key = (transfer.token, transfer.from);
-                    if !balance_cache.contains_key(&key) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = balance_cache.entry(key) {
                         let token_blob = felt_to_blob(transfer.token);
                         let wallet_blob = felt_to_blob(transfer.from);
                         let balance: U256 = stmt
@@ -1020,14 +1025,14 @@ impl Erc20Storage {
                                 Ok(blob_to_u256(&bytes))
                             })
                             .unwrap_or(U256::from(0u64));
-                        balance_cache.insert(key, balance);
+                        e.insert(balance);
                     }
                 }
 
                 // Load receiver balance (if not zero address)
                 if transfer.to != Felt::ZERO {
                     let key = (transfer.token, transfer.to);
-                    if !balance_cache.contains_key(&key) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = balance_cache.entry(key) {
                         let token_blob = felt_to_blob(transfer.token);
                         let wallet_blob = felt_to_blob(transfer.to);
                         let balance: U256 = stmt
@@ -1036,7 +1041,7 @@ impl Erc20Storage {
                                 Ok(blob_to_u256(&bytes))
                             })
                             .unwrap_or(U256::from(0u64));
-                        balance_cache.insert(key, balance);
+                        e.insert(balance);
                     }
                 }
             }
@@ -1174,22 +1179,19 @@ impl Erc20Storage {
     /// Get adjustment count (for statistics)
     pub fn get_adjustment_count(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM balance_adjustments",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM balance_adjustments", [], |row| {
+            row.get(0)
+        })?;
         Ok(count as u64)
     }
 
     /// Get unique wallet count with balances
     pub fn get_wallet_count(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(DISTINCT wallet) FROM balances",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(DISTINCT wallet) FROM balances", [], |row| {
+                row.get(0)
+            })?;
         Ok(count as u64)
     }
 }

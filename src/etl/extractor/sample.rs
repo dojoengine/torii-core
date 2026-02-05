@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::etl::engine_db::EngineDb;
 
-use super::{BlockContext, Extractor, ExtractionBatch, TransactionContext};
+use super::{BlockContext, ExtractionBatch, Extractor, TransactionContext};
 
 /// Simple extractor that cycles through predefined events
 pub struct SampleExtractor {
@@ -64,7 +64,7 @@ impl SampleExtractor {
             self.current_index = (self.current_index + 1) % self.events.len();
 
             // Advance block every 3 events
-            if (self.current_index % 3) == 0 {
+            if self.current_index.is_multiple_of(3) {
                 self.current_block += 1;
             }
         }
@@ -121,13 +121,15 @@ impl Extractor for SampleExtractor {
                     hash: event.transaction_hash,
                     block_number: event.block_number.unwrap_or(0),
                     sender_address: Some(
-                        Felt::from_hex("0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd")
-                            .unwrap(),
+                        Felt::from_hex(
+                            "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd",
+                        )
+                        .unwrap(),
                     ),
                     calldata: vec![
-                        Felt::from(1), // selector
+                        Felt::from(1),                  // selector
                         Felt::from(self.current_block), // param1
-                        Felt::from(42), // param2
+                        Felt::from(42),                 // param2
                     ],
                 });
         }

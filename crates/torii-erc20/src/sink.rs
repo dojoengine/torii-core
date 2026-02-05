@@ -75,10 +75,7 @@ impl Erc20Sink {
     /// - Detect when a balance would go negative (indicating missed history)
     /// - Fetch actual balance from the chain and adjust
     /// - Record adjustments in an audit table
-    pub fn with_balance_tracking(
-        mut self,
-        provider: Arc<JsonRpcClient<HttpTransport>>,
-    ) -> Self {
+    pub fn with_balance_tracking(mut self, provider: Arc<JsonRpcClient<HttpTransport>>) -> Self {
         self.balance_fetcher = Some(Arc::new(BalanceFetcher::new(provider)));
         self
     }
@@ -193,20 +190,16 @@ impl Erc20Sink {
 
         true
     }
-
 }
 
 #[async_trait]
 impl Sink for Erc20Sink {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "erc20"
     }
 
     fn interested_types(&self) -> Vec<TypeId> {
-        vec![
-            TypeId::new("erc20.transfer"),
-            TypeId::new("erc20.approval"),
-        ]
+        vec![TypeId::new("erc20.transfer"), TypeId::new("erc20.approval")]
     }
 
     async fn initialize(
@@ -333,7 +326,10 @@ impl Sink for Erc20Sink {
                     }
 
                     // Step 3: Apply transfers with adjustments to update balances
-                    if let Err(e) = self.storage.apply_transfers_with_adjustments(&transfers, &adjustments) {
+                    if let Err(e) = self
+                        .storage
+                        .apply_transfers_with_adjustments(&transfers, &adjustments)
+                    {
                         tracing::error!(
                             target: "torii_erc20::sink",
                             error = %e,
@@ -363,7 +359,8 @@ impl Sink for Erc20Sink {
                             let mut buf = Vec::new();
                             proto_transfer.encode(&mut buf)?;
                             let any = Any {
-                                type_url: "type.googleapis.com/torii.sinks.erc20.Transfer".to_string(),
+                                type_url: "type.googleapis.com/torii.sinks.erc20.Transfer"
+                                    .to_string(),
                                 value: buf,
                             };
 
@@ -428,7 +425,8 @@ impl Sink for Erc20Sink {
                             let mut buf = Vec::new();
                             proto_approval.encode(&mut buf)?;
                             let any = Any {
-                                type_url: "type.googleapis.com/torii.sinks.erc20.Approval".to_string(),
+                                type_url: "type.googleapis.com/torii.sinks.erc20.Approval"
+                                    .to_string(),
                                 value: buf,
                             };
 

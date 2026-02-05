@@ -1,6 +1,8 @@
 //! ERC721 sink for processing NFT transfers, approvals, and ownership
 
-use crate::decoder::{NftTransfer as DecodedNftTransfer, OperatorApproval as DecodedOperatorApproval};
+use crate::decoder::{
+    NftTransfer as DecodedNftTransfer, OperatorApproval as DecodedOperatorApproval,
+};
 use crate::grpc_service::Erc721Service;
 use crate::proto;
 use crate::storage::{Erc721Storage, NftTransferData, OperatorApprovalData};
@@ -101,12 +103,11 @@ impl Erc721Sink {
 
         true
     }
-
 }
 
 #[async_trait]
 impl Sink for Erc721Sink {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "erc721"
     }
 
@@ -142,7 +143,8 @@ impl Sink for Erc721Sink {
         for envelope in envelopes {
             // Handle transfers
             if envelope.type_id == TypeId::new("erc721.transfer") {
-                if let Some(transfer) = envelope.body.as_any().downcast_ref::<DecodedNftTransfer>() {
+                if let Some(transfer) = envelope.body.as_any().downcast_ref::<DecodedNftTransfer>()
+                {
                     let timestamp = block_timestamps.get(&transfer.block_number).copied();
                     transfers.push(NftTransferData {
                         id: None,
@@ -158,7 +160,11 @@ impl Sink for Erc721Sink {
             }
             // Handle approval for all
             else if envelope.type_id == TypeId::new("erc721.approval_for_all") {
-                if let Some(approval) = envelope.body.as_any().downcast_ref::<DecodedOperatorApproval>() {
+                if let Some(approval) = envelope
+                    .body
+                    .as_any()
+                    .downcast_ref::<DecodedOperatorApproval>()
+                {
                     let timestamp = block_timestamps.get(&approval.block_number).copied();
                     operator_approvals.push(OperatorApprovalData {
                         id: None,
@@ -218,7 +224,8 @@ impl Sink for Erc721Sink {
                             let mut buf = Vec::new();
                             proto_transfer.encode(&mut buf)?;
                             let any = Any {
-                                type_url: "type.googleapis.com/torii.sinks.erc721.NftTransfer".to_string(),
+                                type_url: "type.googleapis.com/torii.sinks.erc721.NftTransfer"
+                                    .to_string(),
                                 value: buf,
                             };
 
@@ -243,7 +250,10 @@ impl Sink for Erc721Sink {
 
         // Batch insert operator approvals
         if !operator_approvals.is_empty() {
-            match self.storage.insert_operator_approvals_batch(&operator_approvals) {
+            match self
+                .storage
+                .insert_operator_approvals_batch(&operator_approvals)
+            {
                 Ok(count) => {
                     tracing::info!(
                         target: "torii_erc721::sink",

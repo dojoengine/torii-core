@@ -12,7 +12,10 @@
 //!   fetches the actual balance from the chain and adjusts
 
 use crate::balance_fetcher::Erc1155BalanceFetcher;
-use crate::decoder::{OperatorApproval as DecodedOperatorApproval, TransferBatch as DecodedTransferBatch, TransferSingle as DecodedTransferSingle};
+use crate::decoder::{
+    OperatorApproval as DecodedOperatorApproval, TransferBatch as DecodedTransferBatch,
+    TransferSingle as DecodedTransferSingle,
+};
 use crate::grpc_service::Erc1155Service;
 use crate::proto;
 use crate::storage::{Erc1155Storage, OperatorApprovalData, TokenTransferData};
@@ -75,10 +78,7 @@ impl Erc1155Sink {
     /// - Detect when a balance would go negative (indicating missed history)
     /// - Fetch actual balance from the chain and adjust
     /// - Record adjustments in an audit table
-    pub fn with_balance_tracking(
-        mut self,
-        provider: Arc<JsonRpcClient<HttpTransport>>,
-    ) -> Self {
+    pub fn with_balance_tracking(mut self, provider: Arc<JsonRpcClient<HttpTransport>>) -> Self {
         self.balance_fetcher = Some(Arc::new(Erc1155BalanceFetcher::new(provider)));
         self
     }
@@ -134,12 +134,11 @@ impl Erc1155Sink {
 
         true
     }
-
 }
 
 #[async_trait]
 impl Sink for Erc1155Sink {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "erc1155"
     }
 
@@ -175,7 +174,11 @@ impl Sink for Erc1155Sink {
         for envelope in envelopes {
             // Handle single transfers
             if envelope.type_id == TypeId::new("erc1155.transfer_single") {
-                if let Some(transfer) = envelope.body.as_any().downcast_ref::<DecodedTransferSingle>() {
+                if let Some(transfer) = envelope
+                    .body
+                    .as_any()
+                    .downcast_ref::<DecodedTransferSingle>()
+                {
                     let timestamp = block_timestamps.get(&transfer.block_number).copied();
                     transfers.push(TokenTransferData {
                         id: None,
@@ -195,7 +198,11 @@ impl Sink for Erc1155Sink {
             }
             // Handle batch transfers
             else if envelope.type_id == TypeId::new("erc1155.transfer_batch") {
-                if let Some(transfer) = envelope.body.as_any().downcast_ref::<DecodedTransferBatch>() {
+                if let Some(transfer) = envelope
+                    .body
+                    .as_any()
+                    .downcast_ref::<DecodedTransferBatch>()
+                {
                     let timestamp = block_timestamps.get(&transfer.block_number).copied();
                     transfers.push(TokenTransferData {
                         id: None,
@@ -215,7 +222,11 @@ impl Sink for Erc1155Sink {
             }
             // Handle approval for all
             else if envelope.type_id == TypeId::new("erc1155.approval_for_all") {
-                if let Some(approval) = envelope.body.as_any().downcast_ref::<DecodedOperatorApproval>() {
+                if let Some(approval) = envelope
+                    .body
+                    .as_any()
+                    .downcast_ref::<DecodedOperatorApproval>()
+                {
                     let timestamp = block_timestamps.get(&approval.block_number).copied();
                     operator_approvals.push(OperatorApprovalData {
                         id: None,
@@ -291,14 +302,20 @@ impl Sink for Erc1155Sink {
                                 );
                                 // On failure, use 0 for all requested adjustments
                                 for req in &adjustment_requests {
-                                    adjustments.insert((req.contract, req.wallet, req.token_id), U256::from(0u64));
+                                    adjustments.insert(
+                                        (req.contract, req.wallet, req.token_id),
+                                        U256::from(0u64),
+                                    );
                                 }
                             }
                         }
                     }
 
                     // Step 3: Apply transfers with adjustments to update balances
-                    if let Err(e) = self.storage.apply_transfers_with_adjustments(&transfers, &adjustments) {
+                    if let Err(e) = self
+                        .storage
+                        .apply_transfers_with_adjustments(&transfers, &adjustments)
+                    {
                         tracing::error!(
                             target: "torii_erc1155::sink",
                             error = %e,
@@ -332,7 +349,8 @@ impl Sink for Erc1155Sink {
                             let mut buf = Vec::new();
                             proto_transfer.encode(&mut buf)?;
                             let any = Any {
-                                type_url: "type.googleapis.com/torii.sinks.erc1155.TokenTransfer".to_string(),
+                                type_url: "type.googleapis.com/torii.sinks.erc1155.TokenTransfer"
+                                    .to_string(),
                                 value: buf,
                             };
 
@@ -357,7 +375,10 @@ impl Sink for Erc1155Sink {
 
         // Batch insert operator approvals
         if !operator_approvals.is_empty() {
-            match self.storage.insert_operator_approvals_batch(&operator_approvals) {
+            match self
+                .storage
+                .insert_operator_approvals_batch(&operator_approvals)
+            {
                 Ok(count) => {
                     tracing::info!(
                         target: "torii_erc1155::sink",

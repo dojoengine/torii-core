@@ -25,15 +25,13 @@ pub fn block_with_receipts_batch_from_block_range(
     from_block: u64,
     to_block: u64,
 ) -> Vec<ProviderRequestData> {
-    let requests = (from_block..=to_block)
+    (from_block..=to_block)
         .map(|block_num| {
             ProviderRequestData::GetBlockWithReceipts(GetBlockWithReceiptsRequest {
                 block_id: BlockId::Number(block_num),
             })
         })
-        .collect();
-
-    requests
+        .collect()
 }
 
 /// Fetches contract classes for a list of class hashes using batch requests.
@@ -99,10 +97,7 @@ where
                 classes.push((class_hash, class));
             }
             _ => {
-                anyhow::bail!(
-                    "Unexpected response type for class {}: expected GetClass",
-                    class_hash
-                );
+                anyhow::bail!("Unexpected response type for class {class_hash}: expected GetClass");
             }
         }
     }
