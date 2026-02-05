@@ -27,6 +27,7 @@ use torii::etl::{
     sink::{EventBus, Sink, TopicInfo},
 };
 use torii::grpc::UpdateType;
+use starknet::core::types::EmittedEvent;
 
 pub use decoder::{SqlDecoder, SqlInsert, SqlUpdate};
 pub use grpc_service::SqlSinkService;
@@ -47,7 +48,7 @@ pub struct SqlSink {
 
 impl SqlSink {
     /// Generates sample events for testing the SQL sink.
-    pub fn generate_sample_events() -> Vec<starknet::core::types::EmittedEvent> {
+    pub fn generate_sample_events() -> Vec<EmittedEvent> {
         samples::generate_sample_events()
     }
 

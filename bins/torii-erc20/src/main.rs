@@ -29,6 +29,7 @@ mod config;
 use anyhow::Result;
 use clap::Parser;
 use config::Config;
+use starknet::core::types::Felt;
 use std::path::Path;
 use std::sync::Arc;
 use torii::etl::decoder::DecoderId;
@@ -139,7 +140,7 @@ async fn main() -> Result<()> {
 
     // Add custom contracts with explicit mappings
     for contract_str in &config.contracts {
-        let address = starknet::core::types::Felt::from_hex(contract_str)?;
+        let address = Felt::from_hex(contract_str)?;
         tracing::info!("Mapping custom contract {:#x} to ERC20 decoder", address);
         torii_config = torii_config.map_contract(address, vec![erc20_decoder_id]);
     }

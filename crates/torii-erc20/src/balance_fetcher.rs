@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 
 /// Maximum number of requests per batch to avoid RPC limits
 const MAX_BATCH_SIZE: usize = 500;
-use starknet::core::types::{BlockId, Felt, FunctionCall, U256};
+use starknet::core::types::{requests::CallRequest, BlockId, Felt, FunctionCall, U256};
 use starknet::macros::selector;
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use starknet::providers::{Provider, ProviderRequestData, ProviderResponseData};
@@ -99,7 +99,7 @@ impl BalanceFetcher {
             let rpc_requests: Vec<ProviderRequestData> = chunk
                 .iter()
                 .map(|req| {
-                    ProviderRequestData::Call(starknet::core::types::requests::CallRequest {
+                    ProviderRequestData::Call(CallRequest {
                         request: FunctionCall {
                             contract_address: req.token,
                             entry_point_selector: selector!("balanceOf"),

@@ -6,7 +6,7 @@
 //! ERC1155 has a different signature: balance_of(account, token_id)
 
 use anyhow::{Context, Result};
-use starknet::core::types::{BlockId, Felt, FunctionCall, U256};
+use starknet::core::types::{requests::CallRequest, BlockId, Felt, FunctionCall, U256};
 use starknet::macros::selector;
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use starknet::providers::{Provider, ProviderRequestData, ProviderResponseData};
@@ -96,7 +96,7 @@ impl Erc1155BalanceFetcher {
             .iter()
             .map(|req| {
                 let calldata = build_balance_of_calldata(req.wallet, req.token_id);
-                ProviderRequestData::Call(starknet::core::types::requests::CallRequest {
+                ProviderRequestData::Call(CallRequest {
                     request: FunctionCall {
                         contract_address: req.contract,
                         entry_point_selector: selector!("balance_of"),

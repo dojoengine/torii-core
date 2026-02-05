@@ -49,7 +49,8 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use starknet::core::types::{
-    requests::GetEventsRequest, BlockId, EmittedEvent, EventFilter, EventFilterWithPage, Felt,
+    requests::{GetBlockWithTxHashesRequest, GetEventsRequest},
+    BlockId, EmittedEvent, EventFilter, EventFilterWithPage, Felt, MaybePreConfirmedBlockWithTxHashes,
     ResultPageRequest,
 };
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
@@ -406,11 +407,9 @@ impl EventExtractor {
         let requests: Vec<ProviderRequestData> = uncached
             .iter()
             .map(|&n| {
-                ProviderRequestData::GetBlockWithTxHashes(
-                    starknet::core::types::requests::GetBlockWithTxHashesRequest {
-                        block_id: BlockId::Number(n),
-                    },
-                )
+                ProviderRequestData::GetBlockWithTxHashes(GetBlockWithTxHashesRequest {
+                    block_id: BlockId::Number(n),
+                })
             })
             .collect();
 
@@ -433,10 +432,10 @@ impl EventExtractor {
         for (block_num, response) in uncached.iter().zip(responses) {
             if let ProviderResponseData::GetBlockWithTxHashes(block) = response {
                 match block {
-                    starknet::core::types::MaybePreConfirmedBlockWithTxHashes::Block(b) => {
+                    MaybePreConfirmedBlockWithTxHashes::Block(b) => {
                         new_timestamps.insert(*block_num, b.timestamp);
                     }
-                    starknet::core::types::MaybePreConfirmedBlockWithTxHashes::PreConfirmedBlock(_) => {
+                    MaybePreConfirmedBlockWithTxHashes::PreConfirmedBlock(_) => {
                         tracing::warn!(
                             target: "torii::etl::event",
                             block_num = block_num,

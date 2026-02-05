@@ -2,7 +2,7 @@
 //!
 //! It demonstrate how to decode Starknet events into envelopes based on the event content.
 use async_trait::async_trait;
-use starknet::core::types::EmittedEvent;
+use starknet::core::types::{EmittedEvent, Felt};
 use starknet::core::utils::parse_cairo_short_string;
 use starknet::macros::selector;
 use std::any::Any;
@@ -67,7 +67,7 @@ impl TypedBody for SqlUpdate {
 pub struct SqlDecoder {
     /// Filter by specific contract addresses.
     /// If empty, processes all events.
-    contract_filters: Vec<starknet::core::types::Felt>,
+    contract_filters: Vec<Felt>,
 }
 
 impl SqlDecoder {
@@ -76,7 +76,7 @@ impl SqlDecoder {
     /// # Arguments
     /// * `contract_filters` - List of contract addresses to filter by.
     ///                        If empty, processes all events.
-    pub fn new(contract_filters: Vec<starknet::core::types::Felt>) -> Self {
+    pub fn new(contract_filters: Vec<Felt>) -> Self {
         Self { contract_filters }
     }
 

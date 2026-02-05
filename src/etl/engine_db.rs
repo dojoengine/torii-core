@@ -8,8 +8,11 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     Pool, Row, Sqlite,
 };
+use starknet::core::types::Felt;
 use std::path::Path;
 use std::str::FromStr;
+
+use crate::etl::decoder::DecoderId;
 
 /// Embedded SQL schema
 const SCHEMA_SQL: &str = include_str!("../../sql/engine_schema.sql");
@@ -358,7 +361,7 @@ impl EngineDb {
     /// Vector of (contract_address, decoder_ids, identified_at_timestamp)
     pub async fn get_all_contract_decoders(
         &self,
-    ) -> Result<Vec<(starknet::core::types::Felt, Vec<crate::etl::decoder::DecoderId>, i64)>> {
+    ) -> Result<Vec<(Felt, Vec<DecoderId>, i64)>> {
         let rows = sqlx::query(
             "SELECT contract_address, decoder_ids, identified_at FROM contract_decoders",
         )
@@ -372,17 +375,17 @@ impl EngineDb {
             let identified_at: i64 = row.get(2);
 
             // Parse contract address
-            let contract_address = starknet::core::types::Felt::from_hex(&addr_hex)
+            let contract_address = Felt::from_hex(&addr_hex)
                 .context(format!("Invalid contract address: {}", addr_hex))?;
 
             // Parse decoder IDs (comma-separated u64 values)
-            let decoder_ids: Vec<crate::etl::decoder::DecoderId> = if decoder_ids_str.is_empty() {
+            let decoder_ids: Vec<DecoderId> = if decoder_ids_str.is_empty() {
                 Vec::new()
             } else {
                 decoder_ids_str
                     .split(',')
                     .filter_map(|s| s.trim().parse::<u64>().ok())
-                    .map(crate::etl::decoder::DecoderId::from_u64)
+                    .map(DecoderId::from_u64)
                     .collect()
             };
 
@@ -399,8 +402,8 @@ impl EngineDb {
     /// * `decoder_ids` - List of decoder IDs (can be empty)
     pub async fn set_contract_decoders(
         &self,
-        contract: starknet::core::types::Felt,
-        decoder_ids: &[crate::etl::decoder::DecoderId],
+        contract: Felt,
+        decoder_ids: &[DecoderId],
     ) -> Result<()> {
         let addr_hex = format!("{:#x}", contract);
         let decoder_ids_str: String = decoder_ids
@@ -434,8 +437,8 @@ impl EngineDb {
     /// Some(decoder_ids) if found, None otherwise
     pub async fn get_contract_decoders(
         &self,
-        contract: starknet::core::types::Felt,
-    ) -> Result<Option<Vec<crate::etl::decoder::DecoderId>>> {
+        contract: Felt,
+    ) -> Result<Option<Vec<DecoderId>>> {
         let addr_hex = format!("{:#x}", contract);
 
         let row = sqlx::query("SELECT decoder_ids FROM contract_decoders WHERE contract_address = ?")
@@ -446,14 +449,13 @@ impl EngineDb {
         match row {
             Some(r) => {
                 let decoder_ids_str: String = r.get(0);
-                let decoder_ids: Vec<crate::etl::decoder::DecoderId> = if decoder_ids_str.is_empty()
-                {
+                let decoder_ids: Vec<DecoderId> = if decoder_ids_str.is_empty() {
                     Vec::new()
                 } else {
                     decoder_ids_str
                         .split(',')
                         .filter_map(|s| s.trim().parse::<u64>().ok())
-                        .map(crate::etl::decoder::DecoderId::from_u64)
+                        .map(DecoderId::from_u64)
                         .collect()
                 };
                 Ok(Some(decoder_ids))

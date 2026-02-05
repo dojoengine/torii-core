@@ -39,6 +39,7 @@ mod config;
 use anyhow::Result;
 use clap::Parser;
 use config::{Config, ExtractionMode};
+use starknet::core::types::Felt;
 use std::path::Path;
 use std::sync::Arc;
 use torii::etl::decoder::DecoderId;
@@ -133,9 +134,9 @@ async fn run_indexer(config: Config) -> Result<()> {
     ));
 
     // Collect all contract addresses first (needed for Event mode)
-    let mut all_erc20_addresses: Vec<starknet::core::types::Felt> = Vec::new();
-    let mut all_erc721_addresses: Vec<starknet::core::types::Felt> = Vec::new();
-    let mut all_erc1155_addresses: Vec<starknet::core::types::Felt> = Vec::new();
+    let mut all_erc20_addresses: Vec<Felt> = Vec::new();
+    let mut all_erc721_addresses: Vec<Felt> = Vec::new();
+    let mut all_erc1155_addresses: Vec<Felt> = Vec::new();
 
     // Add well-known contracts if requested
     if config.include_well_known {

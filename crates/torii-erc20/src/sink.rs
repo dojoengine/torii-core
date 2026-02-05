@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use axum::Router;
 use prost::Message;
 use prost_types::Any;
-use starknet::core::types::U256;
+use starknet::core::types::{Felt, U256};
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -304,7 +304,7 @@ impl Sink for Erc20Sink {
                     };
 
                     // Step 2: Batch fetch actual balances from RPC for inconsistent wallets
-                    let mut adjustments: HashMap<(starknet::core::types::Felt, starknet::core::types::Felt), U256> = HashMap::new();
+                    let mut adjustments: HashMap<(Felt, Felt), U256> = HashMap::new();
                     if !adjustment_requests.is_empty() {
                         tracing::info!(
                             target: "torii_erc20::sink",
