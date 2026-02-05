@@ -5,6 +5,9 @@
 //! and running identification rules.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+
+/// Maximum number of requests per batch to avoid RPC limits
+const MAX_BATCH_SIZE: usize = 500;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -179,37 +182,40 @@ impl ContractRegistry {
             unknown.len()
         );
 
-        // BATCH 1: Fetch all class hashes at once
-        let class_hash_requests: Vec<ProviderRequestData> = unknown
-            .iter()
-            .map(|&addr| {
-                ProviderRequestData::GetClassHashAt(GetClassHashAtRequest {
-                    block_id: BlockId::Tag(BlockTag::Latest),
-                    contract_address: addr,
-                })
-            })
-            .collect();
-
-        let class_hash_responses = self
-            .provider
-            .batch_requests(&class_hash_requests)
-            .await
-            .context("Failed to batch fetch class hashes")?;
-
-        // Map contract → class_hash, track failures
+        // BATCH 1: Fetch all class hashes (chunked to respect RPC limits)
         let mut contract_to_class: HashMap<Felt, Felt> = HashMap::new();
-        for (addr, response) in unknown.iter().zip(class_hash_responses) {
-            match response {
-                ProviderResponseData::GetClassHashAt(class_hash) => {
-                    contract_to_class.insert(*addr, class_hash);
-                }
-                _ => {
-                    tracing::debug!(
-                        target: "torii::etl::identification",
-                        contract = %format!("{:#x}", addr),
-                        "Failed to get class hash, caching as empty"
-                    );
-                    self.cache_empty(*addr).await;
+
+        for chunk in unknown.chunks(MAX_BATCH_SIZE) {
+            let class_hash_requests: Vec<ProviderRequestData> = chunk
+                .iter()
+                .map(|&addr| {
+                    ProviderRequestData::GetClassHashAt(GetClassHashAtRequest {
+                        block_id: BlockId::Tag(BlockTag::Latest),
+                        contract_address: addr,
+                    })
+                })
+                .collect();
+
+            let class_hash_responses = self
+                .provider
+                .batch_requests(&class_hash_requests)
+                .await
+                .context("Failed to batch fetch class hashes")?;
+
+            // Map contract → class_hash, track failures
+            for (addr, response) in chunk.iter().zip(class_hash_responses) {
+                match response {
+                    ProviderResponseData::GetClassHashAt(class_hash) => {
+                        contract_to_class.insert(*addr, class_hash);
+                    }
+                    _ => {
+                        tracing::debug!(
+                            target: "torii::etl::identification",
+                            contract = %format!("{:#x}", addr),
+                            "Failed to get class hash, caching as empty"
+                        );
+                        self.cache_empty(*addr).await;
+                    }
                 }
             }
         }
@@ -218,7 +224,7 @@ impl ContractRegistry {
             return Ok(HashMap::new());
         }
 
-        // BATCH 2: Fetch unique classes (deduplicated by class hash)
+        // BATCH 2: Fetch unique classes (deduplicated by class hash, chunked to respect RPC limits)
         let unique_class_hashes: Vec<Felt> = contract_to_class
             .values()
             .copied()
@@ -233,47 +239,50 @@ impl ContractRegistry {
             "Fetching unique contract classes"
         );
 
-        let class_requests: Vec<ProviderRequestData> = unique_class_hashes
-            .iter()
-            .map(|&class_hash| {
-                ProviderRequestData::GetClass(GetClassRequest {
-                    block_id: BlockId::Tag(BlockTag::Latest),
-                    class_hash,
-                })
-            })
-            .collect();
-
-        let class_responses = self
-            .provider
-            .batch_requests(&class_requests)
-            .await
-            .context("Failed to batch fetch classes")?;
-
         // Map class_hash → ContractAbi
         let mut class_to_abi: HashMap<Felt, ContractAbi> = HashMap::new();
-        for (class_hash, response) in unique_class_hashes.iter().zip(class_responses) {
-            match response {
-                ProviderResponseData::GetClass(contract_class) => {
-                    match ContractAbi::from_contract_class(contract_class) {
-                        Ok(abi) => {
-                            class_to_abi.insert(*class_hash, abi);
-                        }
-                        Err(e) => {
-                            tracing::debug!(
-                                target: "torii::etl::identification",
-                                class_hash = %format!("{:#x}", class_hash),
-                                error = %e,
-                                "Failed to parse ABI"
-                            );
+
+        for chunk in unique_class_hashes.chunks(MAX_BATCH_SIZE) {
+            let class_requests: Vec<ProviderRequestData> = chunk
+                .iter()
+                .map(|&class_hash| {
+                    ProviderRequestData::GetClass(GetClassRequest {
+                        block_id: BlockId::Tag(BlockTag::Latest),
+                        class_hash,
+                    })
+                })
+                .collect();
+
+            let class_responses = self
+                .provider
+                .batch_requests(&class_requests)
+                .await
+                .context("Failed to batch fetch classes")?;
+
+            for (class_hash, response) in chunk.iter().zip(class_responses) {
+                match response {
+                    ProviderResponseData::GetClass(contract_class) => {
+                        match ContractAbi::from_contract_class(contract_class) {
+                            Ok(abi) => {
+                                class_to_abi.insert(*class_hash, abi);
+                            }
+                            Err(e) => {
+                                tracing::debug!(
+                                    target: "torii::etl::identification",
+                                    class_hash = %format!("{:#x}", class_hash),
+                                    error = %e,
+                                    "Failed to parse ABI"
+                                );
+                            }
                         }
                     }
-                }
-                _ => {
-                    tracing::debug!(
-                        target: "torii::etl::identification",
-                        class_hash = %format!("{:#x}", class_hash),
-                        "Failed to get class"
-                    );
+                    _ => {
+                        tracing::debug!(
+                            target: "torii::etl::identification",
+                            class_hash = %format!("{:#x}", class_hash),
+                            "Failed to get class"
+                        );
+                    }
                 }
             }
         }

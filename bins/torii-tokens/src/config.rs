@@ -108,7 +108,7 @@ pub struct Config {
     ///
     /// Higher values improve throughput but use more memory.
     /// Lower values reduce memory usage but may slow down indexing.
-    #[arg(long, default_value = "1000")]
+    #[arg(long, default_value = "50")]
     pub batch_size: u64,
 
     /// Events per RPC request (event mode, max 1024 for most providers)

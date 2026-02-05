@@ -4,6 +4,9 @@
 //! at specific block heights (used for inconsistency detection).
 
 use anyhow::{Context, Result};
+
+/// Maximum number of requests per batch to avoid RPC limits
+const MAX_BATCH_SIZE: usize = 500;
 use starknet::core::types::{BlockId, Felt, FunctionCall, U256};
 use starknet::macros::selector;
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
@@ -47,7 +50,9 @@ impl BalanceFetcher {
     ) -> Result<U256> {
         let call = FunctionCall {
             contract_address: token,
-            entry_point_selector: selector!("balance_of"),
+            // TODO: Some contracts use balance_of (snake_case), others use balanceOf (camelCase).
+            // We need a strategy to handle both - possibly try one, fallback to other, or use ABI.
+            entry_point_selector: selector!("balanceOf"),
             calldata: vec![wallet],
         };
 
@@ -74,6 +79,8 @@ impl BalanceFetcher {
     /// Uses JSON-RPC batch requests for efficiency.
     /// Returns a vector of (token, wallet, balance) tuples.
     /// On RPC failure for any request, sets that balance to 0 and continues.
+    ///
+    /// Requests are chunked into batches of MAX_BATCH_SIZE (500) to avoid RPC limits.
     pub async fn fetch_balances_batch(
         &self,
         requests: &[BalanceFetchRequest],
@@ -82,55 +89,61 @@ impl BalanceFetcher {
             return Ok(Vec::new());
         }
 
-        // Build batch request
-        let rpc_requests: Vec<ProviderRequestData> = requests
-            .iter()
-            .map(|req| {
-                ProviderRequestData::Call(starknet::core::types::requests::CallRequest {
-                    request: FunctionCall {
-                        contract_address: req.token,
-                        entry_point_selector: selector!("balance_of"),
-                        calldata: vec![req.wallet],
-                    },
-                    block_id: BlockId::Number(req.block_number),
+        let mut all_results = Vec::with_capacity(requests.len());
+
+        // Process in chunks of MAX_BATCH_SIZE
+        for chunk in requests.chunks(MAX_BATCH_SIZE) {
+            // Build batch request for this chunk
+            // TODO: Some contracts use balance_of (snake_case), others use balanceOf (camelCase).
+            // We need a strategy to handle both - possibly try one, fallback to other, or use ABI.
+            let rpc_requests: Vec<ProviderRequestData> = chunk
+                .iter()
+                .map(|req| {
+                    ProviderRequestData::Call(starknet::core::types::requests::CallRequest {
+                        request: FunctionCall {
+                            contract_address: req.token,
+                            entry_point_selector: selector!("balanceOf"),
+                            calldata: vec![req.wallet],
+                        },
+                        block_id: BlockId::Number(req.block_number),
+                    })
                 })
-            })
-            .collect();
+                .collect();
 
-        // Execute batch request
-        let responses = self
-            .provider
-            .batch_requests(&rpc_requests)
-            .await
-            .context("Failed to execute batch balance_of requests")?;
+            // Execute batch request
+            let responses = self
+                .provider
+                .batch_requests(&rpc_requests)
+                .await
+                .context("Failed to execute batch balance_of requests")?;
 
-        // Process responses
-        let mut results = Vec::with_capacity(requests.len());
-        for (idx, response) in responses.into_iter().enumerate() {
-            let req = &requests[idx];
-            let balance = match response {
-                ProviderResponseData::Call(felts) => parse_u256_result(&felts),
-                _ => {
-                    tracing::warn!(
-                        target: "torii_erc20::balance_fetcher",
-                        token = %req.token,
-                        wallet = %req.wallet,
-                        block = req.block_number,
-                        "Unexpected response type for balance_of, using 0"
-                    );
-                    U256::from(0u64)
-                }
-            };
-            results.push((req.token, req.wallet, balance));
+            // Process responses
+            for (idx, response) in responses.into_iter().enumerate() {
+                let req = &chunk[idx];
+                let balance = match response {
+                    ProviderResponseData::Call(felts) => parse_u256_result(&felts),
+                    _ => {
+                        tracing::warn!(
+                            target: "torii_erc20::balance_fetcher",
+                            token = %req.token,
+                            wallet = %req.wallet,
+                            block = req.block_number,
+                            "Unexpected response type for balance_of, using 0"
+                        );
+                        U256::from(0u64)
+                    }
+                };
+                all_results.push((req.token, req.wallet, balance));
+            }
         }
 
         tracing::debug!(
             target: "torii_erc20::balance_fetcher",
-            count = results.len(),
+            count = all_results.len(),
             "Fetched balances batch"
         );
 
-        Ok(results)
+        Ok(all_results)
     }
 }
 

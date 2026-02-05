@@ -86,7 +86,7 @@ async fn main() -> Result<()> {
         rpc_url: config.rpc_url.clone(),
         from_block: config.from_block,
         to_block: config.to_block,
-        batch_size: 1000,
+        batch_size: 50,
         retry_policy: torii::etl::extractor::RetryPolicy::default(),
     };
 
