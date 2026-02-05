@@ -62,10 +62,10 @@ torii-erc20 \
 
 ```bash
 # Mainnet
-torii-erc20 --rpc-url https://starknet-mainnet.public.blastapi.io/rpc/v0_7
+torii-erc20 --rpc-url https://api.cartridge.gg/x/starknet/mainnet
 
 # Sepolia (default)
-torii-erc20 --rpc-url https://starknet-sepolia.public.blastapi.io/rpc/v0_7
+torii-erc20 --rpc-url https://api.cartridge.gg/x/starknet/sepolia
 ```
 
 ### All Options
