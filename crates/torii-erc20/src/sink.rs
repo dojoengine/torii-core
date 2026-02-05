@@ -2,13 +2,16 @@
 //!
 //! This sink:
 //! - Stores transfer and approval records in the database
+//! - Tracks balances with automatic inconsistency detection
 //! - Publishes events via EventBus for real-time subscriptions (simple clients)
 //! - Broadcasts events via gRPC service for rich subscriptions (advanced clients)
 //!
-//! Note: Balance tracking was intentionally removed. Clients should fetch
-//! actual balances from the chain when needed, as transfer-derived balances
-//! are inherently incorrect (genesis allocations, airdrops, etc.).
+//! Balance tracking uses a "fetch-on-inconsistency" approach:
+//! - Computes balances from transfer events
+//! - When a balance would go negative (genesis allocation, airdrop, etc.),
+//!   fetches the actual balance from the chain and adjusts
 
+use crate::balance_fetcher::BalanceFetcher;
 use crate::decoder::{Approval as DecodedApproval, Transfer as DecodedTransfer};
 use crate::grpc_service::Erc20Service;
 use crate::proto;
@@ -18,6 +21,8 @@ use async_trait::async_trait;
 use axum::Router;
 use prost::Message;
 use prost_types::Any;
+use starknet::core::types::U256;
+use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use std::collections::HashMap;
 use std::sync::Arc;
 use torii::etl::sink::{EventBus, TopicInfo};
@@ -33,6 +38,7 @@ const LIVE_THRESHOLD_BLOCKS: u64 = 100;
 ///
 /// Processes ERC20 Transfer and Approval events and:
 /// - Stores records in the database
+/// - Tracks balances with automatic inconsistency detection
 /// - Publishes events via EventBus for real-time subscriptions (only when live)
 /// - Broadcasts events via gRPC service for rich subscriptions (only when live)
 ///
@@ -42,6 +48,8 @@ pub struct Erc20Sink {
     storage: Arc<Erc20Storage>,
     event_bus: Option<Arc<EventBus>>,
     grpc_service: Option<Erc20Service>,
+    /// Balance fetcher for RPC calls (None = balance tracking disabled)
+    balance_fetcher: Option<Arc<BalanceFetcher>>,
 }
 
 impl Erc20Sink {
@@ -50,12 +58,28 @@ impl Erc20Sink {
             storage,
             event_bus: None,
             grpc_service: None,
+            balance_fetcher: None,
         }
     }
 
     /// Set the gRPC service for dual publishing
     pub fn with_grpc_service(mut self, service: Erc20Service) -> Self {
         self.grpc_service = Some(service);
+        self
+    }
+
+    /// Enable balance tracking with a provider for RPC calls
+    ///
+    /// When enabled, the sink will:
+    /// - Track balances computed from transfer events
+    /// - Detect when a balance would go negative (indicating missed history)
+    /// - Fetch actual balance from the chain and adjust
+    /// - Record adjustments in an audit table
+    pub fn with_balance_tracking(
+        mut self,
+        provider: Arc<JsonRpcClient<HttpTransport>>,
+    ) -> Self {
+        self.balance_fetcher = Some(Arc::new(BalanceFetcher::new(provider)));
         self
     }
 
@@ -263,6 +287,61 @@ impl Sink for Erc20Sink {
                     count = transfer_count,
                     "Batch inserted transfers"
                 );
+
+                // Update balances if balance tracking is enabled
+                if let Some(ref fetcher) = self.balance_fetcher {
+                    // Step 1: Check which balances need adjustment (would go negative)
+                    let adjustment_requests = match self.storage.check_balances_batch(&transfers) {
+                        Ok(requests) => requests,
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "torii_erc20::sink",
+                                error = %e,
+                                "Failed to check balance inconsistencies, skipping balance tracking"
+                            );
+                            Vec::new()
+                        }
+                    };
+
+                    // Step 2: Batch fetch actual balances from RPC for inconsistent wallets
+                    let mut adjustments: HashMap<(starknet::core::types::Felt, starknet::core::types::Felt), U256> = HashMap::new();
+                    if !adjustment_requests.is_empty() {
+                        tracing::info!(
+                            target: "torii_erc20::sink",
+                            count = adjustment_requests.len(),
+                            "Fetching balance adjustments from RPC"
+                        );
+
+                        match fetcher.fetch_balances_batch(&adjustment_requests).await {
+                            Ok(fetched) => {
+                                for (token, wallet, balance) in fetched {
+                                    adjustments.insert((token, wallet), balance);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "torii_erc20::sink",
+                                    error = %e,
+                                    "Failed to fetch balances from RPC, using 0 for adjustments"
+                                );
+                                // On failure, use 0 for all requested adjustments
+                                for req in &adjustment_requests {
+                                    adjustments.insert((req.token, req.wallet), U256::from(0u64));
+                                }
+                            }
+                        }
+                    }
+
+                    // Step 3: Apply transfers with adjustments to update balances
+                    if let Err(e) = self.storage.apply_transfers_with_adjustments(&transfers, &adjustments) {
+                        tracing::error!(
+                            target: "torii_erc20::sink",
+                            error = %e,
+                            "Failed to apply balance updates"
+                        );
+                        // Don't fail the whole batch - transfers are already inserted
+                    }
+                }
 
                 // Only broadcast to real-time subscribers when near chain head
                 let is_live = batch.is_live(LIVE_THRESHOLD_BLOCKS);

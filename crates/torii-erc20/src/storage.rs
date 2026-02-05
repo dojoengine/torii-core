@@ -1,18 +1,22 @@
-//! SQLite storage for ERC20 transfers and approvals
+//! SQLite storage for ERC20 transfers, approvals, and balances
 //!
 //! Uses binary (BLOB) storage for efficiency (~51% size reduction vs hex strings).
 //! Uses U256 for amounts (proper 256-bit arithmetic for ERC20 token amounts).
 //!
-//! Note: Balance tracking was intentionally removed because balances computed from
-//! transfers are inherently incorrect - some addresses have initial balances without
-//! transfer history (genesis allocations, airdrops). Clients should fetch actual
-//! balances from the chain when needed.
+//! Balance tracking uses a "fetch-on-inconsistency" approach:
+//! - Tracks balances computed from transfer events
+//! - When a balance would go negative (indicating missed history like genesis allocations),
+//!   fetches the actual balance from the chain and adjusts
+//! - Records all adjustments in an audit table for debugging
 
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use starknet::core::types::{Felt, U256};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use torii_common::{blob_to_felt, blob_to_u256, felt_to_blob, u256_to_blob};
+
+use crate::balance_fetcher::BalanceFetchRequest;
 
 /// Direction filter for transfer queries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -69,6 +73,30 @@ pub struct TransferCursor {
 pub struct ApprovalCursor {
     pub block_number: u64,
     pub id: i64,
+}
+
+/// Balance data for a token/wallet pair
+#[derive(Debug, Clone)]
+pub struct BalanceData {
+    pub token: Felt,
+    pub wallet: Felt,
+    pub balance: U256,
+    pub last_block: u64,
+    pub last_tx_hash: Felt,
+}
+
+/// Balance adjustment record for audit trail
+#[derive(Debug, Clone)]
+pub struct BalanceAdjustment {
+    pub token: Felt,
+    pub wallet: Felt,
+    /// What we computed from transfers
+    pub computed_balance: U256,
+    /// What the RPC returned as actual balance
+    pub actual_balance: U256,
+    /// Block at which adjustment was made
+    pub adjusted_at_block: u64,
+    pub tx_hash: Felt,
 }
 
 impl Erc20Storage {
@@ -254,6 +282,58 @@ impl Erc20Storage {
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_approval_activity_approval
              ON approval_activity(approval_id)",
+            [],
+        )?;
+
+        // Balance tracking tables
+        // Tracks current balance per (token, wallet) pair
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS balances (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token BLOB NOT NULL,
+                wallet BLOB NOT NULL,
+                balance BLOB NOT NULL,
+                last_block INTEGER NOT NULL,
+                last_tx_hash BLOB NOT NULL,
+                updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+                UNIQUE(token, wallet)
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_balances_token ON balances(token)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_balances_wallet ON balances(wallet)",
+            [],
+        )?;
+
+        // Balance adjustments table for audit trail
+        // Records when we had to fetch balance from RPC due to inconsistency
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS balance_adjustments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token BLOB NOT NULL,
+                wallet BLOB NOT NULL,
+                computed_balance BLOB NOT NULL,
+                actual_balance BLOB NOT NULL,
+                adjusted_at_block INTEGER NOT NULL,
+                tx_hash BLOB NOT NULL,
+                created_at INTEGER DEFAULT (strftime('%s', 'now'))
+            )",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_adjustments_wallet ON balance_adjustments(wallet)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_adjustments_token ON balance_adjustments(token)",
             [],
         )?;
 
@@ -756,5 +836,360 @@ impl Erc20Storage {
             )
             .ok();
         Ok(block.map(|b| b as u64))
+    }
+
+    // ===== Balance Tracking Methods =====
+
+    /// Get current balance for a wallet/token pair
+    pub fn get_balance(&self, token: Felt, wallet: Felt) -> Result<Option<U256>> {
+        let conn = self.conn.lock().unwrap();
+        let token_blob = felt_to_blob(token);
+        let wallet_blob = felt_to_blob(wallet);
+
+        let result: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT balance FROM balances WHERE token = ? AND wallet = ?",
+                params![&token_blob, &wallet_blob],
+                |row| row.get(0),
+            )
+            .ok();
+
+        Ok(result.map(|bytes| blob_to_u256(&bytes)))
+    }
+
+    /// Get balances for multiple wallet/token pairs in a single query
+    pub fn get_balances_batch(
+        &self,
+        pairs: &[(Felt, Felt)],
+    ) -> Result<HashMap<(Felt, Felt), U256>> {
+        if pairs.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut result = HashMap::new();
+
+        // SQLite doesn't support batch IN with tuples well, so we query one by one
+        // but we keep the connection lock to avoid repeated locking
+        let mut stmt = conn.prepare_cached(
+            "SELECT balance FROM balances WHERE token = ? AND wallet = ?",
+        )?;
+
+        for (token, wallet) in pairs {
+            let token_blob = felt_to_blob(*token);
+            let wallet_blob = felt_to_blob(*wallet);
+
+            if let Ok(balance_bytes) = stmt.query_row(
+                params![&token_blob, &wallet_blob],
+                |row| row.get::<_, Vec<u8>>(0),
+            ) {
+                result.insert((*token, *wallet), blob_to_u256(&balance_bytes));
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Check which transfers need balance adjustments
+    ///
+    /// For each transfer, checks if the sender's current balance would go negative.
+    /// Returns BalanceFetchRequests for wallets that need adjustment.
+    ///
+    /// The returned requests have block_number set to transfer.block_number - 1
+    /// (the block RIGHT BEFORE the transfer occurred).
+    pub fn check_balances_batch(
+        &self,
+        transfers: &[TransferData],
+    ) -> Result<Vec<BalanceFetchRequest>> {
+        if transfers.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Collect unique sender pairs (token, wallet) that need checking
+        // Skip zero addresses (mints)
+        let sender_pairs: Vec<(Felt, Felt)> = transfers
+            .iter()
+            .filter(|t| t.from != Felt::ZERO)
+            .map(|t| (t.token, t.from))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        // Get current balances for all senders
+        let current_balances = self.get_balances_batch(&sender_pairs)?;
+
+        // Track running balance changes within this batch
+        // (multiple transfers from same wallet in same batch)
+        let mut pending_debits: HashMap<(Felt, Felt), U256> = HashMap::new();
+
+        let mut adjustment_requests = Vec::new();
+
+        for transfer in transfers {
+            if transfer.from == Felt::ZERO {
+                continue; // Skip mints
+            }
+
+            let key = (transfer.token, transfer.from);
+
+            // Get current stored balance (default to 0)
+            let stored_balance = current_balances.get(&key).copied().unwrap_or(U256::from(0u64));
+
+            // Add any pending debits from earlier in this batch
+            let total_pending = pending_debits.get(&key).copied().unwrap_or(U256::from(0u64));
+
+            // Check if balance would go negative
+            // Since U256 doesn't have checked_add, we add and check for overflow via comparison
+            let total_needed = total_pending + transfer.amount;
+
+            if stored_balance >= total_needed {
+                // Balance is sufficient, track the debit
+                pending_debits.insert(key, total_needed);
+            } else {
+                    // Balance would go negative - need to fetch actual balance
+                    // Only add one request per unique (token, wallet, block)
+                    let block_before = transfer.block_number.saturating_sub(1);
+                    let already_requested = adjustment_requests.iter().any(|r: &BalanceFetchRequest| {
+                        r.token == transfer.token
+                            && r.wallet == transfer.from
+                            && r.block_number == block_before
+                    });
+
+                if !already_requested {
+                    adjustment_requests.push(BalanceFetchRequest {
+                        token: transfer.token,
+                        wallet: transfer.from,
+                        block_number: block_before,
+                    });
+                }
+            }
+        }
+
+        if !adjustment_requests.is_empty() {
+            tracing::info!(
+                target: "torii_erc20::storage",
+                count = adjustment_requests.len(),
+                "Detected balance inconsistencies, will fetch from RPC"
+            );
+        }
+
+        Ok(adjustment_requests)
+    }
+
+    /// Apply transfers with adjustments and update balances
+    ///
+    /// This is the main balance tracking method. It:
+    /// 1. Uses adjustments for wallets where we fetched actual balances
+    /// 2. Applies transfer debits/credits to update balances
+    /// 3. Records adjustments in the audit table
+    ///
+    /// # Arguments
+    /// * `transfers` - The transfers to apply
+    /// * `adjustments` - Map of (token, wallet) -> actual_balance fetched from RPC
+    pub fn apply_transfers_with_adjustments(
+        &self,
+        transfers: &[TransferData],
+        adjustments: &HashMap<(Felt, Felt), U256>,
+    ) -> Result<()> {
+        if transfers.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        // Track balance changes in memory first
+        // Key: (token, wallet), Value: current balance
+        let mut balance_cache: HashMap<(Felt, Felt), U256> = HashMap::new();
+
+        // Load existing balances for all affected wallets
+        {
+            let mut stmt = tx.prepare_cached(
+                "SELECT balance FROM balances WHERE token = ? AND wallet = ?",
+            )?;
+
+            for transfer in transfers {
+                // Load sender balance (if not zero address)
+                if transfer.from != Felt::ZERO {
+                    let key = (transfer.token, transfer.from);
+                    if !balance_cache.contains_key(&key) {
+                        let token_blob = felt_to_blob(transfer.token);
+                        let wallet_blob = felt_to_blob(transfer.from);
+                        let balance: U256 = stmt
+                            .query_row(params![&token_blob, &wallet_blob], |row| {
+                                let bytes: Vec<u8> = row.get(0)?;
+                                Ok(blob_to_u256(&bytes))
+                            })
+                            .unwrap_or(U256::from(0u64));
+                        balance_cache.insert(key, balance);
+                    }
+                }
+
+                // Load receiver balance (if not zero address)
+                if transfer.to != Felt::ZERO {
+                    let key = (transfer.token, transfer.to);
+                    if !balance_cache.contains_key(&key) {
+                        let token_blob = felt_to_blob(transfer.token);
+                        let wallet_blob = felt_to_blob(transfer.to);
+                        let balance: U256 = stmt
+                            .query_row(params![&token_blob, &wallet_blob], |row| {
+                                let bytes: Vec<u8> = row.get(0)?;
+                                Ok(blob_to_u256(&bytes))
+                            })
+                            .unwrap_or(U256::from(0u64));
+                        balance_cache.insert(key, balance);
+                    }
+                }
+            }
+        }
+
+        // Apply adjustments - these are the "corrected" starting balances
+        let mut adjustments_to_record: Vec<BalanceAdjustment> = Vec::new();
+
+        for ((token, wallet), actual_balance) in adjustments {
+            let key = (*token, *wallet);
+            let computed = balance_cache.get(&key).copied().unwrap_or(U256::from(0u64));
+
+            // Only record if there's actually a difference
+            if computed != *actual_balance {
+                // Find the transfer that triggered this adjustment
+                let triggering_transfer = transfers
+                    .iter()
+                    .find(|t| t.token == *token && t.from == *wallet);
+
+                if let Some(transfer) = triggering_transfer {
+                    adjustments_to_record.push(BalanceAdjustment {
+                        token: *token,
+                        wallet: *wallet,
+                        computed_balance: computed,
+                        actual_balance: *actual_balance,
+                        adjusted_at_block: transfer.block_number,
+                        tx_hash: transfer.tx_hash,
+                    });
+                }
+            }
+
+            // Update cache with actual balance
+            balance_cache.insert(key, *actual_balance);
+        }
+
+        // Apply transfers to balances
+        let mut last_block_per_wallet: HashMap<(Felt, Felt), (u64, Felt)> = HashMap::new();
+
+        for transfer in transfers {
+            // Debit sender (if not mint)
+            if transfer.from != Felt::ZERO {
+                let key = (transfer.token, transfer.from);
+                let current = balance_cache.get(&key).copied().unwrap_or(U256::from(0u64));
+                // Saturating subtract: return 0 if would underflow
+                let new_balance = if current >= transfer.amount {
+                    current - transfer.amount
+                } else {
+                    U256::from(0u64)
+                };
+                balance_cache.insert(key, new_balance);
+                last_block_per_wallet.insert(key, (transfer.block_number, transfer.tx_hash));
+            }
+
+            // Credit receiver (if not burn)
+            if transfer.to != Felt::ZERO {
+                let key = (transfer.token, transfer.to);
+                let current = balance_cache.get(&key).copied().unwrap_or(U256::from(0u64));
+                // For addition, we just add (overflow is extremely unlikely for token balances)
+                let new_balance = current + transfer.amount;
+                balance_cache.insert(key, new_balance);
+                last_block_per_wallet.insert(key, (transfer.block_number, transfer.tx_hash));
+            }
+        }
+
+        // Write balances to database
+        {
+            let mut upsert_stmt = tx.prepare_cached(
+                "INSERT INTO balances (token, wallet, balance, last_block, last_tx_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(token, wallet) DO UPDATE SET
+                     balance = excluded.balance,
+                     last_block = excluded.last_block,
+                     last_tx_hash = excluded.last_tx_hash,
+                     updated_at = strftime('%s', 'now')",
+            )?;
+
+            for ((token, wallet), balance) in &balance_cache {
+                let (last_block, last_tx_hash) = last_block_per_wallet
+                    .get(&(*token, *wallet))
+                    .copied()
+                    .unwrap_or((0, Felt::ZERO));
+
+                let token_blob = felt_to_blob(*token);
+                let wallet_blob = felt_to_blob(*wallet);
+                let balance_blob = u256_to_blob(*balance);
+                let tx_hash_blob = felt_to_blob(last_tx_hash);
+
+                upsert_stmt.execute(params![
+                    &token_blob,
+                    &wallet_blob,
+                    &balance_blob,
+                    last_block as i64,
+                    &tx_hash_blob,
+                ])?;
+            }
+        }
+
+        // Record adjustments for audit
+        if !adjustments_to_record.is_empty() {
+            let mut adj_stmt = tx.prepare_cached(
+                "INSERT INTO balance_adjustments
+                 (token, wallet, computed_balance, actual_balance, adjusted_at_block, tx_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+
+            for adj in &adjustments_to_record {
+                let token_blob = felt_to_blob(adj.token);
+                let wallet_blob = felt_to_blob(adj.wallet);
+                let computed_blob = u256_to_blob(adj.computed_balance);
+                let actual_blob = u256_to_blob(adj.actual_balance);
+                let tx_hash_blob = felt_to_blob(adj.tx_hash);
+
+                adj_stmt.execute(params![
+                    &token_blob,
+                    &wallet_blob,
+                    &computed_blob,
+                    &actual_blob,
+                    adj.adjusted_at_block as i64,
+                    &tx_hash_blob,
+                ])?;
+            }
+
+            tracing::info!(
+                target: "torii_erc20::storage",
+                count = adjustments_to_record.len(),
+                "Applied balance adjustments (genesis/airdrop detection)"
+            );
+        }
+
+        tx.commit()?;
+
+        Ok(())
+    }
+
+    /// Get adjustment count (for statistics)
+    pub fn get_adjustment_count(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM balance_adjustments",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as u64)
+    }
+
+    /// Get unique wallet count with balances
+    pub fn get_wallet_count(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(DISTINCT wallet) FROM balances",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count as u64)
     }
 }

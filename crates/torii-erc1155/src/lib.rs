@@ -36,6 +36,7 @@
 //!     .add_service(Erc1155Server::new(grpc_service));
 //! ```
 
+pub mod balance_fetcher;
 pub mod decoder;
 pub mod grpc_service;
 pub mod identification;
@@ -51,8 +52,11 @@ pub mod proto {
 pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/erc1155_descriptor.bin");
 
 // Re-export main types for convenience
+pub use balance_fetcher::{Erc1155BalanceFetcher, Erc1155BalanceFetchRequest};
 pub use decoder::{Erc1155Decoder, OperatorApproval, TransferBatch, TransferSingle};
 pub use grpc_service::Erc1155Service;
 pub use identification::Erc1155Rule;
 pub use sink::Erc1155Sink;
-pub use storage::{Erc1155Storage, TokenTransferData, TransferCursor};
+pub use storage::{
+    Erc1155BalanceAdjustment, Erc1155BalanceData, Erc1155Storage, TokenTransferData, TransferCursor,
+};

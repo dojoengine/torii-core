@@ -302,8 +302,12 @@ async fn run_indexer(config: Config) -> Result<()> {
         // Create gRPC service
         let grpc_service = Erc20Service::new(storage.clone());
 
-        // Create sink with gRPC service
-        let sink = Box::new(Erc20Sink::new(storage).with_grpc_service(grpc_service.clone()));
+        // Create sink with gRPC service and balance tracking
+        let sink = Box::new(
+            Erc20Sink::new(storage)
+                .with_grpc_service(grpc_service.clone())
+                .with_balance_tracking(provider.clone()),
+        );
         torii_config = torii_config.add_sink_boxed(sink);
 
         // Store gRPC service for later
@@ -386,8 +390,12 @@ async fn run_indexer(config: Config) -> Result<()> {
         // Create gRPC service
         let grpc_service = Erc1155Service::new(storage.clone());
 
-        // Create sink with gRPC service
-        let sink = Box::new(Erc1155Sink::new(storage).with_grpc_service(grpc_service.clone()));
+        // Create sink with gRPC service and balance tracking
+        let sink = Box::new(
+            Erc1155Sink::new(storage)
+                .with_grpc_service(grpc_service.clone())
+                .with_balance_tracking(provider.clone()),
+        );
         torii_config = torii_config.add_sink_boxed(sink);
 
         // Store gRPC service for later
