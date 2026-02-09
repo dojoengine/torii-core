@@ -856,6 +856,27 @@ impl Erc20Storage {
         Ok(result.map(|bytes| blob_to_u256(&bytes)))
     }
 
+    /// Get balance with last block info for a wallet/token pair
+    pub fn get_balance_with_block(
+        &self,
+        token: Felt,
+        wallet: Felt,
+    ) -> Result<Option<(U256, u64)>> {
+        let conn = self.conn.lock().unwrap();
+        let token_blob = felt_to_blob(token);
+        let wallet_blob = felt_to_blob(wallet);
+
+        let result: Option<(Vec<u8>, i64)> = conn
+            .query_row(
+                "SELECT balance, last_block FROM balances WHERE token = ? AND wallet = ?",
+                params![&token_blob, &wallet_blob],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+
+        Ok(result.map(|(bytes, block)| (blob_to_u256(&bytes), block as u64)))
+    }
+
     /// Get balances for multiple wallet/token pairs in a single query
     pub fn get_balances_batch(
         &self,

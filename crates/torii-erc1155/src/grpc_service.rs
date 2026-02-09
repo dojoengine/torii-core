@@ -1,9 +1,9 @@
 //! gRPC service implementation for ERC1155 queries and subscriptions
 
 use crate::proto::{
-    erc1155_server::Erc1155 as Erc1155Trait, Cursor, GetStatsRequest, GetStatsResponse,
-    GetTransfersRequest, GetTransfersResponse, SubscribeTransfersRequest, TokenTransfer,
-    TransferFilter, TransferUpdate,
+    erc1155_server::Erc1155 as Erc1155Trait, Cursor, GetBalanceRequest, GetBalanceResponse,
+    GetStatsRequest, GetStatsResponse, GetTransfersRequest, GetTransfersResponse,
+    SubscribeTransfersRequest, TokenTransfer, TransferFilter, TransferUpdate,
 };
 use crate::storage::{Erc1155Storage, TokenTransferData, TransferCursor};
 use async_trait::async_trait;
@@ -179,6 +179,39 @@ impl Erc1155Trait for Erc1155Service {
         Ok(Response::new(GetTransfersResponse {
             transfers: proto_transfers,
             next_cursor: proto_cursor,
+        }))
+    }
+
+    /// Get balance for a specific contract, wallet, and token ID
+    async fn get_balance(
+        &self,
+        request: Request<GetBalanceRequest>,
+    ) -> Result<Response<GetBalanceResponse>, Status> {
+        let req = request.into_inner();
+
+        let contract = bytes_to_felt(&req.contract)
+            .ok_or_else(|| Status::invalid_argument("Invalid contract address"))?;
+        let wallet = bytes_to_felt(&req.wallet)
+            .ok_or_else(|| Status::invalid_argument("Invalid wallet address"))?;
+        let token_id = bytes_to_u256(&req.token_id);
+
+        tracing::debug!(
+            target: "torii_erc1155::grpc",
+            "GetBalance: contract={:#x}, wallet={:#x}, token_id={}",
+            contract,
+            wallet,
+            token_id
+        );
+
+        let (balance, last_block) = self
+            .storage
+            .get_balance_with_block(contract, wallet, token_id)
+            .map_err(|e| Status::internal(format!("Query failed: {e}")))?
+            .unwrap_or((U256::from(0u64), 0));
+
+        Ok(Response::new(GetBalanceResponse {
+            balance: u256_to_bytes(balance),
+            last_block,
         }))
     }
 

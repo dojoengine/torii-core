@@ -18,6 +18,7 @@
 
 import { BaseSinkClient } from './BaseSinkClient';
 import { GrpcTransport } from './GrpcTransport';
+import { decodeProtobufObject } from './protobuf';
 
 // Type for a client class constructor
 type ClientClass<T extends BaseSinkClient = BaseSinkClient> = new (baseUrl: string) => T;
@@ -134,30 +135,40 @@ class ToriiClientImpl<T extends ClientMap = {}> {
   ): Promise<() => void> {
     this._abortController = new AbortController();
 
-    const request = {
-      client_id: clientId,
-      topics: topics.map((t) => ({
-        topic: t.topic,
-        filters: t.filters ?? {},
-      })),
-      unsubscribe_topics: [],
+    const topicsEncoded = topics.map((t) => {
+      const sub: Record<string, unknown> = { f1: t.topic };
+      if (t.filters && Object.keys(t.filters).length > 0) {
+        sub.f2 = t.filters;
+      }
+      return sub;
+    });
+
+    const request: Record<string, unknown> = {
+      f1: clientId,
+      f2: topicsEncoded,
     };
 
     (async () => {
       try {
-        onConnected?.();
-        // Proto fields: f1 = topic, f2 = update_type, f3 = timestamp, f4 = type_id, f5 = data
         for await (const response of this._transport.streamCall<Record<string, unknown>>(
           '/torii.Torii/SubscribeToTopicsStream',
           request,
-          { abort: this._abortController?.signal }
+          { abort: this._abortController?.signal, onConnected }
         )) {
+          let data = response.f5;
+          if (data instanceof Uint8Array) {
+            try {
+              data = decodeProtobufObject(data);
+            } catch {
+              // Leave as raw bytes
+            }
+          }
           onUpdate({
             topic: String(response.f1 ?? ''),
             updateType: Number(response.f2 ?? 0),
             timestamp: Number(response.f3 ?? 0),
             typeId: String(response.f4 ?? ''),
-            data: response.f5,
+            data,
           });
         }
       } catch (err: unknown) {

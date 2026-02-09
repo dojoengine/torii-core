@@ -1,0 +1,18 @@
+{
+  "name": "@torii-tokens/shared",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./styles": "./styles/shared.css"
+  },
+  "scripts": {
+    "generate": "bunx torii.js --url http://localhost:3000 -o ./generated"
+  },
+  "dependencies": {
+    "@toriijs/sdk": "file:../../../../torii.js"
+  }
+}
