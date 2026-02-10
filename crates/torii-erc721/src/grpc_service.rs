@@ -267,24 +267,24 @@ impl Erc721Trait for Erc721Service {
                 Err(e) => return Err(Status::internal(format!("Query failed: {e}"))),
             };
 
-            Ok(Response::new(GetTokenMetadataResponse { tokens: entries }))
-        } else {
-            let all = self
-                .storage
-                .get_all_token_metadata()
-                .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
-
-            let entries = all
-                .into_iter()
-                .map(|(token, name, symbol)| TokenMetadataEntry {
-                    token: token.to_bytes_be().to_vec(),
-                    name,
-                    symbol,
-                })
-                .collect();
-
-            Ok(Response::new(GetTokenMetadataResponse { tokens: entries }))
+            return Ok(Response::new(GetTokenMetadataResponse { tokens: entries }));
         }
+
+        let all = self
+            .storage
+            .get_all_token_metadata()
+            .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
+
+        let entries = all
+            .into_iter()
+            .map(|(token, name, symbol)| TokenMetadataEntry {
+                token: token.to_bytes_be().to_vec(),
+                name,
+                symbol,
+            })
+            .collect();
+
+        Ok(Response::new(GetTokenMetadataResponse { tokens: entries }))
     }
 
     /// Subscribe to real-time transfer events

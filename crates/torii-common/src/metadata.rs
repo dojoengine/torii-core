@@ -216,17 +216,16 @@ impl MetadataFetcher {
                 }
                 // decimals() returns a single felt (typically u8)
                 let val: u64 = result[0].try_into().unwrap_or(0);
-                if val <= 255 {
-                    Some(val as u8)
-                } else {
+                if val > 255 {
                     tracing::warn!(
                         target: "torii_common::metadata",
                         contract = %format!("{:#x}", contract),
                         value = val,
                         "Unexpected decimals value"
                     );
-                    None
+                    return None;
                 }
+                Some(val as u8)
             }
             Err(e) => {
                 tracing::debug!(

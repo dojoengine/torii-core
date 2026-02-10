@@ -403,7 +403,6 @@ impl Erc20Trait for Erc20Service {
         let req = request.into_inner();
 
         if let Some(token_bytes) = req.token {
-            // Query single token
             let token = bytes_to_felt(&token_bytes)
                 .ok_or_else(|| Status::invalid_argument("Invalid token address"))?;
 
@@ -418,26 +417,25 @@ impl Erc20Trait for Erc20Service {
                 Err(e) => return Err(Status::internal(format!("Query failed: {e}"))),
             };
 
-            Ok(Response::new(GetTokenMetadataResponse { tokens: entries }))
-        } else {
-            // Return all tokens
-            let all = self
-                .storage
-                .get_all_token_metadata()
-                .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
-
-            let entries = all
-                .into_iter()
-                .map(|(token, name, symbol, decimals)| TokenMetadataEntry {
-                    token: token.to_bytes_be().to_vec(),
-                    name,
-                    symbol,
-                    decimals: decimals.map(|d| d as u32),
-                })
-                .collect();
-
-            Ok(Response::new(GetTokenMetadataResponse { tokens: entries }))
+            return Ok(Response::new(GetTokenMetadataResponse { tokens: entries }));
         }
+
+        let all = self
+            .storage
+            .get_all_token_metadata()
+            .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
+
+        let entries = all
+            .into_iter()
+            .map(|(token, name, symbol, decimals)| TokenMetadataEntry {
+                token: token.to_bytes_be().to_vec(),
+                name,
+                symbol,
+                decimals: decimals.map(|d| d as u32),
+            })
+            .collect();
+
+        Ok(Response::new(GetTokenMetadataResponse { tokens: entries }))
     }
 
     /// Subscribe to real-time transfer events with filtering
