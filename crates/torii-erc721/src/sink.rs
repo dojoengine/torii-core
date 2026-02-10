@@ -11,12 +11,14 @@ use async_trait::async_trait;
 use axum::Router;
 use prost::Message;
 use prost_types::Any;
-use std::collections::HashMap;
+use starknet::core::types::Felt;
+use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
-use torii_common::u256_to_bytes;
+use torii_common::{u256_to_bytes, MetadataFetcher};
 
 /// Default threshold for "live" detection: 100 blocks from chain head.
 /// Events from blocks older than this won't be broadcast to real-time subscribers.
@@ -35,6 +37,8 @@ pub struct Erc721Sink {
     storage: Arc<Erc721Storage>,
     event_bus: Option<Arc<EventBus>>,
     grpc_service: Option<Erc721Service>,
+    /// Metadata fetcher for token name/symbol
+    metadata_fetcher: Option<Arc<MetadataFetcher>>,
 }
 
 impl Erc721Sink {
@@ -43,7 +47,14 @@ impl Erc721Sink {
             storage,
             event_bus: None,
             grpc_service: None,
+            metadata_fetcher: None,
         }
+    }
+
+    /// Enable metadata fetching with a provider
+    pub fn with_metadata_fetching(mut self, provider: Arc<JsonRpcClient<HttpTransport>>) -> Self {
+        self.metadata_fetcher = Some(Arc::new(MetadataFetcher::new(provider)));
+        self
     }
 
     /// Set the gRPC service for dual publishing
@@ -180,6 +191,40 @@ impl Sink for Erc721Sink {
             }
             // Note: erc721.approval (single token approval) could be handled similarly
             // but is less commonly needed for indexing purposes
+        }
+
+        // Fetch metadata for any new token contracts
+        if let Some(ref fetcher) = self.metadata_fetcher {
+            let new_tokens: HashSet<Felt> = transfers.iter().map(|t| t.token).collect();
+            for token in new_tokens {
+                match self.storage.has_token_metadata(token) {
+                    Ok(false) => {
+                        let meta = fetcher.fetch_erc721_metadata(token).await;
+                        tracing::info!(
+                            target: "torii_erc721::sink",
+                            token = %format!("{:#x}", token),
+                            name = ?meta.name,
+                            symbol = ?meta.symbol,
+                            "Fetched token metadata"
+                        );
+                        if let Err(e) = self.storage.upsert_token_metadata(
+                            token,
+                            meta.name.as_deref(),
+                            meta.symbol.as_deref(),
+                        ) {
+                            tracing::warn!(
+                                target: "torii_erc721::sink",
+                                error = %e,
+                                "Failed to store token metadata"
+                            );
+                        }
+                    }
+                    Ok(true) => {}
+                    Err(e) => {
+                        tracing::warn!(target: "torii_erc721::sink", error = %e, "Failed to check token metadata");
+                    }
+                }
+            }
         }
 
         // Batch insert transfers

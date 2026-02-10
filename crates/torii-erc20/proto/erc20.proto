@@ -186,6 +186,32 @@ message GetBalanceResponse {
     uint64 last_block = 2;
 }
 
+// ===== Token Metadata =====
+
+// Request for GetTokenMetadata RPC
+message GetTokenMetadataRequest {
+    // Token contract address (32 bytes). If empty, returns all tokens.
+    optional bytes token = 1;
+}
+
+// Token metadata entry
+message TokenMetadataEntry {
+    // Token contract address (32 bytes)
+    bytes token = 1;
+    // Token name (e.g. "Ether")
+    optional string name = 2;
+    // Token symbol (e.g. "ETH")
+    optional string symbol = 3;
+    // Token decimals (e.g. 18)
+    optional uint32 decimals = 4;
+}
+
+// Response for GetTokenMetadata RPC
+message GetTokenMetadataResponse {
+    // Token metadata entries
+    repeated TokenMetadataEntry tokens = 1;
+}
+
 // ===== Stats =====
 
 // Request for GetStats RPC
@@ -215,6 +241,9 @@ service Erc20 {
 
     // Get balance for a specific token and wallet
     rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
+
+    // Get token metadata (name, symbol, decimals)
+    rpc GetTokenMetadata(GetTokenMetadataRequest) returns (GetTokenMetadataResponse);
 
     // Subscribe to real-time transfer events with filtering
     rpc SubscribeTransfers(SubscribeTransfersRequest) returns (stream TransferUpdate);

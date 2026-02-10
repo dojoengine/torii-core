@@ -3,8 +3,9 @@
 use crate::proto::{
     erc721_server::Erc721 as Erc721Trait, Cursor, GetOwnerRequest, GetOwnerResponse,
     GetOwnershipRequest, GetOwnershipResponse, GetStatsRequest, GetStatsResponse,
-    GetTransfersRequest, GetTransfersResponse, NftTransfer, Ownership, SubscribeTransfersRequest,
-    TransferFilter, TransferUpdate,
+    GetTokenMetadataRequest, GetTokenMetadataResponse, GetTransfersRequest, GetTransfersResponse,
+    NftTransfer, Ownership, SubscribeTransfersRequest, TokenMetadataEntry, TransferFilter,
+    TransferUpdate,
 };
 use crate::storage::{Erc721Storage, NftTransferData, TransferCursor};
 use async_trait::async_trait;
@@ -243,6 +244,47 @@ impl Erc721Trait for Erc721Service {
         Ok(Response::new(GetOwnerResponse {
             owner: owner.map(|o| o.to_bytes_be().to_vec()),
         }))
+    }
+
+    /// Get token metadata (name, symbol)
+    async fn get_token_metadata(
+        &self,
+        request: Request<GetTokenMetadataRequest>,
+    ) -> Result<Response<GetTokenMetadataResponse>, Status> {
+        let req = request.into_inner();
+
+        if let Some(token_bytes) = req.token {
+            let token = bytes_to_felt(&token_bytes)
+                .ok_or_else(|| Status::invalid_argument("Invalid token address"))?;
+
+            let entries = match self.storage.get_token_metadata(token) {
+                Ok(Some((name, symbol))) => vec![TokenMetadataEntry {
+                    token: token.to_bytes_be().to_vec(),
+                    name,
+                    symbol,
+                }],
+                Ok(None) => vec![],
+                Err(e) => return Err(Status::internal(format!("Query failed: {e}"))),
+            };
+
+            Ok(Response::new(GetTokenMetadataResponse { tokens: entries }))
+        } else {
+            let all = self
+                .storage
+                .get_all_token_metadata()
+                .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
+
+            let entries = all
+                .into_iter()
+                .map(|(token, name, symbol)| TokenMetadataEntry {
+                    token: token.to_bytes_be().to_vec(),
+                    name,
+                    symbol,
+                })
+                .collect();
+
+            Ok(Response::new(GetTokenMetadataResponse { tokens: entries }))
+        }
     }
 
     /// Subscribe to real-time transfer events

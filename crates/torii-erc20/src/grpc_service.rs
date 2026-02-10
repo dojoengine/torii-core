@@ -8,8 +8,9 @@
 use crate::proto::{
     erc20_server::Erc20 as Erc20Trait, Approval, ApprovalFilter, ApprovalUpdate, Cursor,
     GetApprovalsRequest, GetApprovalsResponse, GetBalanceRequest, GetBalanceResponse,
-    GetStatsRequest, GetStatsResponse, GetTransfersRequest, GetTransfersResponse,
-    SubscribeApprovalsRequest, SubscribeTransfersRequest, Transfer, TransferFilter, TransferUpdate,
+    GetStatsRequest, GetStatsResponse, GetTokenMetadataRequest, GetTokenMetadataResponse,
+    GetTransfersRequest, GetTransfersResponse, SubscribeApprovalsRequest,
+    SubscribeTransfersRequest, TokenMetadataEntry, Transfer, TransferFilter, TransferUpdate,
 };
 use crate::storage::{
     ApprovalCursor, ApprovalData, Erc20Storage, TransferCursor, TransferData, TransferDirection,
@@ -392,6 +393,51 @@ impl Erc20Trait for Erc20Service {
             balance: u256_to_bytes(balance),
             last_block,
         }))
+    }
+
+    /// Get token metadata (name, symbol, decimals)
+    async fn get_token_metadata(
+        &self,
+        request: Request<GetTokenMetadataRequest>,
+    ) -> Result<Response<GetTokenMetadataResponse>, Status> {
+        let req = request.into_inner();
+
+        if let Some(token_bytes) = req.token {
+            // Query single token
+            let token = bytes_to_felt(&token_bytes)
+                .ok_or_else(|| Status::invalid_argument("Invalid token address"))?;
+
+            let entries = match self.storage.get_token_metadata(token) {
+                Ok(Some((name, symbol, decimals))) => vec![TokenMetadataEntry {
+                    token: token.to_bytes_be().to_vec(),
+                    name,
+                    symbol,
+                    decimals: decimals.map(|d| d as u32),
+                }],
+                Ok(None) => vec![],
+                Err(e) => return Err(Status::internal(format!("Query failed: {e}"))),
+            };
+
+            Ok(Response::new(GetTokenMetadataResponse { tokens: entries }))
+        } else {
+            // Return all tokens
+            let all = self
+                .storage
+                .get_all_token_metadata()
+                .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
+
+            let entries = all
+                .into_iter()
+                .map(|(token, name, symbol, decimals)| TokenMetadataEntry {
+                    token: token.to_bytes_be().to_vec(),
+                    name,
+                    symbol,
+                    decimals: decimals.map(|d| d as u32),
+                })
+                .collect();
+
+            Ok(Response::new(GetTokenMetadataResponse { tokens: entries }))
+        }
     }
 
     /// Subscribe to real-time transfer events with filtering

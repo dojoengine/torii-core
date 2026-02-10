@@ -313,7 +313,11 @@ async fn run_indexer(config: Config) -> Result<()> {
         torii_config = torii_config.add_decoder(decoder);
 
         let grpc_service = Erc721Service::new(storage.clone());
-        let sink = Box::new(Erc721Sink::new(storage).with_grpc_service(grpc_service.clone()));
+        let sink = Box::new(
+            Erc721Sink::new(storage)
+                .with_grpc_service(grpc_service.clone())
+                .with_metadata_fetching(provider.clone()),
+        );
         torii_config = torii_config.add_sink_boxed(sink);
 
         erc721_grpc_service = Some(grpc_service);

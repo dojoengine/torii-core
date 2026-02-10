@@ -26,12 +26,12 @@ use prost::Message;
 use prost_types::Any;
 use starknet::core::types::{Felt, U256};
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
-use torii_common::u256_to_bytes;
+use torii_common::{u256_to_bytes, MetadataFetcher};
 
 /// Default threshold for "live" detection: 100 blocks from chain head.
 /// Events from blocks older than this won't be broadcast to real-time subscribers.
@@ -53,6 +53,8 @@ pub struct Erc1155Sink {
     grpc_service: Option<Erc1155Service>,
     /// Balance fetcher for RPC calls (None = balance tracking disabled)
     balance_fetcher: Option<Arc<Erc1155BalanceFetcher>>,
+    /// Metadata fetcher for contract name/symbol
+    metadata_fetcher: Option<Arc<MetadataFetcher>>,
 }
 
 impl Erc1155Sink {
@@ -62,6 +64,7 @@ impl Erc1155Sink {
             event_bus: None,
             grpc_service: None,
             balance_fetcher: None,
+            metadata_fetcher: None,
         }
     }
 
@@ -79,7 +82,8 @@ impl Erc1155Sink {
     /// - Fetch actual balance from the chain and adjust
     /// - Record adjustments in an audit table
     pub fn with_balance_tracking(mut self, provider: Arc<JsonRpcClient<HttpTransport>>) -> Self {
-        self.balance_fetcher = Some(Arc::new(Erc1155BalanceFetcher::new(provider)));
+        self.balance_fetcher = Some(Arc::new(Erc1155BalanceFetcher::new(provider.clone())));
+        self.metadata_fetcher = Some(Arc::new(MetadataFetcher::new(provider)));
         self
     }
 
@@ -238,6 +242,40 @@ impl Sink for Erc1155Sink {
                         tx_hash: approval.transaction_hash,
                         timestamp,
                     });
+                }
+            }
+        }
+
+        // Fetch metadata for any new token contracts
+        if let Some(ref fetcher) = self.metadata_fetcher {
+            let new_tokens: HashSet<Felt> = transfers.iter().map(|t| t.token).collect();
+            for token in new_tokens {
+                match self.storage.has_token_metadata(token) {
+                    Ok(false) => {
+                        let meta = fetcher.fetch_erc1155_metadata(token).await;
+                        tracing::info!(
+                            target: "torii_erc1155::sink",
+                            token = %format!("{:#x}", token),
+                            name = ?meta.name,
+                            symbol = ?meta.symbol,
+                            "Fetched token metadata"
+                        );
+                        if let Err(e) = self.storage.upsert_token_metadata(
+                            token,
+                            meta.name.as_deref(),
+                            meta.symbol.as_deref(),
+                        ) {
+                            tracing::warn!(
+                                target: "torii_erc1155::sink",
+                                error = %e,
+                                "Failed to store token metadata"
+                            );
+                        }
+                    }
+                    Ok(true) => {}
+                    Err(e) => {
+                        tracing::warn!(target: "torii_erc1155::sink", error = %e, "Failed to check token metadata");
+                    }
                 }
             }
         }

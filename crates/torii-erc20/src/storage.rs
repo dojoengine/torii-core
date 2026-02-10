@@ -337,6 +337,19 @@ impl Erc20Storage {
             [],
         )?;
 
+        // Token metadata table
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS token_metadata (
+                token BLOB PRIMARY KEY,
+                name TEXT,
+                symbol TEXT,
+                decimals INTEGER,
+                created_at INTEGER DEFAULT (strftime('%s', 'now')),
+                updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+            )",
+            [],
+        )?;
+
         tracing::info!(target: "torii_erc20::storage", db_path = %db_path, "Database initialized");
 
         Ok(Self {
@@ -1225,5 +1238,87 @@ impl Erc20Storage {
                 row.get(0)
             })?;
         Ok(count as u64)
+    }
+
+    // ===== Token Metadata Methods =====
+
+    /// Check if metadata exists for a token
+    pub fn has_token_metadata(&self, token: Felt) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let token_blob = felt_to_blob(token);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM token_metadata WHERE token = ?",
+            params![&token_blob],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Insert or update token metadata
+    pub fn upsert_token_metadata(
+        &self,
+        token: Felt,
+        name: Option<&str>,
+        symbol: Option<&str>,
+        decimals: Option<u8>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let token_blob = felt_to_blob(token);
+        conn.execute(
+            "INSERT INTO token_metadata (token, name, symbol, decimals)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(token) DO UPDATE SET
+                 name = COALESCE(excluded.name, token_metadata.name),
+                 symbol = COALESCE(excluded.symbol, token_metadata.symbol),
+                 decimals = COALESCE(excluded.decimals, token_metadata.decimals),
+                 updated_at = strftime('%s', 'now')",
+            params![&token_blob, name, symbol, decimals.map(|d| d as i64)],
+        )?;
+        Ok(())
+    }
+
+    /// Get token metadata
+    pub fn get_token_metadata(
+        &self,
+        token: Felt,
+    ) -> Result<Option<(Option<String>, Option<String>, Option<u8>)>> {
+        let conn = self.conn.lock().unwrap();
+        let token_blob = felt_to_blob(token);
+        let result = conn
+            .query_row(
+                "SELECT name, symbol, decimals FROM token_metadata WHERE token = ?",
+                params![&token_blob],
+                |row| {
+                    let name: Option<String> = row.get(0)?;
+                    let symbol: Option<String> = row.get(1)?;
+                    let decimals: Option<i64> = row.get(2)?;
+                    Ok((name, symbol, decimals.map(|d| d as u8)))
+                },
+            )
+            .ok();
+        Ok(result)
+    }
+
+    /// Get all token metadata
+    pub fn get_all_token_metadata(
+        &self,
+    ) -> Result<Vec<(Felt, Option<String>, Option<String>, Option<u8>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT token, name, symbol, decimals FROM token_metadata ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let token_bytes: Vec<u8> = row.get(0)?;
+            let name: Option<String> = row.get(1)?;
+            let symbol: Option<String> = row.get(2)?;
+            let decimals: Option<i64> = row.get(3)?;
+            Ok((
+                blob_to_felt(&token_bytes),
+                name,
+                symbol,
+                decimals.map(|d| d as u8),
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 }

@@ -8,6 +8,7 @@ description = "Common utilities for Torii token indexers"
 starknet = "0.17"
 anyhow = "1.0"
 tracing = "0.1"
+tokio = { version = "1", features = ["full"] }
 
 [lints]
 workspace = true
