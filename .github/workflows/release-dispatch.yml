@@ -89,8 +89,8 @@ jobs:
 
             ### Next Steps
             Once this PR is merged, the release workflow will automatically:
-            ${{ inputs.release_type == 'workspace' && '1. Tag the release as `workspace-v' + steps.release-info.outputs.NEW_VERSION + '`
-            2. No binaries or Docker images will be built (workspace release only)' || format('1. Build `{0}` binaries for 6 platforms (Linux, macOS, Windows on x64/ARM)
+            ${{ inputs.release_type == 'workspace' && format('1. Tag the release as `workspace-v{0}`
+            2. No binaries or Docker images will be built (workspace release only)', steps.release-info.outputs.NEW_VERSION) || format('1. Build `{0}` binaries for 6 platforms (Linux, macOS, Windows on x64/ARM)
             2. Create a draft GitHub release with all artifacts
             3. Build and push multi-platform Docker image to GHCR: `{0}:{1}`', inputs.release_type, steps.release-info.outputs.NEW_VERSION) }}
 
