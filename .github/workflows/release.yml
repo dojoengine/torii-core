@@ -1,0 +1,286 @@
+name: Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Prepare Release
+    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'prepare-release-'))
+    runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.release-info.outputs.TAG_NAME }}
+      version: ${{ steps.release-info.outputs.VERSION }}
+      release_type: ${{ steps.release-info.outputs.RELEASE_TYPE }}
+      binary_name: ${{ steps.release-info.outputs.BINARY_NAME }}
+      is_binary_release: ${{ steps.release-info.outputs.IS_BINARY_RELEASE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install cargo-get
+        run: cargo install cargo-get
+
+      - name: Extract release info
+        id: release-info
+        run: |
+          # Extract release type from branch name
+          BRANCH_REF="${{ github.event.pull_request.head.ref || 'prepare-release-manual' }}"
+
+          if [[ "$BRANCH_REF" == "prepare-release-workspace" ]]; then
+            RELEASE_TYPE="workspace"
+            VERSION=$(cargo get workspace.package.version)
+            TAG_NAME="workspace-v$VERSION"
+            BINARY_NAME=""
+            IS_BINARY_RELEASE="false"
+          elif [[ "$BRANCH_REF" =~ ^prepare-release-(.+)$ ]]; then
+            BINARY_NAME="${BASH_REMATCH[1]}"
+            RELEASE_TYPE="binary"
+            VERSION=$(cargo get package.version --entry bins/$BINARY_NAME)
+            TAG_NAME="${BINARY_NAME}-v${VERSION}"
+            IS_BINARY_RELEASE="true"
+          else
+            echo "Error: Unknown release branch format: $BRANCH_REF"
+            exit 1
+          fi
+
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
+          echo "RELEASE_TYPE=$RELEASE_TYPE" >> $GITHUB_OUTPUT
+          echo "BINARY_NAME=$BINARY_NAME" >> $GITHUB_OUTPUT
+          echo "IS_BINARY_RELEASE=$IS_BINARY_RELEASE" >> $GITHUB_OUTPUT
+
+          echo "Release type: $RELEASE_TYPE"
+          echo "Version: $VERSION"
+          echo "Tag: $TAG_NAME"
+          echo "Binary: ${BINARY_NAME:-N/A}"
+
+  build-binaries:
+    name: Build ${{ needs.prepare.outputs.binary_name }} - ${{ matrix.job.platform }}-${{ matrix.job.arch }}
+    needs: prepare
+    if: needs.prepare.outputs.is_binary_release == 'true'
+    runs-on: ${{ matrix.job.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - os: ubuntu-latest-8-cores
+            platform: linux
+            target: x86_64-unknown-linux-gnu
+            arch: amd64
+          - os: ubuntu-latest-8-cores-arm64
+            platform: linux
+            target: aarch64-unknown-linux-gnu
+            arch: arm64
+          - os: macos-latest-large
+            platform: darwin
+            target: x86_64-apple-darwin
+            arch: amd64
+          - os: macos-latest-xlarge
+            platform: darwin
+            target: aarch64-apple-darwin
+            arch: arm64
+          - os: windows-latest
+            platform: win32
+            target: x86_64-pc-windows-msvc
+            arch: amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.job.target }}
+          cache-on-failure: true
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          version: "25.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup macOS ARM64
+        if: matrix.job.platform == 'darwin' && matrix.job.arch == 'arm64'
+        run: |
+          export SDKROOT=$(xcrun -sdk macosx --show-sdk-path)
+          export MACOSX_DEPLOYMENT_TARGET=$(xcrun -sdk macosx --show-sdk-platform-version)
+          echo "SDKROOT=$SDKROOT" >> $GITHUB_ENV
+          echo "MACOSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET" >> $GITHUB_ENV
+
+      - name: Setup Linux ARM64
+        if: matrix.job.platform == 'linux' && matrix.job.arch == 'arm64'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "JEMALLOC_SYS_WITH_LG_PAGE=16" >> $GITHUB_ENV
+
+      - name: Setup Windows
+        if: matrix.job.platform == 'win32'
+        run: |
+          echo "RUSTFLAGS=-Csymbol-mangling-version=v0" >> $env:GITHUB_ENV
+
+      - name: Build ${{ needs.prepare.outputs.binary_name }}
+        run: cargo build --release --target ${{ matrix.job.target }} --bin ${{ needs.prepare.outputs.binary_name }}
+
+      - name: Create archives (Unix)
+        if: matrix.job.platform != 'win32'
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          PLATFORM="${{ matrix.job.platform }}"
+          ARCH="${{ matrix.job.arch }}"
+          TARGET="${{ matrix.job.target }}"
+          BINARY="${{ needs.prepare.outputs.binary_name }}"
+
+          # Create archive for release
+          cd target/${TARGET}/release
+          tar -czvf ${BINARY}_${VERSION}_${PLATFORM}_${ARCH}.tar.gz ${BINARY}
+          mv ${BINARY}_${VERSION}_${PLATFORM}_${ARCH}.tar.gz ../../../
+          cd ../../..
+
+          # For Linux, stage binaries for Docker
+          if [ "$PLATFORM" = "linux" ]; then
+            mkdir -p docker-staging/${PLATFORM}/${ARCH}
+            cp target/${TARGET}/release/${BINARY} docker-staging/${PLATFORM}/${ARCH}/
+          fi
+
+      - name: Create archives (Windows)
+        if: matrix.job.platform == 'win32'
+        run: |
+          $VERSION = "${{ needs.prepare.outputs.version }}"
+          $PLATFORM = "${{ matrix.job.platform }}"
+          $ARCH = "${{ matrix.job.arch }}"
+          $TARGET = "${{ matrix.job.target }}"
+
+          $BINARY = "${{ needs.prepare.outputs.binary_name }}"
+          cd target\${TARGET}\release
+          7z a -tzip ${BINARY}_${VERSION}_${PLATFORM}_${ARCH}.zip ${BINARY}.exe
+          Move-Item ${BINARY}_${VERSION}_${PLATFORM}_${ARCH}.zip ......
+
+
+      - name: Upload binary artifacts (Linux only)
+        if: matrix.job.platform == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.job.target }}
+          path: docker-staging/
+          retention-days: 1
+
+      - name: Upload archive artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: archives-${{ matrix.job.target }}
+          path: |
+            *.tar.gz
+            *.zip
+          retention-days: 1
+
+  create-draft-release:
+    name: Create Draft Release
+    needs: [prepare, build-binaries]
+    if: needs.prepare.outputs.is_binary_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: archives-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="${{ needs.prepare.outputs.tag_name }}"
+          BINARY="${{ needs.prepare.outputs.binary_name }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
+
+          gh release create "$TAG_NAME" \
+            ./artifacts/*.tar.gz \
+            ./artifacts/*.zip \
+            --draft \
+            --generate-notes \
+            --title "Release ${BINARY} ${VERSION}" \
+            --notes "Release **${BINARY}** version **${VERSION}**
+
+          ## Assets
+
+          This release includes **${BINARY}** binaries for:
+          - Linux (x64, ARM64)
+          - macOS (x64, ARM64)
+          - Windows (x64)
+
+          ## Docker Image
+
+          Multi-platform Docker image is available at:
+          - \`ghcr.io/${{ github.repository }}/${BINARY}:${VERSION}\`
+          - \`ghcr.io/${{ github.repository }}/${BINARY}:latest\`
+          "
+
+  docker-build-push:
+    name: Build Docker Image
+    needs: [prepare, build-binaries]
+    if: needs.prepare.outputs.is_binary_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux AMD64 binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-x86_64-unknown-linux-gnu
+          path: docker-context/
+
+      - name: Download Linux ARM64 binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-aarch64-unknown-linux-gnu
+          path: docker-context/
+
+      - name: Prepare Docker context
+        run: |
+          mkdir -p docker-build-${{ needs.prepare.outputs.binary_name }}
+          cp docker/Dockerfile.${{ needs.prepare.outputs.binary_name }} docker-build-${{ needs.prepare.outputs.binary_name }}/Dockerfile
+          mv docker-context/linux docker-build-${{ needs.prepare.outputs.binary_name }}/
+          ls -R docker-build-${{ needs.prepare.outputs.binary_name }}/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: docker-build-${{ needs.prepare.outputs.binary_name }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/${{ needs.prepare.outputs.binary_name }}:latest
+            ghcr.io/${{ github.repository }}/${{ needs.prepare.outputs.binary_name }}:${{ needs.prepare.outputs.version }}
+          labels: |
+            org.opencontainers.image.title=${{ needs.prepare.outputs.binary_name }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT

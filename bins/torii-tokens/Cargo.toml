@@ -1,0 +1,51 @@
+[package]
+name = "torii-tokens"
+version = "0.1.0"
+edition = "2021"
+description = "Unified token indexer for ERC20, ERC721, and ERC1155 on Starknet"
+
+[[bin]]
+name = "torii-tokens"
+path = "src/main.rs"
+
+[dependencies]
+# Core dependencies
+torii = { path = "../../" }
+torii-common = { path = "../../crates/torii-common" }
+torii-erc20 = { path = "../../crates/torii-erc20" }
+torii-erc721 = { path = "../../crates/torii-erc721" }
+torii-erc1155 = { path = "../../crates/torii-erc1155" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Starknet
+starknet = "0.17"
+url = "2.5"
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Utilities
+anyhow = "1.0"
+
+# gRPC
+tonic = "0.12"
+tonic-web = "0.12"
+tonic-reflection = "0.12"
+
+# Profiling (optional, enable with --features profiling)
+[dependencies.pprof]
+version = "0.13"
+features = ["flamegraph", "prost-codec"]
+optional = true
+
+[features]
+profiling = ["pprof"]
+
+[lints]
+workspace = true

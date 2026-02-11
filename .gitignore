@@ -2,3 +2,15 @@
 *.sqlite
 node_modules/
 test-data/
+contracts/target/
+
+# Database files
+*.db
+*.db-wal
+*.db-shm
+
+# Profiling output
+flamegraph.svg
+perf.data*
+
+.claude-modified-files

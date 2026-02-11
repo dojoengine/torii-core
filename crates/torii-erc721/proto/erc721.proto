@@ -1,0 +1,218 @@
+syntax = "proto3";
+
+package torii.sinks.erc721;
+
+// ===== Core Messages =====
+
+// NFT Transfer event
+message NftTransfer {
+    // Token contract address (32 bytes)
+    bytes token = 1;
+    // NFT token ID as U256 (variable length, up to 32 bytes)
+    bytes token_id = 2;
+    // Sender address (32 bytes)
+    bytes from = 3;
+    // Receiver address (32 bytes)
+    bytes to = 4;
+    // Block number where the transfer occurred
+    uint64 block_number = 5;
+    // Transaction hash (32 bytes)
+    bytes tx_hash = 6;
+    // Unix timestamp of the block
+    int64 timestamp = 7;
+}
+
+// NFT Approval event (single token approval)
+message NftApproval {
+    // Token contract address (32 bytes)
+    bytes token = 1;
+    // NFT token ID as U256 (variable length, up to 32 bytes)
+    bytes token_id = 2;
+    // Owner address (32 bytes)
+    bytes owner = 3;
+    // Approved address (32 bytes)
+    bytes approved = 4;
+    // Block number where the approval occurred
+    uint64 block_number = 5;
+    // Transaction hash (32 bytes)
+    bytes tx_hash = 6;
+    // Unix timestamp of the block
+    int64 timestamp = 7;
+}
+
+// Operator Approval event (approval for all tokens)
+message OperatorApproval {
+    // Token contract address (32 bytes)
+    bytes token = 1;
+    // Owner address (32 bytes)
+    bytes owner = 2;
+    // Operator address (32 bytes)
+    bytes operator = 3;
+    // Whether the operator is approved
+    bool approved = 4;
+    // Block number where the approval occurred
+    uint64 block_number = 5;
+    // Transaction hash (32 bytes)
+    bytes tx_hash = 6;
+    // Unix timestamp of the block
+    int64 timestamp = 7;
+}
+
+// Current NFT ownership state
+message Ownership {
+    // Token contract address (32 bytes)
+    bytes token = 1;
+    // NFT token ID as U256 (variable length, up to 32 bytes)
+    bytes token_id = 2;
+    // Current owner address (32 bytes)
+    bytes owner = 3;
+    // Block number when ownership was last updated
+    uint64 block_number = 4;
+}
+
+// ===== Filters =====
+
+// Filter for transfer queries and subscriptions
+message TransferFilter {
+    // Matches from OR to (wallet-centric filter)
+    optional bytes wallet = 1;
+    // Exact from address match
+    optional bytes from = 2;
+    // Exact to address match
+    optional bytes to = 3;
+    // Token contract whitelist (empty = all tokens)
+    repeated bytes tokens = 4;
+    // Specific NFT token IDs to filter
+    repeated bytes token_ids = 5;
+    // Minimum block number (inclusive)
+    optional uint64 block_from = 6;
+    // Maximum block number (inclusive)
+    optional uint64 block_to = 7;
+}
+
+// Filter for ownership queries
+message OwnershipFilter {
+    // Owner address to filter by
+    optional bytes owner = 1;
+    // Token contract whitelist (empty = all tokens)
+    repeated bytes tokens = 2;
+    // Specific NFT token IDs to filter
+    repeated bytes token_ids = 3;
+}
+
+// ===== Pagination =====
+
+// Cursor for paginated queries (opaque to clients)
+message Cursor {
+    // Block number for cursor position
+    uint64 block_number = 1;
+    // Row ID within block for tie-breaking
+    int64 id = 2;
+}
+
+// ===== Query RPCs =====
+
+// Request for GetTransfers RPC
+message GetTransfersRequest {
+    // Filter criteria
+    TransferFilter filter = 1;
+    // Cursor from previous response (omit for first page)
+    optional Cursor cursor = 2;
+    // Maximum number of transfers to return (default: 100, max: 1000)
+    uint32 limit = 3;
+}
+
+// Response for GetTransfers RPC
+message GetTransfersResponse {
+    // List of transfers matching the filter
+    repeated NftTransfer transfers = 1;
+    // Cursor for next page (absent if no more results)
+    optional Cursor next_cursor = 2;
+}
+
+// Request for GetOwnership RPC
+message GetOwnershipRequest {
+    // Filter criteria
+    OwnershipFilter filter = 1;
+    // Cursor from previous response (omit for first page)
+    optional Cursor cursor = 2;
+    // Maximum number of ownership records to return (default: 100, max: 1000)
+    uint32 limit = 3;
+}
+
+// Response for GetOwnership RPC
+message GetOwnershipResponse {
+    // List of ownership records matching the filter
+    repeated Ownership ownership = 1;
+    // Cursor for next page (absent if no more results)
+    optional Cursor next_cursor = 2;
+}
+
+// Request for GetOwner RPC
+message GetOwnerRequest {
+    // Token contract address (32 bytes)
+    bytes token = 1;
+    // NFT token ID as U256 (variable length, up to 32 bytes)
+    bytes token_id = 2;
+}
+
+// Response for GetOwner RPC
+message GetOwnerResponse {
+    // Current owner address (absent if not found)
+    optional bytes owner = 1;
+}
+
+// ===== Subscription RPCs =====
+
+// Request for SubscribeTransfers RPC
+message SubscribeTransfersRequest {
+    // Client identifier for logging/debugging
+    string client_id = 1;
+    // Filter criteria for transfers
+    TransferFilter filter = 2;
+}
+
+// Update message for transfer subscriptions
+message TransferUpdate {
+    // The transfer event
+    NftTransfer transfer = 1;
+    // Unix timestamp when the update was generated
+    int64 timestamp = 2;
+}
+
+// ===== Stats =====
+
+// Request for GetStats RPC
+message GetStatsRequest {}
+
+// Response for GetStats RPC
+message GetStatsResponse {
+    // Total number of transfers indexed
+    uint64 total_transfers = 1;
+    // Number of unique token contracts indexed
+    uint64 unique_tokens = 2;
+    // Number of unique NFTs indexed
+    uint64 unique_nfts = 3;
+    // Latest block number indexed
+    uint64 latest_block = 4;
+}
+
+// ===== Service =====
+
+// ERC721 indexer service providing queries and subscriptions
+service Erc721 {
+    // Query historical transfers with filtering and pagination
+    rpc GetTransfers(GetTransfersRequest) returns (GetTransfersResponse);
+
+    // Query current NFT ownership with filtering and pagination
+    rpc GetOwnership(GetOwnershipRequest) returns (GetOwnershipResponse);
+
+    // Get the current owner of a specific NFT
+    rpc GetOwner(GetOwnerRequest) returns (GetOwnerResponse);
+
+    // Subscribe to real-time transfer events with filtering
+    rpc SubscribeTransfers(SubscribeTransfersRequest) returns (stream TransferUpdate);
+
+    // Get indexer statistics
+    rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+}

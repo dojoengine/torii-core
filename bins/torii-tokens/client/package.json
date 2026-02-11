@@ -1,0 +1,17 @@
+{
+  "name": "torii-tokens-client",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "workspaces": ["shared", "apps/*"],
+  "scripts": {
+    "generate": "bun run --cwd shared generate",
+    "dev:vanilla": "bun run --cwd apps/vanilla dev",
+    "dev:svelte": "bun run --cwd apps/svelte dev",
+    "dev:react": "bun run --cwd apps/react dev",
+    "build:vanilla": "bun run --cwd apps/vanilla build",
+    "build:svelte": "bun run --cwd apps/svelte build",
+    "build:react": "bun run --cwd apps/react build",
+    "build": "bun run build:vanilla && bun run build:svelte && bun run build:react"
+  }
+}

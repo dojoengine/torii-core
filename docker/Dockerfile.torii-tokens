@@ -1,0 +1,25 @@
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tini && \
+    rm -rf /var/lib/apt/lists/*
+
+ARG TARGETPLATFORM
+WORKDIR /app
+
+# Copy binary from build artifacts
+# Docker build context will have: linux/amd64/torii-tokens, linux/arm64/torii-tokens
+COPY ${TARGETPLATFORM}/torii-tokens /usr/local/bin/torii-tokens
+RUN chmod +x /usr/local/bin/torii-tokens
+
+# Labels
+LABEL org.opencontainers.image.title="torii-tokens" \
+      org.opencontainers.image.description="Unified token indexer for Starknet (ERC20, ERC721, ERC1155)" \
+      org.opencontainers.image.source="https://github.com/dojoengine/torii-core" \
+      org.opencontainers.image.licenses="MIT"
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["torii-tokens", "--help"]

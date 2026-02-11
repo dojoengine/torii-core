@@ -1,0 +1,42 @@
+[package]
+name = "torii-sql-sink"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Torii core
+torii = { path = "../.." }
+
+# Async
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1"
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
+
+# gRPC
+tonic = "0.12"
+tonic-web = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+async-stream = "0.3"
+futures = "0.3"
+
+# Web framework
+axum = { version = "0.7", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Blockchain
+starknet = "0.17"
+
+# Utilities
+anyhow = "1.0"
+tracing = "0.1"
+chrono = "0.4"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[lints]
+workspace = true

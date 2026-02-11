@@ -1,0 +1,50 @@
+{
+  "name": "@toriijs/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript/JavaScript client library and CLI for Torii gRPC services",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "bun": "./src/index.ts"
+    }
+  },
+  "bin": {
+    "torii.js": "./bin/torii.js"
+  },
+  "scripts": {
+    "build": "bun build ./src/cli/index.ts --outdir ./dist/cli --target bun && bun build ./src/index.ts --outdir ./dist --target bun && tsc --emitDeclarationOnly",
+    "dev": "bun run ./src/cli/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {},
+  "files": [
+    "dist",
+    "bin",
+    "src"
+  ],
+  "keywords": [
+    "torii",
+    "grpc",
+    "grpc-web",
+    "starknet",
+    "blockchain",
+    "indexer",
+    "dojo"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dojoengine/torii"
+  }
+}
