@@ -7,9 +7,11 @@ import {
   Erc20GetTokenMetadataRequest, Erc20GetTokenMetadataResponse,
   Erc721GetStatsRequest, Erc721GetStatsResponse,
   Erc721GetTransfersRequest, Erc721GetTransfersResponse,
+  Erc721GetTokenMetadataRequest, Erc721GetTokenMetadataResponse,
   Erc1155GetStatsRequest, Erc1155GetStatsResponse,
   Erc1155GetTransfersRequest, Erc1155GetTransfersResponse,
   Erc1155GetBalanceRequest, Erc1155GetBalanceResponse,
+  Erc1155GetTokenMetadataRequest, Erc1155GetTokenMetadataResponse,
 } from "./schemas";
 
 export interface TokenQuery {
@@ -234,6 +236,60 @@ export async function getErc721Transfers(
     blockNumber: Number(t.blockNumber ?? 0),
     txHash: bytesToHex(t.txHash as string | Uint8Array | undefined),
     timestamp: Number(t.timestamp ?? 0),
+  }));
+}
+
+export async function getErc721TokenMetadata(
+  client: TokensClient,
+  contractAddress?: string
+): Promise<TokenMetadataResult[]> {
+  const request: Record<string, unknown> = {};
+  if (contractAddress) {
+    request.token = hexToBytes(contractAddress);
+  }
+
+  const response = await client.call(
+    "/torii.sinks.erc721.Erc721/GetTokenMetadata",
+    request,
+    Erc721GetTokenMetadataRequest,
+    Erc721GetTokenMetadataResponse
+  );
+
+  const tokens = response.tokens;
+  const list = Array.isArray(tokens) ? tokens : tokens ? [tokens] : [];
+
+  return list.map((t: Record<string, unknown>) => ({
+    token: bytesToHex(t.token as string | Uint8Array | undefined),
+    name: t.name as string | undefined,
+    symbol: t.symbol as string | undefined,
+    totalSupply: t.totalSupply ? formatU256(t.totalSupply as string | Uint8Array | undefined) : undefined,
+  }));
+}
+
+export async function getErc1155TokenMetadata(
+  client: TokensClient,
+  contractAddress?: string
+): Promise<TokenMetadataResult[]> {
+  const request: Record<string, unknown> = {};
+  if (contractAddress) {
+    request.token = hexToBytes(contractAddress);
+  }
+
+  const response = await client.call(
+    "/torii.sinks.erc1155.Erc1155/GetTokenMetadata",
+    request,
+    Erc1155GetTokenMetadataRequest,
+    Erc1155GetTokenMetadataResponse
+  );
+
+  const tokens = response.tokens;
+  const list = Array.isArray(tokens) ? tokens : tokens ? [tokens] : [];
+
+  return list.map((t: Record<string, unknown>) => ({
+    token: bytesToHex(t.token as string | Uint8Array | undefined),
+    name: t.name as string | undefined,
+    symbol: t.symbol as string | undefined,
+    totalSupply: t.totalSupply ? formatU256(t.totalSupply as string | Uint8Array | undefined) : undefined,
   }));
 }
 

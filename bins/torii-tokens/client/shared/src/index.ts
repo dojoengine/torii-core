@@ -20,9 +20,11 @@ export {
   getErc20TokenMetadata,
   getErc721Stats,
   getErc721Transfers,
+  getErc721TokenMetadata,
   getErc1155Balance,
   getErc1155Transfers,
   getErc1155Stats,
+  getErc1155TokenMetadata,
 } from "./queries";
 export type {
   TokenQuery,

@@ -117,6 +117,17 @@ export const Erc20GetStatsResponse = reg({
   },
 });
 
+export const Erc20TokenMetadataEntry = reg({
+  name: "Erc20TokenMetadataEntry",
+  fullName: "torii.sinks.erc20.TokenMetadataEntry",
+  fields: {
+    token: { number: 1, type: "bytes", repeated: false },
+    name: { number: 2, type: "string", repeated: false, optional: true },
+    symbol: { number: 3, type: "string", repeated: false, optional: true },
+    decimals: { number: 4, type: "uint32", repeated: false, optional: true },
+  },
+});
+
 // ===== ERC721 =====
 
 export const Erc721NftTransfer = reg({
@@ -172,6 +183,33 @@ export const Erc721GetTransfersResponse = reg({
   fields: {
     transfers: { number: 1, type: "message", repeated: true, messageType: "NftTransfer" },
     nextCursor: { number: 2, type: "message", repeated: false, optional: true, messageType: "Erc721Cursor" },
+  },
+});
+
+export const Erc721TokenMetadataEntry = reg({
+  name: "Erc721TokenMetadataEntry",
+  fullName: "torii.sinks.erc721.TokenMetadataEntry",
+  fields: {
+    token: { number: 1, type: "bytes", repeated: false },
+    name: { number: 2, type: "string", repeated: false, optional: true },
+    symbol: { number: 3, type: "string", repeated: false, optional: true },
+    totalSupply: { number: 4, type: "bytes", repeated: false, optional: true },
+  },
+});
+
+export const Erc721GetTokenMetadataRequest = reg({
+  name: "Erc721GetTokenMetadataRequest",
+  fullName: "torii.sinks.erc721.GetTokenMetadataRequest",
+  fields: {
+    token: { number: 1, type: "bytes", repeated: false, optional: true },
+  },
+});
+
+export const Erc721GetTokenMetadataResponse = reg({
+  name: "Erc721GetTokenMetadataResponse",
+  fullName: "torii.sinks.erc721.GetTokenMetadataResponse",
+  fields: {
+    tokens: { number: 1, type: "message", repeated: true },
   },
 });
 
@@ -252,6 +290,33 @@ export const Erc1155GetTransfersResponse = reg({
   fields: {
     transfers: { number: 1, type: "message", repeated: true, messageType: "TokenTransfer" },
     nextCursor: { number: 2, type: "message", repeated: false, optional: true, messageType: "Erc1155Cursor" },
+  },
+});
+
+export const Erc1155TokenMetadataEntry = reg({
+  name: "Erc1155TokenMetadataEntry",
+  fullName: "torii.sinks.erc1155.TokenMetadataEntry",
+  fields: {
+    token: { number: 1, type: "bytes", repeated: false },
+    name: { number: 2, type: "string", repeated: false, optional: true },
+    symbol: { number: 3, type: "string", repeated: false, optional: true },
+    totalSupply: { number: 4, type: "bytes", repeated: false, optional: true },
+  },
+});
+
+export const Erc1155GetTokenMetadataRequest = reg({
+  name: "Erc1155GetTokenMetadataRequest",
+  fullName: "torii.sinks.erc1155.GetTokenMetadataRequest",
+  fields: {
+    token: { number: 1, type: "bytes", repeated: false, optional: true },
+  },
+});
+
+export const Erc1155GetTokenMetadataResponse = reg({
+  name: "Erc1155GetTokenMetadataResponse",
+  fullName: "torii.sinks.erc1155.GetTokenMetadataResponse",
+  fields: {
+    tokens: { number: 1, type: "message", repeated: true },
   },
 });
 
