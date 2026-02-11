@@ -365,6 +365,18 @@ impl Erc20Storage {
                 "INSERT OR IGNORE INTO transfers (token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, strftime('%s', 'now')))",
             )?;
+            let mut wallet_both_stmt = tx.prepare_cached(
+                "INSERT INTO wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                 VALUES (?1, ?2, ?3, 'both', ?4)",
+            )?;
+            let mut wallet_sent_stmt = tx.prepare_cached(
+                "INSERT INTO wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                 VALUES (?1, ?2, ?3, 'sent', ?4)",
+            )?;
+            let mut wallet_received_stmt = tx.prepare_cached(
+                "INSERT INTO wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                 VALUES (?1, ?2, ?3, 'received', ?4)",
+            )?;
 
             for transfer in transfers {
                 let token_blob = felt_to_blob(transfer.token);
@@ -395,27 +407,30 @@ impl Erc20Storage {
                         && transfer.from == transfer.to
                     {
                         // Self-transfer (one record with 'both' direction)
-                        tx.execute(
-                            "INSERT INTO wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                             VALUES (?, ?, ?, 'both', ?)",
-                            params![&from_blob, &token_blob, transfer_id, transfer.block_number],
-                        )?;
+                        wallet_both_stmt.execute(params![
+                            &from_blob,
+                            &token_blob,
+                            transfer_id,
+                            transfer.block_number
+                        ])?;
                     } else {
                         // Sender record
                         if transfer.from != Felt::ZERO {
-                            tx.execute(
-                                "INSERT INTO wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                                 VALUES (?, ?, ?, 'sent', ?)",
-                                params![&from_blob, &token_blob, transfer_id, transfer.block_number],
-                            )?;
+                            wallet_sent_stmt.execute(params![
+                                &from_blob,
+                                &token_blob,
+                                transfer_id,
+                                transfer.block_number
+                            ])?;
                         }
                         // Receiver record
                         if transfer.to != Felt::ZERO {
-                            tx.execute(
-                                "INSERT INTO wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                                 VALUES (?, ?, ?, 'received', ?)",
-                                params![&to_blob, &token_blob, transfer_id, transfer.block_number],
-                            )?;
+                            wallet_received_stmt.execute(params![
+                                &to_blob,
+                                &token_blob,
+                                transfer_id,
+                                transfer.block_number
+                            ])?;
                         }
                     }
                 }
@@ -442,6 +457,18 @@ impl Erc20Storage {
             let mut approval_stmt = tx.prepare_cached(
                 "INSERT OR IGNORE INTO approvals (token, owner, spender, amount, block_number, tx_hash, timestamp)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, strftime('%s', 'now')))",
+            )?;
+            let mut approval_both_stmt = tx.prepare_cached(
+                "INSERT INTO approval_activity (account_address, token, approval_id, role, block_number)
+                 VALUES (?1, ?2, ?3, 'both', ?4)",
+            )?;
+            let mut approval_owner_stmt = tx.prepare_cached(
+                "INSERT INTO approval_activity (account_address, token, approval_id, role, block_number)
+                 VALUES (?1, ?2, ?3, 'owner', ?4)",
+            )?;
+            let mut approval_spender_stmt = tx.prepare_cached(
+                "INSERT INTO approval_activity (account_address, token, approval_id, role, block_number)
+                 VALUES (?1, ?2, ?3, 'spender', ?4)",
             )?;
 
             for approval in approvals {
@@ -472,42 +499,30 @@ impl Erc20Storage {
                         && approval.owner == approval.spender
                     {
                         // Self-approval (one record with 'both' role)
-                        tx.execute(
-                            "INSERT INTO approval_activity (account_address, token, approval_id, role, block_number)
-                             VALUES (?, ?, ?, 'both', ?)",
-                            params![
+                        approval_both_stmt.execute(params![
+                            &owner_blob,
+                            &token_blob,
+                            approval_id,
+                            approval.block_number
+                        ])?;
+                    } else {
+                        // Owner record
+                        if approval.owner != Felt::ZERO {
+                            approval_owner_stmt.execute(params![
                                 &owner_blob,
                                 &token_blob,
                                 approval_id,
                                 approval.block_number
-                            ],
-                        )?;
-                    } else {
-                        // Owner record
-                        if approval.owner != Felt::ZERO {
-                            tx.execute(
-                                "INSERT INTO approval_activity (account_address, token, approval_id, role, block_number)
-                                 VALUES (?, ?, ?, 'owner', ?)",
-                                params![
-                                    &owner_blob,
-                                    &token_blob,
-                                    approval_id,
-                                    approval.block_number
-                                ],
-                            )?;
+                            ])?;
                         }
                         // Spender record
                         if approval.spender != Felt::ZERO {
-                            tx.execute(
-                                "INSERT INTO approval_activity (account_address, token, approval_id, role, block_number)
-                                 VALUES (?, ?, ?, 'spender', ?)",
-                                params![
-                                    &spender_blob,
-                                    &token_blob,
-                                    approval_id,
-                                    approval.block_number
-                                ],
-                            )?;
+                            approval_spender_stmt.execute(params![
+                                &spender_blob,
+                                &token_blob,
+                                approval_id,
+                                approval.block_number
+                            ])?;
                         }
                     }
                 }
