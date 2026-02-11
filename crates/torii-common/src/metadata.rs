@@ -261,14 +261,12 @@ impl MetadataFetcher {
         let data_len: u64 = result[0].try_into().unwrap_or(u64::MAX);
 
         if data_len < 100 && result.len() >= (data_len as usize + 3) {
-            // Looks like ByteArray format
-            let mut s = String::new();
+            // Pre-allocate: each chunk is up to 31 bytes
+            let mut s = String::with_capacity(data_len as usize * 31 + 31);
 
             // Decode data chunks (each is 31 bytes)
             for i in 0..data_len as usize {
-                if let Some(chunk) = Self::felt_to_fixed_string(result[1 + i], 31) {
-                    s.push_str(&chunk);
-                }
+                Self::append_fixed_string(&mut s, result[1 + i], 31);
             }
 
             // Decode pending word
@@ -280,9 +278,7 @@ impl MetadataFetcher {
                 let pending_len: u64 = result[pending_len_idx].try_into().unwrap_or(0);
 
                 if pending_len > 0 && pending_len <= 31 {
-                    if let Some(chunk) = Self::felt_to_fixed_string(pending_word, pending_len as usize) {
-                        s.push_str(&chunk);
-                    }
+                    Self::append_fixed_string(&mut s, pending_word, pending_len as usize);
                 }
             }
 
@@ -295,11 +291,9 @@ impl MetadataFetcher {
         if result.len() >= 2 {
             let array_len: u64 = result[0].try_into().unwrap_or(0);
             if array_len > 0 && array_len < 100 && result.len() >= (array_len as usize + 1) {
-                let mut s = String::new();
+                let mut s = String::with_capacity(array_len as usize * 31);
                 for i in 0..array_len as usize {
-                    if let Some(chunk) = Self::felt_to_short_string(result[1 + i]) {
-                        s.push_str(&chunk);
-                    }
+                    Self::append_short_string(&mut s, result[1 + i]);
                 }
                 if !s.is_empty() {
                     return Some(s);
@@ -318,14 +312,43 @@ impl MetadataFetcher {
         }
 
         let bytes = felt.to_bytes_be();
-        // Find first non-zero byte
         let start = bytes.iter().position(|&b| b != 0)?;
         let slice = &bytes[start..];
 
-        // Check if all bytes are valid ASCII/UTF-8
         match std::str::from_utf8(slice) {
             Ok(s) if !s.is_empty() => Some(s.to_string()),
             _ => None,
+        }
+    }
+
+    /// Append a short string from a felt directly to a buffer (avoids intermediate allocation).
+    fn append_short_string(buf: &mut String, felt: Felt) {
+        if felt == Felt::ZERO {
+            return;
+        }
+
+        let bytes = felt.to_bytes_be();
+        let Some(start) = bytes.iter().position(|&b| b != 0) else {
+            return;
+        };
+        let slice = &bytes[start..];
+
+        if let Ok(s) = std::str::from_utf8(slice) {
+            buf.push_str(s);
+        }
+    }
+
+    /// Append a fixed-length string from a felt directly to a buffer.
+    fn append_fixed_string(buf: &mut String, felt: Felt, len: usize) {
+        if len == 0 || len > 31 {
+            return;
+        }
+
+        let bytes = felt.to_bytes_be();
+        let slice = &bytes[32 - len..];
+
+        if let Ok(s) = std::str::from_utf8(slice) {
+            buf.push_str(s);
         }
     }
 
