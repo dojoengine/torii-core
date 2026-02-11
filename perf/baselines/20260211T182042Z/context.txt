@@ -1,0 +1,6 @@
+commit=e8a76cb5e5512f0e2d0530f1dac966dae7125fbc
+branch=perf-opt
+sample_size=20
+measurement_time=1
+warmup_time=1
+created_at_utc=20260211T182042Z

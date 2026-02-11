@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    Pool, Row, Sqlite,
+    Pool, QueryBuilder, Row, Sqlite,
 };
 use starknet::core::types::Felt;
 use std::path::Path;
@@ -298,7 +298,7 @@ impl EngineDb {
 
         let rows = query_builder.fetch_all(&self.pool).await?;
 
-        let mut result = std::collections::HashMap::new();
+        let mut result = std::collections::HashMap::with_capacity(rows.len());
         for row in rows {
             let block_number: i64 = row.get(0);
             let timestamp: i64 = row.get(1);
@@ -320,16 +320,25 @@ impl EngineDb {
             return Ok(());
         }
 
-        // Use INSERT OR IGNORE to avoid conflicts
-        for (block_number, timestamp) in timestamps {
-            sqlx::query(
-                "INSERT OR IGNORE INTO block_timestamps (block_number, timestamp) VALUES (?, ?)",
-            )
-            .bind(*block_number as i64)
-            .bind(*timestamp as i64)
-            .execute(&self.pool)
-            .await?;
+        const CHUNK_SIZE: usize = 400;
+
+        let mut tx = self.pool.begin().await?;
+
+        // Use chunked multi-row INSERT OR IGNORE to reduce round-trips.
+        let timestamp_items: Vec<(u64, u64)> = timestamps.iter().map(|(k, v)| (*k, *v)).collect();
+        for chunk in timestamp_items.chunks(CHUNK_SIZE) {
+            let mut query_builder = QueryBuilder::<Sqlite>::new(
+                "INSERT OR IGNORE INTO block_timestamps (block_number, timestamp) ",
+            );
+            query_builder.push_values(chunk, |mut b, (block_number, timestamp)| {
+                b.push_bind(*block_number as i64)
+                    .push_bind(*timestamp as i64);
+            });
+
+            query_builder.build().execute(&mut *tx).await?;
         }
+
+        tx.commit().await?;
 
         Ok(())
     }
@@ -342,15 +351,13 @@ impl EngineDb {
     /// # Returns
     /// Timestamp if found in cache, None otherwise
     pub async fn get_block_timestamp(&self, block_number: u64) -> Result<Option<u64>> {
-        let row = sqlx::query("SELECT timestamp FROM block_timestamps WHERE block_number = ?")
-            .bind(block_number as i64)
-            .fetch_optional(&self.pool)
-            .await?;
+        let timestamp: Option<i64> =
+            sqlx::query_scalar("SELECT timestamp FROM block_timestamps WHERE block_number = ?")
+                .bind(block_number as i64)
+                .fetch_optional(&self.pool)
+                .await?;
 
-        Ok(row.map(|r| {
-            let ts: i64 = r.get(0);
-            ts as u64
-        }))
+        Ok(timestamp.map(|ts| ts as u64))
     }
 
     // ===== Contract Decoder Persistence =====
