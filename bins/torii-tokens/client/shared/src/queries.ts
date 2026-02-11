@@ -181,11 +181,13 @@ export async function getErc20Transfers(
   if (query.wallet) filter.wallet = hexToBytes(query.wallet);
   if (query.contractAddress) filter.tokens = [hexToBytes(query.contractAddress)];
 
-  // Fetch decimals if filtering by a specific contract
-  let decimals: number | undefined;
-  if (query.contractAddress) {
-    const metadata = await getErc20TokenMetadata(client, query.contractAddress);
-    decimals = metadata[0]?.decimals;
+  // Fetch all token metadata to build a decimals lookup
+  const allMetadata = await getErc20TokenMetadata(client, query.contractAddress || undefined);
+  const decimalsMap = new Map<string, number>();
+  for (const m of allMetadata) {
+    if (m.decimals != null) {
+      decimalsMap.set(m.token, m.decimals);
+    }
   }
 
   const response = await client.call(
@@ -198,15 +200,19 @@ export async function getErc20Transfers(
   const transfers = response.transfers;
   const list = Array.isArray(transfers) ? transfers : transfers ? [transfers] : [];
 
-  return list.map((t: Record<string, unknown>) => ({
-    token: bytesToHex(t.token as string | Uint8Array | undefined),
-    from: bytesToHex(t.from as string | Uint8Array | undefined),
-    to: bytesToHex(t.to as string | Uint8Array | undefined),
-    amount: formatU256(t.amount as string | Uint8Array | undefined, decimals),
-    blockNumber: Number(t.blockNumber ?? 0),
-    txHash: bytesToHex(t.txHash as string | Uint8Array | undefined),
-    timestamp: Number(t.timestamp ?? 0),
-  }));
+  return list.map((t: Record<string, unknown>) => {
+    const token = bytesToHex(t.token as string | Uint8Array | undefined);
+    const decimals = decimalsMap.get(token);
+    return {
+      token,
+      from: bytesToHex(t.from as string | Uint8Array | undefined),
+      to: bytesToHex(t.to as string | Uint8Array | undefined),
+      amount: formatU256(t.amount as string | Uint8Array | undefined, decimals),
+      blockNumber: Number(t.blockNumber ?? 0),
+      txHash: bytesToHex(t.txHash as string | Uint8Array | undefined),
+      timestamp: Number(t.timestamp ?? 0),
+    };
+  });
 }
 
 export async function getErc721Transfers(
