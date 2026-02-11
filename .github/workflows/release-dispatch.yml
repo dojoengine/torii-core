@@ -3,16 +3,15 @@ name: Release Dispatch
 on:
   workflow_dispatch:
     inputs:
-      release_type:
-        description: 'What to release'
+      binary:
+        description: 'Binary to release'
         required: true
         type: choice
         options:
-          - workspace
           - torii-tokens
           - torii-erc20
       version:
-        description: 'Release version (e.g., "0.2.0" or "v0.2.0")'
+        description: 'Release version (e.g., "1.0.0" or "v1.0.0")'
         required: true
         type: string
 
@@ -39,60 +38,42 @@ jobs:
           VERSION="${{ inputs.version }}"
           VERSION="${VERSION#v}"
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "Preparing release for version: $VERSION"
-
-      - name: Bump workspace version
-        if: inputs.release_type == 'workspace'
-        run: |
-          cargo release version ${{ steps.version.outputs.VERSION }} --execute --no-confirm
-          cargo release replace --execute --no-confirm
+          echo "Preparing release for ${{ inputs.binary }} version: $VERSION"
 
       - name: Bump binary version
-        if: inputs.release_type != 'workspace'
         run: |
-          cargo release version ${{ steps.version.outputs.VERSION }} --execute --no-confirm -p ${{ inputs.release_type }}
-          cargo release replace --execute --no-confirm -p ${{ inputs.release_type }}
+          cargo release version ${{ steps.version.outputs.VERSION }} --execute --no-confirm -p ${{ inputs.binary }}
+          cargo release replace --execute --no-confirm -p ${{ inputs.binary }}
 
-      - name: Extract release info
+      - name: Extract new version
         id: release-info
         run: |
-          if [ "${{ inputs.release_type }}" = "workspace" ]; then
-            NEW_VERSION=$(cargo get workspace.package.version)
-            RELEASE_NAME="workspace"
-            BRANCH_NAME="prepare-release-workspace"
-          else
-            NEW_VERSION=$(cargo get package.version --entry bins/${{ inputs.release_type }})
-            RELEASE_NAME="${{ inputs.release_type }}"
-            BRANCH_NAME="prepare-release-${{ inputs.release_type }}"
-          fi
+          NEW_VERSION=$(cargo get package.version --entry bins/${{ inputs.binary }})
           echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_OUTPUT
-          echo "RELEASE_NAME=$RELEASE_NAME" >> $GITHUB_OUTPUT
-          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_OUTPUT
-          echo "Version bumped to: $NEW_VERSION for $RELEASE_NAME"
+          echo "BINARY=${{ inputs.binary }}" >> $GITHUB_OUTPUT
+          echo "BRANCH_NAME=prepare-release-${{ inputs.binary }}" >> $GITHUB_OUTPUT
+          echo "Version bumped to: $NEW_VERSION for ${{ inputs.binary }}"
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.CREATE_PR_TOKEN }}
-          commit-message: "release(prepare): ${{ steps.release-info.outputs.RELEASE_NAME }} v${{ steps.release-info.outputs.NEW_VERSION }}"
-          title: "release(prepare): ${{ steps.release-info.outputs.RELEASE_NAME }} v${{ steps.release-info.outputs.NEW_VERSION }}"
+          commit-message: "release(prepare): ${{ steps.release-info.outputs.BINARY }} v${{ steps.release-info.outputs.NEW_VERSION }}"
+          title: "release(prepare): ${{ steps.release-info.outputs.BINARY }} v${{ steps.release-info.outputs.NEW_VERSION }}"
           body: |
             ## Release Preparation
 
-            This PR prepares **${{ steps.release-info.outputs.RELEASE_NAME }}** for version **v${{ steps.release-info.outputs.NEW_VERSION }}**.
+            This PR prepares **${{ steps.release-info.outputs.BINARY }}** for version **v${{ steps.release-info.outputs.NEW_VERSION }}**.
 
             ### Changes
-            ${{ inputs.release_type == 'workspace' && format('- Updated workspace version to `{0}`
-            - Updated all workspace member versions (libraries and crates)
-            - Updated internal workspace dependencies', steps.release-info.outputs.NEW_VERSION) || format('- Updated `{0}` binary version to `{1}`
-            - Updated dependencies if needed', inputs.release_type, steps.release-info.outputs.NEW_VERSION) }}
+            - Updated `${{ steps.release-info.outputs.BINARY }}` binary version to `${{ steps.release-info.outputs.NEW_VERSION }}`
+            - Updated dependencies if needed
 
             ### Next Steps
             Once this PR is merged, the release workflow will automatically:
-            ${{ inputs.release_type == 'workspace' && format('1. Tag the release as `workspace-v{0}`
-            2. No binaries or Docker images will be built (workspace release only)', steps.release-info.outputs.NEW_VERSION) || format('1. Build `{0}` binaries for 6 platforms (Linux, macOS, Windows on x64/ARM)
+            1. Build `${{ steps.release-info.outputs.BINARY }}` binaries for 6 platforms (Linux, macOS, Windows on x64/ARM)
             2. Create a draft GitHub release with all artifacts
-            3. Build and push multi-platform Docker image to GHCR: `{0}:{1}`', inputs.release_type, steps.release-info.outputs.NEW_VERSION) }}
+            3. Build and push multi-platform Docker image to GHCR: `${{ steps.release-info.outputs.BINARY }}:${{ steps.release-info.outputs.NEW_VERSION }}`
 
             **Review the changes and merge when ready to proceed with the release.**
           branch: ${{ steps.release-info.outputs.BRANCH_NAME }}

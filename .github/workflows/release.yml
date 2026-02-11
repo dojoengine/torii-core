@@ -17,9 +17,7 @@ jobs:
     outputs:
       tag_name: ${{ steps.release-info.outputs.TAG_NAME }}
       version: ${{ steps.release-info.outputs.VERSION }}
-      release_type: ${{ steps.release-info.outputs.RELEASE_TYPE }}
       binary_name: ${{ steps.release-info.outputs.BINARY_NAME }}
-      is_binary_release: ${{ steps.release-info.outputs.IS_BINARY_RELEASE }}
     steps:
       - uses: actions/checkout@v4
 
@@ -32,41 +30,30 @@ jobs:
       - name: Extract release info
         id: release-info
         run: |
-          # Extract release type from branch name
+          # Extract binary name from branch name
           BRANCH_REF="${{ github.event.pull_request.head.ref || 'prepare-release-manual' }}"
 
-          if [[ "$BRANCH_REF" == "prepare-release-workspace" ]]; then
-            RELEASE_TYPE="workspace"
-            VERSION=$(cargo get workspace.package.version)
-            TAG_NAME="workspace-v$VERSION"
-            BINARY_NAME=""
-            IS_BINARY_RELEASE="false"
-          elif [[ "$BRANCH_REF" =~ ^prepare-release-(.+)$ ]]; then
+          if [[ "$BRANCH_REF" =~ ^prepare-release-(.+)$ ]]; then
             BINARY_NAME="${BASH_REMATCH[1]}"
-            RELEASE_TYPE="binary"
             VERSION=$(cargo get package.version --entry bins/$BINARY_NAME)
             TAG_NAME="${BINARY_NAME}-v${VERSION}"
-            IS_BINARY_RELEASE="true"
           else
             echo "Error: Unknown release branch format: $BRANCH_REF"
+            echo "Expected: prepare-release-<binary-name>"
             exit 1
           fi
 
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
-          echo "RELEASE_TYPE=$RELEASE_TYPE" >> $GITHUB_OUTPUT
           echo "BINARY_NAME=$BINARY_NAME" >> $GITHUB_OUTPUT
-          echo "IS_BINARY_RELEASE=$IS_BINARY_RELEASE" >> $GITHUB_OUTPUT
 
-          echo "Release type: $RELEASE_TYPE"
+          echo "Binary: $BINARY_NAME"
           echo "Version: $VERSION"
           echo "Tag: $TAG_NAME"
-          echo "Binary: ${BINARY_NAME:-N/A}"
 
   build-binaries:
     name: Build ${{ needs.prepare.outputs.binary_name }} - ${{ matrix.job.platform }}-${{ matrix.job.arch }}
     needs: prepare
-    if: needs.prepare.outputs.is_binary_release == 'true'
     runs-on: ${{ matrix.job.os }}
     strategy:
       fail-fast: false
@@ -185,7 +172,6 @@ jobs:
   create-draft-release:
     name: Create Draft Release
     needs: [prepare, build-binaries]
-    if: needs.prepare.outputs.is_binary_release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -232,7 +218,6 @@ jobs:
   docker-build-push:
     name: Build Docker Image
     needs: [prepare, build-binaries]
-    if: needs.prepare.outputs.is_binary_release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
