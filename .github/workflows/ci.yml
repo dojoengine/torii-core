@@ -2,8 +2,17 @@ name: CI
 
 on:
   pull_request:
+    paths-ignore:
+      - '.github/**'
+      - '*.md'
+      - 'LICENSE'
   push:
     branches: [main]
+    paths-ignore:
+      - '.github/**'
+      - '*.md'
+      - 'LICENSE'
+  workflow_dispatch:
 
 # Cancel previous runs on the same PR/branch
 concurrency:

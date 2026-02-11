@@ -3,6 +3,10 @@ name: Benchmark
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '.github/**'
+      - '*.md'
+      - 'LICENSE'
   workflow_dispatch:
 
 env:
