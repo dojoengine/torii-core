@@ -545,12 +545,11 @@ fn benchmark_sink_fanout(c: &mut Criterion) {
             &sink_count,
             |b, _| {
                 b.to_async(&rt).iter(|| async {
-                    black_box(
-                        multi_sink
-                            .process(black_box(&envelopes), black_box(&batch))
-                            .await
-                            .expect("multi sink process failed"),
-                    )
+                    let _: () = multi_sink
+                        .process(black_box(&envelopes), black_box(&batch))
+                        .await
+                        .expect("multi sink process failed");
+                    black_box(());
                 });
             },
         );
@@ -689,7 +688,7 @@ fn benchmark_engine_db(c: &mut Criterion) {
             db.set_extractor_state("bench_extractor", "cursor", "12345")
                 .await
                 .expect("set_extractor_state failed");
-            black_box(())
+            black_box(());
         });
     });
 
@@ -717,7 +716,7 @@ fn benchmark_engine_db(c: &mut Criterion) {
             db.set_contract_decoders(contract, &decoder_ids)
                 .await
                 .expect("set_contract_decoders failed");
-            black_box(())
+            black_box(());
         });
     });
 

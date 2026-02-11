@@ -9,8 +9,7 @@ use crate::proto::{
     erc20_server::Erc20 as Erc20Trait, Approval, ApprovalFilter, ApprovalUpdate, Cursor,
     GetApprovalsRequest, GetApprovalsResponse, GetBalanceRequest, GetBalanceResponse,
     GetStatsRequest, GetStatsResponse, GetTransfersRequest, GetTransfersResponse,
-    SubscribeApprovalsRequest, SubscribeTransfersRequest, Transfer, TransferFilter,
-    TransferUpdate,
+    SubscribeApprovalsRequest, SubscribeTransfersRequest, Transfer, TransferFilter, TransferUpdate,
 };
 use crate::storage::{
     ApprovalCursor, ApprovalData, Erc20Storage, TransferCursor, TransferData, TransferDirection,

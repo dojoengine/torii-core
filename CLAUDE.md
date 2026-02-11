@@ -24,6 +24,17 @@ cargo run --example eventbus_only_sink   # Run EventBus-only demo
 cargo run --example http_only_sink       # Run HTTP-only demo
 ```
 
+### Quality Checks
+
+```bash
+./scripts/lint.sh           # Check formatting (cargo fmt) + clippy
+./scripts/lint.sh --fix     # Auto-fix formatting + clippy issues
+./scripts/test.sh           # Run all tests
+./scripts/test.sh <args>    # Run tests with additional cargo test arguments
+```
+
+**Pre-push hook**: Automatically runs lint + test checks before pushing (see `.githooks/pre-push`)
+
 ### TypeScript SDK (torii.js)
 
 ```bash

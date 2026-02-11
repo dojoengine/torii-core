@@ -872,11 +872,7 @@ impl Erc20Storage {
     }
 
     /// Get balance with last block info for a wallet/token pair
-    pub fn get_balance_with_block(
-        &self,
-        token: Felt,
-        wallet: Felt,
-    ) -> Result<Option<(U256, u64)>> {
+    pub fn get_balance_with_block(&self, token: Felt, wallet: Felt) -> Result<Option<(U256, u64)>> {
         let conn = self.conn.lock().unwrap();
         let token_blob = felt_to_blob(token);
         let wallet_blob = felt_to_blob(wallet);
