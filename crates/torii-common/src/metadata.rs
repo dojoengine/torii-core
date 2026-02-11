@@ -5,7 +5,9 @@
 //! selectors, felt-encoded strings and ByteArray returns.
 
 use anyhow::{Context, Result};
-use starknet::core::types::{BlockId, BlockTag, Felt, FunctionCall};
+use starknet::core::codec::Decode;
+use starknet::core::types::{BlockId, BlockTag, ByteArray, Felt, FunctionCall};
+use starknet::core::utils::parse_cairo_short_string;
 use starknet::macros::selector;
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use starknet::providers::Provider;
@@ -241,10 +243,9 @@ impl MetadataFetcher {
 
     /// Decode a string result from a contract call.
     ///
-    /// Handles multiple return formats:
-    /// 1. **Single short string** (felt): Characters packed into a single felt (≤31 bytes)
-    /// 2. **Cairo ByteArray**: `[data_len, ...pending_word_chunks, pending_word, pending_word_len]`
-    ///    where each chunk in data is a felt-encoded 31-byte segment
+    /// Handles multiple return formats using `starknet` crate utilities:
+    /// 1. **Single short string** (felt): via `parse_cairo_short_string`
+    /// 2. **Cairo ByteArray**: via `ByteArray::decode` (the standard Cairo string type)
     /// 3. **Legacy array**: `[len, felt1, felt2, ...]` where each felt is a short string segment
     fn decode_string_result(result: &[Felt]) -> Option<String> {
         if result.is_empty() {
@@ -253,37 +254,15 @@ impl MetadataFetcher {
 
         // Single felt — short string (≤31 chars packed into felt)
         if result.len() == 1 {
-            return Self::felt_to_short_string(result[0]);
+            return parse_cairo_short_string(&result[0]).ok().filter(|s| !s.is_empty());
         }
 
-        // Try ByteArray format: [data_len, ...chunks, pending_word, pending_word_len]
-        // data_len tells us how many 31-byte chunks follow
-        let data_len: u64 = result[0].try_into().unwrap_or(u64::MAX);
-
-        if data_len < 100 && result.len() >= (data_len as usize + 3) {
-            // Pre-allocate: each chunk is up to 31 bytes
-            let mut s = String::with_capacity(data_len as usize * 31 + 31);
-
-            // Decode data chunks (each is 31 bytes)
-            for i in 0..data_len as usize {
-                Self::append_fixed_string(&mut s, result[1 + i], 31);
-            }
-
-            // Decode pending word
-            let pending_idx = 1 + data_len as usize;
-            let pending_len_idx = pending_idx + 1;
-
-            if pending_len_idx < result.len() {
-                let pending_word = result[pending_idx];
-                let pending_len: u64 = result[pending_len_idx].try_into().unwrap_or(0);
-
-                if pending_len > 0 && pending_len <= 31 {
-                    Self::append_fixed_string(&mut s, pending_word, pending_len as usize);
+        // Try ByteArray format via starknet crate's Decode impl
+        if let Ok(byte_array) = ByteArray::decode(result) {
+            if let Ok(s) = String::try_from(byte_array) {
+                if !s.is_empty() {
+                    return Some(s);
                 }
-            }
-
-            if !s.is_empty() {
-                return Some(s);
             }
         }
 
@@ -292,8 +271,10 @@ impl MetadataFetcher {
             let array_len: u64 = result[0].try_into().unwrap_or(0);
             if array_len > 0 && array_len < 100 && result.len() >= (array_len as usize + 1) {
                 let mut s = String::with_capacity(array_len as usize * 31);
-                for i in 0..array_len as usize {
-                    Self::append_short_string(&mut s, result[1 + i]);
+                for felt in &result[1..=array_len as usize] {
+                    if let Ok(chunk) = parse_cairo_short_string(felt) {
+                        s.push_str(&chunk);
+                    }
                 }
                 if !s.is_empty() {
                     return Some(s);
@@ -302,69 +283,7 @@ impl MetadataFetcher {
         }
 
         // Last resort: try first felt as short string
-        Self::felt_to_short_string(result[0])
-    }
-
-    /// Convert a felt to a short string (up to 31 ASCII bytes packed in big-endian).
-    fn felt_to_short_string(felt: Felt) -> Option<String> {
-        if felt == Felt::ZERO {
-            return None;
-        }
-
-        let bytes = felt.to_bytes_be();
-        let start = bytes.iter().position(|&b| b != 0)?;
-        let slice = &bytes[start..];
-
-        match std::str::from_utf8(slice) {
-            Ok(s) if !s.is_empty() => Some(s.to_string()),
-            _ => None,
-        }
-    }
-
-    /// Append a short string from a felt directly to a buffer (avoids intermediate allocation).
-    fn append_short_string(buf: &mut String, felt: Felt) {
-        if felt == Felt::ZERO {
-            return;
-        }
-
-        let bytes = felt.to_bytes_be();
-        let Some(start) = bytes.iter().position(|&b| b != 0) else {
-            return;
-        };
-        let slice = &bytes[start..];
-
-        if let Ok(s) = std::str::from_utf8(slice) {
-            buf.push_str(s);
-        }
-    }
-
-    /// Append a fixed-length string from a felt directly to a buffer.
-    fn append_fixed_string(buf: &mut String, felt: Felt, len: usize) {
-        if len == 0 || len > 31 {
-            return;
-        }
-
-        let bytes = felt.to_bytes_be();
-        let slice = &bytes[32 - len..];
-
-        if let Ok(s) = std::str::from_utf8(slice) {
-            buf.push_str(s);
-        }
-    }
-
-    /// Convert a felt to a string of exactly `len` bytes (from the right side of the felt).
-    fn felt_to_fixed_string(felt: Felt, len: usize) -> Option<String> {
-        if len == 0 || len > 31 {
-            return None;
-        }
-
-        let bytes = felt.to_bytes_be();
-        let slice = &bytes[32 - len..];
-
-        match std::str::from_utf8(slice) {
-            Ok(s) if !s.is_empty() => Some(s.to_string()),
-            _ => None,
-        }
+        parse_cairo_short_string(&result[0]).ok().filter(|s| !s.is_empty())
     }
 }
 
@@ -373,18 +292,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_felt_to_short_string() {
+    fn test_parse_short_string() {
         // "ETH" = 0x455448
         let felt = Felt::from(0x455448u64);
         assert_eq!(
-            MetadataFetcher::felt_to_short_string(felt),
-            Some("ETH".to_string())
+            parse_cairo_short_string(&felt).unwrap(),
+            "ETH".to_string()
         );
-    }
-
-    #[test]
-    fn test_felt_to_short_string_zero() {
-        assert_eq!(MetadataFetcher::felt_to_short_string(Felt::ZERO), None);
     }
 
     #[test]
