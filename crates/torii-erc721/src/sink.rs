@@ -1,7 +1,9 @@
 //! ERC721 sink for processing NFT transfers, approvals, and ownership
 
 use crate::decoder::{
-    NftTransfer as DecodedNftTransfer, OperatorApproval as DecodedOperatorApproval,
+    BatchMetadataUpdate as DecodedBatchMetadataUpdate,
+    MetadataUpdate as DecodedMetadataUpdate, NftTransfer as DecodedNftTransfer,
+    OperatorApproval as DecodedOperatorApproval,
 };
 use crate::grpc_service::Erc721Service;
 use crate::proto;
@@ -18,7 +20,7 @@ use std::sync::Arc;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
-use torii_common::{u256_to_bytes, MetadataFetcher};
+use torii_common::{u256_to_bytes, MetadataFetcher, TokenStandard, TokenUriRequest, TokenUriSender};
 
 /// Default threshold for "live" detection: 100 blocks from chain head.
 /// Events from blocks older than this won't be broadcast to real-time subscribers.
@@ -39,6 +41,8 @@ pub struct Erc721Sink {
     grpc_service: Option<Erc721Service>,
     /// Metadata fetcher for token name/symbol
     metadata_fetcher: Option<Arc<MetadataFetcher>>,
+    /// Token URI service sender for async URI fetching
+    token_uri_sender: Option<TokenUriSender>,
 }
 
 impl Erc721Sink {
@@ -48,12 +52,19 @@ impl Erc721Sink {
             event_bus: None,
             grpc_service: None,
             metadata_fetcher: None,
+            token_uri_sender: None,
         }
     }
 
     /// Enable metadata fetching with a provider
     pub fn with_metadata_fetching(mut self, provider: Arc<JsonRpcClient<HttpTransport>>) -> Self {
         self.metadata_fetcher = Some(Arc::new(MetadataFetcher::new(provider)));
+        self
+    }
+
+    /// Enable async token URI fetching
+    pub fn with_token_uri_sender(mut self, sender: TokenUriSender) -> Self {
+        self.token_uri_sender = Some(sender);
         self
     }
 
@@ -127,6 +138,8 @@ impl Sink for Erc721Sink {
             TypeId::new("erc721.transfer"),
             TypeId::new("erc721.approval"),
             TypeId::new("erc721.approval_for_all"),
+            TypeId::new("erc721.metadata_update"),
+            TypeId::new("erc721.batch_metadata_update"),
         ]
     }
 
@@ -189,6 +202,54 @@ impl Sink for Erc721Sink {
                     });
                 }
             }
+            // Handle MetadataUpdate (EIP-4906) — single token
+            else if envelope.type_id == TypeId::new("erc721.metadata_update") {
+                if let Some(update) = envelope
+                    .body
+                    .as_any()
+                    .downcast_ref::<DecodedMetadataUpdate>()
+                {
+                    if let Some(ref sender) = self.token_uri_sender {
+                        sender
+                            .request_update(TokenUriRequest {
+                                contract: update.token,
+                                token_id: update.token_id,
+                                standard: TokenStandard::Erc721,
+                            })
+                            .await;
+                    }
+                }
+            }
+            // Handle BatchMetadataUpdate (EIP-4906) — range of tokens
+            else if envelope.type_id == TypeId::new("erc721.batch_metadata_update") {
+                if let Some(update) = envelope
+                    .body
+                    .as_any()
+                    .downcast_ref::<DecodedBatchMetadataUpdate>()
+                {
+                    if let Some(ref sender) = self.token_uri_sender {
+                        // For batch updates, we need to know which token IDs exist in the range.
+                        // Fetch them from storage and request URI updates for each.
+                        if let Ok(uris) =
+                            self.storage.get_token_uris_by_contract(update.token)
+                        {
+                            for (token_id, _, _) in &uris {
+                                if *token_id >= update.from_token_id
+                                    && *token_id <= update.to_token_id
+                                {
+                                    sender
+                                        .request_update(TokenUriRequest {
+                                            contract: update.token,
+                                            token_id: *token_id,
+                                            standard: TokenStandard::Erc721,
+                                        })
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             // Note: erc721.approval (single token approval) could be handled similarly
             // but is less commonly needed for indexing purposes
         }
@@ -223,6 +284,31 @@ impl Sink for Erc721Sink {
                     Ok(true) => {}
                     Err(e) => {
                         tracing::warn!(target: "torii_erc721::sink", error = %e, "Failed to check token metadata");
+                    }
+                }
+            }
+        }
+
+        // Request token URI fetches for new token IDs
+        if let Some(ref sender) = self.token_uri_sender {
+            for transfer in &transfers {
+                match self.storage.has_token_uri(transfer.token, transfer.token_id) {
+                    Ok(false) => {
+                        sender
+                            .request_update(TokenUriRequest {
+                                contract: transfer.token,
+                                token_id: transfer.token_id,
+                                standard: TokenStandard::Erc721,
+                            })
+                            .await;
+                    }
+                    Ok(true) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "torii_erc721::sink",
+                            error = %e,
+                            "Failed to check token URI existence"
+                        );
                     }
                 }
             }

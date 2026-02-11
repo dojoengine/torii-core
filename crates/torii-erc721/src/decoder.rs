@@ -85,12 +85,61 @@ impl TypedBody for OperatorApproval {
     }
 }
 
+/// MetadataUpdate event (EIP-4906) — single token
+#[derive(Debug, Clone)]
+pub struct MetadataUpdate {
+    pub token: Felt,
+    pub token_id: U256,
+    pub block_number: u64,
+    pub transaction_hash: Felt,
+}
+
+impl TypedBody for MetadataUpdate {
+    fn envelope_type_id(&self) -> torii::etl::envelope::TypeId {
+        torii::etl::envelope::TypeId::new("erc721.metadata_update")
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+/// BatchMetadataUpdate event (EIP-4906) — range of tokens
+#[derive(Debug, Clone)]
+pub struct BatchMetadataUpdate {
+    pub token: Felt,
+    pub from_token_id: U256,
+    pub to_token_id: U256,
+    pub block_number: u64,
+    pub transaction_hash: Felt,
+}
+
+impl TypedBody for BatchMetadataUpdate {
+    fn envelope_type_id(&self) -> torii::etl::envelope::TypeId {
+        torii::etl::envelope::TypeId::new("erc721.batch_metadata_update")
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
 /// ERC721 event decoder
 ///
 /// Decodes multiple ERC721 events:
 /// - Transfer(from, to, token_id)
 /// - Approval(owner, approved, token_id)
 /// - ApprovalForAll(owner, operator, approved)
+/// - MetadataUpdate(token_id) — EIP-4906
+/// - BatchMetadataUpdate(from_token_id, to_token_id) — EIP-4906
 ///
 /// Supports both modern (keys) and legacy (data-only) formats from OpenZeppelin.
 pub struct Erc721Decoder;
@@ -113,6 +162,16 @@ impl Erc721Decoder {
     /// ApprovalForAll event selector: sn_keccak("ApprovalForAll")
     fn approval_for_all_selector() -> Felt {
         selector!("ApprovalForAll")
+    }
+
+    /// MetadataUpdate event selector (EIP-4906): sn_keccak("MetadataUpdate")
+    fn metadata_update_selector() -> Felt {
+        selector!("MetadataUpdate")
+    }
+
+    /// BatchMetadataUpdate event selector (EIP-4906): sn_keccak("BatchMetadataUpdate")
+    fn batch_metadata_update_selector() -> Felt {
+        selector!("BatchMetadataUpdate")
     }
 
     /// Decode Transfer event into envelope
@@ -378,6 +437,116 @@ impl Erc721Decoder {
             metadata,
         )))
     }
+
+    /// Decode MetadataUpdate event (EIP-4906)
+    ///
+    /// MetadataUpdate(uint256 tokenId):
+    /// - keys[0]: selector
+    /// - data[0]: token_id_low
+    /// - data[1]: token_id_high
+    /// OR:
+    /// - keys[0]: selector
+    /// - keys[1]: token_id_low
+    /// - keys[2]: token_id_high
+    async fn decode_metadata_update(&self, event: &EmittedEvent) -> Result<Option<Envelope>> {
+        let token_id: U256;
+
+        if event.data.len() >= 2 {
+            let low: u128 = event.data[0].try_into().unwrap_or(0);
+            let high: u128 = event.data[1].try_into().unwrap_or(0);
+            token_id = U256::from_words(low, high);
+        } else if event.keys.len() >= 3 {
+            let low: u128 = event.keys[1].try_into().unwrap_or(0);
+            let high: u128 = event.keys[2].try_into().unwrap_or(0);
+            token_id = U256::from_words(low, high);
+        } else if event.data.len() == 1 {
+            let id: u128 = event.data[0].try_into().unwrap_or(0);
+            token_id = U256::from(id);
+        } else if event.keys.len() == 2 {
+            let id: u128 = event.keys[1].try_into().unwrap_or(0);
+            token_id = U256::from(id);
+        } else {
+            tracing::warn!(
+                target: "torii_erc721::decoder",
+                token = %format!("{:#x}", event.from_address),
+                "Malformed MetadataUpdate event"
+            );
+            return Ok(None);
+        }
+
+        let update = MetadataUpdate {
+            token: event.from_address,
+            token_id,
+            block_number: event.block_number.unwrap_or(0),
+            transaction_hash: event.transaction_hash,
+        };
+
+        let envelope_id = format!(
+            "erc721_metadata_update_{}_{:#x}",
+            event.block_number.unwrap_or(0),
+            event.transaction_hash
+        );
+
+        Ok(Some(Envelope::new(
+            envelope_id,
+            Box::new(update),
+            HashMap::new(),
+        )))
+    }
+
+    /// Decode BatchMetadataUpdate event (EIP-4906)
+    ///
+    /// BatchMetadataUpdate(uint256 fromTokenId, uint256 toTokenId)
+    async fn decode_batch_metadata_update(
+        &self,
+        event: &EmittedEvent,
+    ) -> Result<Option<Envelope>> {
+        let from_token_id: U256;
+        let to_token_id: U256;
+
+        if event.data.len() >= 4 {
+            let low: u128 = event.data[0].try_into().unwrap_or(0);
+            let high: u128 = event.data[1].try_into().unwrap_or(0);
+            from_token_id = U256::from_words(low, high);
+            let low: u128 = event.data[2].try_into().unwrap_or(0);
+            let high: u128 = event.data[3].try_into().unwrap_or(0);
+            to_token_id = U256::from_words(low, high);
+        } else if event.keys.len() >= 5 {
+            let low: u128 = event.keys[1].try_into().unwrap_or(0);
+            let high: u128 = event.keys[2].try_into().unwrap_or(0);
+            from_token_id = U256::from_words(low, high);
+            let low: u128 = event.keys[3].try_into().unwrap_or(0);
+            let high: u128 = event.keys[4].try_into().unwrap_or(0);
+            to_token_id = U256::from_words(low, high);
+        } else {
+            tracing::warn!(
+                target: "torii_erc721::decoder",
+                token = %format!("{:#x}", event.from_address),
+                "Malformed BatchMetadataUpdate event"
+            );
+            return Ok(None);
+        }
+
+        let update = BatchMetadataUpdate {
+            token: event.from_address,
+            from_token_id,
+            to_token_id,
+            block_number: event.block_number.unwrap_or(0),
+            transaction_hash: event.transaction_hash,
+        };
+
+        let envelope_id = format!(
+            "erc721_batch_metadata_update_{}_{:#x}",
+            event.block_number.unwrap_or(0),
+            event.transaction_hash
+        );
+
+        Ok(Some(Envelope::new(
+            envelope_id,
+            Box::new(update),
+            HashMap::new(),
+        )))
+    }
 }
 
 impl Default for Erc721Decoder {
@@ -409,6 +578,14 @@ impl Decoder for Erc721Decoder {
             }
         } else if selector == Self::approval_for_all_selector() {
             if let Some(envelope) = self.decode_approval_for_all(event).await? {
+                return Ok(vec![envelope]);
+            }
+        } else if selector == Self::metadata_update_selector() {
+            if let Some(envelope) = self.decode_metadata_update(event).await? {
+                return Ok(vec![envelope]);
+            }
+        } else if selector == Self::batch_metadata_update_selector() {
+            if let Some(envelope) = self.decode_batch_metadata_update(event).await? {
                 return Ok(vec![envelope]);
             }
         } else {

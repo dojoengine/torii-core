@@ -7,7 +7,7 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 use starknet::core::types::{Felt, U256};
 use std::sync::{Arc, Mutex};
-use torii_common::{blob_to_felt, blob_to_u256, felt_to_blob, u256_to_blob};
+use torii_common::{blob_to_felt, blob_to_u256, felt_to_blob, u256_to_blob, TokenUriResult, TokenUriStore};
 
 /// Storage for ERC721 NFT data
 pub struct Erc721Storage {
@@ -224,6 +224,18 @@ impl Erc721Storage {
                 total_supply BLOB
             )",
             [],
+        )?;
+
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS token_uris (
+                token BLOB NOT NULL,
+                token_id BLOB NOT NULL,
+                uri TEXT,
+                metadata_json TEXT,
+                updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (token, token_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_token_uris_token ON token_uris(token);",
         )?;
 
         tracing::info!(target: "torii_erc721::storage", db_path = %db_path, "ERC721 database initialized");
@@ -696,5 +708,95 @@ impl Erc721Storage {
             ))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    // ===== Token URI methods =====
+
+    /// Upsert a token URI entry
+    pub fn upsert_token_uri(
+        &self,
+        token: Felt,
+        token_id: U256,
+        uri: Option<&str>,
+        metadata_json: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO token_uris (token, token_id, uri, metadata_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, strftime('%s', 'now'))
+             ON CONFLICT(token, token_id) DO UPDATE SET
+                 uri = COALESCE(excluded.uri, token_uris.uri),
+                 metadata_json = COALESCE(excluded.metadata_json, token_uris.metadata_json),
+                 updated_at = excluded.updated_at",
+            rusqlite::params![
+                felt_to_blob(token),
+                u256_to_blob(token_id),
+                uri,
+                metadata_json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Check if a token URI exists
+    pub fn has_token_uri(&self, token: Felt, token_id: U256) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM token_uris WHERE token = ?1 AND token_id = ?2",
+            rusqlite::params![felt_to_blob(token), u256_to_blob(token_id)],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Get a token URI entry
+    pub fn get_token_uri(
+        &self,
+        token: Felt,
+        token_id: U256,
+    ) -> Result<Option<(Option<String>, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn
+            .query_row(
+                "SELECT uri, metadata_json FROM token_uris WHERE token = ?1 AND token_id = ?2",
+                rusqlite::params![felt_to_blob(token), u256_to_blob(token_id)],
+                |row| {
+                    let uri: Option<String> = row.get(0)?;
+                    let metadata_json: Option<String> = row.get(1)?;
+                    Ok((uri, metadata_json))
+                },
+            )
+            .ok();
+        Ok(result)
+    }
+
+    /// Get all token URIs for a contract
+    pub fn get_token_uris_by_contract(
+        &self,
+        token: Felt,
+    ) -> Result<Vec<(U256, Option<String>, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT token_id, uri, metadata_json FROM token_uris WHERE token = ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![felt_to_blob(token)], |row| {
+            let token_id_bytes: Vec<u8> = row.get(0)?;
+            let uri: Option<String> = row.get(1)?;
+            let metadata_json: Option<String> = row.get(2)?;
+            Ok((blob_to_u256(&token_id_bytes), uri, metadata_json))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+}
+
+#[async_trait::async_trait]
+impl TokenUriStore for Erc721Storage {
+    async fn store_token_uri(&self, result: &TokenUriResult) -> anyhow::Result<()> {
+        self.upsert_token_uri(
+            result.contract,
+            result.token_id,
+            result.uri.as_deref(),
+            result.metadata_json.as_deref(),
+        )
     }
 }

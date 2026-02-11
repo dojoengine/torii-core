@@ -31,7 +31,7 @@ use std::sync::Arc;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
-use torii_common::{u256_to_bytes, MetadataFetcher};
+use torii_common::{u256_to_bytes, MetadataFetcher, TokenStandard, TokenUriRequest, TokenUriSender};
 
 /// Default threshold for "live" detection: 100 blocks from chain head.
 /// Events from blocks older than this won't be broadcast to real-time subscribers.
@@ -55,6 +55,8 @@ pub struct Erc1155Sink {
     balance_fetcher: Option<Arc<Erc1155BalanceFetcher>>,
     /// Metadata fetcher for contract name/symbol
     metadata_fetcher: Option<Arc<MetadataFetcher>>,
+    /// Token URI service sender for async URI fetching
+    token_uri_sender: Option<TokenUriSender>,
 }
 
 impl Erc1155Sink {
@@ -65,7 +67,14 @@ impl Erc1155Sink {
             grpc_service: None,
             balance_fetcher: None,
             metadata_fetcher: None,
+            token_uri_sender: None,
         }
+    }
+
+    /// Enable async token URI fetching
+    pub fn with_token_uri_sender(mut self, sender: TokenUriSender) -> Self {
+        self.token_uri_sender = Some(sender);
+        self
     }
 
     /// Set the gRPC service for dual publishing
@@ -276,6 +285,31 @@ impl Sink for Erc1155Sink {
                     Ok(true) => {}
                     Err(e) => {
                         tracing::warn!(target: "torii_erc1155::sink", error = %e, "Failed to check token metadata");
+                    }
+                }
+            }
+        }
+
+        // Request token URI fetches for new token IDs
+        if let Some(ref sender) = self.token_uri_sender {
+            for transfer in &transfers {
+                match self.storage.has_token_uri(transfer.token, transfer.token_id) {
+                    Ok(false) => {
+                        sender
+                            .request_update(TokenUriRequest {
+                                contract: transfer.token,
+                                token_id: transfer.token_id,
+                                standard: TokenStandard::Erc1155,
+                            })
+                            .await;
+                    }
+                    Ok(true) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "torii_erc1155::sink",
+                            error = %e,
+                            "Failed to check token URI existence"
+                        );
                     }
                 }
             }
