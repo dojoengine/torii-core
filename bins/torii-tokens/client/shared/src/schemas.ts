@@ -78,7 +78,7 @@ export const Erc20GetTokenMetadataResponse = reg({
   name: "Erc20GetTokenMetadataResponse",
   fullName: "torii.sinks.erc20.GetTokenMetadataResponse",
   fields: {
-    tokens: { number: 1, type: "message", repeated: true },
+    tokens: { number: 1, type: "message", repeated: true, messageType: "Erc20TokenMetadataEntry" },
   },
 });
 
@@ -209,7 +209,7 @@ export const Erc721GetTokenMetadataResponse = reg({
   name: "Erc721GetTokenMetadataResponse",
   fullName: "torii.sinks.erc721.GetTokenMetadataResponse",
   fields: {
-    tokens: { number: 1, type: "message", repeated: true },
+    tokens: { number: 1, type: "message", repeated: true, messageType: "Erc721TokenMetadataEntry" },
   },
 });
 
@@ -316,7 +316,7 @@ export const Erc1155GetTokenMetadataResponse = reg({
   name: "Erc1155GetTokenMetadataResponse",
   fullName: "torii.sinks.erc1155.GetTokenMetadataResponse",
   fields: {
-    tokens: { number: 1, type: "message", repeated: true },
+    tokens: { number: 1, type: "message", repeated: true, messageType: "Erc1155TokenMetadataEntry" },
   },
 });
 

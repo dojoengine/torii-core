@@ -20,6 +20,18 @@ export function hexToBase64(hex: string): string {
 }
 
 /**
+ * Decode a base64 string into a Uint8Array
+ */
+function base64Decode(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/**
  * Convert bytes (Uint8Array or base64 string) to hex string for display
  */
 export function bytesToHex(value: Uint8Array | string | undefined): string {
@@ -29,7 +41,7 @@ export function bytesToHex(value: Uint8Array | string | undefined): string {
     if (value instanceof Uint8Array) {
       bytes = value;
     } else {
-      bytes = new TextEncoder().encode(value);
+      bytes = base64Decode(value);
     }
     let hex = Array.from(bytes)
       .map((b) => b.toString(16).padStart(2, "0"))
@@ -61,7 +73,7 @@ export function formatU256(
   try {
     let data: Uint8Array;
     if (typeof bytes === "string") {
-      data = new TextEncoder().encode(bytes);
+      data = base64Decode(bytes);
     } else {
       data = bytes;
     }
