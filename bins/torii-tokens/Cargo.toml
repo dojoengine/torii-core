@@ -35,6 +35,7 @@ anyhow = "1.0"
 
 # gRPC
 tonic = "0.12"
+tonic-web = "0.12"
 tonic-reflection = "0.12"
 
 # Profiling (optional, enable with --features profiling)

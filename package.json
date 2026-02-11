@@ -1,5 +1,12 @@
 {
   "name": "torii-core",
   "private": true,
-  "workspaces": ["torii.js", "client", "examples/*"]
+  "workspaces": [
+    "torii.js",
+    "client",
+    "examples/*",
+    "bins/torii-tokens/client",
+    "bins/torii-tokens/client/shared",
+    "bins/torii-tokens/client/apps/*"
+  ]
 }

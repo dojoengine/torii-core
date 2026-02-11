@@ -130,6 +130,26 @@ message TransferUpdate {
     int64 timestamp = 2;
 }
 
+// ===== Balance Query =====
+
+// Request for GetBalance RPC
+message GetBalanceRequest {
+    // Token contract address (32 bytes)
+    bytes contract = 1;
+    // Wallet address (32 bytes)
+    bytes wallet = 2;
+    // Token ID as U256 (variable length, up to 32 bytes)
+    bytes token_id = 3;
+}
+
+// Response for GetBalance RPC
+message GetBalanceResponse {
+    // Balance as U256 (variable length, up to 32 bytes)
+    bytes balance = 1;
+    // Last block number where balance was updated
+    uint64 last_block = 2;
+}
+
 // ===== Stats =====
 
 // Request for GetStats RPC
@@ -153,6 +173,9 @@ message GetStatsResponse {
 service Erc1155 {
     // Query historical transfers with filtering and pagination
     rpc GetTransfers(GetTransfersRequest) returns (GetTransfersResponse);
+
+    // Get balance for a specific contract, wallet, and token ID
+    rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
 
     // Subscribe to real-time transfer events with filtering
     rpc SubscribeTransfers(SubscribeTransfersRequest) returns (stream TransferUpdate);

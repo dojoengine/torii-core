@@ -1,0 +1,6 @@
+node_modules
+dist
+.vite
+
+# Generated clients (regenerate with bun run generate)
+shared/generated

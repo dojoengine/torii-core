@@ -7,9 +7,10 @@
 
 use crate::proto::{
     erc20_server::Erc20 as Erc20Trait, Approval, ApprovalFilter, ApprovalUpdate, Cursor,
-    GetApprovalsRequest, GetApprovalsResponse, GetStatsRequest, GetStatsResponse,
-    GetTransfersRequest, GetTransfersResponse, SubscribeApprovalsRequest,
-    SubscribeTransfersRequest, Transfer, TransferFilter, TransferUpdate,
+    GetApprovalsRequest, GetApprovalsResponse, GetBalanceRequest, GetBalanceResponse,
+    GetStatsRequest, GetStatsResponse, GetTransfersRequest, GetTransfersResponse,
+    SubscribeApprovalsRequest, SubscribeTransfersRequest, Transfer, TransferFilter,
+    TransferUpdate,
 };
 use crate::storage::{
     ApprovalCursor, ApprovalData, Erc20Storage, TransferCursor, TransferData, TransferDirection,
@@ -360,6 +361,37 @@ impl Erc20Trait for Erc20Service {
         Ok(Response::new(GetApprovalsResponse {
             approvals: proto_approvals,
             next_cursor: proto_cursor,
+        }))
+    }
+
+    /// Get balance for a specific token and wallet
+    async fn get_balance(
+        &self,
+        request: Request<GetBalanceRequest>,
+    ) -> Result<Response<GetBalanceResponse>, Status> {
+        let req = request.into_inner();
+
+        let token = bytes_to_felt(&req.token)
+            .ok_or_else(|| Status::invalid_argument("Invalid token address"))?;
+        let wallet = bytes_to_felt(&req.wallet)
+            .ok_or_else(|| Status::invalid_argument("Invalid wallet address"))?;
+
+        tracing::debug!(
+            target: "torii_erc20::grpc",
+            "GetBalance: token={:#x}, wallet={:#x}",
+            token,
+            wallet
+        );
+
+        let (balance, last_block) = self
+            .storage
+            .get_balance_with_block(token, wallet)
+            .map_err(|e| Status::internal(format!("Query failed: {e}")))?
+            .unwrap_or((starknet::core::types::U256::from(0u64), 0));
+
+        Ok(Response::new(GetBalanceResponse {
+            balance: u256_to_bytes(balance),
+            last_block,
         }))
     }
 

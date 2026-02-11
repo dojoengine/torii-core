@@ -4068,6 +4068,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tonic-reflection",
+ "tonic-web",
  "torii",
  "torii-common",
  "torii-erc1155",

@@ -168,6 +168,24 @@ message ApprovalUpdate {
     int64 timestamp = 2;
 }
 
+// ===== Balance Query =====
+
+// Request for GetBalance RPC
+message GetBalanceRequest {
+    // Token contract address (32 bytes)
+    bytes token = 1;
+    // Wallet address (32 bytes)
+    bytes wallet = 2;
+}
+
+// Response for GetBalance RPC
+message GetBalanceResponse {
+    // Balance as U256 (variable length, up to 32 bytes)
+    bytes balance = 1;
+    // Last block number where balance was updated
+    uint64 last_block = 2;
+}
+
 // ===== Stats =====
 
 // Request for GetStats RPC
@@ -194,6 +212,9 @@ service Erc20 {
 
     // Query historical approvals with filtering and pagination
     rpc GetApprovals(GetApprovalsRequest) returns (GetApprovalsResponse);
+
+    // Get balance for a specific token and wallet
+    rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse);
 
     // Subscribe to real-time transfer events with filtering
     rpc SubscribeTransfers(SubscribeTransfersRequest) returns (stream TransferUpdate);

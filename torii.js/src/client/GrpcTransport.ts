@@ -18,6 +18,7 @@ export interface CallOptions {
   headers?: Record<string, string>;
   requestSchema?: MessageSchema;
   responseSchema?: MessageSchema;
+  onConnected?: () => void;
 }
 
 export class GrpcTransport {
@@ -56,8 +57,8 @@ export class GrpcTransport {
       throw new Error(`gRPC call failed: ${response.status} ${response.statusText}`);
     }
 
-    const responseBody = await response.arrayBuffer();
-    return this.decodeMessageWithSchema<T>(new Uint8Array(responseBody), options?.responseSchema);
+    const responseBody = new Uint8Array(await response.arrayBuffer());
+    return this.decodeFramedResponse<T>(responseBody, options?.responseSchema);
   }
 
   /**
@@ -92,47 +93,77 @@ export class GrpcTransport {
     const reader = response.body?.getReader();
     if (!reader) throw new Error('No response body');
 
+    options?.onConnected?.();
+
     let buffer = new Uint8Array(0);
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      // Append to buffer
       const newBuffer = new Uint8Array(buffer.length + value.length);
       newBuffer.set(buffer);
       newBuffer.set(value, buffer.length);
       buffer = newBuffer;
 
-      // Parse complete frames from buffer
       while (buffer.length >= 5) {
-        const messageLength =
+        const frameLength =
           (buffer[1] << 24) | (buffer[2] << 16) | (buffer[3] << 8) | buffer[4];
-        const totalLength = 5 + messageLength;
+        const totalLength = 5 + frameLength;
 
         if (buffer.length < totalLength) break;
 
-        const messageFrame = buffer.slice(0, totalLength);
+        const flag = buffer[0];
+        const payload = buffer.slice(5, totalLength);
         buffer = buffer.slice(totalLength);
 
-        // Only yield data frames (0x00), skip trailers (0x80)
-        if (messageFrame[0] === 0x00) {
-          yield this.decodeMessageWithSchema<T>(messageFrame, options?.responseSchema);
+        if (flag === 0x00) {
+          yield this.decodePayload<T>(payload, options?.responseSchema);
+        } else if (flag === 0x80) {
+          GrpcTransport.checkTrailer(payload);
         }
       }
     }
   }
 
   /**
-   * Decode a gRPC-Web frame with optional schema
+   * Parse a gRPC-Web response buffer that may contain data + trailer frames.
+   *
+   * Frame format: 1-byte flag | 4-byte big-endian length | payload
+   *   flag 0x00 = data frame (protobuf message)
+   *   flag 0x80 = trailer frame (ASCII "key: value\r\n" pairs)
    */
-  private decodeMessageWithSchema<T>(data: Uint8Array, schema?: MessageSchema): T {
+  private decodeFramedResponse<T>(data: Uint8Array, schema?: MessageSchema): T {
     if (data.length < 5) return {} as T;
 
-    const messageLength =
-      (data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4];
-    const message = data.slice(5, 5 + messageLength);
+    let offset = 0;
+    let messageData: Uint8Array | null = null;
 
+    while (offset + 5 <= data.length) {
+      const flag = data[offset];
+      const frameLength =
+        (data[offset + 1] << 24) |
+        (data[offset + 2] << 16) |
+        (data[offset + 3] << 8) |
+        data[offset + 4];
+      const frameEnd = offset + 5 + frameLength;
+      if (frameEnd > data.length) break;
+
+      if (flag === 0x00) {
+        messageData = data.slice(offset + 5, frameEnd);
+      } else if (flag === 0x80) {
+        GrpcTransport.checkTrailer(data.slice(offset + 5, frameEnd));
+      }
+
+      offset = frameEnd;
+    }
+
+    if (!messageData || messageData.length === 0) return {} as T;
+
+    return this.decodePayload<T>(messageData, schema);
+  }
+
+  private decodePayload<T>(message: Uint8Array, schema?: MessageSchema): T {
     if (message.length === 0) return {} as T;
 
     try {
@@ -142,6 +173,21 @@ export class GrpcTransport {
       return decodeProtobufObject(message) as T;
     } catch {
       return { _raw: Array.from(message) } as T;
+    }
+  }
+
+  private static checkTrailer(payload: Uint8Array): void {
+    const trailer = new TextDecoder().decode(payload);
+    const statusMatch = trailer.match(/grpc-status:\s*(\d+)/);
+    if (statusMatch) {
+      const grpcStatus = parseInt(statusMatch[1], 10);
+      if (grpcStatus !== 0) {
+        const msgMatch = trailer.match(/grpc-message:\s*([^\r\n]*)/);
+        const grpcMessage = msgMatch
+          ? decodeURIComponent(msgMatch[1])
+          : `gRPC error ${grpcStatus}`;
+        throw new Error(grpcMessage);
+      }
     }
   }
 }

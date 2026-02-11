@@ -192,6 +192,26 @@ pub struct ApprovalUpdate {
     #[prost(int64, tag = "2")]
     pub timestamp: i64,
 }
+/// Request for GetBalance RPC
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetBalanceRequest {
+    /// Token contract address (32 bytes)
+    #[prost(bytes = "vec", tag = "1")]
+    pub token: ::prost::alloc::vec::Vec<u8>,
+    /// Wallet address (32 bytes)
+    #[prost(bytes = "vec", tag = "2")]
+    pub wallet: ::prost::alloc::vec::Vec<u8>,
+}
+/// Response for GetBalance RPC
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetBalanceResponse {
+    /// Balance as U256 (variable length, up to 32 bytes)
+    #[prost(bytes = "vec", tag = "1")]
+    pub balance: ::prost::alloc::vec::Vec<u8>,
+    /// Last block number where balance was updated
+    #[prost(uint64, tag = "2")]
+    pub last_block: u64,
+}
 /// Request for GetStats RPC
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct GetStatsRequest {}
@@ -271,6 +291,14 @@ pub mod erc20_server {
             request: tonic::Request<super::GetApprovalsRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetApprovalsResponse>,
+            tonic::Status,
+        >;
+        /// Get balance for a specific token and wallet
+        async fn get_balance(
+            &self,
+            request: tonic::Request<super::GetBalanceRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetBalanceResponse>,
             tonic::Status,
         >;
         /// Server streaming response type for the SubscribeTransfers method.
@@ -462,6 +490,49 @@ pub mod erc20_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetApprovalsSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/torii.sinks.erc20.Erc20/GetBalance" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetBalanceSvc<T: Erc20>(pub Arc<T>);
+                    impl<T: Erc20> tonic::server::UnaryService<super::GetBalanceRequest>
+                    for GetBalanceSvc<T> {
+                        type Response = super::GetBalanceResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetBalanceRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Erc20>::get_balance(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetBalanceSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

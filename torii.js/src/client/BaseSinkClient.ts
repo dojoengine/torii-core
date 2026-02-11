@@ -60,10 +60,10 @@ export abstract class BaseSinkClient {
 
     (async () => {
       try {
-        onConnected?.();
         for await (const message of this.streamCall<T>(path, request, {
           abort: abortController.signal,
           responseSchema,
+          onConnected,
         })) {
           onMessage(message);
         }

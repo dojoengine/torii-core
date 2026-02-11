@@ -593,6 +593,30 @@ impl Erc1155Storage {
         Ok(result.map(|bytes| blob_to_u256(&bytes)))
     }
 
+    /// Get balance with last block info for a (contract, wallet, token_id) tuple
+    pub fn get_balance_with_block(
+        &self,
+        contract: Felt,
+        wallet: Felt,
+        token_id: U256,
+    ) -> Result<Option<(U256, u64)>> {
+        let conn = self.conn.lock().unwrap();
+        let contract_blob = felt_to_blob(contract);
+        let wallet_blob = felt_to_blob(wallet);
+        let token_id_blob = u256_to_blob(token_id);
+
+        let result: Option<(Vec<u8>, i64)> = conn
+            .query_row(
+                "SELECT balance, last_block FROM erc1155_balances
+                 WHERE contract = ? AND wallet = ? AND token_id = ?",
+                params![&contract_blob, &wallet_blob, &token_id_blob],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .ok();
+
+        Ok(result.map(|(bytes, block)| (blob_to_u256(&bytes), block as u64)))
+    }
+
     /// Get balances for multiple (contract, wallet, token_id) tuples in a single query
     pub fn get_balances_batch(
         &self,
