@@ -261,9 +261,7 @@ impl Erc1155Storage {
                 token BLOB PRIMARY KEY,
                 name TEXT,
                 symbol TEXT,
-                total_supply BLOB,
-                created_at INTEGER DEFAULT (strftime('%s', 'now')),
-                updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+                total_supply BLOB
             )",
             [],
         )?;
@@ -1007,8 +1005,7 @@ impl Erc1155Storage {
              ON CONFLICT(token) DO UPDATE SET
                  name = COALESCE(excluded.name, token_metadata.name),
                  symbol = COALESCE(excluded.symbol, token_metadata.symbol),
-                 total_supply = COALESCE(excluded.total_supply, token_metadata.total_supply),
-                 updated_at = strftime('%s', 'now')",
+                 total_supply = COALESCE(excluded.total_supply, token_metadata.total_supply)",
             params![&token_blob, name, symbol, supply_blob],
         )?;
         Ok(())
@@ -1042,7 +1039,7 @@ impl Erc1155Storage {
     ) -> Result<Vec<(Felt, Option<String>, Option<String>, Option<U256>)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT token, name, symbol, total_supply FROM token_metadata ORDER BY created_at",
+            "SELECT token, name, symbol, total_supply FROM token_metadata",
         )?;
         let rows = stmt.query_map([], |row| {
             let token_bytes: Vec<u8> = row.get(0)?;

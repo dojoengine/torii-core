@@ -343,9 +343,7 @@ impl Erc20Storage {
                 token BLOB PRIMARY KEY,
                 name TEXT,
                 symbol TEXT,
-                decimals INTEGER,
-                created_at INTEGER DEFAULT (strftime('%s', 'now')),
-                updated_at INTEGER DEFAULT (strftime('%s', 'now'))
+                decimals INTEGER
             )",
             [],
         )?;
@@ -1270,8 +1268,7 @@ impl Erc20Storage {
              ON CONFLICT(token) DO UPDATE SET
                  name = COALESCE(excluded.name, token_metadata.name),
                  symbol = COALESCE(excluded.symbol, token_metadata.symbol),
-                 decimals = COALESCE(excluded.decimals, token_metadata.decimals),
-                 updated_at = strftime('%s', 'now')",
+                 decimals = COALESCE(excluded.decimals, token_metadata.decimals)",
             params![&token_blob, name, symbol, decimals.map(|d| d as i64)],
         )?;
         Ok(())
@@ -1305,7 +1302,7 @@ impl Erc20Storage {
     ) -> Result<Vec<(Felt, Option<String>, Option<String>, Option<u8>)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT token, name, symbol, decimals FROM token_metadata ORDER BY created_at",
+            "SELECT token, name, symbol, decimals FROM token_metadata",
         )?;
         let rows = stmt.query_map([], |row| {
             let token_bytes: Vec<u8> = row.get(0)?;
