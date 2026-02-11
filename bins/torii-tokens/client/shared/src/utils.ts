@@ -52,7 +52,10 @@ export function base64ToHex(b64: string): string {
  * Format U256 bytes to readable string
  * U256 values are base64-encoded big-endian bytes
  */
-export function formatU256(bytes: string | Uint8Array | undefined): string {
+export function formatU256(
+  bytes: string | Uint8Array | undefined,
+  decimals?: number
+): string {
   if (!bytes) return "0";
 
   try {
@@ -69,10 +72,40 @@ export function formatU256(bytes: string | Uint8Array | undefined): string {
     hex = hex.replace(/^0+/, "") || "0";
 
     const value = BigInt("0x" + hex);
+
+    if (decimals != null && decimals > 0) {
+      return formatBigIntWithDecimals(value, decimals);
+    }
+
     return formatBigInt(value);
   } catch {
     return String(bytes);
   }
+}
+
+/**
+ * Format a BigInt raw amount using token decimals.
+ *
+ * Example: formatBigIntWithDecimals(1000000000000000000n, 18) → "1"
+ * Example: formatBigIntWithDecimals(1500000000000000000n, 18) → "1.5"
+ */
+export function formatBigIntWithDecimals(
+  value: bigint,
+  decimals: number
+): string {
+  const divisor = 10n ** BigInt(decimals);
+  const whole = value / divisor;
+  const remainder = value % divisor;
+
+  if (remainder === 0n) {
+    return formatBigInt(whole);
+  }
+
+  const fracStr = remainder
+    .toString()
+    .padStart(decimals, "0")
+    .replace(/0+$/, "");
+  return `${formatBigInt(whole)}.${fracStr}`;
 }
 
 /**

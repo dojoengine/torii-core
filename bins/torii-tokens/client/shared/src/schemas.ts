@@ -66,6 +66,22 @@ export const Erc20GetTransfersResponse = reg({
   },
 });
 
+export const Erc20GetTokenMetadataRequest = reg({
+  name: "Erc20GetTokenMetadataRequest",
+  fullName: "torii.sinks.erc20.GetTokenMetadataRequest",
+  fields: {
+    token: { number: 1, type: "bytes", repeated: false, optional: true },
+  },
+});
+
+export const Erc20GetTokenMetadataResponse = reg({
+  name: "Erc20GetTokenMetadataResponse",
+  fullName: "torii.sinks.erc20.GetTokenMetadataResponse",
+  fields: {
+    tokens: { number: 1, type: "message", repeated: true },
+  },
+});
+
 export const Erc20GetBalanceRequest = reg({
   name: "Erc20GetBalanceRequest",
   fullName: "torii.sinks.erc20.GetBalanceRequest",

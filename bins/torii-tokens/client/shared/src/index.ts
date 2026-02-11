@@ -7,6 +7,7 @@ export {
   base64ToHex,
   formatU256,
   formatBigInt,
+  formatBigIntWithDecimals,
   formatTimestamp,
   truncateAddress,
   getUpdateTypeName,
@@ -16,6 +17,7 @@ export {
   getErc20Balance,
   getErc20Transfers,
   getErc20Stats,
+  getErc20TokenMetadata,
   getErc721Stats,
   getErc721Transfers,
   getErc1155Balance,
@@ -25,6 +27,7 @@ export {
 export type {
   TokenQuery,
   Erc1155TokenQuery,
+  TokenMetadataResult,
   BalanceResult,
   TransferResult,
   Erc1155TransferResult,
