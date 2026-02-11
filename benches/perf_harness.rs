@@ -3,6 +3,7 @@ use starknet::core::types::{EmittedEvent, Felt, U256};
 use starknet::macros::selector;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
@@ -292,31 +293,45 @@ fn benchmark_subscription_manager(c: &mut Criterion) {
 
 fn benchmark_erc20_storage(c: &mut Criterion) {
     let mut group = c.benchmark_group("erc20_storage");
-
-    let dir = TempDir::new().expect("failed to create tempdir");
-    let db_path = dir.path().join("erc20_bench.db");
-    let storage = Erc20Storage::new(db_path.to_str().expect("invalid db path"))
-        .expect("failed to create erc20 storage");
+    group.sample_size(30);
+    group.measurement_time(Duration::from_secs(6));
 
     for size in [100usize, 1_000usize, 5_000usize] {
-        let mut offset = 0u64;
         group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(
             BenchmarkId::new("insert_transfers_batch", size),
             &size,
             |b, &s| {
-                b.iter(|| {
-                    let batch = make_transfer_batch(s, offset);
-                    offset += s as u64;
-                    black_box(
-                        storage
-                            .insert_transfers_batch(black_box(&batch))
-                            .expect("insert batch failed"),
-                    )
+                b.iter_custom(|iters| {
+                    let mut fixtures = Vec::with_capacity(iters as usize);
+                    for _ in 0..iters {
+                        let dir = TempDir::new().expect("failed to create tempdir");
+                        let db_path = dir.path().join("erc20_insert_bench.db");
+                        let storage = Erc20Storage::new(db_path.to_str().expect("invalid db path"))
+                            .expect("failed to create erc20 storage");
+                        fixtures.push((dir, storage));
+                    }
+
+                    let batch = make_transfer_batch(s, 0);
+                    let start = Instant::now();
+                    for (_dir, storage) in fixtures {
+                        black_box(
+                            storage
+                                .insert_transfers_batch(black_box(&batch))
+                                .expect("insert batch failed"),
+                        );
+                    }
+
+                    start.elapsed()
                 });
             },
         );
     }
+
+    let dir = TempDir::new().expect("failed to create tempdir");
+    let db_path = dir.path().join("erc20_query_bench.db");
+    let storage = Erc20Storage::new(db_path.to_str().expect("invalid db path"))
+        .expect("failed to create erc20 storage");
 
     let preload = make_transfer_batch(20_000, 100_000);
     storage

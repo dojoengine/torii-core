@@ -2,6 +2,18 @@
 
 This repository now includes a Criterion-based benchmark harness for `torii-core`.
 
+## Baseline Workflow
+
+```bash
+# 1) Establish and save a baseline snapshot
+./scripts/perf/run_baseline.sh
+
+# 2) Compare current code against a saved baseline
+./scripts/perf/compare_to_baseline.sh perf/baselines/<timestamp>
+```
+
+The comparison script labels only changes `>=10%` as `IMPROVED` or `REGRESSED`.
+
 ## Run
 
 ```bash
