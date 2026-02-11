@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use starknet::core::codec::Decode;
-use starknet::core::types::{BlockId, BlockTag, ByteArray, Felt, FunctionCall};
+use starknet::core::types::{BlockId, BlockTag, ByteArray, Felt, FunctionCall, U256};
 use starknet::core::utils::parse_cairo_short_string;
 use starknet::macros::selector;
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
@@ -22,6 +22,8 @@ pub struct TokenMetadata {
     pub symbol: Option<String>,
     /// Token decimals (e.g. 18). Only meaningful for ERC20.
     pub decimals: Option<u8>,
+    /// Total supply as U256 string. Meaningful for ERC721/ERC1155.
+    pub total_supply: Option<U256>,
 }
 
 /// Fetches token metadata from on-chain contracts via RPC calls.
@@ -47,28 +49,31 @@ impl MetadataFetcher {
         }
     }
 
-    /// Fetch metadata for an ERC721 contract (name, symbol).
+    /// Fetch metadata for an ERC721 contract (name, symbol, totalSupply).
     pub async fn fetch_erc721_metadata(&self, contract: Felt) -> TokenMetadata {
         let name = self.fetch_string(contract, "name").await;
         let symbol = self.fetch_string(contract, "symbol").await;
+        let total_supply = self.fetch_total_supply(contract).await;
 
         TokenMetadata {
             name,
             symbol,
             decimals: None,
+            total_supply,
         }
     }
 
-    /// Fetch metadata for an ERC1155 contract (name, symbol if available).
-    /// ERC1155 doesn't mandate name/symbol but many implementations have them.
+    /// Fetch metadata for an ERC1155 contract (name, symbol, totalSupply if available).
     pub async fn fetch_erc1155_metadata(&self, contract: Felt) -> TokenMetadata {
         let name = self.fetch_string(contract, "name").await;
         let symbol = self.fetch_string(contract, "symbol").await;
+        let total_supply = self.fetch_total_supply(contract).await;
 
         TokenMetadata {
             name,
             symbol,
             decimals: None,
+            total_supply,
         }
     }
 
@@ -239,6 +244,41 @@ impl MetadataFetcher {
                 None
             }
         }
+    }
+
+    /// Fetch `total_supply()` or `totalSupply()` from a contract.
+    async fn fetch_total_supply(&self, contract: Felt) -> Option<U256> {
+        for sel in [selector!("total_supply"), selector!("totalSupply")] {
+            let call = FunctionCall {
+                contract_address: contract,
+                entry_point_selector: sel,
+                calldata: vec![],
+            };
+
+            if let Ok(result) = self
+                .provider
+                .call(call, BlockId::Tag(BlockTag::Latest))
+                .await
+            {
+                if result.is_empty() {
+                    continue;
+                }
+                // U256 return: [low, high] or single felt
+                return Some(match result.len() {
+                    1 => {
+                        let low: u128 = result[0].try_into().unwrap_or(0);
+                        U256::from(low)
+                    }
+                    _ => {
+                        let low: u128 = result[0].try_into().unwrap_or(0);
+                        let high: u128 = result[1].try_into().unwrap_or(0);
+                        U256::from_words(low, high)
+                    }
+                });
+            }
+        }
+
+        None
     }
 
     /// Decode a string result from a contract call.

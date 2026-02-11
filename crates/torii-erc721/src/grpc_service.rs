@@ -258,10 +258,11 @@ impl Erc721Trait for Erc721Service {
                 .ok_or_else(|| Status::invalid_argument("Invalid token address"))?;
 
             let entries = match self.storage.get_token_metadata(token) {
-                Ok(Some((name, symbol))) => vec![TokenMetadataEntry {
+                Ok(Some((name, symbol, total_supply))) => vec![TokenMetadataEntry {
                     token: token.to_bytes_be().to_vec(),
                     name,
                     symbol,
+                    total_supply: total_supply.map(u256_to_bytes),
                 }],
                 Ok(None) => vec![],
                 Err(e) => return Err(Status::internal(format!("Query failed: {e}"))),
@@ -277,10 +278,11 @@ impl Erc721Trait for Erc721Service {
 
         let entries = all
             .into_iter()
-            .map(|(token, name, symbol)| TokenMetadataEntry {
+            .map(|(token, name, symbol, total_supply)| TokenMetadataEntry {
                 token: token.to_bytes_be().to_vec(),
                 name,
                 symbol,
+                total_supply: total_supply.map(u256_to_bytes),
             })
             .collect();
 

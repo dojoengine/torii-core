@@ -264,6 +264,7 @@ impl Sink for Erc1155Sink {
                             token,
                             meta.name.as_deref(),
                             meta.symbol.as_deref(),
+                            meta.total_supply,
                         ) {
                             tracing::warn!(
                                 target: "torii_erc1155::sink",

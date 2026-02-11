@@ -261,6 +261,7 @@ impl Erc1155Storage {
                 token BLOB PRIMARY KEY,
                 name TEXT,
                 symbol TEXT,
+                total_supply BLOB,
                 created_at INTEGER DEFAULT (strftime('%s', 'now')),
                 updated_at INTEGER DEFAULT (strftime('%s', 'now'))
             )",
@@ -995,33 +996,40 @@ impl Erc1155Storage {
         token: Felt,
         name: Option<&str>,
         symbol: Option<&str>,
+        total_supply: Option<U256>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let token_blob = felt_to_blob(token);
+        let supply_blob = total_supply.map(u256_to_blob);
         conn.execute(
-            "INSERT INTO token_metadata (token, name, symbol)
-             VALUES (?1, ?2, ?3)
+            "INSERT INTO token_metadata (token, name, symbol, total_supply)
+             VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(token) DO UPDATE SET
                  name = COALESCE(excluded.name, token_metadata.name),
                  symbol = COALESCE(excluded.symbol, token_metadata.symbol),
+                 total_supply = COALESCE(excluded.total_supply, token_metadata.total_supply),
                  updated_at = strftime('%s', 'now')",
-            params![&token_blob, name, symbol],
+            params![&token_blob, name, symbol, supply_blob],
         )?;
         Ok(())
     }
 
     /// Get token metadata
-    pub fn get_token_metadata(&self, token: Felt) -> Result<Option<(Option<String>, Option<String>)>> {
+    pub fn get_token_metadata(
+        &self,
+        token: Felt,
+    ) -> Result<Option<(Option<String>, Option<String>, Option<U256>)>> {
         let conn = self.conn.lock().unwrap();
         let token_blob = felt_to_blob(token);
         let result = conn
             .query_row(
-                "SELECT name, symbol FROM token_metadata WHERE token = ?",
+                "SELECT name, symbol, total_supply FROM token_metadata WHERE token = ?",
                 params![&token_blob],
                 |row| {
                     let name: Option<String> = row.get(0)?;
                     let symbol: Option<String> = row.get(1)?;
-                    Ok((name, symbol))
+                    let supply_bytes: Option<Vec<u8>> = row.get(2)?;
+                    Ok((name, symbol, supply_bytes.map(|b| blob_to_u256(&b))))
                 },
             )
             .ok();
@@ -1029,15 +1037,24 @@ impl Erc1155Storage {
     }
 
     /// Get all token metadata
-    pub fn get_all_token_metadata(&self) -> Result<Vec<(Felt, Option<String>, Option<String>)>> {
+    pub fn get_all_token_metadata(
+        &self,
+    ) -> Result<Vec<(Felt, Option<String>, Option<String>, Option<U256>)>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT token, name, symbol FROM token_metadata ORDER BY created_at")?;
+        let mut stmt = conn.prepare(
+            "SELECT token, name, symbol, total_supply FROM token_metadata ORDER BY created_at",
+        )?;
         let rows = stmt.query_map([], |row| {
             let token_bytes: Vec<u8> = row.get(0)?;
             let name: Option<String> = row.get(1)?;
             let symbol: Option<String> = row.get(2)?;
-            Ok((blob_to_felt(&token_bytes), name, symbol))
+            let supply_bytes: Option<Vec<u8>> = row.get(3)?;
+            Ok((
+                blob_to_felt(&token_bytes),
+                name,
+                symbol,
+                supply_bytes.map(|b| blob_to_u256(&b)),
+            ))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
