@@ -145,11 +145,11 @@ jobs:
           $PLATFORM = "${{ matrix.job.platform }}"
           $ARCH = "${{ matrix.job.arch }}"
           $TARGET = "${{ matrix.job.target }}"
-
           $BINARY = "${{ needs.prepare.outputs.binary_name }}"
+
           cd target\${TARGET}\release
           7z a -tzip ${BINARY}_${VERSION}_${PLATFORM}_${ARCH}.zip ${BINARY}.exe
-          Move-Item ${BINARY}_${VERSION}_${PLATFORM}_${ARCH}.zip ......
+          Move-Item ${BINARY}_${VERSION}_${PLATFORM}_${ARCH}.zip ..\..\..\..
 
 
       - name: Upload binary artifacts (Linux only)
