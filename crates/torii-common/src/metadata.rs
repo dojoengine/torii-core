@@ -4,7 +4,6 @@
 //! making `starknet_call` requests. Handles both snake_case and camelCase
 //! selectors, felt-encoded strings and ByteArray returns.
 
-use anyhow::{Context, Result};
 use starknet::core::codec::Decode;
 use starknet::core::types::{BlockId, BlockTag, ByteArray, Felt, FunctionCall, U256};
 use starknet::core::utils::parse_cairo_short_string;
@@ -46,6 +45,7 @@ impl MetadataFetcher {
             name,
             symbol,
             decimals,
+            total_supply: None,
         }
     }
 
@@ -294,7 +294,9 @@ impl MetadataFetcher {
 
         // Single felt — short string (≤31 chars packed into felt)
         if result.len() == 1 {
-            return parse_cairo_short_string(&result[0]).ok().filter(|s| !s.is_empty());
+            return parse_cairo_short_string(&result[0])
+                .ok()
+                .filter(|s| !s.is_empty());
         }
 
         // Try ByteArray format via starknet crate's Decode impl
@@ -323,7 +325,9 @@ impl MetadataFetcher {
         }
 
         // Last resort: try first felt as short string
-        parse_cairo_short_string(&result[0]).ok().filter(|s| !s.is_empty())
+        parse_cairo_short_string(&result[0])
+            .ok()
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -335,10 +339,7 @@ mod tests {
     fn test_parse_short_string() {
         // "ETH" = 0x455448
         let felt = Felt::from(0x455448u64);
-        assert_eq!(
-            parse_cairo_short_string(&felt).unwrap(),
-            "ETH".to_string()
-        );
+        assert_eq!(parse_cairo_short_string(&felt).unwrap(), "ETH".to_string());
     }
 
     #[test]
@@ -354,9 +355,9 @@ mod tests {
     fn test_decode_byte_array() {
         // ByteArray: [data_len=0, pending_word="ETH", pending_word_len=3]
         let result = vec![
-            Felt::from(0u64),       // data_len = 0 chunks
+            Felt::from(0u64),        // data_len = 0 chunks
             Felt::from(0x455448u64), // pending_word = "ETH"
-            Felt::from(3u64),       // pending_word_len = 3
+            Felt::from(3u64),        // pending_word_len = 3
         ];
         assert_eq!(
             MetadataFetcher::decode_string_result(&result),

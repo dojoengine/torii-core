@@ -1038,9 +1038,8 @@ impl Erc1155Storage {
         &self,
     ) -> Result<Vec<(Felt, Option<String>, Option<String>, Option<U256>)>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT token, name, symbol, total_supply FROM token_metadata",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT token, name, symbol, total_supply FROM token_metadata")?;
         let rows = stmt.query_map([], |row| {
             let token_bytes: Vec<u8> = row.get(0)?;
             let name: Option<String> = row.get(1)?;
