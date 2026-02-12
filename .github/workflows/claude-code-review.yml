@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   claude-code-review:
+    if: github.repository == 'dojoengine/torii-core'
     runs-on: ubuntu-latest
 
     steps:
