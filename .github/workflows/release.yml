@@ -226,7 +226,7 @@ jobs:
             "${ARCHIVES[@]}" \
             --draft \
             --generate-notes \
-            --title "Release ${BINARY} ${VERSION}" \
+            --title "${BINARY}_v${VERSION}" \
             --notes "Release **${BINARY}** version **${VERSION}**
 
           ## Assets
