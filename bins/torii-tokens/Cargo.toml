@@ -1,6 +1,6 @@
 [package]
 name = "torii-tokens"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2021"
 description = "Unified token indexer for ERC20, ERC721, and ERC1155 on Starknet"
 
@@ -35,6 +35,7 @@ anyhow = "1.0"
 
 # gRPC
 tonic = "0.12"
+tonic-web = "0.12"
 tonic-reflection = "0.12"
 
 # Profiling (optional, enable with --features profiling)

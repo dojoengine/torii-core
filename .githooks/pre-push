@@ -9,9 +9,15 @@ NC='\033[0m' # No Color
 
 echo -e "${YELLOW}=== Running pre-push checks ===${NC}"
 
-# Run full lint script (includes tests)
+# Run linting checks
 if ! ./scripts/lint.sh; then
-    echo -e "${RED}✗ Pre-push checks failed. Please fix issues before pushing.${NC}"
+    echo -e "${RED}✗ Linting failed. Please fix issues before pushing.${NC}"
+    exit 1
+fi
+
+# Run tests
+if ! ./scripts/test.sh; then
+    echo -e "${RED}✗ Tests failed. Please fix issues before pushing.${NC}"
     exit 1
 fi
 

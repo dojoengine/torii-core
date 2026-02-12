@@ -40,22 +40,30 @@ export function getSchemaRegistry(): Record<string, MessageSchema> {
 
 /**
  * Encode a JS object to protobuf bytes
- * Fields are encoded in order of object keys
+ *
+ * Keys matching the "fN" pattern (e.g. f1, f4) are encoded with the
+ * corresponding protobuf field number N.  This allows callers to skip
+ * field numbers (e.g. {f1: …, f4: …}) without the gap being collapsed.
+ *
+ * Keys that do NOT match the "fN" pattern are assigned sequential field
+ * numbers starting from 1 (backward-compatible with the old behaviour).
  */
 export function encodeProtobufObject(obj: Record<string, unknown>): Uint8Array {
   const parts: number[] = [];
-  let fieldNumber = 1;
+  let autoFieldNumber = 1;
 
   for (const key of Object.keys(obj)) {
+    const match = key.match(/^f(\d+)$/);
+    const fieldNumber = match ? parseInt(match[1], 10) : autoFieldNumber;
+    autoFieldNumber = fieldNumber + 1;
+
     const value = obj[key];
     if (value === undefined || value === null) {
-      fieldNumber++;
       continue;
     }
 
     const encoded = encodeField(fieldNumber, value);
     parts.push(...encoded);
-    fieldNumber++;
   }
 
   return new Uint8Array(parts);
@@ -81,7 +89,6 @@ export function decodeProtobufObject(data: Uint8Array): Record<string, unknown> 
 
     const key = `f${fieldNumber}`;
 
-    // Handle repeated fields
     if (key in result) {
       const existing = result[key];
       if (Array.isArray(existing)) {
@@ -181,30 +188,30 @@ function readField(data: Uint8Array, offset: number, wireType: number): [unknown
 }
 
 function tryDecodeNested(bytes: Uint8Array): unknown {
-  // Try as UTF-8 string first (most common case)
-  try {
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    // If it decodes as valid UTF-8 and looks like text, return it
-    // Check: printable ASCII, common extended chars, or empty
-    if (text.length === 0 || /^[\x20-\x7E\u00A0-\uFFFF\s]*$/.test(text)) {
-      return text;
-    }
-  } catch {
-    // Not valid UTF-8, try as nested message
-  }
-
-  // Try to decode as nested protobuf message
-  if (bytes.length > 0) {
+  // Try to decode as nested protobuf message first.
+  // Real messages in this codebase have multiple fields (Transfer: 7,
+  // NftTransfer: 7, TokenTransfer: 10, Stats: 4, TopicInfo: 4, etc.).
+  // Random binary data that happens to start with a valid tag rarely
+  // produces 3+ sequential fields, so we use that as a discriminator.
+  if (bytes.length >= 4) {
     const firstByte = bytes[0];
     const wireType = firstByte & 0x07;
     const fieldNum = firstByte >> 3;
 
-    // Valid protobuf: field numbers 1-15 common, wire types 0,2,5 most common
-    if (fieldNum >= 1 && fieldNum <= 15 && (wireType === 0 || wireType === 2 || wireType === 5)) {
+    if (fieldNum >= 1 && fieldNum <= 15 && (wireType === 0 || wireType === 1 || wireType === 2 || wireType === 5)) {
       try {
         const nested = decodeProtobufObject(bytes);
-        if (Object.keys(nested).length > 0) {
-          return nested;
+        const keys = Object.keys(nested);
+        if (keys.length >= 3 && keys.every(k => /^f\d+$/.test(k))) {
+          const fieldNums = keys.map(k => parseInt(k.slice(1), 10)).sort((a, b) => a - b);
+          if (fieldNums[0] <= 2) {
+            const maxGap = fieldNums.length > 1
+              ? Math.max(...fieldNums.slice(1).map((n, i) => n - fieldNums[i]))
+              : 0;
+            if (maxGap <= 5) {
+              return nested;
+            }
+          }
         }
       } catch {
         // Not a valid nested message
@@ -212,7 +219,16 @@ function tryDecodeNested(bytes: Uint8Array): unknown {
     }
   }
 
-  // Return as bytes
+  // Try as UTF-8 string – only if every byte is printable
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    if (text.length === 0 || /^[\x20-\x7E\u00A0-\uFFFF\s]*$/.test(text)) {
+      return text;
+    }
+  } catch {
+    // Not valid UTF-8
+  }
+
   return bytes;
 }
 

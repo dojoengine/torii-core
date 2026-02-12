@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+    paths-ignore:
+      - '.github/**'
+      - '*.md'
+      - 'LICENSE'
+  push:
+    branches: [main]
+    paths-ignore:
+      - '.github/**'
+      - '*.md'
+      - 'LICENSE'
+  workflow_dispatch:
+
+# Cancel previous runs on the same PR/branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format-and-lint:
+    name: Format & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-on-failure: true
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          version: "25.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-on-failure: true
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          version: "25.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Build examples
+        run: cargo build --examples

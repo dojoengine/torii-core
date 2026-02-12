@@ -1,0 +1,65 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '.github/**'
+      - '*.md'
+      - 'LICENSE'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    name: Run Benchmarks
+    runs-on: ubuntu-latest-8-cores
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-on-failure: true
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          version: "25.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore previous benchmark baseline
+        id: cache-baseline
+        uses: actions/cache@v4
+        with:
+          path: scripts/perf/baselines
+          key: benchmark-baseline-main-${{ github.sha }}
+          restore-keys: |
+            benchmark-baseline-main-
+
+      - name: Run benchmarks and create baseline
+        run: ./scripts/perf/run_baseline.sh
+
+      - name: Compare against previous baseline
+        if: steps.cache-baseline.outputs.cache-hit == 'true'
+        continue-on-error: true
+        run: |
+          echo "📊 Comparing against previous baseline..."
+          ./scripts/perf/compare_to_baseline.sh || true
+
+      - name: Save new baseline
+        uses: actions/cache/save@v4
+        with:
+          path: scripts/perf/baselines
+          key: benchmark-baseline-main-${{ github.sha }}
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.sha }}
+          path: scripts/perf/baselines/
+          retention-days: 90

@@ -94,9 +94,19 @@ tonic-build = "0.12"
 hyper = "1.0"
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy"] }
 http-body-util = "0.1"
+criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+tempfile = "3.13"
 # Example dependencies
 torii-sql-sink = { path = "crates/torii-sql-sink" }
 torii-log-sink = { path = "crates/torii-log-sink" }
+torii-common = { path = "crates/torii-common" }
+torii-erc20 = { path = "crates/torii-erc20" }
+torii-erc721 = { path = "crates/torii-erc721" }
+torii-erc1155 = { path = "crates/torii-erc1155" }
+
+[[bench]]
+name = "perf_harness"
+harness = false
 
 [workspace.lints.rust]
 # Deny unsafe code unless explicitly allowed
