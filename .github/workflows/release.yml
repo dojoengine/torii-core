@@ -211,9 +211,19 @@ jobs:
           BINARY="${{ needs.prepare.outputs.binary_name }}"
           VERSION="${{ needs.prepare.outputs.version }}"
 
+          # Collect all archive files (tar.gz and zip)
+          shopt -s nullglob  # Don't fail if no matches
+          ARCHIVES=(./artifacts/*.tar.gz ./artifacts/*.zip)
+
+          if [ ${#ARCHIVES[@]} -eq 0 ]; then
+            echo "Error: No archive files found in ./artifacts/"
+            exit 1
+          fi
+
+          echo "Found ${#ARCHIVES[@]} archive files to release"
+
           gh release create "$TAG_NAME" \
-            ./artifacts/*.tar.gz \
-            ./artifacts/*.zip \
+            "${ARCHIVES[@]}" \
             --draft \
             --generate-notes \
             --title "Release ${BINARY} ${VERSION}" \
