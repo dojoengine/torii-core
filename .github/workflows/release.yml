@@ -5,6 +5,18 @@ on:
     types: [closed]
     branches: [main]
   workflow_dispatch:
+    inputs:
+      binary:
+        description: 'Binary to release (only needed for manual trigger)'
+        required: false
+        type: choice
+        options:
+          - torii-tokens
+          - torii-erc20
+      version:
+        description: 'Version to release (only needed for manual trigger, e.g., "0.1.1")'
+        required: false
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -30,17 +42,26 @@ jobs:
       - name: Extract release info
         id: release-info
         run: |
-          # Extract binary name from branch name
-          BRANCH_REF="${{ github.event.pull_request.head.ref || 'prepare-release-manual' }}"
-
-          if [[ "$BRANCH_REF" =~ ^prepare-release-(.+)$ ]]; then
-            BINARY_NAME="${BASH_REMATCH[1]}"
-            VERSION=$(cargo get package.version --entry bins/$BINARY_NAME)
+          # Check if manual trigger with inputs
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.binary }}" ]; then
+            # Manual trigger - use workflow inputs
+            BINARY_NAME="${{ inputs.binary }}"
+            VERSION="${{ inputs.version }}"
             TAG_NAME="${BINARY_NAME}-v${VERSION}"
+            echo "Using manual workflow inputs"
           else
-            echo "Error: Unknown release branch format: $BRANCH_REF"
-            echo "Expected: prepare-release-<binary-name>"
-            exit 1
+            # PR-based trigger - extract from branch name
+            BRANCH_REF="${{ github.event.pull_request.head.ref }}"
+
+            if [[ "$BRANCH_REF" =~ ^prepare-release-(.+)$ ]]; then
+              BINARY_NAME="${BASH_REMATCH[1]}"
+              VERSION=$(cargo get package.version --entry bins/$BINARY_NAME)
+              TAG_NAME="${BINARY_NAME}-v${VERSION}"
+            else
+              echo "Error: Unknown release branch format: $BRANCH_REF"
+              echo "Expected: prepare-release-<binary-name>"
+              exit 1
+            fi
           fi
 
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
