@@ -22,4 +22,3 @@ LABEL org.opencontainers.image.title="torii-erc20" \
       org.opencontainers.image.licenses="MIT"
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["torii-erc20", "--help"]
