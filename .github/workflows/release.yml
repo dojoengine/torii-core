@@ -7,16 +7,12 @@ on:
   workflow_dispatch:
     inputs:
       binary:
-        description: 'Binary to release (only needed for manual trigger)'
-        required: false
+        description: 'Binary to release'
+        required: true
         type: choice
         options:
           - torii-tokens
           - torii-erc20
-      version:
-        description: 'Version to release (only needed for manual trigger, e.g., "0.1.1")'
-        required: false
-        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -42,27 +38,28 @@ jobs:
       - name: Extract release info
         id: release-info
         run: |
-          # Check if manual trigger with inputs
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.binary }}" ]; then
-            # Manual trigger - use workflow inputs
+          # Determine binary name
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # Manual trigger - use workflow input
             BINARY_NAME="${{ inputs.binary }}"
-            VERSION="${{ inputs.version }}"
-            TAG_NAME="${BINARY_NAME}-v${VERSION}"
-            echo "Using manual workflow inputs"
+            echo "Manual trigger for binary: $BINARY_NAME"
           else
             # PR-based trigger - extract from branch name
             BRANCH_REF="${{ github.event.pull_request.head.ref }}"
 
             if [[ "$BRANCH_REF" =~ ^prepare-release-(.+)$ ]]; then
               BINARY_NAME="${BASH_REMATCH[1]}"
-              VERSION=$(cargo get package.version --entry bins/$BINARY_NAME)
-              TAG_NAME="${BINARY_NAME}-v${VERSION}"
+              echo "PR-based trigger for binary: $BINARY_NAME"
             else
               echo "Error: Unknown release branch format: $BRANCH_REF"
               echo "Expected: prepare-release-<binary-name>"
               exit 1
             fi
           fi
+
+          # Always read version from Cargo.toml (already bumped by release-dispatch)
+          VERSION=$(cargo get package.version --entry bins/$BINARY_NAME)
+          TAG_NAME="${BINARY_NAME}-v${VERSION}"
 
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
