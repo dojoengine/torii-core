@@ -7,13 +7,11 @@ members = [
     "crates/torii-erc20",
     "crates/torii-erc721",
     "crates/torii-erc1155",
+    "crates/dojo",
     "bins/torii-erc20",
     "bins/torii-tokens",
 ]
-default-members = [
-    "bins/torii-erc20",
-    "bins/torii-tokens",
-]
+default-members = ["bins/torii-erc20", "bins/torii-tokens"]
 resolver = "2"
 
 [package]
@@ -87,6 +85,7 @@ async-stream = "0.3"
 hex = "0.4"
 bitflags = "2.6"
 tokio-util = "0.7"
+
 
 [build-dependencies]
 tonic-build = "0.12"
