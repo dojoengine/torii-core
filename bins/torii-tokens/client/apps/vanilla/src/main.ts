@@ -13,8 +13,12 @@ import {
   getErc721Transfers,
   getErc1155Transfers,
   getErc20Balance,
+  getErc20TokenMetadata,
+  getErc721TokenMetadata,
+  getErc1155TokenMetadata,
   type BalanceResult,
   type TransferResult,
+  type TokenMetadataResult,
 } from "@torii-tokens/shared";
 
 interface Stats {
@@ -57,6 +61,10 @@ class TokensApp {
   private erc1155Stats: Stats | null = null;
   private erc1155Transfers: Transfer[] = [];
 
+  private erc20Metadata: TokenMetadataResult[] = [];
+  private erc721Metadata: TokenMetadataResult[] = [];
+  private erc1155Metadata: TokenMetadataResult[] = [];
+
   private queryContractAddress = "";
   private queryWallet = "";
   private queryLoading = false;
@@ -73,6 +81,7 @@ class TokensApp {
     await this.checkHealth();
     await this.loadAllStats();
     await this.loadAllTransfers();
+    await this.loadAllMetadata();
     this.render();
   }
 
@@ -154,6 +163,21 @@ class TokensApp {
       }));
     } catch (err) {
       console.error("Failed to load transfers:", err);
+    }
+  }
+
+  private async loadAllMetadata() {
+    try {
+      const [m20, m721, m1155] = await Promise.all([
+        getErc20TokenMetadata(this.client),
+        getErc721TokenMetadata(this.client),
+        getErc1155TokenMetadata(this.client),
+      ]);
+      this.erc20Metadata = m20;
+      this.erc721Metadata = m721;
+      this.erc1155Metadata = m1155;
+    } catch (err) {
+      console.error("Failed to load metadata:", err);
     }
   }
 
@@ -447,6 +471,7 @@ class TokensApp {
         `
             : ""
         }
+        ${this.renderMetadataTable(this.erc20Metadata, true)}
         ${this.renderTransfersTable(this.erc20Transfers, true)}
       </section>
     `;
@@ -477,6 +502,7 @@ class TokensApp {
         `
             : ""
         }
+        ${this.renderMetadataTable(this.erc721Metadata, false)}
         ${this.renderTransfersTable(this.erc721Transfers, false)}
       </section>
     `;
@@ -507,8 +533,41 @@ class TokensApp {
         `
             : ""
         }
+        ${this.renderMetadataTable(this.erc1155Metadata, false)}
         ${this.renderTransfersTable(this.erc1155Transfers, false)}
       </section>
+    `;
+  }
+
+  private renderMetadataTable(metadata: TokenMetadataResult[], showDecimals: boolean): string {
+    if (metadata.length === 0) return "";
+
+    return `
+      <div class="metadata-list" style="margin-bottom: 1rem;">
+        <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">Token Metadata</h3>
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Contract</th>
+                <th>Name</th>
+                <th>Symbol</th>
+                ${showDecimals ? "<th>Decimals</th>" : ""}
+              </tr>
+            </thead>
+            <tbody>
+              ${metadata.map((m) => `
+                <tr>
+                  <td class="address">${truncateAddress(m.token)}</td>
+                  <td>${m.name ?? "—"}</td>
+                  <td>${m.symbol ?? "—"}</td>
+                  ${showDecimals ? `<td>${m.decimals ?? "—"}</td>` : ""}
+                </tr>
+              `).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
     `;
   }
 

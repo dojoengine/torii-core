@@ -4,11 +4,14 @@ import {
   Erc20GetStatsRequest, Erc20GetStatsResponse,
   Erc20GetTransfersRequest, Erc20GetTransfersResponse,
   Erc20GetBalanceRequest, Erc20GetBalanceResponse,
+  Erc20GetTokenMetadataRequest, Erc20GetTokenMetadataResponse,
   Erc721GetStatsRequest, Erc721GetStatsResponse,
   Erc721GetTransfersRequest, Erc721GetTransfersResponse,
+  Erc721GetTokenMetadataRequest, Erc721GetTokenMetadataResponse,
   Erc1155GetStatsRequest, Erc1155GetStatsResponse,
   Erc1155GetTransfersRequest, Erc1155GetTransfersResponse,
   Erc1155GetBalanceRequest, Erc1155GetBalanceResponse,
+  Erc1155GetTokenMetadataRequest, Erc1155GetTokenMetadataResponse,
 } from "./schemas";
 
 export interface TokenQuery {
@@ -18,6 +21,14 @@ export interface TokenQuery {
 
 export interface Erc1155TokenQuery extends TokenQuery {
   tokenId: string;
+}
+
+export interface TokenMetadataResult {
+  token: string;
+  name?: string;
+  symbol?: string;
+  decimals?: number;
+  totalSupply?: string;
 }
 
 export interface BalanceResult {
@@ -105,6 +116,33 @@ export async function getErc1155Stats(
   };
 }
 
+export async function getErc20TokenMetadata(
+  client: TokensClient,
+  contractAddress?: string
+): Promise<TokenMetadataResult[]> {
+  const request: Record<string, unknown> = {};
+  if (contractAddress) {
+    request.token = hexToBytes(contractAddress);
+  }
+
+  const response = await client.call(
+    "/torii.sinks.erc20.Erc20/GetTokenMetadata",
+    request,
+    Erc20GetTokenMetadataRequest,
+    Erc20GetTokenMetadataResponse
+  );
+
+  const tokens = response.tokens;
+  const list = Array.isArray(tokens) ? tokens : tokens ? [tokens] : [];
+
+  return list.map((t: Record<string, unknown>) => ({
+    token: bytesToHex(t.token as string | Uint8Array | undefined),
+    name: t.name as string | undefined,
+    symbol: t.symbol as string | undefined,
+    decimals: t.decimals != null ? Number(t.decimals) : undefined,
+  }));
+}
+
 export async function getErc20Balance(
   client: TokensClient,
   query: TokenQuery
@@ -112,6 +150,10 @@ export async function getErc20Balance(
   if (!query.contractAddress || !query.wallet) {
     return null;
   }
+
+  // Fetch decimals from token metadata
+  const metadata = await getErc20TokenMetadata(client, query.contractAddress);
+  const decimals = metadata[0]?.decimals;
 
   const response = await client.call(
     "/torii.sinks.erc20.Erc20/GetBalance",
@@ -124,7 +166,7 @@ export async function getErc20Balance(
   );
 
   return {
-    balance: formatU256(response.balance as string | Uint8Array | undefined),
+    balance: formatU256(response.balance as string | Uint8Array | undefined, decimals),
     balanceRaw: typeof response.balance === "string" ? response.balance : "",
     lastBlock: Number(response.lastBlock) || 0,
   };
@@ -139,6 +181,15 @@ export async function getErc20Transfers(
   if (query.wallet) filter.wallet = hexToBytes(query.wallet);
   if (query.contractAddress) filter.tokens = [hexToBytes(query.contractAddress)];
 
+  // Fetch all token metadata to build a decimals lookup
+  const allMetadata = await getErc20TokenMetadata(client, query.contractAddress || undefined);
+  const decimalsMap = new Map<string, number>();
+  for (const m of allMetadata) {
+    if (m.decimals != null) {
+      decimalsMap.set(m.token, m.decimals);
+    }
+  }
+
   const response = await client.call(
     "/torii.sinks.erc20.Erc20/GetTransfers",
     { filter, limit },
@@ -149,15 +200,19 @@ export async function getErc20Transfers(
   const transfers = response.transfers;
   const list = Array.isArray(transfers) ? transfers : transfers ? [transfers] : [];
 
-  return list.map((t: Record<string, unknown>) => ({
-    token: bytesToHex(t.token as string | Uint8Array | undefined),
-    from: bytesToHex(t.from as string | Uint8Array | undefined),
-    to: bytesToHex(t.to as string | Uint8Array | undefined),
-    amount: formatU256(t.amount as string | Uint8Array | undefined),
-    blockNumber: Number(t.blockNumber ?? 0),
-    txHash: bytesToHex(t.txHash as string | Uint8Array | undefined),
-    timestamp: Number(t.timestamp ?? 0),
-  }));
+  return list.map((t: Record<string, unknown>) => {
+    const token = bytesToHex(t.token as string | Uint8Array | undefined);
+    const decimals = decimalsMap.get(token);
+    return {
+      token,
+      from: bytesToHex(t.from as string | Uint8Array | undefined),
+      to: bytesToHex(t.to as string | Uint8Array | undefined),
+      amount: formatU256(t.amount as string | Uint8Array | undefined, decimals),
+      blockNumber: Number(t.blockNumber ?? 0),
+      txHash: bytesToHex(t.txHash as string | Uint8Array | undefined),
+      timestamp: Number(t.timestamp ?? 0),
+    };
+  });
 }
 
 export async function getErc721Transfers(
@@ -187,6 +242,60 @@ export async function getErc721Transfers(
     blockNumber: Number(t.blockNumber ?? 0),
     txHash: bytesToHex(t.txHash as string | Uint8Array | undefined),
     timestamp: Number(t.timestamp ?? 0),
+  }));
+}
+
+export async function getErc721TokenMetadata(
+  client: TokensClient,
+  contractAddress?: string
+): Promise<TokenMetadataResult[]> {
+  const request: Record<string, unknown> = {};
+  if (contractAddress) {
+    request.token = hexToBytes(contractAddress);
+  }
+
+  const response = await client.call(
+    "/torii.sinks.erc721.Erc721/GetTokenMetadata",
+    request,
+    Erc721GetTokenMetadataRequest,
+    Erc721GetTokenMetadataResponse
+  );
+
+  const tokens = response.tokens;
+  const list = Array.isArray(tokens) ? tokens : tokens ? [tokens] : [];
+
+  return list.map((t: Record<string, unknown>) => ({
+    token: bytesToHex(t.token as string | Uint8Array | undefined),
+    name: t.name as string | undefined,
+    symbol: t.symbol as string | undefined,
+    totalSupply: t.totalSupply ? formatU256(t.totalSupply as string | Uint8Array | undefined) : undefined,
+  }));
+}
+
+export async function getErc1155TokenMetadata(
+  client: TokensClient,
+  contractAddress?: string
+): Promise<TokenMetadataResult[]> {
+  const request: Record<string, unknown> = {};
+  if (contractAddress) {
+    request.token = hexToBytes(contractAddress);
+  }
+
+  const response = await client.call(
+    "/torii.sinks.erc1155.Erc1155/GetTokenMetadata",
+    request,
+    Erc1155GetTokenMetadataRequest,
+    Erc1155GetTokenMetadataResponse
+  );
+
+  const tokens = response.tokens;
+  const list = Array.isArray(tokens) ? tokens : tokens ? [tokens] : [];
+
+  return list.map((t: Record<string, unknown>) => ({
+    token: bytesToHex(t.token as string | Uint8Array | undefined),
+    name: t.name as string | undefined,
+    symbol: t.symbol as string | undefined,
+    totalSupply: t.totalSupply ? formatU256(t.totalSupply as string | Uint8Array | undefined) : undefined,
   }));
 }
 

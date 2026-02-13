@@ -1,8 +1,13 @@
 //! Common utilities for Torii token indexers
 //!
-//! Provides efficient conversions between Starknet types and storage/wire formats.
+//! Provides efficient conversions between Starknet types and storage/wire formats,
+//! and shared helpers like token metadata fetching.
+
+pub mod metadata;
 
 use starknet::core::types::{Felt, U256};
+
+pub use metadata::{MetadataFetcher, TokenMetadata};
 
 // ===== Felt conversions =====
 

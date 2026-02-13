@@ -1,6 +1,7 @@
 import {
   formatTimestamp,
   truncateAddress,
+  type TokenMetadataResult,
 } from "@torii-tokens/shared";
 
 interface Stats {
@@ -26,6 +27,7 @@ interface TokenPanelProps {
   tokenType: "erc20" | "erc721" | "erc1155";
   stats: Stats | null;
   transfers: Transfer[];
+  metadata?: TokenMetadataResult[];
   showAmount: boolean;
 }
 
@@ -34,6 +36,7 @@ export default function TokenPanel({
   tokenType,
   stats,
   transfers,
+  metadata = [],
   showAmount,
 }: TokenPanelProps) {
   return (
@@ -63,6 +66,34 @@ export default function TokenPanel({
               {tokenType === "erc721" ? "Owners" : "Accounts"}
             </div>
             <div className="stat-value">{stats.uniqueAccounts}</div>
+          </div>
+        </div>
+      )}
+
+      {metadata.length > 0 && (
+        <div className="metadata-list" style={{ marginBottom: "1rem" }}>
+          <h3 style={{ fontSize: "0.9rem", marginBottom: "0.5rem" }}>Token Metadata</h3>
+          <div className="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Contract</th>
+                  <th>Name</th>
+                  <th>Symbol</th>
+                  {tokenType === "erc20" ? <th>Decimals</th> : null}
+                </tr>
+              </thead>
+              <tbody>
+                {metadata.map((m) => (
+                  <tr key={m.token}>
+                    <td className="address">{truncateAddress(m.token)}</td>
+                    <td>{m.name ?? "—"}</td>
+                    <td>{m.symbol ?? "—"}</td>
+                    {tokenType === "erc20" ? <td>{m.decimals ?? "—"}</td> : null}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}

@@ -14,8 +14,12 @@
     getErc721Transfers,
     getErc1155Transfers,
     getErc20Balance,
+    getErc20TokenMetadata,
+    getErc721TokenMetadata,
+    getErc1155TokenMetadata,
     type BalanceResult,
     type TransferResult,
+    type TokenMetadataResult,
   } from "@torii-tokens/shared";
 
   import StatusPanel from "./components/StatusPanel.svelte";
@@ -63,6 +67,10 @@
   let erc721Transfers = $state<Transfer[]>([]);
   let erc1155Stats = $state<Stats | null>(null);
   let erc1155Transfers = $state<Transfer[]>([]);
+
+  let erc20Metadata = $state<TokenMetadataResult[]>([]);
+  let erc721Metadata = $state<TokenMetadataResult[]>([]);
+  let erc1155Metadata = $state<TokenMetadataResult[]>([]);
 
   let queryContractAddress = $state("");
   let queryWallet = $state("");
@@ -129,6 +137,21 @@
       erc20Stats = { totalTransfers: 0, totalApprovals: 0, uniqueTokens: 0, uniqueAccounts: 0 };
       erc721Stats = { totalTransfers: 0, uniqueTokens: 0, uniqueAccounts: 0 };
       erc1155Stats = { totalTransfers: 0, uniqueTokens: 0, uniqueAccounts: 0 };
+    }
+  }
+
+  async function loadMetadata() {
+    try {
+      const [m20, m721, m1155] = await Promise.all([
+        getErc20TokenMetadata(client),
+        getErc721TokenMetadata(client),
+        getErc1155TokenMetadata(client),
+      ]);
+      erc20Metadata = m20;
+      erc721Metadata = m721;
+      erc1155Metadata = m1155;
+    } catch (err) {
+      console.error("Failed to load metadata:", err);
     }
   }
 
@@ -214,6 +237,7 @@
     checkHealth();
     loadStats();
     loadTransfers();
+    loadMetadata();
   });
 
   onDestroy(() => {
@@ -253,6 +277,7 @@
       tokenType="erc20"
       stats={erc20Stats}
       transfers={erc20Transfers}
+      metadata={erc20Metadata}
       showAmount={true}
     />
 
@@ -261,6 +286,7 @@
       tokenType="erc721"
       stats={erc721Stats}
       transfers={erc721Transfers}
+      metadata={erc721Metadata}
       showAmount={false}
     />
 
@@ -269,6 +295,7 @@
       tokenType="erc1155"
       stats={erc1155Stats}
       transfers={erc1155Transfers}
+      metadata={erc1155Metadata}
       showAmount={false}
     />
 
