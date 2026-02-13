@@ -497,10 +497,7 @@ impl Erc721Decoder {
     /// Decode BatchMetadataUpdate event (EIP-4906)
     ///
     /// BatchMetadataUpdate(uint256 fromTokenId, uint256 toTokenId)
-    async fn decode_batch_metadata_update(
-        &self,
-        event: &EmittedEvent,
-    ) -> Result<Option<Envelope>> {
+    async fn decode_batch_metadata_update(&self, event: &EmittedEvent) -> Result<Option<Envelope>> {
         let from_token_id: U256;
         let to_token_id: U256;
 

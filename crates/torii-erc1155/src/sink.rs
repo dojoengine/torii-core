@@ -31,7 +31,9 @@ use std::sync::Arc;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
-use torii_common::{u256_to_bytes, MetadataFetcher, TokenStandard, TokenUriRequest, TokenUriSender};
+use torii_common::{
+    u256_to_bytes, MetadataFetcher, TokenStandard, TokenUriRequest, TokenUriSender,
+};
 
 /// Default threshold for "live" detection: 100 blocks from chain head.
 /// Events from blocks older than this won't be broadcast to real-time subscribers.
@@ -293,7 +295,10 @@ impl Sink for Erc1155Sink {
         // Request token URI fetches for new token IDs
         if let Some(ref sender) = self.token_uri_sender {
             for transfer in &transfers {
-                match self.storage.has_token_uri(transfer.token, transfer.token_id) {
+                match self
+                    .storage
+                    .has_token_uri(transfer.token, transfer.token_id)
+                {
                     Ok(false) => {
                         sender
                             .request_update(TokenUriRequest {

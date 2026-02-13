@@ -94,12 +94,7 @@ impl TokenUriSender {
     }
 
     /// Queue updates for a batch of token IDs on the same contract.
-    pub async fn request_batch(
-        &self,
-        contract: Felt,
-        token_ids: &[U256],
-        standard: TokenStandard,
-    ) {
+    pub async fn request_batch(&self, contract: Felt, token_ids: &[U256], standard: TokenStandard) {
         for &token_id in token_ids {
             self.request_update(TokenUriRequest {
                 contract,
@@ -300,25 +295,21 @@ async fn resolve_metadata(uri: &str) -> Option<String> {
         u if u.starts_with("ipfs://") => {
             let cid = &u[7..];
             // Try multiple IPFS gateways
-            let gateway_url = format!("https://ipfs.io/ipfs/{}", cid);
+            let gateway_url = format!("https://ipfs.io/ipfs/{cid}");
             fetch_http_with_retry(&gateway_url).await
         }
         u if u.starts_with("data:") => resolve_data_uri(u),
         u => {
             // Fallback: try to parse as raw JSON
-            match serde_json::from_str::<serde_json::Value>(u) {
-                Ok(json) => match serde_json::to_string(&json) {
-                    Ok(s) => Some(s),
-                    Err(_) => None,
-                },
-                Err(_) => {
-                    tracing::debug!(
-                        target: "torii_common::token_uri",
-                        uri = u,
-                        "Unsupported URI scheme and not valid JSON"
-                    );
-                    None
-                }
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(u) {
+                serde_json::to_string(&json).ok()
+            } else {
+                tracing::debug!(
+                    target: "torii_common::token_uri",
+                    uri = u,
+                    "Unsupported URI scheme and not valid JSON"
+                );
+                None
             }
         }
     };
@@ -401,13 +392,11 @@ fn resolve_data_uri(uri: &str) -> Option<String> {
     // Handle the # issue: https://github.com/servo/rust-url/issues/908
     let uri = uri.replace('#', "%23");
 
-    if uri.starts_with("data:application/json;base64,") {
-        let encoded = &uri["data:application/json;base64,".len()..];
+    if let Some(encoded) = uri.strip_prefix("data:application/json;base64,") {
         return base64_decode(encoded);
     }
 
-    if uri.starts_with("data:application/json,") {
-        let json = &uri["data:application/json,".len()..];
+    if let Some(json) = uri.strip_prefix("data:application/json,") {
         let decoded = urlencoding::decode(json)
             .unwrap_or_else(|_| json.into())
             .into_owned();
@@ -448,7 +437,7 @@ fn sanitize_json_string(s: &str) -> String {
         .collect();
 
     let mut result = String::with_capacity(filtered.len());
-    let mut chars = filtered.chars().peekable();
+    let mut chars = filtered.chars();
     let mut in_string = false;
     let mut backslash_count: usize = 0;
 
@@ -472,9 +461,9 @@ fn sanitize_json_string(s: &str) -> String {
         }
 
         if c == '"' {
-            if backslash_count % 2 == 0 {
+            if backslash_count.is_multiple_of(2) {
                 // Unescaped quote — check if it ends the string or is internal
-                let mut temp = chars.clone();
+                let mut temp = chars.clone().peekable();
                 // Skip whitespace
                 while let Some(&next) = temp.peek() {
                     if next.is_whitespace() {
@@ -572,7 +561,7 @@ mod tests {
     fn test_erc1155_id_substitution() {
         let uri = "https://example.com/token/{id}.json";
         let token_id = U256::from(42u64);
-        let token_id_hex = format!("{:064x}", token_id);
+        let token_id_hex = format!("{token_id:064x}");
         let result = uri.replace("{id}", &token_id_hex);
         assert!(result.contains("000000000000000000000000000000000000000000000000000000000000002a"));
     }

@@ -1,9 +1,8 @@
 //! ERC721 sink for processing NFT transfers, approvals, and ownership
 
 use crate::decoder::{
-    BatchMetadataUpdate as DecodedBatchMetadataUpdate,
-    MetadataUpdate as DecodedMetadataUpdate, NftTransfer as DecodedNftTransfer,
-    OperatorApproval as DecodedOperatorApproval,
+    BatchMetadataUpdate as DecodedBatchMetadataUpdate, MetadataUpdate as DecodedMetadataUpdate,
+    NftTransfer as DecodedNftTransfer, OperatorApproval as DecodedOperatorApproval,
 };
 use crate::grpc_service::Erc721Service;
 use crate::proto;
@@ -20,7 +19,9 @@ use std::sync::Arc;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
-use torii_common::{u256_to_bytes, MetadataFetcher, TokenStandard, TokenUriRequest, TokenUriSender};
+use torii_common::{
+    u256_to_bytes, MetadataFetcher, TokenStandard, TokenUriRequest, TokenUriSender,
+};
 
 /// Default threshold for "live" detection: 100 blocks from chain head.
 /// Events from blocks older than this won't be broadcast to real-time subscribers.
@@ -230,9 +231,7 @@ impl Sink for Erc721Sink {
                     if let Some(ref sender) = self.token_uri_sender {
                         // For batch updates, we need to know which token IDs exist in the range.
                         // Fetch them from storage and request URI updates for each.
-                        if let Ok(uris) =
-                            self.storage.get_token_uris_by_contract(update.token)
-                        {
+                        if let Ok(uris) = self.storage.get_token_uris_by_contract(update.token) {
                             for (token_id, _, _) in &uris {
                                 if *token_id >= update.from_token_id
                                     && *token_id <= update.to_token_id
@@ -292,7 +291,10 @@ impl Sink for Erc721Sink {
         // Request token URI fetches for new token IDs
         if let Some(ref sender) = self.token_uri_sender {
             for transfer in &transfers {
-                match self.storage.has_token_uri(transfer.token, transfer.token_id) {
+                match self
+                    .storage
+                    .has_token_uri(transfer.token, transfer.token_id)
+                {
                     Ok(false) => {
                         sender
                             .request_update(TokenUriRequest {

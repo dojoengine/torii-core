@@ -319,8 +319,8 @@ async fn run_indexer(config: Config) -> Result<()> {
         let (token_uri_sender, _token_uri_service) = TokenUriService::spawn(
             metadata_fetcher,
             storage.clone(),
-            1024,  // buffer size
-            8,     // max concurrent fetches
+            1024, // buffer size
+            8,    // max concurrent fetches
         );
 
         let grpc_service = Erc721Service::new(storage.clone());
@@ -363,12 +363,8 @@ async fn run_indexer(config: Config) -> Result<()> {
 
         // Spawn token URI service for ERC1155
         let erc1155_fetcher = Arc::new(MetadataFetcher::new(provider.clone()));
-        let (erc1155_uri_sender, _erc1155_uri_service) = TokenUriService::spawn(
-            erc1155_fetcher,
-            storage.clone(),
-            1024,
-            8,
-        );
+        let (erc1155_uri_sender, _erc1155_uri_service) =
+            TokenUriService::spawn(erc1155_fetcher, storage.clone(), 1024, 8);
 
         let grpc_service = Erc1155Service::new(storage.clone());
         let sink = Box::new(

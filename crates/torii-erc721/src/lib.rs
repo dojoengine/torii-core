@@ -51,8 +51,7 @@ pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/erc721_descript
 
 // Re-export main types for convenience
 pub use decoder::{
-    BatchMetadataUpdate, Erc721Decoder, MetadataUpdate, NftApproval, NftTransfer,
-    OperatorApproval,
+    BatchMetadataUpdate, Erc721Decoder, MetadataUpdate, NftApproval, NftTransfer, OperatorApproval,
 };
 pub use grpc_service::Erc721Service;
 pub use identification::Erc721Rule;
