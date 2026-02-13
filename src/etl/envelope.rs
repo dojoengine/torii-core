@@ -35,6 +35,26 @@ pub trait TypedBody: Send + Sync {
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
+/// Helper macro to implement TypedBody
+#[macro_export]
+macro_rules! typed_body_impl {
+    ($t:ty, $url:expr) => {
+        impl TypedBody for $t {
+            fn envelope_type_id(&self) -> $crate::etl::envelope::TypeId {
+                $crate::etl::envelope::TypeId::new($url)
+            }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+    };
+}
+
 /// Envelope wraps transformed data with metadata
 /// This is the core data structure that flows through the ETL pipeline
 pub struct Envelope {

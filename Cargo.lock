@@ -365,6 +365,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
+name = "cainome-cairo-serde"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95ae2d4c21db23c7730a85187c2e9d73fe00c123171839185fb13f31550f3240"
+dependencies = [
+ "num-bigint",
+ "serde",
+ "serde_with",
+ "starknet",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1657,6 +1670,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "generic-array",
+]
+
+[[package]]
+name = "introspect-events"
+version = "0.1.2"
+dependencies = [
+ "cainome-cairo-serde",
+ "introspect-types",
+ "serde",
+ "starknet",
+ "starknet-types-core",
 ]
 
 [[package]]
@@ -4149,8 +4173,12 @@ dependencies = [
 name = "torii-introspect"
 version = "0.1.0"
 dependencies = [
+ "introspect-events",
  "introspect-types",
+ "serde",
+ "starknet-types-core",
  "tonic-build",
+ "torii",
 ]
 
 [[package]]

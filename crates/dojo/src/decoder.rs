@@ -14,7 +14,7 @@ pub struct DojoDecoder;
 impl DojoDecoder {
     pub fn decode_event(&self, event: &EmittedEvent) -> DecodeResult<DojoEvent> {
         let mut keys = (&event.keys).into_source();
-        let mut data = (&event.data).into_source();
+        let mut data: CairoSerde<_> = (&event.data).into();
         let selector = keys.next()?.to_raw();
         match selector {
             ModelRegistered::SELECTOR_RAW => {

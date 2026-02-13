@@ -5,10 +5,11 @@ edition = "2021"
 description = "Introspect indexer library for Torii"
 
 [dependencies]
-
-
+introspect-events = { path = "../../../introspect/crates/events" }
 introspect-types = { path = "../../../introspect/crates/types" }
-
+serde.workspace = true
+starknet-types-core.workspace = true
+torii.workspace = true
 
 [build-dependencies]
 tonic-build = "0.12"

@@ -79,7 +79,9 @@ starknet-types-core = "0.2.0"
 tonic-build = "0.12"
 
 # Torii core
+torii.path = "."
 torii-common = { path = "crates/torii-common" }
+
 
 [lib]
 name = "torii"

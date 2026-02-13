@@ -17,36 +17,6 @@ use torii_types_introspect::IdValue;
 
 pub const DOJO_ID_FIELD_NAME: &str = "entity_id";
 
-#[derive(Debug, Error)]
-pub enum DojoTableErrors {
-    #[error("Field {0} not found in table {1}")]
-    FieldNotFound(Felt, String),
-    #[error("Failed to parse field {0} in table {1}")]
-    FieldParseError(Felt, String),
-    #[error("Too many values provided for field {0}")]
-    TooManyFieldValues(Felt),
-    #[error("Failed to parse values for table {0}")]
-    ParseValuesError(String),
-}
-
-#[derive(Debug, Error)]
-pub enum DojoManagerError {
-    #[error("Table Error")]
-    TableError(#[from] DojoTableErrors),
-    #[error("Table already exists with id {0}")]
-    TableAlreadyExists(Felt),
-    #[error("Table not found with id {0}")]
-    TableNotFoundById(Felt),
-    #[error("Failed to acquire lock: {0}")]
-    LockError(String),
-    #[error("Store error: {0}")]
-    StoreError(String),
-    #[error("Starknet selector error: {0}")]
-    StarknetSelectorError(#[from] NonAsciiNameError),
-    #[error("Lock poisoned: {0}")]
-    LockPoisoned(String),
-}
-
 // impl From<serde_json::Error> for DojoManagerErrors<JsonStore> {
 //     fn from(err: serde_json::Error) -> Self {
 //         DojoManagerErrors::StoreError(err)
