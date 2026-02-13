@@ -1,5 +1,5 @@
 [package]
-name = "torii-dojo"
+name = "torii-introspect"
 version = "0.1.0"
 edition = "2021"
 description = "ERC20 token indexer library for Torii"
@@ -15,19 +15,35 @@ async-trait = "0.1"
 
 # Starknet
 starknet = "0.17"
-starknet-types-core = "0.2.0"
+
+# # Storage
+# rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-dojo-introspect-types = { path = "../../../dojo-introspect/" }
+# # Encoding
+# hex = "0.4"
+
 introspect-types = { path = "../../../introspect/crates/types" }
+
+# # gRPC/Protobuf
+# prost = "0.13"
+# prost-types = "0.13"
+# tonic = "0.12"
+# chrono = "0.4"
+
+# Streaming
+async-stream = "0.3"
+futures = "0.3"
+
+# Web framework
+axum = "0.7"
 
 # Utilities
 anyhow = "1.0"
 tracing = "0.1"
-thiserror = "2.0.17"
 
 [build-dependencies]
 tonic-build = "0.12"

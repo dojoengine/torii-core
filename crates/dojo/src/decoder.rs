@@ -4,16 +4,17 @@ use dojo_introspect_types::events::{
     StoreUpdateRecord,
 };
 use introspect_types::{
-    CairoEvent, CairoSerde, DecodeError, DecodeResult, FeltSource, IntoFeltSource, VecFeltSource,
+    CairoEvent, CairoSerde, DecodeError, DecodeResult, FeltSource, IntoFeltSource, SliceFeltSource,
+    VecFeltSource,
 };
 use starknet::core::types::EmittedEvent;
 
 pub struct DojoDecoder;
 
 impl DojoDecoder {
-    pub fn decode_event(&self, event: EmittedEvent) -> DecodeResult<DojoEvent> {
-        let mut keys = event.keys.into_source();
-        let mut data = event.data.into_source();
+    pub fn decode_event(&self, event: &EmittedEvent) -> DecodeResult<DojoEvent> {
+        let mut keys = (&event.keys).into_source();
+        let mut data = (&event.data).into_source();
         let selector = keys.next()?.to_raw();
         match selector {
             ModelRegistered::SELECTOR_RAW => {
