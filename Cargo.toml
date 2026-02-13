@@ -7,6 +7,7 @@ members = [
     "crates/torii-erc20",
     "crates/torii-erc721",
     "crates/torii-erc1155",
+    "crates/introspect",
     "crates/dojo",
     "bins/torii-erc20",
     "bins/torii-tokens",
@@ -14,36 +15,13 @@ members = [
 default-members = ["bins/torii-erc20", "bins/torii-tokens"]
 resolver = "2"
 
+
 [package]
 name = "torii"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-name = "torii"
-path = "src/lib.rs"
-
-[[example]]
-name = "simple_sql_sink"
-path = "examples/simple_sql_sink/main.rs"
-
-[[example]]
-name = "multi_sink_example"
-path = "examples/multi_sink_example/main.rs"
-
-[[example]]
-name = "eventbus_only_sink"
-path = "examples/eventbus_only_sink/main.rs"
-
-[[example]]
-name = "http_only_sink"
-path = "examples/http_only_sink/main.rs"
-
-[[example]]
-name = "test_block_extractor"
-path = "examples/test_block_extractor/main.rs"
-
-[dependencies]
+[workspace.dependencies]
 # Core async runtime
 tokio = { version = "1.41", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -73,22 +51,83 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 
-# ETL Pipeline dependencies
+# Starknet
 starknet = "0.17"
+
+# Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+# ETL Pipeline dependencies
 async-trait = "0.1"
-anyhow = "1.0"
 chrono = "0.4"
 futures-util = "0.3"
 futures = "0.3"
 async-stream = "0.3"
-hex = "0.4"
 bitflags = "2.6"
 tokio-util = "0.7"
 
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0.17"
+
+# Types
+hex = "0.4"
+primitive-types = { version = "0.14.0", features = ["serde"] }
+starknet-types-core = "0.2.0"
+
+# Build
+tonic-build = "0.12"
+
+# Torii core
+torii-common = { path = "crates/torii-common" }
+
+[lib]
+name = "torii"
+path = "src/lib.rs"
+
+[[example]]
+name = "simple_sql_sink"
+path = "examples/simple_sql_sink/main.rs"
+
+[[example]]
+name = "multi_sink_example"
+path = "examples/multi_sink_example/main.rs"
+
+[[example]]
+name = "eventbus_only_sink"
+path = "examples/eventbus_only_sink/main.rs"
+
+[[example]]
+name = "http_only_sink"
+path = "examples/http_only_sink/main.rs"
+
+[[example]]
+name = "test_block_extractor"
+path = "examples/test_block_extractor/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+prost-types.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+sqlx.workspace = true
+starknet.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tokio.workspace = true
+tonic-reflection.workspace = true
+tonic-web.workspace = true
+tonic.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+prost.workspace = true
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-build.workspace = true
 
 [dev-dependencies]
 hyper = "1.0"
@@ -96,6 +135,9 @@ hyper-util = { version = "0.1", features = ["tokio", "client-legacy"] }
 http-body-util = "0.1"
 criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 tempfile = "3.13"
+tracing-subscriber.workspace = true
+tower.workspace = true
+
 # Example dependencies
 torii-sql-sink = { path = "crates/torii-sql-sink" }
 torii-log-sink = { path = "crates/torii-log-sink" }

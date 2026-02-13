@@ -3990,16 +3990,11 @@ name = "torii"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-stream",
  "async-trait",
  "axum",
- "bitflags 2.10.0",
  "chrono",
- "clap",
  "criterion",
- "futures",
  "futures-util",
- "hex",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -4053,7 +4048,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tonic-build",
- "torii",
  "torii-common",
  "tracing",
 ]
@@ -4149,6 +4143,14 @@ dependencies = [
  "torii",
  "torii-common",
  "tracing",
+]
+
+[[package]]
+name = "torii-introspect"
+version = "0.1.0"
+dependencies = [
+ "introspect-types",
+ "tonic-build",
 ]
 
 [[package]]
