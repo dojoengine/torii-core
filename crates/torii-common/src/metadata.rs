@@ -264,16 +264,12 @@ impl MetadataFetcher {
                     continue;
                 }
                 // U256 return: [low, high] or single felt
-                return Some(match result.len() {
-                    1 => {
-                        let low: u128 = result[0].try_into().unwrap_or(0);
-                        U256::from(low)
-                    }
-                    _ => {
-                        let low: u128 = result[0].try_into().unwrap_or(0);
-                        let high: u128 = result[1].try_into().unwrap_or(0);
-                        U256::from_words(low, high)
-                    }
+                let low: u128 = result[0].try_into().unwrap_or(0);
+                return Some(if result.len() == 1 {
+                    U256::from(low)
+                } else {
+                    let high: u128 = result[1].try_into().unwrap_or(0);
+                    U256::from_words(low, high)
                 });
             }
         }
