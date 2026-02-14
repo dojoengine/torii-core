@@ -4073,6 +4073,7 @@ dependencies = [
  "tokio",
  "tonic-build",
  "torii-common",
+ "torii-introspect",
  "tracing",
 ]
 

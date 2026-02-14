@@ -4,16 +4,12 @@ use introspect_types::{
     Attribute, ColumnDef, FeltIterator, Field, PrimaryDef, PrimaryTypeDef, TableSchema, ToValue,
     Value,
 };
-use serde::{Deserialize, Serialize};
-use starknet::core::utils::NonAsciiNameError;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::fs;
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::RwLock;
-use thiserror::Error;
-use torii_types_introspect::IdValue;
 
 pub const DOJO_ID_FIELD_NAME: &str = "entity_id";
 

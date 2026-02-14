@@ -11,25 +11,23 @@ use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
 use torii::typed_body_impl;
 
-pub const CREATE_TABLE_URL: &str = "torii.introspect/CreateTable@1";
+pub const CREATE_TABLE_URL: &str = "introspect.CreateTable";
 
-pub const UPDATE_TABLE_URL: &str = "torii.introspect/UpdateTable@1";
+pub const RENAME_TABLE_URL: &str = "introspect.RenameTable";
+pub const RENAME_PRIMARY_URL: &str = "introspect.RenamePrimary";
+pub const RETYPE_PRIMARY_URL: &str = "introspect.RetypePrimary";
+pub const RENAME_COLUMNS_URL: &str = "introspect.RenameColumns";
+pub const ADD_COLUMNS_URL: &str = "introspect.AddColumns";
+pub const RETYPE_COLUMNS_URL: &str = "introspect.RetypeColumns";
+pub const DROP_TABLE_URL: &str = "introspect.DropTable";
+pub const DROP_COLUMNS_URL: &str = "introspect.DropColumns";
 
-pub const RENAME_TABLE_URL: &str = "torii.introspect/RenameTable@1";
-pub const RENAME_PRIMARY_URL: &str = "torii.introspect/RenamePrimary@1";
-pub const RETYPE_PRIMARY_URL: &str = "torii.introspect/RetypePrimary@1";
-pub const RENAME_COLUMNS_URL: &str = "torii.introspect/RenameColumns@1";
-pub const ADD_COLUMNS_URL: &str = "torii.introspect/AddColumns@1";
-pub const RETYPE_COLUMNS_URL: &str = "torii.introspect/RetypeColumns@1";
-pub const DROP_TABLE_URL: &str = "torii.introspect/DropTable@1";
-pub const DROP_COLUMNS_URL: &str = "torii.introspect/DropColumns@1";
-
-pub const UPDATE_FIELDS_URL: &str = "torii.introspect/UpdateFields@1";
-pub const UPDATES_FIELDS_URL: &str = "torii.introspect/UpdatesFields@1";
-pub const DELETE_RECORDS_URL: &str = "torii.introspect/DeleteRecords@1";
-pub const DELETES_FIELDS_URL: &str = "torii.introspect/DeletesFields@1";
-pub const CREATE_FIELD_GROUP_URL: &str = "torii.introspect/CreateFieldGroup@1";
-pub const CREATE_TYPE_DEF_URL: &str = "torii.introspect/CreateTypeDef@1";
+pub const UPDATE_FIELDS_URL: &str = "introspect.UpdateFields";
+pub const UPDATES_FIELDS_URL: &str = "introspect.UpdatesFields";
+pub const DELETE_RECORDS_URL: &str = "introspect.DeleteRecords";
+pub const DELETES_FIELDS_URL: &str = "introspect.DeletesFields";
+pub const CREATE_FIELD_GROUP_URL: &str = "introspect.CreateFieldGroup";
+pub const CREATE_TYPE_DEF_URL: &str = "introspect.CreateTypeDef";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdValue {
@@ -41,14 +39,6 @@ pub struct IdValue {
 pub struct CreateTable {
     pub id: Felt,
     pub name: String,
-    pub attributes: Vec<Attribute>,
-    pub primary: PrimaryDef,
-    pub columns: Vec<ColumnDef>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateTable {
-    pub id: Felt,
     pub attributes: Vec<Attribute>,
     pub primary: PrimaryDef,
     pub columns: Vec<ColumnDef>,
@@ -151,7 +141,6 @@ typed_body_impl!(RetypeColumns, RETYPE_COLUMNS_URL);
 typed_body_impl!(AddColumns, ADD_COLUMNS_URL);
 typed_body_impl!(DropTable, DROP_TABLE_URL);
 typed_body_impl!(DropColumns, DROP_COLUMNS_URL);
-typed_body_impl!(UpdateTable, UPDATE_TABLE_URL);
 typed_body_impl!(InsertFields, UPDATE_FIELDS_URL);
 typed_body_impl!(UpdatesFields, UPDATES_FIELDS_URL);
 typed_body_impl!(DeleteRecords, DELETE_RECORDS_URL);
@@ -171,22 +160,11 @@ impl From<TableSchema> for CreateTable {
     }
 }
 
-impl Into<TableSchema> for CreateTable {
-    fn into(self) -> TableSchema {
+impl From<CreateTable> for TableSchema {
+    fn from(schema: CreateTable) -> Self {
         TableSchema {
-            id: self.id,
-            name: self.name,
-            attributes: self.attributes,
-            primary: self.primary,
-            columns: self.columns,
-        }
-    }
-}
-
-impl From<TableSchema> for UpdateTable {
-    fn from(schema: TableSchema) -> Self {
-        Self {
             id: schema.id,
+            name: schema.name,
             attributes: schema.attributes,
             primary: schema.primary,
             columns: schema.columns,

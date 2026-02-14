@@ -39,7 +39,7 @@ pub trait TypedBody: Send + Sync {
 #[macro_export]
 macro_rules! typed_body_impl {
     ($t:ty, $url:expr) => {
-        impl TypedBody for $t {
+        impl $crate::etl::envelope::TypedBody for $t {
             fn envelope_type_id(&self) -> $crate::etl::envelope::TypeId {
                 $crate::etl::envelope::TypeId::new($url)
             }

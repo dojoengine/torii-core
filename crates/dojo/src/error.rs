@@ -1,8 +1,11 @@
+use introspect_types::DecodeError;
 use starknet::core::utils::NonAsciiNameError;
 use starknet_types_core::felt::Felt;
 
 #[derive(Debug, thiserror::Error)]
-pub enum DojoIntrospectError {
+pub enum DojoToriiError {
+    #[error("Unknown Dojo Event selector {0}")]
+    UnknownDojoEventSelector(Felt),
     #[error("Field {0} not found in table {1}")]
     FieldNotFound(Felt, String),
     #[error("Failed to parse field {0} in table {1}")]
@@ -23,4 +26,8 @@ pub enum DojoIntrospectError {
     StarknetSelectorError(#[from] NonAsciiNameError),
     #[error("Lock poisoned: {0}")]
     LockPoisoned(String),
+    #[error(transparent)]
+    DecodeError(#[from] DecodeError),
 }
+
+pub type DojoToriiResult<T> = std::result::Result<T, DojoToriiError>;
