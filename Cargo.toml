@@ -57,6 +57,9 @@ starknet = "0.17"
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 
+# Hashing
+blake3 = "1.8.3"
+
 # ETL Pipeline dependencies
 async-trait = "0.1"
 chrono = "0.4"

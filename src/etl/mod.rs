@@ -1,6 +1,7 @@
 pub mod decoder;
 pub mod engine_db;
 pub mod envelope;
+pub mod event;
 pub mod extractor;
 pub mod identification;
 pub mod sink;

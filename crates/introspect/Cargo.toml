@@ -10,6 +10,7 @@ introspect-types = { path = "../../../introspect/crates/types" }
 serde.workspace = true
 starknet-types-core.workspace = true
 torii.workspace = true
+blake3.workspace = true
 
 [build-dependencies]
 tonic-build = "0.12"

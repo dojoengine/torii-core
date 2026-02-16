@@ -33,6 +33,12 @@ pub trait TypedBody: Send + Sync {
     fn envelope_type_id(&self) -> TypeId;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn to_envelope(self, id: String, metadata: HashMap<String, String>) -> Envelope
+    where
+        Self: Sized + 'static,
+    {
+        Envelope::new(id, Box::new(self), metadata)
+    }
 }
 
 /// Helper macro to implement TypedBody

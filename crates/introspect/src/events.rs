@@ -4,15 +4,15 @@
 
 use introspect_events::database::{IdName, IdTypeDef};
 use introspect_types::{
-    Attribute, ColumnDef, PrimaryDef, PrimaryTypeDef, PrimaryValue, RecordValues, TableSchema,
-    TypeDef, Value,
+    Attribute, ColumnDef, FeltId, FeltIds, PrimaryDef, PrimaryTypeDef, PrimaryValue, RecordValues,
+    TableSchema, TypeDef, Value,
 };
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
-use torii::typed_body_impl;
+use torii::{tokio::runtime::Id, typed_body_impl};
 
 pub const CREATE_TABLE_URL: &str = "introspect.CreateTable";
-
+pub const UPDATE_TABLE_URL: &str = "introspect.UpdateTable";
 pub const RENAME_TABLE_URL: &str = "introspect.RenameTable";
 pub const RENAME_PRIMARY_URL: &str = "introspect.RenamePrimary";
 pub const RETYPE_PRIMARY_URL: &str = "introspect.RetypePrimary";
@@ -45,6 +45,15 @@ pub struct CreateTable {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateTable {
+    pub id: Felt,
+    pub name: String,
+    pub attributes: Vec<Attribute>,
+    pub primary: PrimaryDef,
+    pub columns: Vec<ColumnDef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenameTable {
     pub id: Felt,
     pub name: String,
@@ -56,6 +65,7 @@ pub struct RenamePrimary {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetypePrimary {
     pub table: Felt,
     pub attributes: Vec<Attribute>,
@@ -148,6 +158,101 @@ typed_body_impl!(DeletesFields, DELETES_FIELDS_URL);
 typed_body_impl!(CreateFieldGroup, CREATE_FIELD_GROUP_URL);
 typed_body_impl!(CreateTypeDef, CREATE_TYPE_DEF_URL);
 
+impl CreateTable {
+    pub fn id(&self) -> String {
+        format!("introspect.create_table.{:064x}", self.id)
+    }
+}
+impl RenameTable {
+    pub fn id(&self) -> String {
+        format!("introspect.rename_table.{:064x}", self.id)
+    }
+}
+impl RenamePrimary {
+    pub fn id(&self) -> String {
+        format!("introspect.rename_primary.{:064x}", self.table)
+    }
+}
+impl RetypePrimary {
+    pub fn id(&self) -> String {
+        format!("introspect.retype_primary.{:064x}", self.table)
+    }
+}
+impl RenameColumns {
+    pub fn id(&self) -> String {
+        format!(
+            "introspect.rename_columns.{:064x}.{}",
+            self.table,
+            self.columns.hash()
+        )
+    }
+}
+impl RetypeColumns {
+    pub fn id(&self) -> String {
+        format!(
+            "introspect.retype_columns.{:064x}.{}",
+            self.table,
+            self.columns.hash()
+        )
+    }
+}
+impl AddColumns {
+    pub fn id(&self) -> String {
+        format!(
+            "introspect.add_columns.{:064x}.{}",
+            self.table,
+            self.columns.hash()
+        )
+    }
+}
+impl DropTable {
+    pub fn id(&self) -> String {
+        format!("introspect.drop_table.{:064x}", self.id)
+    }
+}
+impl DropColumns {
+    pub fn id(&self) -> String {
+        format!(
+            "introspect.drop_columns.{:064x}.{}",
+            self.table,
+            self.columns.hash()
+        )
+    }
+}
+impl InsertFields {
+    pub fn id(&self) -> String {
+        format!(
+            "introspect.insert_fields.{:064x}.{:064x}",
+            self.table, self.primary.id
+        )
+    }
+}
+impl UpdatesFields {
+    pub fn id(&self) -> String {
+        format!("introspect.updates_fields.{:064x}", self.table)
+    }
+}
+impl DeleteRecords {
+    pub fn id(&self) -> String {
+        format!("introspect.delete_records.{:064x}", self.table)
+    }
+}
+impl DeletesFields {
+    pub fn id(&self) -> String {
+        format!("introspect.deletes_fields.{:064x}", self.table)
+    }
+}
+impl CreateFieldGroup {
+    pub fn id(&self) -> String {
+        format!("introspect.create_field_group.{:064x}", self.id)
+    }
+}
+impl CreateTypeDef {
+    pub fn id(&self) -> String {
+        format!("introspect.create_type_def.{:064x}", self.id)
+    }
+}
+
 impl From<TableSchema> for CreateTable {
     fn from(schema: TableSchema) -> Self {
         Self {
@@ -172,6 +277,30 @@ impl From<CreateTable> for TableSchema {
     }
 }
 
+impl From<TableSchema> for UpdateTable {
+    fn from(schema: TableSchema) -> Self {
+        Self {
+            id: schema.id,
+            name: schema.name,
+            attributes: schema.attributes,
+            primary: schema.primary,
+            columns: schema.columns,
+        }
+    }
+}
+
+impl From<UpdateTable> for TableSchema {
+    fn from(schema: UpdateTable) -> Self {
+        TableSchema {
+            id: schema.id,
+            name: schema.name,
+            attributes: schema.attributes,
+            primary: schema.primary,
+            columns: schema.columns,
+        }
+    }
+}
+
 impl InsertFields {
     pub fn new(table: Felt, primary: PrimaryValue, fields: Vec<IdValue>) -> Self {
         Self {
@@ -185,5 +314,11 @@ impl InsertFields {
 impl DeleteRecords {
     pub fn new(table: Felt, records: Vec<PrimaryValue>) -> Self {
         Self { table, records }
+    }
+}
+
+impl FeltId for IdValue {
+    fn id(&self) -> &Felt {
+        &self.id
     }
 }

@@ -1,8 +1,8 @@
-use dojo_introspect_types::{DojoSchema, IsDojoKey};
+use crate::{DojoTable, DojoToriiError, DojoToriiResult};
+use dojo_introspect_types::DojoSchema;
 use introspect_types::schema::PrimaryInfo;
 use introspect_types::{
-    Attribute, ColumnDef, FeltIterator, Field, PrimaryDef, PrimaryTypeDef, TableSchema, ToValue,
-    Value,
+    Attribute, Attributes, ColumnDef, Field, ParseValue, PrimaryDef, PrimaryTypeDef, TableSchema,
 };
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
@@ -13,14 +13,12 @@ use std::sync::RwLock;
 
 pub const DOJO_ID_FIELD_NAME: &str = "entity_id";
 
-// impl From<serde_json::Error> for DojoManagerErrors<JsonStore> {
+// impl From<serde_json::Error> for DojoToriiErrors<JsonStore> {
 //     fn from(err: serde_json::Error) -> Self {
-//         DojoManagerErrors::StoreError(err)
+//         DojoToriiErrors::StoreError(err)
 //     }
 // }
 
-pub type TableResult<T> = std::result::Result<T, DojoTableErrors>;
-pub type ManagerResult<T> = std::result::Result<T, DojoManagerError>;
 pub struct DojoManagerInner<Store>
 where
     Store: Send + Sync,
@@ -29,11 +27,11 @@ where
     pub store: Store,
 }
 
-pub struct DojoManager<Store>(pub RwLock<DojoManagerInner<Store>>)
+pub struct DojoTableStore<Store>(pub RwLock<DojoManagerInner<Store>>)
 where
     Store: Send + Sync;
 
-impl<Store> Deref for DojoManager<Store>
+impl<Store> Deref for DojoTableStore<Store>
 where
     Store: Send + Sync,
 {
@@ -63,10 +61,10 @@ impl<Store> DojoManagerInner<Store>
 where
     Store: StoreTrait<Table = DojoTable> + Send + Sync + Sized + 'static,
 {
-    pub fn new(store: Store) -> ManagerResult<Self> {
+    pub fn new(store: Store) -> DojoToriiResult<Self> {
         let tables = store
             .load_all()
-            .map_err(|e| DojoManagerError::StoreError(e.to_string()))?
+            .map_err(|e| DojoToriiError::StoreError(e.to_string()))?
             .into_iter()
             .map(|(id, table)| (id, RwLock::new(table)))
             .collect();
@@ -159,85 +157,94 @@ impl StoreTrait for JsonStore {
     }
 }
 
-impl<Store> DojoManager<Store>
-where
-    Store: StoreTrait<Table = DojoTable> + Send + Sync,
-{
-    pub fn new(store: Store) -> ManagerResult<Self> {
-        Ok(Self(RwLock::new(DojoManagerInner::new(store)?)))
-    }
-    pub fn register_table(
+pub trait DojoTableManager {
+    fn register_table(
         &self,
         namespace: &str,
         name: &str,
         schema: DojoSchema,
-    ) -> ManagerResult<TableSchema> {
+    ) -> DojoToriiResult<TableSchema>;
+    fn update_table(&self, id: Felt, schema: DojoSchema) -> DojoToriiResult<TableSchema>;
+    fn with_table<F, R>(&self, id: Felt, f: F) -> DojoToriiResult<R>
+    where
+        F: FnOnce(&DojoTable) -> R;
+}
+
+impl<Store> DojoTableManager for DojoTableStore<Store>
+where
+    Store: StoreTrait<Table = DojoTable> + Send + Sync,
+{
+    fn register_table(
+        &self,
+        namespace: &str,
+        name: &str,
+        schema: DojoSchema,
+    ) -> DojoToriiResult<TableSchema> {
         let table = schema.to_table_schema(namespace, name);
         if self
             .read()
-            .map_err(|e| DojoManagerError::LockError(e.to_string()))?
+            .map_err(|e| DojoToriiError::LockError(e.to_string()))?
             .tables
             .contains_key(&table.id)
         {
-            return Err(DojoManagerError::TableAlreadyExists(table.id));
+            return Err(DojoToriiError::TableAlreadyExists(table.id));
         }
         let dojo_table: DojoTable = table.clone().into();
 
         let mut manager = self
             .write()
-            .map_err(|e| DojoManagerError::LockError(e.to_string()))?;
+            .map_err(|e| DojoToriiError::LockError(e.to_string()))?;
         manager
             .store
             .dump(table.id, &dojo_table)
-            .map_err(|e| DojoManagerError::StoreError(e.to_string()))?;
+            .map_err(|e| DojoToriiError::StoreError(e.to_string()))?;
         manager.tables.insert(table.id, RwLock::new(dojo_table));
         Ok(table)
     }
 
-    pub fn update_table(&self, id: Felt, schema: DojoSchema) -> ManagerResult<TableSchema> {
+    fn update_table(&self, id: Felt, schema: DojoSchema) -> DojoToriiResult<TableSchema> {
         let manager = self
             .read()
-            .map_err(|e| DojoManagerError::LockError(e.to_string()))?;
+            .map_err(|e| DojoToriiError::LockError(e.to_string()))?;
         let mut table = match manager.tables.get(&id) {
             Some(t) => t
                 .write()
-                .map_err(|e| DojoManagerError::LockError(e.to_string())),
-            None => return Err(DojoManagerError::TableNotFoundById(id)),
+                .map_err(|e| DojoToriiError::LockError(e.to_string())),
+            None => return Err(DojoToriiError::TableNotFoundById(id)),
         }?;
         let mut key_fields = Vec::new();
         let mut value_fields = Vec::new();
         for column in schema.columns {
-            if column.is_dojo_key() {
-                key_fields.push(column.id);
-            } else {
-                value_fields.push(column.id);
+            match column.has_attribute("key") {
+                true => key_fields.push(column.id),
+                false => value_fields.push(column.id),
             }
             table.columns.insert(column.id, column);
         }
         table.key_fields = key_fields;
         table.value_fields = value_fields;
         self.read()
-            .map_err(|e| DojoManagerError::LockError(e.to_string()))?
+            .map_err(|e| DojoToriiError::LockError(e.to_string()))?
             .store
             .dump(id, &table)
-            .map_err(|e| DojoManagerError::StoreError(e.to_string()))?;
-        Ok(table.schema())
+            .map_err(|e| DojoToriiError::StoreError(e.to_string()))?;
+        Ok(table.to_schema())
     }
 
-    pub fn with_table<F, R>(&self, id: Felt, f: F) -> ManagerResult<R>
+    fn with_table<F, R>(&self, id: Felt, f: F) -> DojoToriiResult<R>
     where
         F: FnOnce(&DojoTable) -> R,
     {
         let manager = self
             .read()
-            .map_err(|e| DojoManagerError::LockError(e.to_string()))?;
+            .map_err(|e| DojoToriiError::LockError(e.to_string()))?;
         let table = manager
             .tables
             .get(&id)
-            .ok_or_else(|| DojoManagerError::TableNotFoundById(id))?;
+            .ok_or_else(|| DojoToriiError::TableNotFoundById(id))?;
         let table_guard = table
             .read()
-            .map_err(|e| DojoManagerError::LockError(e.to_string()))?;
+            .map_err(|e| DojoToriiError::LockError(e.to_string()))?;
         Ok(f(&*table_guard))
     }
 }
