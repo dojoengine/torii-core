@@ -317,11 +317,15 @@ impl ContractAbi {
 
     /// Check if ABI contains a function with the given name,
     /// recursively checking interfaces.
+    ///
+    /// This matches:
+    /// - Exact function names (e.g., "transfer")
+    /// - Fully qualified names (e.g., "openzeppelin::token::erc20::ERC20::transfer")
     pub fn has_function(&self, name: &str) -> bool {
         if let Some(abi) = &self.abi {
             for entry in abi {
                 if let AbiEntry::Function(func) = entry {
-                    if func.name == name {
+                    if func.name == name || func.name.ends_with(&format!("::{name}")) {
                         return true;
                     }
                 }
@@ -329,7 +333,7 @@ impl ContractAbi {
                 if let AbiEntry::Interface(interface) = entry {
                     for function in &interface.items {
                         if let AbiEntry::Function(func) = function {
-                            if func.name == name {
+                            if func.name == name || func.name.ends_with(&format!("::{name}")) {
                                 return true;
                             }
                         }
@@ -341,7 +345,7 @@ impl ContractAbi {
         if let Some(legacy_abi) = &self.legacy_abi {
             for entry in legacy_abi {
                 if let LegacyContractAbiEntry::Function(func) = entry {
-                    if func.name == name {
+                    if func.name == name || func.name.ends_with(&format!("::{name}")) {
                         return true;
                     }
                 }
@@ -352,6 +356,11 @@ impl ContractAbi {
     }
 
     /// Check if ABI contains an event with the given name.
+    ///
+    /// This matches:
+    /// - Exact event names (e.g., "Transfer")
+    /// - Fully qualified names (e.g., "openzeppelin::token::erc20::ERC20::Transfer")
+    /// - Enum variant names (e.g., "Transfer" inside an Event enum)
     pub fn has_event(&self, name: &str) -> bool {
         if let Some(abi) = &self.abi {
             for entry in abi {
@@ -359,17 +368,25 @@ impl ContractAbi {
                     use starknet::core::types::contract::AbiEvent;
                     match event {
                         AbiEvent::Typed(TypedAbiEvent::Struct(s)) => {
-                            if s.name == name {
+                            // Check exact name or if fully qualified name ends with target name
+                            if s.name == name || s.name.ends_with(&format!("::{name}")) {
                                 return true;
                             }
                         }
                         AbiEvent::Typed(TypedAbiEvent::Enum(e)) => {
-                            if e.name == name {
+                            // Check enum name
+                            if e.name == name || e.name.ends_with(&format!("::{name}")) {
                                 return true;
+                            }
+                            // Check enum variants (for nested events like OpenZeppelin v0.7.0)
+                            for variant in &e.variants {
+                                if variant.name == name {
+                                    return true;
+                                }
                             }
                         }
                         AbiEvent::Untyped(u) => {
-                            if u.name == name {
+                            if u.name == name || u.name.ends_with(&format!("::{name}")) {
                                 return true;
                             }
                         }
@@ -381,7 +398,7 @@ impl ContractAbi {
         if let Some(legacy_abi) = &self.legacy_abi {
             for entry in legacy_abi {
                 if let LegacyContractAbiEntry::Event(event) = entry {
-                    if event.name == name {
+                    if event.name == name || event.name.ends_with(&format!("::{name}")) {
                         return true;
                     }
                 }
