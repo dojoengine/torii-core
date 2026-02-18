@@ -2,8 +2,9 @@
 
 use crate::proto::{
     erc1155_server::Erc1155 as Erc1155Trait, Cursor, GetBalanceRequest, GetBalanceResponse,
-    GetStatsRequest, GetStatsResponse, GetTransfersRequest, GetTransfersResponse,
-    SubscribeTransfersRequest, TokenTransfer, TransferFilter, TransferUpdate,
+    GetStatsRequest, GetStatsResponse, GetTokenMetadataRequest, GetTokenMetadataResponse,
+    GetTransfersRequest, GetTransfersResponse, SubscribeTransfersRequest, TokenMetadataEntry,
+    TokenTransfer, TransferFilter, TransferUpdate,
 };
 use crate::storage::{Erc1155Storage, TokenTransferData, TransferCursor};
 use async_trait::async_trait;
@@ -213,6 +214,49 @@ impl Erc1155Trait for Erc1155Service {
             balance: u256_to_bytes(balance),
             last_block,
         }))
+    }
+
+    /// Get token metadata (name, symbol)
+    async fn get_token_metadata(
+        &self,
+        request: Request<GetTokenMetadataRequest>,
+    ) -> Result<Response<GetTokenMetadataResponse>, Status> {
+        let req = request.into_inner();
+
+        if let Some(token_bytes) = req.token {
+            let token = bytes_to_felt(&token_bytes)
+                .ok_or_else(|| Status::invalid_argument("Invalid token address"))?;
+
+            let entries = match self.storage.get_token_metadata(token) {
+                Ok(Some((name, symbol, total_supply))) => vec![TokenMetadataEntry {
+                    token: token.to_bytes_be().to_vec(),
+                    name,
+                    symbol,
+                    total_supply: total_supply.map(u256_to_bytes),
+                }],
+                Ok(None) => vec![],
+                Err(e) => return Err(Status::internal(format!("Query failed: {e}"))),
+            };
+
+            return Ok(Response::new(GetTokenMetadataResponse { tokens: entries }));
+        }
+
+        let all = self
+            .storage
+            .get_all_token_metadata()
+            .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
+
+        let entries = all
+            .into_iter()
+            .map(|(token, name, symbol, total_supply)| TokenMetadataEntry {
+                token: token.to_bytes_be().to_vec(),
+                name,
+                symbol,
+                total_supply: total_supply.map(u256_to_bytes),
+            })
+            .collect();
+
+        Ok(Response::new(GetTokenMetadataResponse { tokens: entries }))
     }
 
     /// Subscribe to real-time transfer events

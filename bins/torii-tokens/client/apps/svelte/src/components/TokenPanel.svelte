@@ -2,6 +2,7 @@
   import {
     formatTimestamp,
     truncateAddress,
+    type TokenMetadataResult,
   } from "@torii-tokens/shared";
 
   interface Stats {
@@ -27,10 +28,11 @@
     tokenType: "erc20" | "erc721" | "erc1155";
     stats: Stats | null;
     transfers: Transfer[];
+    metadata?: TokenMetadataResult[];
     showAmount: boolean;
   }
 
-  let { title, tokenType, stats, transfers, showAmount }: Props = $props();
+  let { title, tokenType, stats, transfers, metadata = [], showAmount }: Props = $props();
 </script>
 
 <section class="panel token-panel {tokenType}">
@@ -55,6 +57,38 @@
       <div class="stat">
         <div class="stat-label">{tokenType === "erc721" ? "Owners" : "Accounts"}</div>
         <div class="stat-value">{stats.uniqueAccounts}</div>
+      </div>
+    </div>
+  {/if}
+
+  {#if metadata.length > 0}
+    <div class="metadata-list" style="margin-bottom: 1rem;">
+      <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">Token Metadata</h3>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>Contract</th>
+              <th>Name</th>
+              <th>Symbol</th>
+              {#if tokenType === "erc20"}
+                <th>Decimals</th>
+              {/if}
+            </tr>
+          </thead>
+          <tbody>
+            {#each metadata as m (m.token)}
+              <tr>
+                <td class="address">{truncateAddress(m.token)}</td>
+                <td>{m.name ?? "—"}</td>
+                <td>{m.symbol ?? "—"}</td>
+                {#if tokenType === "erc20"}
+                  <td>{m.decimals ?? "—"}</td>
+                {/if}
+              </tr>
+            {/each}
+          </tbody>
+        </table>
       </div>
     </div>
   {/if}

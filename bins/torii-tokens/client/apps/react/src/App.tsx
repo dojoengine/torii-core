@@ -6,12 +6,16 @@ import {
   getErc20Balance,
   getErc20Transfers,
   getErc20Stats,
+  getErc20TokenMetadata,
   getErc721Stats,
   getErc721Transfers,
+  getErc721TokenMetadata,
   getErc1155Stats,
   getErc1155Transfers,
+  getErc1155TokenMetadata,
   type BalanceResult,
   type TransferResult,
+  type TokenMetadataResult,
 } from "@torii-tokens/shared";
 import StatusPanel from "./components/StatusPanel";
 import TokenPanel from "./components/TokenPanel";
@@ -60,6 +64,10 @@ export default function App() {
   const [erc1155Stats, setErc1155Stats] = useState<Stats | null>(null);
   const [erc1155Transfers, setErc1155Transfers] = useState<Transfer[]>([]);
 
+  const [erc20Metadata, setErc20Metadata] = useState<TokenMetadataResult[]>([]);
+  const [erc721Metadata, setErc721Metadata] = useState<TokenMetadataResult[]>([]);
+  const [erc1155Metadata, setErc1155Metadata] = useState<TokenMetadataResult[]>([]);
+
   const [queryContractAddress, setQueryContractAddress] = useState("");
   const [queryWallet, setQueryWallet] = useState("");
   const [queryLoading, setQueryLoading] = useState(false);
@@ -95,6 +103,21 @@ export default function App() {
       setErc20Stats({ totalTransfers: 0, totalApprovals: 0, uniqueTokens: 0, uniqueAccounts: 0 });
       setErc721Stats({ totalTransfers: 0, uniqueTokens: 0, uniqueAccounts: 0 });
       setErc1155Stats({ totalTransfers: 0, uniqueTokens: 0, uniqueAccounts: 0 });
+    }
+  }, []);
+
+  const loadMetadata = useCallback(async () => {
+    try {
+      const [m20, m721, m1155] = await Promise.all([
+        getErc20TokenMetadata(client),
+        getErc721TokenMetadata(client),
+        getErc1155TokenMetadata(client),
+      ]);
+      setErc20Metadata(m20);
+      setErc721Metadata(m721);
+      setErc1155Metadata(m1155);
+    } catch (err) {
+      console.error("Failed to load metadata:", err);
     }
   }, []);
 
@@ -200,10 +223,11 @@ export default function App() {
   useEffect(() => {
     loadStats();
     loadTransfers();
+    loadMetadata();
     return () => {
       disconnect();
     };
-  }, [loadStats, loadTransfers, disconnect]);
+  }, [loadStats, loadTransfers, loadMetadata, disconnect]);
 
   return (
     <div className="container">
@@ -238,6 +262,7 @@ export default function App() {
           tokenType="erc20"
           stats={erc20Stats}
           transfers={erc20Transfers}
+          metadata={erc20Metadata}
           showAmount={true}
         />
 
@@ -246,6 +271,7 @@ export default function App() {
           tokenType="erc721"
           stats={erc721Stats}
           transfers={erc721Transfers}
+          metadata={erc721Metadata}
           showAmount={false}
         />
 
@@ -254,6 +280,7 @@ export default function App() {
           tokenType="erc1155"
           stats={erc1155Stats}
           transfers={erc1155Transfers}
+          metadata={erc1155Metadata}
           showAmount={false}
         />
 

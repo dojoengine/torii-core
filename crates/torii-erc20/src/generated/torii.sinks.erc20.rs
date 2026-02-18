@@ -212,6 +212,36 @@ pub struct GetBalanceResponse {
     #[prost(uint64, tag = "2")]
     pub last_block: u64,
 }
+/// Request for GetTokenMetadata RPC
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetTokenMetadataRequest {
+    /// Token contract address (32 bytes). If empty, returns all tokens.
+    #[prost(bytes = "vec", optional, tag = "1")]
+    pub token: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+}
+/// Token metadata entry
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TokenMetadataEntry {
+    /// Token contract address (32 bytes)
+    #[prost(bytes = "vec", tag = "1")]
+    pub token: ::prost::alloc::vec::Vec<u8>,
+    /// Token name (e.g. "Ether")
+    #[prost(string, optional, tag = "2")]
+    pub name: ::core::option::Option<::prost::alloc::string::String>,
+    /// Token symbol (e.g. "ETH")
+    #[prost(string, optional, tag = "3")]
+    pub symbol: ::core::option::Option<::prost::alloc::string::String>,
+    /// Token decimals (e.g. 18)
+    #[prost(uint32, optional, tag = "4")]
+    pub decimals: ::core::option::Option<u32>,
+}
+/// Response for GetTokenMetadata RPC
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetTokenMetadataResponse {
+    /// Token metadata entries
+    #[prost(message, repeated, tag = "1")]
+    pub tokens: ::prost::alloc::vec::Vec<TokenMetadataEntry>,
+}
 /// Request for GetStats RPC
 #[derive(Clone, Copy, PartialEq, ::prost::Message)]
 pub struct GetStatsRequest {}
@@ -299,6 +329,14 @@ pub mod erc20_server {
             request: tonic::Request<super::GetBalanceRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetBalanceResponse>,
+            tonic::Status,
+        >;
+        /// Get token metadata (name, symbol, decimals)
+        async fn get_token_metadata(
+            &self,
+            request: tonic::Request<super::GetTokenMetadataRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetTokenMetadataResponse>,
             tonic::Status,
         >;
         /// Server streaming response type for the SubscribeTransfers method.
@@ -533,6 +571,51 @@ pub mod erc20_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetBalanceSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/torii.sinks.erc20.Erc20/GetTokenMetadata" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetTokenMetadataSvc<T: Erc20>(pub Arc<T>);
+                    impl<
+                        T: Erc20,
+                    > tonic::server::UnaryService<super::GetTokenMetadataRequest>
+                    for GetTokenMetadataSvc<T> {
+                        type Response = super::GetTokenMetadataResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetTokenMetadataRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Erc20>::get_token_metadata(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetTokenMetadataSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
