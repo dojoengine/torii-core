@@ -1,2 +1,2 @@
 pub mod events;
-pub use events::IdValue;
+pub use events::{IdValue, IntrospectEvent};

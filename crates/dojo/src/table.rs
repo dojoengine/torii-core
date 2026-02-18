@@ -1,4 +1,6 @@
-use introspect_types::{Attribute, Attributes, ColumnDef, ParseValue, PrimaryDef, TableSchema};
+use introspect_types::{
+    Attribute, Attributes, CairoSerde, ColumnDef, ParseValue, PrimaryDef, TableSchema,
+};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use torii_introspect::IdValue;
@@ -97,8 +99,9 @@ impl DojoTable {
         }
     }
 
-    pub fn parse_keys(&self, keys: Vec<Felt>) -> DojoToriiResult<Vec<IdValue>> {
-        let mut keys = keys.into_iter();
+    pub fn parse_keys(&self, keys: &[Felt]) -> DojoToriiResult<Vec<IdValue>> {
+        let mut keys: CairoSerde<_> = keys.into();
+        let columns = self.get_columns(&self.key_fields)?;
         let values = self
             .key_fields
             .iter()
@@ -139,8 +142,8 @@ impl DojoTable {
 
     pub fn parse_key_values(
         &self,
-        keys: Vec<Felt>,
-        values: Vec<Felt>,
+        keys: &[Felt],
+        values: &[Felt],
     ) -> DojoToriiResult<Vec<IdValue>> {
         let mut k = self.parse_keys(keys)?;
         let mut v = self.parse_values(values)?;
@@ -148,7 +151,7 @@ impl DojoTable {
         Ok(k)
     }
 
-    pub fn parse_field(&self, selector: Felt, data: Vec<Felt>) -> DojoToriiResult<Value> {
+    pub fn parse_field(&self, selector: Felt, data: &[Felt]) -> DojoToriiResult<Value> {
         let mut data = data.into_iter();
         let column_def = self
             .columns

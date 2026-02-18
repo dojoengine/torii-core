@@ -2,14 +2,17 @@
 //! taken from introspect crate. We may not need it, or only the URL declaration and the ID
 //! and then using the new type pattern, using the `impl_event!` on the struct.
 
+use std::collections::HashMap;
+
 use introspect_events::database::{IdName, IdTypeDef};
 use introspect_types::{
-    Attribute, ColumnDef, FeltId, FeltIds, PrimaryDef, PrimaryTypeDef, PrimaryValue, RecordValues,
+    Attribute, ColumnDef, FeltIds, PrimaryDef, PrimaryTypeDef, PrimaryValue, RecordValues,
     TableSchema, TypeDef, Value,
 };
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
-use torii::{tokio::runtime::Id, typed_body_impl};
+use torii::etl::{Envelope, TypedBody};
+use torii::typed_body_impl;
 
 pub const CREATE_TABLE_URL: &str = "introspect.CreateTable";
 pub const UPDATE_TABLE_URL: &str = "introspect.UpdateTable";
@@ -22,17 +25,28 @@ pub const RETYPE_COLUMNS_URL: &str = "introspect.RetypeColumns";
 pub const DROP_TABLE_URL: &str = "introspect.DropTable";
 pub const DROP_COLUMNS_URL: &str = "introspect.DropColumns";
 
-pub const UPDATE_FIELDS_URL: &str = "introspect.UpdateFields";
-pub const UPDATES_FIELDS_URL: &str = "introspect.UpdatesFields";
+pub const INSERTS_FIELDS_URL: &str = "introspect.InsertsFields";
 pub const DELETE_RECORDS_URL: &str = "introspect.DeleteRecords";
 pub const DELETES_FIELDS_URL: &str = "introspect.DeletesFields";
 pub const CREATE_FIELD_GROUP_URL: &str = "introspect.CreateFieldGroup";
 pub const CREATE_TYPE_DEF_URL: &str = "introspect.CreateTypeDef";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IdValue {
-    pub id: Felt,
-    pub value: Value,
+enum IntrospectBody {
+    CreateTable(CreateTable),
+    UpdateTable(UpdateTable),
+    RenameTable(RenameTable),
+    RenamePrimary(RenamePrimary),
+    RetypePrimary(RetypePrimary),
+    RenameColumns(RenameColumns),
+    RetypeColumns(RetypeColumns),
+    AddColumns(AddColumns),
+    DropTable(DropTable),
+    DropColumns(DropColumns),
+    InsertsFields(InsertsFields),
+    DeleteRecords(DeleteRecords),
+    DeletesFields(DeletesFields),
+    CreateFieldGroup(CreateFieldGroup),
+    CreateTypeDef(CreateTypeDef),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,14 +115,8 @@ pub struct DropColumns {
     pub columns: Vec<Felt>,
 }
 
-pub struct InsertFields {
-    pub table: Felt,
-    pub primary: PrimaryValue,
-    pub fields: Vec<IdValue>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdatesFields {
+pub struct InsertsFields {
     pub table: Felt,
     pub columns: Vec<Felt>,
     pub records: Vec<RecordValues>,
@@ -117,12 +125,13 @@ pub struct UpdatesFields {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeleteRecords {
     pub table: Felt,
-    pub records: Vec<PrimaryValue>,
+    pub rows: Vec<PrimaryValue>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeletesFields {
     pub table: Felt,
-    pub records: Vec<PrimaryValue>,
+    pub rows: Vec<PrimaryValue>,
     pub columns: Vec<Felt>,
 }
 
@@ -136,13 +145,8 @@ pub struct CreateTypeDef {
     pub type_def: TypeDef,
 }
 
-impl IdValue {
-    pub fn new(id: Felt, value: Value) -> Self {
-        Self { id, value }
-    }
-}
-
 typed_body_impl!(CreateTable, CREATE_TABLE_URL);
+typed_body_impl!(UpdateTable, UPDATE_TABLE_URL);
 typed_body_impl!(RenameTable, RENAME_TABLE_URL);
 typed_body_impl!(RenamePrimary, RENAME_PRIMARY_URL);
 typed_body_impl!(RetypePrimary, RETYPE_PRIMARY_URL);
@@ -151,35 +155,50 @@ typed_body_impl!(RetypeColumns, RETYPE_COLUMNS_URL);
 typed_body_impl!(AddColumns, ADD_COLUMNS_URL);
 typed_body_impl!(DropTable, DROP_TABLE_URL);
 typed_body_impl!(DropColumns, DROP_COLUMNS_URL);
-typed_body_impl!(InsertFields, UPDATE_FIELDS_URL);
-typed_body_impl!(UpdatesFields, UPDATES_FIELDS_URL);
+typed_body_impl!(InsertsFields, INSERTS_FIELDS_URL);
+// typed_body_impl!(UpdatesFields, UPDATES_FIELDS_URL);
 typed_body_impl!(DeleteRecords, DELETE_RECORDS_URL);
 typed_body_impl!(DeletesFields, DELETES_FIELDS_URL);
 typed_body_impl!(CreateFieldGroup, CREATE_FIELD_GROUP_URL);
 typed_body_impl!(CreateTypeDef, CREATE_TYPE_DEF_URL);
 
-impl CreateTable {
-    pub fn id(&self) -> String {
+pub trait IntrospectEvent: TypedBody {
+    fn event_id(&self) -> String;
+    fn to_envelope(self, metadata: HashMap<String, String>) -> Envelope
+    where
+        Self: Sized + 'static,
+    {
+        Envelope::new(self.event_id(), Box::new(self), metadata)
+    }
+}
+
+impl IntrospectEvent for CreateTable {
+    fn event_id(&self) -> String {
         format!("introspect.create_table.{:064x}", self.id)
     }
 }
-impl RenameTable {
-    pub fn id(&self) -> String {
+impl IntrospectEvent for UpdateTable {
+    fn event_id(&self) -> String {
+        format!("introspect.update_table.{:064x}", self.id)
+    }
+}
+impl IntrospectEvent for RenameTable {
+    fn event_id(&self) -> String {
         format!("introspect.rename_table.{:064x}", self.id)
     }
 }
-impl RenamePrimary {
-    pub fn id(&self) -> String {
+impl IntrospectEvent for RenamePrimary {
+    fn event_id(&self) -> String {
         format!("introspect.rename_primary.{:064x}", self.table)
     }
 }
-impl RetypePrimary {
-    pub fn id(&self) -> String {
+impl IntrospectEvent for RetypePrimary {
+    fn event_id(&self) -> String {
         format!("introspect.retype_primary.{:064x}", self.table)
     }
 }
-impl RenameColumns {
-    pub fn id(&self) -> String {
+impl IntrospectEvent for RenameColumns {
+    fn event_id(&self) -> String {
         format!(
             "introspect.rename_columns.{:064x}.{}",
             self.table,
@@ -187,8 +206,8 @@ impl RenameColumns {
         )
     }
 }
-impl RetypeColumns {
-    pub fn id(&self) -> String {
+impl IntrospectEvent for RetypeColumns {
+    fn event_id(&self) -> String {
         format!(
             "introspect.retype_columns.{:064x}.{}",
             self.table,
@@ -196,8 +215,8 @@ impl RetypeColumns {
         )
     }
 }
-impl AddColumns {
-    pub fn id(&self) -> String {
+impl IntrospectEvent for AddColumns {
+    fn event_id(&self) -> String {
         format!(
             "introspect.add_columns.{:064x}.{}",
             self.table,
@@ -205,13 +224,13 @@ impl AddColumns {
         )
     }
 }
-impl DropTable {
-    pub fn id(&self) -> String {
+impl IntrospectEvent for DropTable {
+    fn event_id(&self) -> String {
         format!("introspect.drop_table.{:064x}", self.id)
     }
 }
-impl DropColumns {
-    pub fn id(&self) -> String {
+impl IntrospectEvent for DropColumns {
+    fn event_id(&self) -> String {
         format!(
             "introspect.drop_columns.{:064x}.{}",
             self.table,
@@ -219,36 +238,46 @@ impl DropColumns {
         )
     }
 }
-impl InsertFields {
-    pub fn id(&self) -> String {
+impl IntrospectEvent for InsertsFields {
+    fn event_id(&self) -> String {
         format!(
             "introspect.insert_fields.{:064x}.{:064x}",
-            self.table, self.primary.id
+            self.table,
+            self.columns.to_felt()
         )
     }
 }
-impl UpdatesFields {
-    pub fn id(&self) -> String {
-        format!("introspect.updates_fields.{:064x}", self.table)
+// impl UpdatesFields {
+//     pub fn id(&self) -> String {
+//         format!("introspect.updates_fields.{:064x}", self.table)
+//     }
+// }
+impl IntrospectEvent for DeleteRecords {
+    fn event_id(&self) -> String {
+        format!(
+            "introspect.delete_records.{:064x}.{}",
+            self.table,
+            self.rows.hash()
+        )
     }
 }
-impl DeleteRecords {
-    pub fn id(&self) -> String {
-        format!("introspect.delete_records.{:064x}", self.table)
+impl IntrospectEvent for DeletesFields {
+    fn event_id(&self) -> String {
+        format!(
+            "introspect.deletes_fields.{:064x}.{}.{}",
+            self.table,
+            self.rows.hash(),
+            self.columns.hash()
+        )
     }
 }
-impl DeletesFields {
-    pub fn id(&self) -> String {
-        format!("introspect.deletes_fields.{:064x}", self.table)
-    }
-}
-impl CreateFieldGroup {
-    pub fn id(&self) -> String {
+impl IntrospectEvent for CreateFieldGroup {
+    fn event_id(&self) -> String {
         format!("introspect.create_field_group.{:064x}", self.id)
     }
 }
-impl CreateTypeDef {
-    pub fn id(&self) -> String {
+impl IntrospectEvent for CreateTypeDef {
+    fn event_id(&self) -> String {
         format!("introspect.create_type_def.{:064x}", self.id)
     }
 }
@@ -312,13 +341,7 @@ impl InsertFields {
 }
 
 impl DeleteRecords {
-    pub fn new(table: Felt, records: Vec<PrimaryValue>) -> Self {
-        Self { table, records }
-    }
-}
-
-impl FeltId for IdValue {
-    fn id(&self) -> &Felt {
-        &self.id
+    pub fn new(table: Felt, rows: Vec<PrimaryValue>) -> Self {
+        Self { table, rows }
     }
 }
