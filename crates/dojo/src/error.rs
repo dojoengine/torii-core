@@ -1,5 +1,5 @@
 use dojo_introspect_types::DojoIntrospectError;
-use introspect_types::DecodeError;
+use introspect_types::{transcode::TranscodeError, DecodeError};
 use starknet::core::utils::NonAsciiNameError;
 use starknet_types_core::felt::Felt;
 
@@ -31,6 +31,14 @@ pub enum DojoToriiError {
     DecodeError(#[from] DecodeError),
     #[error(transparent)]
     DojoIntrospectError(#[from] DojoIntrospectError),
+    #[error("Transcode error: {0:?}")]
+    TranscodeError(TranscodeError<DecodeError, ()>),
 }
 
 pub type DojoToriiResult<T> = std::result::Result<T, DojoToriiError>;
+
+impl From<TranscodeError<DecodeError, ()>> for DojoToriiError {
+    fn from(err: TranscodeError<DecodeError, ()>) -> Self {
+        Self::TranscodeError(err)
+    }
+}

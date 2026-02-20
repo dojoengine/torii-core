@@ -1,9 +1,7 @@
 use crate::{DojoTable, DojoToriiError, DojoToriiResult};
 use dojo_introspect_types::DojoSchema;
 use introspect_types::schema::PrimaryInfo;
-use introspect_types::{
-    Attribute, Attributes, ColumnDef, Field, ParseValue, PrimaryDef, PrimaryTypeDef, TableSchema,
-};
+use introspect_types::{Attributes, PrimaryDef, PrimaryTypeDef, TableSchema};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::fs;

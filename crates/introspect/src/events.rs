@@ -3,11 +3,12 @@
 //! and then using the new type pattern, using the `impl_event!` on the struct.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use introspect_events::database::{IdName, IdTypeDef};
 use introspect_types::{
-    Attribute, ColumnDef, FeltIds, PrimaryDef, PrimaryTypeDef, PrimaryValue, RecordValues,
-    TableSchema, TypeDef, Value,
+    Attribute, ColumnDef, FeltId, FeltIds, PrimaryDef, PrimaryTypeDef, PrimaryValue, TableSchema,
+    TypeDef,
 };
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
@@ -31,7 +32,7 @@ pub const DELETES_FIELDS_URL: &str = "introspect.DeletesFields";
 pub const CREATE_FIELD_GROUP_URL: &str = "introspect.CreateFieldGroup";
 pub const CREATE_TYPE_DEF_URL: &str = "introspect.CreateTypeDef";
 
-enum IntrospectBody {
+pub enum IntrospectBody {
     CreateTable(CreateTable),
     UpdateTable(UpdateTable),
     RenameTable(RenameTable),
@@ -116,10 +117,16 @@ pub struct DropColumns {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Record {
+    pub id: Arc<[u8; 32]>,
+    pub values: Arc<[u8]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InsertsFields {
     pub table: Felt,
     pub columns: Vec<Felt>,
-    pub records: Vec<RecordValues>,
+    pub records: Vec<Record>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,17 +248,14 @@ impl IntrospectEvent for DropColumns {
 impl IntrospectEvent for InsertsFields {
     fn event_id(&self) -> String {
         format!(
-            "introspect.insert_fields.{:064x}.{:064x}",
+            "introspect.insert_fields.{:064x}.{}.{}",
             self.table,
-            self.columns.to_felt()
+            self.records.hash(),
+            self.columns.hash()
         )
     }
 }
-// impl UpdatesFields {
-//     pub fn id(&self) -> String {
-//         format!("introspect.updates_fields.{:064x}", self.table)
-//     }
-// }
+
 impl IntrospectEvent for DeleteRecords {
     fn event_id(&self) -> String {
         format!(
@@ -330,12 +334,25 @@ impl From<UpdateTable> for TableSchema {
     }
 }
 
-impl InsertFields {
-    pub fn new(table: Felt, primary: PrimaryValue, fields: Vec<IdValue>) -> Self {
+impl InsertsFields {
+    #[allow(private_bounds)]
+    pub fn new_single<K: ToKeyBytes>(
+        table: Felt,
+        columns: Vec<Felt>,
+        key: K,
+        values: Vec<u8>,
+    ) -> Self {
         Self {
             table,
-            primary,
-            fields,
+            columns,
+            records: vec![Record::new(key, values)],
+        }
+    }
+    pub fn new(table: Felt, columns: Vec<Felt>, records: Vec<Record>) -> Self {
+        Self {
+            table,
+            columns,
+            records,
         }
     }
 }
@@ -343,5 +360,31 @@ impl InsertFields {
 impl DeleteRecords {
     pub fn new(table: Felt, rows: Vec<PrimaryValue>) -> Self {
         Self { table, rows }
+    }
+}
+
+impl Record {
+    #[allow(private_bounds)]
+    pub fn new<T: ToKeyBytes>(id: T, values: Vec<u8>) -> Self {
+        Self {
+            id: id.to_key_bytes().into(),
+            values: values.into(),
+        }
+    }
+}
+
+impl FeltId for Record {
+    fn id(&self) -> Felt {
+        Felt::from_bytes_be(&self.id)
+    }
+}
+
+trait ToKeyBytes {
+    fn to_key_bytes(&self) -> [u8; 32];
+}
+
+impl ToKeyBytes for Felt {
+    fn to_key_bytes(&self) -> [u8; 32] {
+        self.to_bytes_be()
     }
 }

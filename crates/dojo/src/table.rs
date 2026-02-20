@@ -1,11 +1,9 @@
+use crate::{error::DojoToriiError, DojoToriiResult};
 use introspect_types::{
-    Attribute, Attributes, CairoSerde, ColumnDef, ParseValue, PrimaryDef, TableSchema,
+    transcode::Transcode, Attribute, Attributes, CairoSerde, ColumnDef, PrimaryDef, TableSchema,
 };
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
-use torii_introspect::IdValue;
-
-use crate::{error::DojoToriiError, DojoToriiResult};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct DojoTable {
@@ -99,94 +97,59 @@ impl DojoTable {
         }
     }
 
-    pub fn parse_keys(&self, keys: &[Felt]) -> DojoToriiResult<Vec<IdValue>> {
+    pub fn parse_keys(&self, keys: Vec<Felt>) -> DojoToriiResult<Vec<u8>> {
         let mut keys: CairoSerde<_> = keys.into();
         let columns = self.get_columns(&self.key_fields)?;
-        let values = self
-            .key_fields
-            .iter()
-            .map(|selector| {
-                self.get_column(selector)?
-                    .type_def
-                    .parse(&mut keys)
-                    .map(|v| IdValue::new(*selector, v))
-            })
-            .collect::<Option<Vec<_>>>();
-        match keys.next() {
-            None => values
-                .ok_or_else(|| DojoIntrospectResult::ParseValuesError(self.name.clone()).into()),
-            _ => Err(DojoIntrospectResult::ParseValuesError(self.name.clone()).into()),
-        }
+        columns
+            .transcode_complete(&mut keys)
+            .map_err(DojoToriiError::TranscodeError)
     }
 
-    pub fn parse_values(&self, values: Vec<Felt>) -> DojoToriiResult<Vec<IdValue>> {
-        let mut values = values.into_iter();
-        let vals = self
-            .value_fields
-            .iter()
-            .map(|selector| {
-                self.get_column(selector)?
-                    .type_def
-                    .parse(&mut values)
-                    .map(|v| IdValue::new(*selector, v))
-            })
-            .collect::<Option<Vec<_>>>();
-
-        match values.next() {
-            None => {
-                vals.ok_or_else(|| DojoIntrospectResult::ParseValuesError(self.name.clone()).into())
-            }
-            Some(_) => Err(DojoIntrospectResult::ParseValuesError(self.name.clone()).into()),
-        }
+    pub fn parse_values(&self, values: Vec<Felt>) -> DojoToriiResult<(Vec<Felt>, Vec<u8>)> {
+        let mut output = Vec::new();
+        self.add_parsed_values(values, &mut output)?;
+        Ok((self.value_fields.clone(), output))
     }
 
-    pub fn parse_key_values(
+    pub fn add_parsed_values(
         &self,
-        keys: &[Felt],
-        values: &[Felt],
-    ) -> DojoToriiResult<Vec<IdValue>> {
-        let mut k = self.parse_keys(keys)?;
-        let mut v = self.parse_values(values)?;
-        k.append(&mut v);
-        Ok(k)
+        values: Vec<Felt>,
+        output: &mut Vec<u8>,
+    ) -> DojoToriiResult<()> {
+        let mut values: CairoSerde<_> = values.into();
+        let columns = self.get_columns(&self.value_fields)?;
+        columns
+            .transcode(&mut values, output)
+            .map_err(DojoToriiError::TranscodeError)
     }
 
-    pub fn parse_field(&self, selector: Felt, data: &[Felt]) -> DojoToriiResult<Value> {
-        let mut data = data.into_iter();
-        let column_def = self
-            .columns
-            .get(&selector)
-            .ok_or_else(|| DojoIntrospectResult::FieldNotFound(selector, self.name.clone()))?;
-        let field = column_def
-            .type_def
-            .parse(&mut data)
-            .ok_or_else(|| DojoIntrospectResult::FieldParseError(selector, self.name.clone()))?;
-        match data.next() {
-            None => Ok(field),
-            _ => Err(DojoIntrospectResult::TooManyFieldValues(selector)),
-        }
-    }
-
-    pub fn parse_fields(
+    pub fn parse_record(
         &self,
-        selectors: &[Felt],
-        data: &mut FeltIterator,
-    ) -> DojoToriiResult<Vec<Field>> {
-        let fields = selectors
-            .iter()
-            .map(|selector| {
-                let field_def = self.columns.get(selector)?;
-                field_def.parse(data)
-            })
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| DojoIntrospectResult::ParseValuesError(self.name.clone()))?;
+        keys: Vec<Felt>,
+        values: Vec<Felt>,
+    ) -> DojoToriiResult<(Vec<Felt>, Vec<u8>)> {
+        let mut data = self.parse_keys(keys)?;
+        self.add_parsed_values(values, &mut data)?;
 
-        match data.next() {
-            None => Ok(fields),
-            _ => Err(DojoIntrospectResult::ParseValuesError(format!(
-                "Too many values for table {}",
-                self.name
-            ))),
-        }
+        Ok((
+            [self.key_fields.clone(), self.value_fields.clone()].concat(),
+            data,
+        ))
+    }
+
+    pub fn parse_field(&self, selector: Felt, data: Vec<Felt>) -> DojoToriiResult<Vec<u8>> {
+        let mut data: CairoSerde<_> = data.into();
+        let column = self.get_column(&selector)?;
+        column
+            .transcode_complete(&mut data)
+            .map_err(DojoToriiError::TranscodeError)
+    }
+
+    pub fn parse_fields(&self, selectors: &[Felt], data: &[Felt]) -> DojoToriiResult<Vec<u8>> {
+        let mut data: CairoSerde<_> = data.into();
+        let columns = self.get_columns(selectors)?;
+        columns
+            .transcode_complete(&mut data)
+            .map_err(DojoToriiError::TranscodeError)
     }
 }

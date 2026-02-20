@@ -11,8 +11,8 @@ use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
 use torii::etl::event::EmittedEventExt;
 use torii::etl::Envelope;
-use torii_introspect::events::{CreateTable, DeleteRecords, InsertFields, UpdateTable};
-use torii_introspect::{IdValue, IntrospectEvent};
+use torii_introspect::events::{CreateTable, DeleteRecords, InsertsFields, UpdateTable};
+use torii_introspect::IntrospectEvent;
 
 pub struct DojoDecoder<M, F> {
     pub manager: M,
@@ -27,7 +27,6 @@ impl<M: DojoTableManager, F: DojoSchemaFetcher> DojoDecoder<M, F> {
     {
         self.manager.with_table(id, f)?
     }
-
     async fn build_model_registered(&self, raw: &EmittedEvent) -> DojoToriiResult<Envelope> {
         let event: ModelRegistered = CairoEvent::<CairoSerde<_>>::from_emitted_event(raw)?;
         let schema = self.fetcher.schema(event.address).await?;
@@ -77,43 +76,40 @@ impl<M: DojoTableManager, F: DojoSchemaFetcher> DojoDecoder<M, F> {
 
     fn build_set_record(&self, raw: &EmittedEvent) -> DojoToriiResult<Envelope> {
         let event: StoreSetRecord = CairoEvent::<CairoSerde<_>>::from_emitted_event(raw)?;
-        let fields = self.with_table(event.selector, |table| {
-            Ok(table.parse_key_values(event.keys.clone(), event.values.clone()))
-        })??;
-        let data = InsertFields::new(event.selector, event.entity_id.into(), fields);
+        let (columns, data) = self.with_table(event.selector, |table| {
+            table.parse_record(event.keys, event.values)
+        })?;
+        let data = InsertsFields::new_single(event.selector, columns, event.entity_id, data);
         Ok(data.to_envelope(raw.metadata()))
     }
 
     fn build_update_record(&self, raw: &EmittedEvent) -> DojoToriiResult<Envelope> {
         let event: StoreUpdateRecord = CairoEvent::<CairoSerde<_>>::from_emitted_event(raw)?;
-        let fields =
-            self.with_table(event.selector, |table| Ok(table.parse_values(event.values)))??;
-        let data = InsertFields::new(event.selector, event.entity_id.into(), fields);
+        let (columns, data) =
+            self.with_table(event.selector, |table| table.parse_values(event.values))?;
+        let data = InsertsFields::new_single(event.selector, columns, event.entity_id, data);
         Ok(data.to_envelope(raw.metadata()))
     }
 
     fn build_emit_event(&self, raw: &EmittedEvent) -> DojoToriiResult<Envelope> {
         let event: EventEmitted = CairoEvent::<CairoSerde<_>>::from_emitted_event(raw)?;
 
-        let primary = event.keys.hash().into();
-        let fields = self.with_table(event.selector, |table| {
-            table.parse_key_values(event.keys, event.values)
+        let primary = Felt::from_bytes_be(&event.keys.hash().into());
+        let (columns, data) = self.with_table(event.selector, |table| {
+            table.parse_record(event.keys, event.values)
         })?;
-        let data = InsertFields::new(event.selector, primary, fields);
+        let data = InsertsFields::new_single(event.selector, columns, primary, data);
+
         Ok(data.to_envelope(raw.metadata()))
     }
 
     fn build_update_member(&self, raw: &EmittedEvent) -> DojoToriiResult<Envelope> {
         let event: StoreUpdateMember = CairoEvent::<CairoSerde<_>>::from_emitted_event(raw)?;
-        let field = self.with_table(event.selector, |table| {
-            Ok(table.parse_field(event.member_selector, event.values))
-        })??;
-
-        let data = InsertFields::new(
-            event.selector,
-            event.entity_id.into(),
-            vec![IdValue::new(event.member_selector, field)],
-        );
+        let member = event.member_selector;
+        let data = self.with_table(event.selector, |table| {
+            table.parse_field(member, event.values)
+        })?;
+        let data = InsertsFields::new_single(event.selector, vec![member], event.entity_id, data);
         Ok(data.to_envelope(raw.metadata()))
     }
 
@@ -123,11 +119,11 @@ impl<M: DojoTableManager, F: DojoSchemaFetcher> DojoDecoder<M, F> {
         Ok(data.to_envelope(raw.metadata()))
     }
 
-    async fn decode_event(&self, event: &EmittedEvent) -> DojoToriiResult<Envelope> {
+    pub async fn decode_event(&self, event: &EmittedEvent) -> DojoToriiResult<Envelope> {
         let selector = event.keys[0];
         let selector_raw = selector.to_raw();
         match selector_raw {
-            ModelRegistered::SELECTOR_RAW => self.build_event_registered(event).await,
+            ModelRegistered::SELECTOR_RAW => self.build_model_registered(event).await,
             ModelWithSchemaRegistered::SELECTOR_RAW => {
                 self.build_model_with_schema_registered(event).await
             }
