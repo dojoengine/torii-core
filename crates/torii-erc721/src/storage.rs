@@ -7,7 +7,9 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 use starknet::core::types::{Felt, U256};
 use std::sync::{Arc, Mutex};
-use torii_common::{blob_to_felt, blob_to_u256, felt_to_blob, u256_to_blob};
+use torii_common::{
+    blob_to_felt, blob_to_u256, felt_to_blob, u256_to_blob, TokenUriResult, TokenUriStore,
+};
 
 /// Storage for ERC721 NFT data
 pub struct Erc721Storage {
@@ -213,6 +215,41 @@ impl Erc721Storage {
                 UNIQUE(token, owner, operator)
             )",
             [],
+        )?;
+
+        // Token metadata table
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS token_metadata (
+                token BLOB PRIMARY KEY,
+                name TEXT,
+                symbol TEXT,
+                total_supply BLOB
+            )",
+            [],
+        )?;
+
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS token_uris (
+                token BLOB NOT NULL,
+                token_id BLOB NOT NULL,
+                uri TEXT,
+                metadata_json TEXT,
+                updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (token, token_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_token_uris_token ON token_uris(token);
+
+            CREATE TABLE IF NOT EXISTS token_attributes (
+                token BLOB NOT NULL,
+                token_id BLOB NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY (token, token_id, key),
+                FOREIGN KEY (token, token_id) REFERENCES token_uris(token, token_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_token_attributes_token ON token_attributes(token);
+            CREATE INDEX IF NOT EXISTS idx_token_attributes_key ON token_attributes(key);
+            CREATE INDEX IF NOT EXISTS idx_token_attributes_key_value ON token_attributes(key, value);",
         )?;
 
         tracing::info!(target: "torii_erc721::storage", db_path = %db_path, "ERC721 database initialized");
@@ -604,5 +641,256 @@ impl Erc721Storage {
             })
             .ok();
         Ok(block.map(|b| b as u64))
+    }
+
+    // ===== Token Metadata Methods =====
+
+    /// Check if metadata exists for a token
+    pub fn has_token_metadata(&self, token: Felt) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let token_blob = felt_to_blob(token);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM token_metadata WHERE token = ?",
+            params![&token_blob],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Insert or update token metadata
+    pub fn upsert_token_metadata(
+        &self,
+        token: Felt,
+        name: Option<&str>,
+        symbol: Option<&str>,
+        total_supply: Option<U256>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let token_blob = felt_to_blob(token);
+        let supply_blob = total_supply.map(u256_to_blob);
+        conn.execute(
+            "INSERT INTO token_metadata (token, name, symbol, total_supply)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(token) DO UPDATE SET
+                 name = COALESCE(excluded.name, token_metadata.name),
+                 symbol = COALESCE(excluded.symbol, token_metadata.symbol),
+                 total_supply = COALESCE(excluded.total_supply, token_metadata.total_supply)",
+            params![&token_blob, name, symbol, supply_blob],
+        )?;
+        Ok(())
+    }
+
+    /// Get token metadata
+    pub fn get_token_metadata(
+        &self,
+        token: Felt,
+    ) -> Result<Option<(Option<String>, Option<String>, Option<U256>)>> {
+        let conn = self.conn.lock().unwrap();
+        let token_blob = felt_to_blob(token);
+        let result = conn
+            .query_row(
+                "SELECT name, symbol, total_supply FROM token_metadata WHERE token = ?",
+                params![&token_blob],
+                |row| {
+                    let name: Option<String> = row.get(0)?;
+                    let symbol: Option<String> = row.get(1)?;
+                    let supply_bytes: Option<Vec<u8>> = row.get(2)?;
+                    Ok((name, symbol, supply_bytes.map(|b| blob_to_u256(&b))))
+                },
+            )
+            .ok();
+        Ok(result)
+    }
+
+    /// Get all token metadata
+    pub fn get_all_token_metadata(
+        &self,
+    ) -> Result<Vec<(Felt, Option<String>, Option<String>, Option<U256>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt =
+            conn.prepare("SELECT token, name, symbol, total_supply FROM token_metadata")?;
+        let rows = stmt.query_map([], |row| {
+            let token_bytes: Vec<u8> = row.get(0)?;
+            let name: Option<String> = row.get(1)?;
+            let symbol: Option<String> = row.get(2)?;
+            let supply_bytes: Option<Vec<u8>> = row.get(3)?;
+            Ok((
+                blob_to_felt(&token_bytes),
+                name,
+                symbol,
+                supply_bytes.map(|b| blob_to_u256(&b)),
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Get token metadata with cursor-based pagination.
+    ///
+    /// Returns at most `limit` rows and an optional next cursor token.
+    pub fn get_token_metadata_paginated(
+        &self,
+        cursor: Option<Felt>,
+        limit: u32,
+    ) -> Result<(
+        Vec<(Felt, Option<String>, Option<String>, Option<U256>)>,
+        Option<Felt>,
+    )> {
+        let conn = self.conn.lock().unwrap();
+        let fetch_limit = limit.clamp(1, 1000) as usize + 1;
+
+        let mut out = if let Some(cursor_token) = cursor {
+            let cursor_blob = felt_to_blob(cursor_token);
+            let mut stmt = conn.prepare(
+                "SELECT token, name, symbol, total_supply
+                 FROM token_metadata
+                 WHERE token > ?1
+                 ORDER BY token ASC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![&cursor_blob, fetch_limit as i64], |row| {
+                let token_bytes: Vec<u8> = row.get(0)?;
+                let name: Option<String> = row.get(1)?;
+                let symbol: Option<String> = row.get(2)?;
+                let supply_bytes: Option<Vec<u8>> = row.get(3)?;
+                Ok((
+                    blob_to_felt(&token_bytes),
+                    name,
+                    symbol,
+                    supply_bytes.map(|b| blob_to_u256(&b)),
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT token, name, symbol, total_supply
+                 FROM token_metadata
+                 ORDER BY token ASC
+                 LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![fetch_limit as i64], |row| {
+                let token_bytes: Vec<u8> = row.get(0)?;
+                let name: Option<String> = row.get(1)?;
+                let symbol: Option<String> = row.get(2)?;
+                let supply_bytes: Option<Vec<u8>> = row.get(3)?;
+                Ok((
+                    blob_to_felt(&token_bytes),
+                    name,
+                    symbol,
+                    supply_bytes.map(|b| blob_to_u256(&b)),
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        let capped = limit.clamp(1, 1000) as usize;
+        let next_cursor = if out.len() > capped {
+            let next = out[capped].0;
+            out.truncate(capped);
+            Some(next)
+        } else {
+            None
+        };
+
+        Ok((out, next_cursor))
+    }
+
+    /// Returns true if a token URI row exists for `(token, token_id)`.
+    pub fn has_token_uri(&self, token: Felt, token_id: U256) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let token_blob = felt_to_blob(token);
+        let token_id_blob = u256_to_blob(token_id);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM token_uris WHERE token = ?1 AND token_id = ?2",
+            params![&token_blob, &token_id_blob],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Returns all token URI rows for a given contract.
+    pub fn get_token_uris_by_contract(
+        &self,
+        token: Felt,
+    ) -> Result<Vec<(U256, Option<String>, Option<String>)>> {
+        let conn = self.conn.lock().unwrap();
+        let token_blob = felt_to_blob(token);
+        let mut stmt = conn.prepare(
+            "SELECT token_id, uri, metadata_json
+             FROM token_uris
+             WHERE token = ?1
+             ORDER BY token_id ASC",
+        )?;
+        let rows = stmt.query_map(params![&token_blob], |row| {
+            let token_id_bytes: Vec<u8> = row.get(0)?;
+            let uri: Option<String> = row.get(1)?;
+            let metadata_json: Option<String> = row.get(2)?;
+            Ok((blob_to_u256(&token_id_bytes), uri, metadata_json))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+}
+
+#[async_trait::async_trait]
+impl TokenUriStore for Erc721Storage {
+    async fn store_token_uri(&self, result: &TokenUriResult) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+
+        let token_blob = felt_to_blob(result.contract);
+        let token_id_blob = u256_to_blob(result.token_id);
+
+        tx.execute(
+            "INSERT INTO token_uris (token, token_id, uri, metadata_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4, strftime('%s', 'now'))
+             ON CONFLICT(token, token_id) DO UPDATE SET
+                uri = excluded.uri,
+                metadata_json = excluded.metadata_json,
+                updated_at = excluded.updated_at",
+            params![
+                &token_blob,
+                &token_id_blob,
+                result.uri.as_deref(),
+                result.metadata_json.as_deref()
+            ],
+        )?;
+
+        tx.execute(
+            "DELETE FROM token_attributes WHERE token = ?1 AND token_id = ?2",
+            params![&token_blob, &token_id_blob],
+        )?;
+
+        if let Some(metadata_json) = &result.metadata_json {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(metadata_json) {
+                if let Some(attrs) = value.get("attributes").and_then(|a| a.as_array()) {
+                    let mut attr_stmt = tx.prepare_cached(
+                        "INSERT OR REPLACE INTO token_attributes (token, token_id, key, value)
+                         VALUES (?1, ?2, ?3, ?4)",
+                    )?;
+
+                    for attr in attrs {
+                        let key = attr
+                            .get("trait_type")
+                            .or_else(|| attr.get("key"))
+                            .and_then(|v| v.as_str());
+                        let value = attr.get("value").and_then(|v| {
+                            v.as_str().map(ToOwned::to_owned).or_else(|| {
+                                if v.is_null() {
+                                    None
+                                } else {
+                                    Some(v.to_string())
+                                }
+                            })
+                        });
+
+                        if let (Some(key), Some(value)) = (key, value) {
+                            attr_stmt.execute(params![&token_blob, &token_id_blob, key, value])?;
+                        }
+                    }
+                }
+            }
+        }
+
+        tx.commit()?;
+        Ok(())
     }
 }

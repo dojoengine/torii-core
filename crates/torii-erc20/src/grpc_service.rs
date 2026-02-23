@@ -6,10 +6,12 @@
 //! - Indexer statistics (GetStats)
 
 use crate::proto::{
-    erc20_server::Erc20 as Erc20Trait, Approval, ApprovalFilter, ApprovalUpdate, Cursor,
-    GetApprovalsRequest, GetApprovalsResponse, GetBalanceRequest, GetBalanceResponse,
-    GetStatsRequest, GetStatsResponse, GetTransfersRequest, GetTransfersResponse,
-    SubscribeApprovalsRequest, SubscribeTransfersRequest, Transfer, TransferFilter, TransferUpdate,
+    erc20_server::Erc20 as Erc20Trait, Approval, ApprovalFilter, ApprovalUpdate, BalanceEntry,
+    Cursor, GetApprovalsRequest, GetApprovalsResponse, GetBalanceRequest, GetBalanceResponse,
+    GetBalancesRequest, GetBalancesResponse, GetStatsRequest, GetStatsResponse,
+    GetTokenMetadataRequest, GetTokenMetadataResponse, GetTransfersRequest, GetTransfersResponse,
+    SubscribeApprovalsRequest, SubscribeTransfersRequest, TokenMetadataEntry, Transfer,
+    TransferFilter, TransferUpdate,
 };
 use crate::storage::{
     ApprovalCursor, ApprovalData, Erc20Storage, TransferCursor, TransferData, TransferDirection,
@@ -391,6 +393,108 @@ impl Erc20Trait for Erc20Service {
         Ok(Response::new(GetBalanceResponse {
             balance: u256_to_bytes(balance),
             last_block,
+        }))
+    }
+
+    /// Query balances in batch with optional token/wallet filters
+    async fn get_balances(
+        &self,
+        request: Request<GetBalancesRequest>,
+    ) -> Result<Response<GetBalancesResponse>, Status> {
+        let req = request.into_inner();
+
+        let token = req.token.as_ref().and_then(|b| bytes_to_felt(b));
+        let wallet = req.wallet.as_ref().and_then(|b| bytes_to_felt(b));
+        let cursor = req.cursor;
+        let limit = if req.limit == 0 {
+            1000
+        } else {
+            req.limit.min(10_000)
+        };
+
+        tracing::debug!(
+            target: "torii_erc20::grpc",
+            "GetBalances: token={:?}, wallet={:?}, cursor={:?}, limit={}",
+            token.map(|t| format!("{t:#x}")),
+            wallet.map(|w| format!("{w:#x}")),
+            cursor,
+            limit
+        );
+
+        let (balances, next_cursor) = self
+            .storage
+            .get_balances_filtered(token, wallet, cursor, limit)
+            .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
+
+        let rows = balances
+            .into_iter()
+            .map(|b| BalanceEntry {
+                token: b.token.to_bytes_be().to_vec(),
+                wallet: b.wallet.to_bytes_be().to_vec(),
+                balance: u256_to_bytes(b.balance),
+                last_block: b.last_block,
+            })
+            .collect();
+
+        Ok(Response::new(GetBalancesResponse {
+            balances: rows,
+            next_cursor,
+        }))
+    }
+
+    /// Get token metadata (name, symbol, decimals)
+    async fn get_token_metadata(
+        &self,
+        request: Request<GetTokenMetadataRequest>,
+    ) -> Result<Response<GetTokenMetadataResponse>, Status> {
+        let req = request.into_inner();
+
+        if let Some(token_bytes) = req.token {
+            let token = bytes_to_felt(&token_bytes)
+                .ok_or_else(|| Status::invalid_argument("Invalid token address"))?;
+
+            let entries = match self.storage.get_token_metadata(token) {
+                Ok(Some((name, symbol, decimals))) => vec![TokenMetadataEntry {
+                    token: token.to_bytes_be().to_vec(),
+                    name,
+                    symbol,
+                    decimals: decimals.map(|d| d as u32),
+                }],
+                Ok(None) => vec![],
+                Err(e) => return Err(Status::internal(format!("Query failed: {e}"))),
+            };
+
+            return Ok(Response::new(GetTokenMetadataResponse {
+                tokens: entries,
+                next_cursor: None,
+            }));
+        }
+
+        let cursor = req.cursor.as_ref().and_then(|b| bytes_to_felt(b));
+        let limit = if req.limit == 0 {
+            100
+        } else {
+            req.limit.min(1000)
+        };
+
+        let (all, next_cursor) = self
+            .storage
+            .get_token_metadata_paginated(cursor, limit)
+            .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
+
+        let entries = all
+            .into_iter()
+            .map(|(token, name, symbol, decimals)| TokenMetadataEntry {
+                token: token.to_bytes_be().to_vec(),
+                name,
+                symbol,
+                decimals: decimals.map(|d| d as u32),
+            })
+            .collect();
+
+        Ok(Response::new(GetTokenMetadataResponse {
+            tokens: entries,
+            next_cursor: next_cursor.map(|c| c.to_bytes_be().to_vec()),
         }))
     }
 

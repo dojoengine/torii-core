@@ -23,12 +23,12 @@ use prost::Message;
 use prost_types::Any;
 use starknet::core::types::{Felt, U256};
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
-use torii_common::u256_to_bytes;
+use torii_common::{u256_to_bytes, MetadataFetcher};
 
 /// Default threshold for "live" detection: 100 blocks from chain head.
 /// Events from blocks older than this won't be broadcast to real-time subscribers.
@@ -50,6 +50,8 @@ pub struct Erc20Sink {
     grpc_service: Option<Erc20Service>,
     /// Balance fetcher for RPC calls (None = balance tracking disabled)
     balance_fetcher: Option<Arc<BalanceFetcher>>,
+    /// Metadata fetcher for token name/symbol/decimals
+    metadata_fetcher: Option<Arc<MetadataFetcher>>,
 }
 
 impl Erc20Sink {
@@ -59,6 +61,7 @@ impl Erc20Sink {
             event_bus: None,
             grpc_service: None,
             balance_fetcher: None,
+            metadata_fetcher: None,
         }
     }
 
@@ -76,7 +79,8 @@ impl Erc20Sink {
     /// - Fetch actual balance from the chain and adjust
     /// - Record adjustments in an audit table
     pub fn with_balance_tracking(mut self, provider: Arc<JsonRpcClient<HttpTransport>>) -> Self {
-        self.balance_fetcher = Some(Arc::new(BalanceFetcher::new(provider)));
+        self.balance_fetcher = Some(Arc::new(BalanceFetcher::new(provider.clone())));
+        self.metadata_fetcher = Some(Arc::new(MetadataFetcher::new(provider)));
         self
     }
 
@@ -190,6 +194,28 @@ impl Erc20Sink {
 
         true
     }
+
+    /// Filter function for ERC20 token metadata updates.
+    ///
+    /// Supports filters:
+    /// - "token": Filter by token contract address (hex string)
+    fn matches_metadata_filters(
+        metadata: &proto::TokenMetadataEntry,
+        filters: &HashMap<String, String>,
+    ) -> bool {
+        if filters.is_empty() {
+            return true;
+        }
+
+        if let Some(token_filter) = filters.get("token") {
+            let token_hex = format!("0x{}", hex::encode(&metadata.token));
+            if !token_hex.eq_ignore_ascii_case(token_filter) {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 #[async_trait]
@@ -255,6 +281,82 @@ impl Sink for Erc20Sink {
                         tx_hash: approval.transaction_hash,
                         timestamp,
                     });
+                }
+            }
+        }
+
+        // Fetch metadata for any new token contracts we haven't seen before
+        if let Some(ref fetcher) = self.metadata_fetcher {
+            let mut new_tokens: HashSet<Felt> = HashSet::new();
+            for transfer in &transfers {
+                new_tokens.insert(transfer.token);
+            }
+            for approval in &approvals {
+                new_tokens.insert(approval.token);
+            }
+
+            for token in new_tokens {
+                match self.storage.has_token_metadata(token) {
+                    Ok(exists) => {
+                        if exists {
+                            continue;
+                        }
+
+                        let meta = fetcher.fetch_erc20_metadata(token).await;
+                        tracing::info!(
+                            target: "torii_erc20::sink",
+                            token = %format!("{:#x}", token),
+                            name = ?meta.name,
+                            symbol = ?meta.symbol,
+                            decimals = ?meta.decimals,
+                            "Fetched token metadata"
+                        );
+                        if let Err(e) = self.storage.upsert_token_metadata(
+                            token,
+                            meta.name.as_deref(),
+                            meta.symbol.as_deref(),
+                            meta.decimals,
+                        ) {
+                            tracing::warn!(
+                                target: "torii_erc20::sink",
+                                token = %format!("{:#x}", token),
+                                error = %e,
+                                "Failed to store token metadata"
+                            );
+                        } else if let Some(event_bus) = &self.event_bus {
+                            let meta_entry = proto::TokenMetadataEntry {
+                                token: token.to_bytes_be().to_vec(),
+                                name: meta.name,
+                                symbol: meta.symbol,
+                                decimals: meta.decimals.map(|d| d as u32),
+                            };
+
+                            let mut buf = Vec::new();
+                            meta_entry.encode(&mut buf)?;
+                            let any = Any {
+                                type_url:
+                                    "type.googleapis.com/torii.sinks.erc20.TokenMetadataEntry"
+                                        .to_string(),
+                                value: buf,
+                            };
+
+                            event_bus.publish_protobuf(
+                                "erc20.metadata",
+                                "erc20.metadata",
+                                &any,
+                                &meta_entry,
+                                UpdateType::Created,
+                                Self::matches_metadata_filters,
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "torii_erc20::sink",
+                            error = %e,
+                            "Failed to check token metadata"
+                        );
+                    }
                 }
             }
         }
@@ -491,6 +593,11 @@ impl Sink for Erc20Sink {
                     "account".to_string(),
                 ],
                 "ERC20 token approvals. Use 'account' filter for owner OR spender matching.",
+            ),
+            TopicInfo::new(
+                "erc20.metadata",
+                vec!["token".to_string()],
+                "ERC20 token metadata updates (registered/updated token attributes).",
             ),
         ]
     }

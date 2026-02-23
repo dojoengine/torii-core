@@ -180,6 +180,38 @@ message TransferUpdate {
     int64 timestamp = 2;
 }
 
+// ===== Token Metadata =====
+
+// Request for GetTokenMetadata RPC
+message GetTokenMetadataRequest {
+    // Token contract address (32 bytes). If empty, returns all tokens.
+    optional bytes token = 1;
+    // Cursor token (exclusive). Only used when token is not set.
+    optional bytes cursor = 2;
+    // Maximum number of entries to return (default: 100, max: 1000).
+    uint32 limit = 3;
+}
+
+// Token metadata entry
+message TokenMetadataEntry {
+    // Token contract address (32 bytes)
+    bytes token = 1;
+    // Token name (e.g. "Loot Survivor")
+    optional string name = 2;
+    // Token symbol (e.g. "LS")
+    optional string symbol = 3;
+    // Total supply as U256 (variable length, up to 32 bytes)
+    optional bytes total_supply = 4;
+}
+
+// Response for GetTokenMetadata RPC
+message GetTokenMetadataResponse {
+    // Token metadata entries
+    repeated TokenMetadataEntry tokens = 1;
+    // Cursor for next page (absent if no more results).
+    optional bytes next_cursor = 2;
+}
+
 // ===== Stats =====
 
 // Request for GetStats RPC
@@ -209,6 +241,9 @@ service Erc721 {
 
     // Get the current owner of a specific NFT
     rpc GetOwner(GetOwnerRequest) returns (GetOwnerResponse);
+
+    // Get token metadata (name, symbol)
+    rpc GetTokenMetadata(GetTokenMetadataRequest) returns (GetTokenMetadataResponse);
 
     // Subscribe to real-time transfer events with filtering
     rpc SubscribeTransfers(SubscribeTransfersRequest) returns (stream TransferUpdate);
