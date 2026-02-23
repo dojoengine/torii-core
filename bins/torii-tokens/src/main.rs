@@ -63,6 +63,8 @@ use torii_erc721::{
     FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
 };
 
+use torii_common::{MetadataFetcher, TokenUriService};
+
 // Import from ERC1155 library crate
 use torii_erc1155::proto::erc1155_server::Erc1155Server;
 use torii_erc1155::{
@@ -312,11 +314,21 @@ async fn run_indexer(config: Config) -> Result<()> {
         let decoder = Arc::new(Erc721Decoder::new());
         torii_config = torii_config.add_decoder(decoder);
 
+        // Spawn token URI service for async metadata fetching
+        let metadata_fetcher = Arc::new(MetadataFetcher::new(provider.clone()));
+        let (token_uri_sender, _token_uri_service) = TokenUriService::spawn(
+            metadata_fetcher,
+            storage.clone(),
+            1024, // buffer size
+            8,    // max concurrent fetches
+        );
+
         let grpc_service = Erc721Service::new(storage.clone());
         let sink = Box::new(
             Erc721Sink::new(storage)
                 .with_grpc_service(grpc_service.clone())
-                .with_metadata_fetching(provider.clone()),
+                .with_metadata_fetching(provider.clone())
+                .with_token_uri_sender(token_uri_sender),
         );
         torii_config = torii_config.add_sink_boxed(sink);
 
@@ -349,11 +361,17 @@ async fn run_indexer(config: Config) -> Result<()> {
         let decoder = Arc::new(Erc1155Decoder::new());
         torii_config = torii_config.add_decoder(decoder);
 
+        // Spawn token URI service for ERC1155
+        let erc1155_fetcher = Arc::new(MetadataFetcher::new(provider.clone()));
+        let (erc1155_uri_sender, _erc1155_uri_service) =
+            TokenUriService::spawn(erc1155_fetcher, storage.clone(), 1024, 8);
+
         let grpc_service = Erc1155Service::new(storage.clone());
         let sink = Box::new(
             Erc1155Sink::new(storage)
                 .with_grpc_service(grpc_service.clone())
-                .with_balance_tracking(provider.clone()),
+                .with_balance_tracking(provider.clone())
+                .with_token_uri_sender(erc1155_uri_sender),
         );
         torii_config = torii_config.add_sink_boxed(sink);
 

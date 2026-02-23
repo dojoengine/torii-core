@@ -4,10 +4,14 @@
 //! and shared helpers like token metadata fetching.
 
 pub mod metadata;
+pub mod token_uri;
 
 use starknet::core::types::{Felt, U256};
 
 pub use metadata::{MetadataFetcher, TokenMetadata};
+pub use token_uri::{
+    TokenStandard, TokenUriRequest, TokenUriResult, TokenUriSender, TokenUriService, TokenUriStore,
+};
 
 // ===== Felt conversions =====
 
