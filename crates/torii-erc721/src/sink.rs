@@ -15,6 +15,7 @@ use prost_types::Any;
 use starknet::core::types::Felt;
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
@@ -44,6 +45,9 @@ pub struct Erc721Sink {
     metadata_fetcher: Option<Arc<MetadataFetcher>>,
     /// Token URI service sender for async URI fetching
     token_uri_sender: Option<TokenUriSender>,
+    /// In-memory counters to avoid full-table COUNT(*) in the ingest hot path.
+    total_transfers: AtomicU64,
+    total_operator_approvals: AtomicU64,
 }
 
 impl Erc721Sink {
@@ -54,6 +58,9 @@ impl Erc721Sink {
             grpc_service: None,
             metadata_fetcher: None,
             token_uri_sender: None,
+            // Avoid startup full-table COUNT(*) scans on large datasets.
+            total_transfers: AtomicU64::new(0),
+            total_operator_approvals: AtomicU64::new(0),
         }
     }
 
@@ -179,6 +186,8 @@ impl Sink for Erc721Sink {
     async fn process(&self, envelopes: &[Envelope], batch: &ExtractionBatch) -> Result<()> {
         let mut transfers: Vec<NftTransferData> = Vec::new();
         let mut operator_approvals: Vec<OperatorApprovalData> = Vec::new();
+        let mut inserted_transfers: u64 = 0;
+        let mut inserted_operator_approvals: u64 = 0;
 
         // Get block timestamps from batch
         let block_timestamps: HashMap<u64, i64> = batch
@@ -382,6 +391,10 @@ impl Sink for Erc721Sink {
             };
 
             if transfer_count > 0 {
+                inserted_transfers = transfer_count as u64;
+                self.total_transfers
+                    .fetch_add(inserted_transfers, Ordering::Relaxed);
+
                 tracing::info!(
                     target: "torii_erc721::sink",
                     count = transfer_count,
@@ -439,6 +452,10 @@ impl Sink for Erc721Sink {
                 .insert_operator_approvals_batch(&operator_approvals)
             {
                 Ok(count) => {
+                    inserted_operator_approvals = count as u64;
+                    self.total_operator_approvals
+                        .fetch_add(inserted_operator_approvals, Ordering::Relaxed);
+
                     tracing::info!(
                         target: "torii_erc721::sink",
                         count = count,
@@ -457,22 +474,17 @@ impl Sink for Erc721Sink {
             }
         }
 
-        // Log combined statistics
-        if !transfers.is_empty() || !operator_approvals.is_empty() {
-            if let Ok(total_transfers) = self.storage.get_transfer_count() {
-                if let Ok(nft_count) = self.storage.get_nft_count() {
-                    if let Ok(token_count) = self.storage.get_token_count() {
-                        tracing::info!(
-                            target: "torii_erc721::sink",
-                            transfers = total_transfers,
-                            nfts = nft_count,
-                            collections = token_count,
-                            blocks = batch.blocks.len(),
-                            "Total statistics"
-                        );
-                    }
-                }
-            }
+        // Log combined statistics without full-table scans.
+        if inserted_transfers > 0 || inserted_operator_approvals > 0 {
+            tracing::info!(
+                target: "torii_erc721::sink",
+                batch_transfers = inserted_transfers,
+                batch_operator_approvals = inserted_operator_approvals,
+                total_transfers = self.total_transfers.load(Ordering::Relaxed),
+                total_operator_approvals = self.total_operator_approvals.load(Ordering::Relaxed),
+                blocks = batch.blocks.len(),
+                "Total statistics"
+            );
         }
 
         Ok(())

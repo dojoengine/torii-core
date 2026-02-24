@@ -105,6 +105,7 @@ impl Erc1155Storage {
              PRAGMA cache_size=-64000;
              PRAGMA temp_store=MEMORY;
              PRAGMA mmap_size=268435456;
+             PRAGMA wal_autocheckpoint=10000;
              PRAGMA page_size=4096;
              PRAGMA busy_timeout=5000;",
         )?;
@@ -313,6 +314,18 @@ impl Erc1155Storage {
                 "INSERT OR IGNORE INTO token_transfers (token, operator, from_addr, to_addr, token_id, amount, is_batch, batch_index, block_number, tx_hash, timestamp)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, strftime('%s', 'now')))",
             )?;
+            let mut wallet_both_stmt = tx.prepare_cached(
+                "INSERT INTO token_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                 VALUES (?1, ?2, ?3, 'both', ?4)",
+            )?;
+            let mut wallet_sent_stmt = tx.prepare_cached(
+                "INSERT INTO token_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                 VALUES (?1, ?2, ?3, 'sent', ?4)",
+            )?;
+            let mut wallet_received_stmt = tx.prepare_cached(
+                "INSERT INTO token_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                 VALUES (?1, ?2, ?3, 'received', ?4)",
+            )?;
 
             for transfer in transfers {
                 let token_blob = felt_to_blob(transfer.token);
@@ -346,25 +359,28 @@ impl Erc1155Storage {
                         && transfer.to != Felt::ZERO
                         && transfer.from == transfer.to
                     {
-                        tx.execute(
-                            "INSERT INTO token_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                             VALUES (?, ?, ?, 'both', ?)",
-                            params![&from_blob, &token_blob, transfer_id, transfer.block_number],
-                        )?;
+                        wallet_both_stmt.execute(params![
+                            &from_blob,
+                            &token_blob,
+                            transfer_id,
+                            transfer.block_number
+                        ])?;
                     } else {
                         if transfer.from != Felt::ZERO {
-                            tx.execute(
-                                "INSERT INTO token_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                                 VALUES (?, ?, ?, 'sent', ?)",
-                                params![&from_blob, &token_blob, transfer_id, transfer.block_number],
-                            )?;
+                            wallet_sent_stmt.execute(params![
+                                &from_blob,
+                                &token_blob,
+                                transfer_id,
+                                transfer.block_number
+                            ])?;
                         }
                         if transfer.to != Felt::ZERO {
-                            tx.execute(
-                                "INSERT INTO token_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                                 VALUES (?, ?, ?, 'received', ?)",
-                                params![&to_blob, &token_blob, transfer_id, transfer.block_number],
-                            )?;
+                            wallet_received_stmt.execute(params![
+                                &to_blob,
+                                &token_blob,
+                                transfer_id,
+                                transfer.block_number
+                            ])?;
                         }
                     }
                 }

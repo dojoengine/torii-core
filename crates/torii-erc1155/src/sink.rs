@@ -27,6 +27,7 @@ use prost_types::Any;
 use starknet::core::types::{Felt, U256};
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
@@ -59,6 +60,10 @@ pub struct Erc1155Sink {
     metadata_fetcher: Option<Arc<MetadataFetcher>>,
     /// Token URI service sender for async URI fetching
     token_uri_sender: Option<TokenUriSender>,
+    /// In-memory counters to avoid full-table COUNT(*) in the ingest hot path.
+    total_transfers: AtomicU64,
+    total_operator_approvals: AtomicU64,
+    total_uri_updates: AtomicU64,
 }
 
 impl Erc1155Sink {
@@ -70,6 +75,10 @@ impl Erc1155Sink {
             balance_fetcher: None,
             metadata_fetcher: None,
             token_uri_sender: None,
+            // Avoid startup full-table COUNT(*) scans on large datasets.
+            total_transfers: AtomicU64::new(0),
+            total_operator_approvals: AtomicU64::new(0),
+            total_uri_updates: AtomicU64::new(0),
         }
     }
 
@@ -229,6 +238,9 @@ impl Sink for Erc1155Sink {
         let mut transfers: Vec<TokenTransferData> = Vec::new();
         let mut operator_approvals: Vec<OperatorApprovalData> = Vec::new();
         let mut uri_updates: Vec<TokenUriData> = Vec::new();
+        let mut inserted_transfers: u64 = 0;
+        let mut inserted_operator_approvals: u64 = 0;
+        let mut inserted_uri_updates: u64 = 0;
 
         // Get block timestamps from batch
         let block_timestamps: HashMap<u64, i64> = batch
@@ -429,6 +441,10 @@ impl Sink for Erc1155Sink {
             };
 
             if transfer_count > 0 {
+                inserted_transfers = transfer_count as u64;
+                self.total_transfers
+                    .fetch_add(inserted_transfers, Ordering::Relaxed);
+
                 tracing::info!(
                     target: "torii_erc1155::sink",
                     count = transfer_count,
@@ -551,6 +567,10 @@ impl Sink for Erc1155Sink {
                 .insert_operator_approvals_batch(&operator_approvals)
             {
                 Ok(count) => {
+                    inserted_operator_approvals = count as u64;
+                    self.total_operator_approvals
+                        .fetch_add(inserted_operator_approvals, Ordering::Relaxed);
+
                     tracing::info!(
                         target: "torii_erc1155::sink",
                         count = count,
@@ -573,6 +593,10 @@ impl Sink for Erc1155Sink {
         if !uri_updates.is_empty() {
             match self.storage.upsert_token_uris_batch(&uri_updates) {
                 Ok(count) => {
+                    inserted_uri_updates = count as u64;
+                    self.total_uri_updates
+                        .fetch_add(inserted_uri_updates, Ordering::Relaxed);
+
                     tracing::info!(
                         target: "torii_erc1155::sink",
                         count = count,
@@ -620,22 +644,19 @@ impl Sink for Erc1155Sink {
             }
         }
 
-        // Log combined statistics
-        if !transfers.is_empty() || !operator_approvals.is_empty() {
-            if let Ok(total_transfers) = self.storage.get_transfer_count() {
-                if let Ok(token_id_count) = self.storage.get_token_id_count() {
-                    if let Ok(token_count) = self.storage.get_token_count() {
-                        tracing::info!(
-                            target: "torii_erc1155::sink",
-                            transfers = total_transfers,
-                            token_ids = token_id_count,
-                            contracts = token_count,
-                            blocks = batch.blocks.len(),
-                            "Total statistics"
-                        );
-                    }
-                }
-            }
+        // Log combined statistics without full-table scans.
+        if inserted_transfers > 0 || inserted_operator_approvals > 0 || inserted_uri_updates > 0 {
+            tracing::info!(
+                target: "torii_erc1155::sink",
+                batch_transfers = inserted_transfers,
+                batch_operator_approvals = inserted_operator_approvals,
+                batch_uri_updates = inserted_uri_updates,
+                total_transfers = self.total_transfers.load(Ordering::Relaxed),
+                total_operator_approvals = self.total_operator_approvals.load(Ordering::Relaxed),
+                total_uri_updates = self.total_uri_updates.load(Ordering::Relaxed),
+                blocks = batch.blocks.len(),
+                "Total statistics"
+            );
         }
 
         Ok(())

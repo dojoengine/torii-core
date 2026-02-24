@@ -11,6 +11,7 @@ use starknet::core::types::Felt;
 ///
 /// - **Event**: Uses `starknet_getEvents` with per-contract cursors.
 ///   Best for indexing specific contracts - easy to add new ones without re-indexing.
+///
 #[derive(Clone, Debug, Default, ValueEnum, PartialEq, Eq)]
 pub enum ExtractionMode {
     /// Fetch all events from blocks (single global cursor)
@@ -44,6 +45,7 @@ pub enum ExtractionMode {
 /// # Add a new contract in event mode (just restart with updated list)
 /// torii-tokens --mode event --erc20 0x...ETH,0x...STRK,0x...USDC --from-block 0
 /// # USDC starts from block 0, ETH and STRK resume from their cursors
+///
 /// ```
 #[derive(Parser, Debug)]
 #[command(name = "torii-tokens")]

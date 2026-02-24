@@ -24,6 +24,7 @@ use prost_types::Any;
 use starknet::core::types::{Felt, U256};
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
@@ -52,6 +53,9 @@ pub struct Erc20Sink {
     balance_fetcher: Option<Arc<BalanceFetcher>>,
     /// Metadata fetcher for token name/symbol/decimals
     metadata_fetcher: Option<Arc<MetadataFetcher>>,
+    /// In-memory counters to avoid full-table COUNT(*) in the ingest hot path.
+    total_transfers: AtomicU64,
+    total_approvals: AtomicU64,
 }
 
 impl Erc20Sink {
@@ -62,6 +66,9 @@ impl Erc20Sink {
             grpc_service: None,
             balance_fetcher: None,
             metadata_fetcher: None,
+            // Avoid startup full-table COUNT(*) scans on large datasets.
+            total_transfers: AtomicU64::new(0),
+            total_approvals: AtomicU64::new(0),
         }
     }
 
@@ -242,6 +249,8 @@ impl Sink for Erc20Sink {
         // Collect all transfers and approvals for batch insertion
         let mut transfers: Vec<TransferData> = Vec::new();
         let mut approvals: Vec<ApprovalData> = Vec::new();
+        let mut inserted_transfers: u64 = 0;
+        let mut inserted_approvals: u64 = 0;
 
         // Get block timestamps from batch for enrichment
         let block_timestamps: HashMap<u64, i64> = batch
@@ -377,6 +386,10 @@ impl Sink for Erc20Sink {
             };
 
             if transfer_count > 0 {
+                inserted_transfers = transfer_count as u64;
+                self.total_transfers
+                    .fetch_add(inserted_transfers, Ordering::Relaxed);
+
                 tracing::info!(
                     target: "torii_erc20::sink",
                     count = transfer_count,
@@ -501,6 +514,10 @@ impl Sink for Erc20Sink {
             };
 
             if approval_count > 0 {
+                inserted_approvals = approval_count as u64;
+                self.total_approvals
+                    .fetch_add(inserted_approvals, Ordering::Relaxed);
+
                 tracing::info!(
                     target: "torii_erc20::sink",
                     count = approval_count,
@@ -551,22 +568,17 @@ impl Sink for Erc20Sink {
             }
         }
 
-        // Log combined statistics
-        if !transfers.is_empty() || !approvals.is_empty() {
-            if let Ok(total_transfers) = self.storage.get_transfer_count() {
-                if let Ok(total_approvals) = self.storage.get_approval_count() {
-                    if let Ok(token_count) = self.storage.get_token_count() {
-                        tracing::info!(
-                            target: "torii_erc20::sink",
-                            transfers = total_transfers,
-                            approvals = total_approvals,
-                            tokens = token_count,
-                            blocks = batch.blocks.len(),
-                            "Total statistics"
-                        );
-                    }
-                }
-            }
+        // Log combined statistics without full-table scans.
+        if inserted_transfers > 0 || inserted_approvals > 0 {
+            tracing::info!(
+                target: "torii_erc20::sink",
+                batch_transfers = inserted_transfers,
+                batch_approvals = inserted_approvals,
+                total_transfers = self.total_transfers.load(Ordering::Relaxed),
+                total_approvals = self.total_approvals.load(Ordering::Relaxed),
+                blocks = batch.blocks.len(),
+                "Total statistics"
+            );
         }
 
         Ok(())
