@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: torii-postgres
+    environment:
+      POSTGRES_USER: torii
+      POSTGRES_PASSWORD: torii
+      POSTGRES_DB: torii
+    ports:
+      - "5432:5432"
+    volumes:
+      - torii_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U torii -d torii"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  torii_postgres_data:

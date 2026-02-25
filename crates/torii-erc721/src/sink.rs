@@ -262,7 +262,9 @@ impl Sink for Erc721Sink {
                     if let Some(ref sender) = self.token_uri_sender {
                         // For batch updates, we need to know which token IDs exist in the range.
                         // Fetch them from storage and request URI updates for each.
-                        if let Ok(uris) = self.storage.get_token_uris_by_contract(update.token) {
+                        if let Ok(uris) =
+                            self.storage.get_token_uris_by_contract(update.token).await
+                        {
                             for (token_id, _, _) in &uris {
                                 if *token_id >= update.from_token_id
                                     && *token_id <= update.to_token_id
@@ -288,7 +290,7 @@ impl Sink for Erc721Sink {
         if let Some(ref fetcher) = self.metadata_fetcher {
             let new_tokens: HashSet<Felt> = transfers.iter().map(|t| t.token).collect();
             for token in new_tokens {
-                match self.storage.has_token_metadata(token) {
+                match self.storage.has_token_metadata(token).await {
                     Ok(exists) => {
                         if exists {
                             continue;
@@ -302,12 +304,16 @@ impl Sink for Erc721Sink {
                             symbol = ?meta.symbol,
                             "Fetched token metadata"
                         );
-                        if let Err(e) = self.storage.upsert_token_metadata(
-                            token,
-                            meta.name.as_deref(),
-                            meta.symbol.as_deref(),
-                            meta.total_supply,
-                        ) {
+                        if let Err(e) = self
+                            .storage
+                            .upsert_token_metadata(
+                                token,
+                                meta.name.as_deref(),
+                                meta.symbol.as_deref(),
+                                meta.total_supply,
+                            )
+                            .await
+                        {
                             tracing::warn!(
                                 target: "torii_erc721::sink",
                                 error = %e,
@@ -353,6 +359,7 @@ impl Sink for Erc721Sink {
                 match self
                     .storage
                     .has_token_uri(transfer.token, transfer.token_id)
+                    .await
                 {
                     Ok(false) => {
                         sender
@@ -377,7 +384,7 @@ impl Sink for Erc721Sink {
 
         // Batch insert transfers
         if !transfers.is_empty() {
-            let transfer_count = match self.storage.insert_transfers_batch(&transfers) {
+            let transfer_count = match self.storage.insert_transfers_batch(&transfers).await {
                 Ok(count) => count,
                 Err(e) => {
                     tracing::error!(
@@ -450,6 +457,7 @@ impl Sink for Erc721Sink {
             match self
                 .storage
                 .insert_operator_approvals_batch(&operator_approvals)
+                .await
             {
                 Ok(count) => {
                     inserted_operator_approvals = count as u64;

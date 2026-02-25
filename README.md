@@ -37,6 +37,18 @@ This work is still in progress, refer to the modules documentation for more deta
 
 ## 🚀 Quick Start
 
+### Start PostgreSQL (Docker Compose)
+
+```bash
+docker compose up -d postgres
+```
+
+Default connection string:
+
+```bash
+export DATABASE_URL=postgres://torii:torii@localhost:5432/torii
+```
+
 ### Running Examples
 
 ```bash

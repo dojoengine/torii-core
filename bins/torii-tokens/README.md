@@ -89,6 +89,7 @@ torii-tokens --db-dir /path/to/data --from-block 0
 | `--from-block` | `0` | Starting block number |
 | `--to-block` | None | Ending block (None = follow chain head) |
 | `--db-dir` | `./torii-data` | Directory for database files |
+| `--database-url` | None | Engine DB URL/path (e.g. `postgres://...`) |
 | `--port` | `3000` | HTTP/gRPC server port |
 | `--erc20` | None | ERC20 contract addresses (comma-separated) |
 | `--erc721` | None | ERC721 contract addresses (comma-separated) |
@@ -136,6 +137,8 @@ torii-tokens --from-block 0
 The indexer creates separate SQLite databases for each component:
 
 ```
+
+Set `--database-url` (or `DATABASE_URL`) to run engine + token storages on PostgreSQL. If unset, the local SQLite files below are used.
 ./torii-data/
   engine.db     # ETL state, cursors, statistics
   erc20.db      # ERC20 transfers, approvals, balances

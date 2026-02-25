@@ -80,6 +80,13 @@ pub struct Config {
     #[arg(long, default_value = "./torii-data")]
     pub db_dir: String,
 
+    /// Optional engine database URL/path.
+    ///
+    /// Supports PostgreSQL (`postgres://...`) and SQLite (`sqlite:...` or file path).
+    /// When omitted, engine state uses `<db-dir>/engine.db`.
+    #[arg(long, env = "DATABASE_URL")]
+    pub database_url: Option<String>,
+
     /// Port for the HTTP/gRPC API
     #[arg(long, default_value = "3000")]
     pub port: u16,

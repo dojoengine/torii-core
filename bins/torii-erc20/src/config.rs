@@ -30,6 +30,13 @@ pub struct Config {
     #[arg(long, default_value = "./erc20-data.db")]
     pub db_path: String,
 
+    /// Optional engine database URL/path.
+    ///
+    /// Supports PostgreSQL (`postgres://...`) and SQLite (`sqlite:...` or file path).
+    /// When omitted, engine state uses `<db-path parent>/engine.db`.
+    #[arg(long, env = "DATABASE_URL")]
+    pub database_url: Option<String>,
+
     /// Disable auto-discovery of ERC20 contracts
     ///
     /// When enabled, only explicitly configured contracts will be indexed.

@@ -167,6 +167,7 @@ impl Erc1155Trait for Erc1155Service {
                 cursor,
                 limit,
             )
+            .await
             .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
 
         let proto_transfers: Vec<TokenTransfer> =
@@ -207,6 +208,7 @@ impl Erc1155Trait for Erc1155Service {
         let (balance, last_block) = self
             .storage
             .get_balance_with_block(contract, wallet, token_id)
+            .await
             .map_err(|e| Status::internal(format!("Query failed: {e}")))?
             .unwrap_or((U256::from(0u64), 0));
 
@@ -227,7 +229,7 @@ impl Erc1155Trait for Erc1155Service {
             let token = bytes_to_felt(&token_bytes)
                 .ok_or_else(|| Status::invalid_argument("Invalid token address"))?;
 
-            let entries = match self.storage.get_token_metadata(token) {
+            let entries = match self.storage.get_token_metadata(token).await {
                 Ok(Some((name, symbol, total_supply))) => vec![TokenMetadataEntry {
                     token: token.to_bytes_be().to_vec(),
                     name,
@@ -254,6 +256,7 @@ impl Erc1155Trait for Erc1155Service {
         let (all, next_cursor) = self
             .storage
             .get_token_metadata_paginated(cursor, limit)
+            .await
             .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
 
         let entries = all
@@ -329,21 +332,25 @@ impl Erc1155Trait for Erc1155Service {
         let total_transfers = self
             .storage
             .get_transfer_count()
+            .await
             .map_err(|e| Status::internal(format!("Failed to get transfer count: {e}")))?;
 
         let unique_tokens = self
             .storage
             .get_token_count()
+            .await
             .map_err(|e| Status::internal(format!("Failed to get token count: {e}")))?;
 
         let unique_token_ids = self
             .storage
             .get_token_id_count()
+            .await
             .map_err(|e| Status::internal(format!("Failed to get token ID count: {e}")))?;
 
         let latest_block = self
             .storage
             .get_latest_block()
+            .await
             .map_err(|e| Status::internal(format!("Failed to get latest block: {e}")))?
             .unwrap_or(0);
 

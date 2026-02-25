@@ -11,6 +11,7 @@ use rusqlite::{params, Connection};
 use starknet::core::types::{Felt, U256};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use tokio_postgres::{types::ToSql as PgToSql, Client, NoTls};
 use torii_common::{
     blob_to_felt, blob_to_u256, felt_to_blob, u256_to_blob, TokenUriResult, TokenUriStore,
 };
@@ -19,7 +20,15 @@ use crate::balance_fetcher::Erc1155BalanceFetchRequest;
 
 /// Storage for ERC1155 token data
 pub struct Erc1155Storage {
+    backend: StorageBackend,
     conn: Arc<Mutex<Connection>>,
+    pg_conn: Option<Arc<tokio::sync::Mutex<Client>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StorageBackend {
+    Sqlite,
+    Postgres,
 }
 
 /// Token transfer data for batch insertion
@@ -94,7 +103,127 @@ pub struct Erc1155BalanceAdjustment {
 
 impl Erc1155Storage {
     /// Create or open the database
-    pub fn new(db_path: &str) -> Result<Self> {
+    pub async fn new(db_path: &str) -> Result<Self> {
+        if db_path.starts_with("postgres://") || db_path.starts_with("postgresql://") {
+            let (client, connection) = tokio_postgres::connect(db_path, NoTls).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    tracing::error!(target: "torii_erc1155::storage", error = %e, "PostgreSQL connection task failed");
+                }
+            });
+
+            client.batch_execute(
+                r"
+                CREATE SCHEMA IF NOT EXISTS erc1155;
+
+                CREATE TABLE IF NOT EXISTS erc1155.token_transfers (
+                    id BIGSERIAL PRIMARY KEY,
+                    token BYTEA NOT NULL,
+                    operator BYTEA NOT NULL,
+                    from_addr BYTEA NOT NULL,
+                    to_addr BYTEA NOT NULL,
+                    token_id BYTEA NOT NULL,
+                    amount BYTEA NOT NULL,
+                    is_batch BIGINT NOT NULL DEFAULT 0,
+                    batch_index BIGINT NOT NULL DEFAULT 0,
+                    block_number BIGINT NOT NULL,
+                    tx_hash BYTEA NOT NULL,
+                    timestamp BIGINT,
+                    UNIQUE(token, tx_hash, token_id, from_addr, to_addr, batch_index)
+                );
+                CREATE INDEX IF NOT EXISTS idx_token_transfers_token ON erc1155.token_transfers(token);
+                CREATE INDEX IF NOT EXISTS idx_token_transfers_from ON erc1155.token_transfers(from_addr);
+                CREATE INDEX IF NOT EXISTS idx_token_transfers_to ON erc1155.token_transfers(to_addr);
+                CREATE INDEX IF NOT EXISTS idx_token_transfers_block ON erc1155.token_transfers(block_number DESC);
+                CREATE INDEX IF NOT EXISTS idx_token_transfers_token_id ON erc1155.token_transfers(token, token_id);
+
+                CREATE TABLE IF NOT EXISTS erc1155.token_wallet_activity (
+                    id BIGSERIAL PRIMARY KEY,
+                    wallet_address BYTEA NOT NULL,
+                    token BYTEA NOT NULL,
+                    transfer_id BIGINT NOT NULL REFERENCES erc1155.token_transfers(id),
+                    direction TEXT NOT NULL CHECK(direction IN ('sent', 'received', 'both')),
+                    block_number BIGINT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_token_wallet_activity_wallet_block ON erc1155.token_wallet_activity(wallet_address, block_number DESC);
+                CREATE INDEX IF NOT EXISTS idx_token_wallet_activity_wallet_token ON erc1155.token_wallet_activity(wallet_address, token, block_number DESC);
+
+                CREATE TABLE IF NOT EXISTS erc1155.token_operators (
+                    id BIGSERIAL PRIMARY KEY,
+                    token BYTEA NOT NULL,
+                    owner BYTEA NOT NULL,
+                    operator BYTEA NOT NULL,
+                    approved BIGINT NOT NULL,
+                    block_number BIGINT NOT NULL,
+                    tx_hash BYTEA NOT NULL,
+                    timestamp BIGINT,
+                    UNIQUE(token, owner, operator)
+                );
+
+                CREATE TABLE IF NOT EXISTS erc1155.token_uris (
+                    token BYTEA NOT NULL,
+                    token_id BYTEA NOT NULL,
+                    uri TEXT,
+                    metadata_json TEXT,
+                    updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+                    PRIMARY KEY (token, token_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS erc1155.token_attributes (
+                    token BYTEA NOT NULL,
+                    token_id BYTEA NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    PRIMARY KEY (token, token_id, key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_token_attributes_token ON erc1155.token_attributes(token);
+                CREATE INDEX IF NOT EXISTS idx_token_attributes_key ON erc1155.token_attributes(key);
+                CREATE INDEX IF NOT EXISTS idx_token_attributes_key_value ON erc1155.token_attributes(key, value);
+
+                CREATE TABLE IF NOT EXISTS erc1155.erc1155_balances (
+                    id BIGSERIAL PRIMARY KEY,
+                    contract BYTEA NOT NULL,
+                    wallet BYTEA NOT NULL,
+                    token_id BYTEA NOT NULL,
+                    balance BYTEA NOT NULL,
+                    last_block BIGINT NOT NULL,
+                    updated_at BIGINT DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+                    UNIQUE(contract, wallet, token_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_erc1155_balances_contract ON erc1155.erc1155_balances(contract);
+                CREATE INDEX IF NOT EXISTS idx_erc1155_balances_wallet ON erc1155.erc1155_balances(wallet);
+                CREATE INDEX IF NOT EXISTS idx_erc1155_balances_contract_wallet ON erc1155.erc1155_balances(contract, wallet);
+
+                CREATE TABLE IF NOT EXISTS erc1155.erc1155_balance_adjustments (
+                    id BIGSERIAL PRIMARY KEY,
+                    contract BYTEA NOT NULL,
+                    wallet BYTEA NOT NULL,
+                    token_id BYTEA NOT NULL,
+                    computed_balance BYTEA NOT NULL,
+                    actual_balance BYTEA NOT NULL,
+                    adjusted_at_block BIGINT NOT NULL,
+                    tx_hash BYTEA NOT NULL,
+                    created_at BIGINT DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+                );
+                CREATE INDEX IF NOT EXISTS idx_erc1155_adjustments_wallet ON erc1155.erc1155_balance_adjustments(wallet);
+
+                CREATE TABLE IF NOT EXISTS erc1155.token_metadata (
+                    token BYTEA PRIMARY KEY,
+                    name TEXT,
+                    symbol TEXT,
+                    total_supply BYTEA
+                );
+                ",
+            ).await?;
+
+            tracing::info!(target: "torii_erc1155::storage", "PostgreSQL storage initialized");
+            return Ok(Self {
+                backend: StorageBackend::Postgres,
+                conn: Arc::new(Mutex::new(Connection::open_in_memory()?)),
+                pg_conn: Some(Arc::new(tokio::sync::Mutex::new(client))),
+            });
+        }
+
         let conn = Connection::open(db_path)?;
 
         // Enable WAL mode + Performance PRAGMAs
@@ -294,12 +423,17 @@ impl Erc1155Storage {
         tracing::info!(target: "torii_erc1155::storage", db_path = %db_path, "ERC1155 database initialized");
 
         Ok(Self {
+            backend: StorageBackend::Sqlite,
             conn: Arc::new(Mutex::new(conn)),
+            pg_conn: None,
         })
     }
 
     /// Insert multiple transfers in a single transaction
-    pub fn insert_transfers_batch(&self, transfers: &[TokenTransferData]) -> Result<usize> {
+    pub async fn insert_transfers_batch(&self, transfers: &[TokenTransferData]) -> Result<usize> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_insert_transfers_batch(transfers).await;
+        }
         if transfers.is_empty() {
             return Ok(0);
         }
@@ -392,10 +526,13 @@ impl Erc1155Storage {
     }
 
     /// Insert operator approvals in a single transaction
-    pub fn insert_operator_approvals_batch(
+    pub async fn insert_operator_approvals_batch(
         &self,
         approvals: &[OperatorApprovalData],
     ) -> Result<usize> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_insert_operator_approvals_batch(approvals).await;
+        }
         if approvals.is_empty() {
             return Ok(0);
         }
@@ -436,7 +573,10 @@ impl Erc1155Storage {
     }
 
     /// Insert or update token URIs in a single transaction
-    pub fn upsert_token_uris_batch(&self, uris: &[TokenUriData]) -> Result<usize> {
+    pub async fn upsert_token_uris_batch(&self, uris: &[TokenUriData]) -> Result<usize> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_upsert_token_uris_batch(uris).await;
+        }
         if uris.is_empty() {
             return Ok(0);
         }
@@ -469,7 +609,7 @@ impl Erc1155Storage {
     }
 
     /// Get filtered transfers with cursor-based pagination
-    pub fn get_transfers_filtered(
+    pub async fn get_transfers_filtered(
         &self,
         wallet: Option<Felt>,
         from: Option<Felt>,
@@ -482,6 +622,14 @@ impl Erc1155Storage {
         cursor: Option<TransferCursor>,
         limit: u32,
     ) -> Result<(Vec<TokenTransferData>, Option<TransferCursor>)> {
+        if self.backend == StorageBackend::Postgres {
+            return self
+                .pg_get_transfers_filtered(
+                    wallet, from, to, operator, tokens, token_ids, block_from, block_to, cursor,
+                    limit,
+                )
+                .await;
+        }
         let conn = self.conn.lock().unwrap();
 
         let mut query = String::new();
@@ -611,7 +759,10 @@ impl Erc1155Storage {
     }
 
     /// Get transfer count
-    pub fn get_transfer_count(&self) -> Result<u64> {
+    pub async fn get_transfer_count(&self) -> Result<u64> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_transfer_count().await;
+        }
         let conn = self.conn.lock().unwrap();
         let count: i64 =
             conn.query_row("SELECT COUNT(*) FROM token_transfers", [], |row| row.get(0))?;
@@ -619,7 +770,10 @@ impl Erc1155Storage {
     }
 
     /// Get unique token contract count
-    pub fn get_token_count(&self) -> Result<u64> {
+    pub async fn get_token_count(&self) -> Result<u64> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_token_count().await;
+        }
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
             "SELECT COUNT(DISTINCT token) FROM token_transfers",
@@ -630,7 +784,10 @@ impl Erc1155Storage {
     }
 
     /// Get unique token ID count
-    pub fn get_token_id_count(&self) -> Result<u64> {
+    pub async fn get_token_id_count(&self) -> Result<u64> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_token_id_count().await;
+        }
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
             "SELECT COUNT(DISTINCT token || token_id) FROM token_transfers",
@@ -641,7 +798,10 @@ impl Erc1155Storage {
     }
 
     /// Get latest block number indexed
-    pub fn get_latest_block(&self) -> Result<Option<u64>> {
+    pub async fn get_latest_block(&self) -> Result<Option<u64>> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_latest_block().await;
+        }
         let conn = self.conn.lock().unwrap();
         let block: Option<i64> = conn
             .query_row("SELECT MAX(block_number) FROM token_transfers", [], |row| {
@@ -654,12 +814,15 @@ impl Erc1155Storage {
     // ===== Balance Tracking Methods =====
 
     /// Get current balance for a (contract, wallet, token_id) tuple
-    pub fn get_balance(
+    pub async fn get_balance(
         &self,
         contract: Felt,
         wallet: Felt,
         token_id: U256,
     ) -> Result<Option<U256>> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_balance(contract, wallet, token_id).await;
+        }
         let conn = self.conn.lock().unwrap();
         let contract_blob = felt_to_blob(contract);
         let wallet_blob = felt_to_blob(wallet);
@@ -678,12 +841,17 @@ impl Erc1155Storage {
     }
 
     /// Get balance with last block info for a (contract, wallet, token_id) tuple
-    pub fn get_balance_with_block(
+    pub async fn get_balance_with_block(
         &self,
         contract: Felt,
         wallet: Felt,
         token_id: U256,
     ) -> Result<Option<(U256, u64)>> {
+        if self.backend == StorageBackend::Postgres {
+            return self
+                .pg_get_balance_with_block(contract, wallet, token_id)
+                .await;
+        }
         let conn = self.conn.lock().unwrap();
         let contract_blob = felt_to_blob(contract);
         let wallet_blob = felt_to_blob(wallet);
@@ -702,10 +870,13 @@ impl Erc1155Storage {
     }
 
     /// Get balances for multiple (contract, wallet, token_id) tuples in a single query
-    pub fn get_balances_batch(
+    pub async fn get_balances_batch(
         &self,
         tuples: &[(Felt, Felt, U256)],
     ) -> Result<HashMap<(Felt, Felt, U256), U256>> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_balances_batch(tuples).await;
+        }
         if tuples.is_empty() {
             return Ok(HashMap::new());
         }
@@ -741,7 +912,7 @@ impl Erc1155Storage {
     ///
     /// For each transfer, checks if the sender's current balance would go negative.
     /// Returns Erc1155BalanceFetchRequests for wallets that need adjustment.
-    pub fn check_balances_batch(
+    pub async fn check_balances_batch(
         &self,
         transfers: &[TokenTransferData],
     ) -> Result<Vec<Erc1155BalanceFetchRequest>> {
@@ -760,7 +931,7 @@ impl Erc1155Storage {
             .collect();
 
         // Get current balances for all senders
-        let current_balances = self.get_balances_batch(&sender_tuples)?;
+        let current_balances = self.get_balances_batch(&sender_tuples).await?;
 
         // Track running balance changes within this batch
         let mut pending_debits: HashMap<(Felt, Felt, U256), U256> = HashMap::new();
@@ -832,11 +1003,16 @@ impl Erc1155Storage {
     /// # Arguments
     /// * `transfers` - The transfers to apply
     /// * `adjustments` - Map of (contract, wallet, token_id) -> actual_balance fetched from RPC
-    pub fn apply_transfers_with_adjustments(
+    pub async fn apply_transfers_with_adjustments(
         &self,
         transfers: &[TokenTransferData],
         adjustments: &HashMap<(Felt, Felt, U256), U256>,
     ) -> Result<()> {
+        if self.backend == StorageBackend::Postgres {
+            return self
+                .pg_apply_transfers_with_adjustments(transfers, adjustments)
+                .await;
+        }
         if transfers.is_empty() {
             return Ok(());
         }
@@ -1026,7 +1202,10 @@ impl Erc1155Storage {
     }
 
     /// Get adjustment count (for statistics)
-    pub fn get_adjustment_count(&self) -> Result<u64> {
+    pub async fn get_adjustment_count(&self) -> Result<u64> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_adjustment_count().await;
+        }
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM erc1155_balance_adjustments",
@@ -1037,7 +1216,10 @@ impl Erc1155Storage {
     }
 
     /// Get unique wallet count with balances
-    pub fn get_wallet_count(&self) -> Result<u64> {
+    pub async fn get_wallet_count(&self) -> Result<u64> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_wallet_count().await;
+        }
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
             "SELECT COUNT(DISTINCT wallet) FROM erc1155_balances",
@@ -1050,7 +1232,10 @@ impl Erc1155Storage {
     // ===== Token Metadata Methods =====
 
     /// Check if metadata exists for a token
-    pub fn has_token_metadata(&self, token: Felt) -> Result<bool> {
+    pub async fn has_token_metadata(&self, token: Felt) -> Result<bool> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_has_token_metadata(token).await;
+        }
         let conn = self.conn.lock().unwrap();
         let token_blob = felt_to_blob(token);
         let count: i64 = conn.query_row(
@@ -1062,13 +1247,18 @@ impl Erc1155Storage {
     }
 
     /// Insert or update token metadata
-    pub fn upsert_token_metadata(
+    pub async fn upsert_token_metadata(
         &self,
         token: Felt,
         name: Option<&str>,
         symbol: Option<&str>,
         total_supply: Option<U256>,
     ) -> Result<()> {
+        if self.backend == StorageBackend::Postgres {
+            return self
+                .pg_upsert_token_metadata(token, name, symbol, total_supply)
+                .await;
+        }
         let conn = self.conn.lock().unwrap();
         let token_blob = felt_to_blob(token);
         let supply_blob = total_supply.map(u256_to_blob);
@@ -1085,10 +1275,13 @@ impl Erc1155Storage {
     }
 
     /// Get token metadata
-    pub fn get_token_metadata(
+    pub async fn get_token_metadata(
         &self,
         token: Felt,
     ) -> Result<Option<(Option<String>, Option<String>, Option<U256>)>> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_token_metadata(token).await;
+        }
         let conn = self.conn.lock().unwrap();
         let token_blob = felt_to_blob(token);
         let result = conn
@@ -1107,9 +1300,12 @@ impl Erc1155Storage {
     }
 
     /// Get all token metadata
-    pub fn get_all_token_metadata(
+    pub async fn get_all_token_metadata(
         &self,
     ) -> Result<Vec<(Felt, Option<String>, Option<String>, Option<U256>)>> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_all_token_metadata().await;
+        }
         let conn = self.conn.lock().unwrap();
         let mut stmt =
             conn.prepare("SELECT token, name, symbol, total_supply FROM token_metadata")?;
@@ -1131,7 +1327,7 @@ impl Erc1155Storage {
     /// Get token metadata with cursor-based pagination.
     ///
     /// Returns at most `limit` rows and an optional next cursor token.
-    pub fn get_token_metadata_paginated(
+    pub async fn get_token_metadata_paginated(
         &self,
         cursor: Option<Felt>,
         limit: u32,
@@ -1139,6 +1335,9 @@ impl Erc1155Storage {
         Vec<(Felt, Option<String>, Option<String>, Option<U256>)>,
         Option<Felt>,
     )> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_token_metadata_paginated(cursor, limit).await;
+        }
         let conn = self.conn.lock().unwrap();
         let fetch_limit = limit.clamp(1, 1000) as usize + 1;
 
@@ -1199,7 +1398,10 @@ impl Erc1155Storage {
     }
 
     /// Returns true if a token URI row exists for `(token, token_id)`.
-    pub fn has_token_uri(&self, token: Felt, token_id: U256) -> Result<bool> {
+    pub async fn has_token_uri(&self, token: Felt, token_id: U256) -> Result<bool> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_has_token_uri(token, token_id).await;
+        }
         let conn = self.conn.lock().unwrap();
         let token_blob = felt_to_blob(token);
         let token_id_blob = u256_to_blob(token_id);
@@ -1210,11 +1412,820 @@ impl Erc1155Storage {
         )?;
         Ok(count > 0)
     }
+
+    async fn pg_client(&self) -> Result<tokio::sync::MutexGuard<'_, Client>> {
+        let conn = self
+            .pg_conn
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("PostgreSQL connection not initialized"))?;
+        Ok(conn.lock().await)
+    }
+
+    fn pg_next_param(
+        params: &mut Vec<Box<dyn PgToSql + Sync + Send>>,
+        value: impl PgToSql + Sync + Send + 'static,
+    ) -> String {
+        params.push(Box::new(value));
+        format!("${}", params.len())
+    }
+
+    async fn pg_insert_transfers_batch(&self, transfers: &[TokenTransferData]) -> Result<usize> {
+        if transfers.is_empty() {
+            return Ok(0);
+        }
+
+        let mut client = self.pg_client().await?;
+        let tx = client.transaction().await?;
+        let mut inserted = 0usize;
+
+        for transfer in transfers {
+            let token_blob = felt_to_blob(transfer.token);
+            let operator_blob = felt_to_blob(transfer.operator);
+            let from_blob = felt_to_blob(transfer.from);
+            let to_blob = felt_to_blob(transfer.to);
+            let token_id_blob = u256_to_blob(transfer.token_id);
+            let amount_blob = u256_to_blob(transfer.amount);
+            let tx_hash_blob = felt_to_blob(transfer.tx_hash);
+            let ts = transfer
+                .timestamp
+                .unwrap_or_else(|| chrono::Utc::now().timestamp());
+
+            let row = tx.query_opt(
+                "INSERT INTO erc1155.token_transfers
+                 (token, operator, from_addr, to_addr, token_id, amount, is_batch, batch_index, block_number, tx_hash, timestamp)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                 ON CONFLICT (token, tx_hash, token_id, from_addr, to_addr, batch_index) DO NOTHING
+                 RETURNING id",
+                &[
+                    &token_blob,
+                    &operator_blob,
+                    &from_blob,
+                    &to_blob,
+                    &token_id_blob,
+                    &amount_blob,
+                    &((transfer.is_batch as i32) as i64),
+                    &(transfer.batch_index as i64),
+                    &(transfer.block_number as i64),
+                    &tx_hash_blob,
+                    &ts,
+                ],
+            ).await?;
+
+            if let Some(row) = row {
+                inserted += 1;
+                let transfer_id: i64 = row.get(0);
+
+                if transfer.from != Felt::ZERO
+                    && transfer.to != Felt::ZERO
+                    && transfer.from == transfer.to
+                {
+                    tx.execute(
+                        "INSERT INTO erc1155.token_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                         VALUES ($1, $2, $3, 'both', $4)",
+                        &[
+                            &from_blob,
+                            &token_blob,
+                            &transfer_id,
+                            &(transfer.block_number as i64),
+                        ],
+                    ).await?;
+                } else {
+                    if transfer.from != Felt::ZERO {
+                        tx.execute(
+                            "INSERT INTO erc1155.token_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                             VALUES ($1, $2, $3, 'sent', $4)",
+                            &[
+                                &from_blob,
+                                &token_blob,
+                                &transfer_id,
+                                &(transfer.block_number as i64),
+                            ],
+                        ).await?;
+                    }
+                    if transfer.to != Felt::ZERO {
+                        tx.execute(
+                            "INSERT INTO erc1155.token_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                             VALUES ($1, $2, $3, 'received', $4)",
+                            &[
+                                &to_blob,
+                                &token_blob,
+                                &transfer_id,
+                                &(transfer.block_number as i64),
+                            ],
+                        ).await?;
+                    }
+                }
+            }
+        }
+
+        tx.commit().await?;
+        Ok(inserted)
+    }
+
+    async fn pg_insert_operator_approvals_batch(
+        &self,
+        approvals: &[OperatorApprovalData],
+    ) -> Result<usize> {
+        if approvals.is_empty() {
+            return Ok(0);
+        }
+        let mut client = self.pg_client().await?;
+        let tx = client.transaction().await?;
+        let mut inserted = 0usize;
+
+        for approval in approvals {
+            tx.execute(
+                "INSERT INTO erc1155.token_operators (token, owner, operator, approved, block_number, tx_hash, timestamp)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (token, owner, operator) DO UPDATE SET
+                    approved = EXCLUDED.approved,
+                    block_number = EXCLUDED.block_number,
+                    tx_hash = EXCLUDED.tx_hash,
+                    timestamp = EXCLUDED.timestamp",
+                &[
+                    &felt_to_blob(approval.token),
+                    &felt_to_blob(approval.owner),
+                    &felt_to_blob(approval.operator),
+                    &((approval.approved as i32) as i64),
+                    &(approval.block_number as i64),
+                    &felt_to_blob(approval.tx_hash),
+                    &approval
+                        .timestamp
+                        .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+                ],
+            ).await?;
+            inserted += 1;
+        }
+
+        tx.commit().await?;
+        Ok(inserted)
+    }
+
+    async fn pg_upsert_token_uris_batch(&self, uris: &[TokenUriData]) -> Result<usize> {
+        if uris.is_empty() {
+            return Ok(0);
+        }
+        let mut client = self.pg_client().await?;
+        let tx = client.transaction().await?;
+        let mut updated = 0usize;
+
+        for entry in uris {
+            let rows = tx
+                .execute(
+                    "INSERT INTO erc1155.token_uris (token, token_id, uri, updated_at)
+                 VALUES ($1, $2, $3, EXTRACT(EPOCH FROM NOW())::BIGINT)
+                 ON CONFLICT(token, token_id) DO UPDATE SET
+                    uri = EXCLUDED.uri,
+                    updated_at = EXCLUDED.updated_at",
+                    &[
+                        &felt_to_blob(entry.token),
+                        &u256_to_blob(entry.token_id),
+                        &entry.uri,
+                    ],
+                )
+                .await?;
+            if rows > 0 {
+                updated += 1;
+            }
+        }
+
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn pg_get_transfers_filtered(
+        &self,
+        wallet: Option<Felt>,
+        from: Option<Felt>,
+        to: Option<Felt>,
+        operator: Option<Felt>,
+        tokens: &[Felt],
+        token_ids: &[U256],
+        block_from: Option<u64>,
+        block_to: Option<u64>,
+        cursor: Option<TransferCursor>,
+        limit: u32,
+    ) -> Result<(Vec<TokenTransferData>, Option<TransferCursor>)> {
+        let client = self.pg_client().await?;
+        let mut query = String::new();
+        let mut params: Vec<Box<dyn PgToSql + Sync + Send>> = Vec::new();
+
+        if let Some(wallet_addr) = wallet {
+            query.push_str(
+                "SELECT DISTINCT t.id, t.token, t.operator, t.from_addr, t.to_addr, t.token_id, t.amount, t.is_batch, t.batch_index, t.block_number, t.tx_hash, t.timestamp
+                 FROM erc1155.token_wallet_activity wa
+                 JOIN erc1155.token_transfers t ON wa.transfer_id = t.id
+                 WHERE wa.wallet_address = ",
+            );
+            query.push_str(&Self::pg_next_param(&mut params, felt_to_blob(wallet_addr)));
+            if !tokens.is_empty() {
+                let list = tokens
+                    .iter()
+                    .map(|token| Self::pg_next_param(&mut params, felt_to_blob(*token)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                query.push_str(&format!(" AND wa.token IN ({list})"));
+            }
+        } else {
+            query.push_str(
+                "SELECT t.id, t.token, t.operator, t.from_addr, t.to_addr, t.token_id, t.amount, t.is_batch, t.batch_index, t.block_number, t.tx_hash, t.timestamp
+                 FROM erc1155.token_transfers t
+                 WHERE 1=1",
+            );
+            if let Some(from_addr) = from {
+                query.push_str(" AND t.from_addr = ");
+                query.push_str(&Self::pg_next_param(&mut params, felt_to_blob(from_addr)));
+            }
+            if let Some(to_addr) = to {
+                query.push_str(" AND t.to_addr = ");
+                query.push_str(&Self::pg_next_param(&mut params, felt_to_blob(to_addr)));
+            }
+            if let Some(op_addr) = operator {
+                query.push_str(" AND t.operator = ");
+                query.push_str(&Self::pg_next_param(&mut params, felt_to_blob(op_addr)));
+            }
+            if !tokens.is_empty() {
+                let list = tokens
+                    .iter()
+                    .map(|token| Self::pg_next_param(&mut params, felt_to_blob(*token)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                query.push_str(&format!(" AND t.token IN ({list})"));
+            }
+        }
+
+        if !token_ids.is_empty() {
+            let list = token_ids
+                .iter()
+                .map(|tid| Self::pg_next_param(&mut params, u256_to_blob(*tid)))
+                .collect::<Vec<_>>()
+                .join(",");
+            query.push_str(&format!(" AND t.token_id IN ({list})"));
+        }
+        if let Some(block_min) = block_from {
+            query.push_str(" AND t.block_number >= ");
+            query.push_str(&Self::pg_next_param(&mut params, block_min as i64));
+        }
+        if let Some(block_max) = block_to {
+            query.push_str(" AND t.block_number <= ");
+            query.push_str(&Self::pg_next_param(&mut params, block_max as i64));
+        }
+        if let Some(c) = cursor {
+            let p1 = Self::pg_next_param(&mut params, c.block_number as i64);
+            let p2 = Self::pg_next_param(&mut params, c.block_number as i64);
+            let p3 = Self::pg_next_param(&mut params, c.id);
+            query.push_str(&format!(
+                " AND (t.block_number < {p1} OR (t.block_number = {p2} AND t.id < {p3}))"
+            ));
+        }
+        query.push_str(" ORDER BY t.block_number DESC, t.id DESC LIMIT ");
+        query.push_str(&Self::pg_next_param(&mut params, limit as i64));
+
+        let refs: Vec<&(dyn PgToSql + Sync)> = params
+            .iter()
+            .map(|p| p.as_ref() as &(dyn PgToSql + Sync))
+            .collect();
+        let rows = client.query(&query, &refs).await?;
+        let transfers: Vec<TokenTransferData> = rows
+            .into_iter()
+            .map(|row| TokenTransferData {
+                id: Some(row.get::<usize, i64>(0)),
+                token: blob_to_felt(&row.get::<usize, Vec<u8>>(1)),
+                operator: blob_to_felt(&row.get::<usize, Vec<u8>>(2)),
+                from: blob_to_felt(&row.get::<usize, Vec<u8>>(3)),
+                to: blob_to_felt(&row.get::<usize, Vec<u8>>(4)),
+                token_id: blob_to_u256(&row.get::<usize, Vec<u8>>(5)),
+                amount: blob_to_u256(&row.get::<usize, Vec<u8>>(6)),
+                is_batch: row.get::<usize, i64>(7) != 0,
+                batch_index: row.get::<usize, i64>(8) as u32,
+                block_number: row.get::<usize, i64>(9) as u64,
+                tx_hash: blob_to_felt(&row.get::<usize, Vec<u8>>(10)),
+                timestamp: Some(row.get::<usize, i64>(11)),
+            })
+            .collect();
+
+        let next_cursor = if transfers.len() == limit as usize {
+            transfers.last().map(|t| TransferCursor {
+                block_number: t.block_number,
+                id: t.id.unwrap_or_default(),
+            })
+        } else {
+            None
+        };
+
+        Ok((transfers, next_cursor))
+    }
+
+    async fn pg_get_transfer_count(&self) -> Result<u64> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one("SELECT COUNT(*) FROM erc1155.token_transfers", &[])
+            .await?;
+        Ok(row.get::<usize, i64>(0) as u64)
+    }
+
+    async fn pg_get_token_count(&self) -> Result<u64> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one(
+                "SELECT COUNT(DISTINCT token) FROM erc1155.token_transfers",
+                &[],
+            )
+            .await?;
+        Ok(row.get::<usize, i64>(0) as u64)
+    }
+
+    async fn pg_get_token_id_count(&self) -> Result<u64> {
+        let client = self.pg_client().await?;
+        let row = client.query_one(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT token, token_id FROM erc1155.token_transfers) t",
+            &[],
+        ).await?;
+        Ok(row.get::<usize, i64>(0) as u64)
+    }
+
+    async fn pg_get_latest_block(&self) -> Result<Option<u64>> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one("SELECT MAX(block_number) FROM erc1155.token_transfers", &[])
+            .await?;
+        let v: Option<i64> = row.get(0);
+        Ok(v.map(|x| x as u64))
+    }
+
+    async fn pg_get_balance(
+        &self,
+        contract: Felt,
+        wallet: Felt,
+        token_id: U256,
+    ) -> Result<Option<U256>> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_opt(
+                "SELECT balance FROM erc1155.erc1155_balances
+             WHERE contract = $1 AND wallet = $2 AND token_id = $3",
+                &[
+                    &felt_to_blob(contract),
+                    &felt_to_blob(wallet),
+                    &u256_to_blob(token_id),
+                ],
+            )
+            .await?;
+        Ok(row.map(|r| blob_to_u256(&r.get::<usize, Vec<u8>>(0))))
+    }
+
+    async fn pg_get_balance_with_block(
+        &self,
+        contract: Felt,
+        wallet: Felt,
+        token_id: U256,
+    ) -> Result<Option<(U256, u64)>> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_opt(
+                "SELECT balance, last_block FROM erc1155.erc1155_balances
+             WHERE contract = $1 AND wallet = $2 AND token_id = $3",
+                &[
+                    &felt_to_blob(contract),
+                    &felt_to_blob(wallet),
+                    &u256_to_blob(token_id),
+                ],
+            )
+            .await?;
+        Ok(row.map(|r| {
+            (
+                blob_to_u256(&r.get::<usize, Vec<u8>>(0)),
+                r.get::<usize, i64>(1) as u64,
+            )
+        }))
+    }
+
+    async fn pg_get_balances_batch(
+        &self,
+        tuples: &[(Felt, Felt, U256)],
+    ) -> Result<HashMap<(Felt, Felt, U256), U256>> {
+        if tuples.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let client = self.pg_client().await?;
+        let mut result = HashMap::new();
+
+        for (contract, wallet, token_id) in tuples {
+            let row = client
+                .query_opt(
+                    "SELECT balance FROM erc1155.erc1155_balances
+                 WHERE contract = $1 AND wallet = $2 AND token_id = $3",
+                    &[
+                        &felt_to_blob(*contract),
+                        &felt_to_blob(*wallet),
+                        &u256_to_blob(*token_id),
+                    ],
+                )
+                .await?;
+
+            if let Some(row) = row {
+                result.insert(
+                    (*contract, *wallet, *token_id),
+                    blob_to_u256(&row.get::<usize, Vec<u8>>(0)),
+                );
+            }
+        }
+
+        Ok(result)
+    }
+
+    async fn pg_apply_transfers_with_adjustments(
+        &self,
+        transfers: &[TokenTransferData],
+        adjustments: &HashMap<(Felt, Felt, U256), U256>,
+    ) -> Result<()> {
+        if transfers.is_empty() {
+            return Ok(());
+        }
+
+        let mut client = self.pg_client().await?;
+        let tx = client.transaction().await?;
+        let mut balance_cache: HashMap<(Felt, Felt, U256), U256> = HashMap::new();
+
+        for transfer in transfers {
+            if transfer.from != Felt::ZERO {
+                let key = (transfer.token, transfer.from, transfer.token_id);
+                if let std::collections::hash_map::Entry::Vacant(e) = balance_cache.entry(key) {
+                    let row = tx
+                        .query_opt(
+                            "SELECT balance FROM erc1155.erc1155_balances
+                         WHERE contract = $1 AND wallet = $2 AND token_id = $3",
+                            &[
+                                &felt_to_blob(transfer.token),
+                                &felt_to_blob(transfer.from),
+                                &u256_to_blob(transfer.token_id),
+                            ],
+                        )
+                        .await?;
+                    let balance = row
+                        .map(|r| blob_to_u256(&r.get::<usize, Vec<u8>>(0)))
+                        .unwrap_or(U256::from(0u64));
+                    e.insert(balance);
+                }
+            }
+
+            if transfer.to != Felt::ZERO {
+                let key = (transfer.token, transfer.to, transfer.token_id);
+                if let std::collections::hash_map::Entry::Vacant(e) = balance_cache.entry(key) {
+                    let row = tx
+                        .query_opt(
+                            "SELECT balance FROM erc1155.erc1155_balances
+                         WHERE contract = $1 AND wallet = $2 AND token_id = $3",
+                            &[
+                                &felt_to_blob(transfer.token),
+                                &felt_to_blob(transfer.to),
+                                &u256_to_blob(transfer.token_id),
+                            ],
+                        )
+                        .await?;
+                    let balance = row
+                        .map(|r| blob_to_u256(&r.get::<usize, Vec<u8>>(0)))
+                        .unwrap_or(U256::from(0u64));
+                    e.insert(balance);
+                }
+            }
+        }
+
+        let mut adjustments_to_record: Vec<Erc1155BalanceAdjustment> = Vec::new();
+        for ((contract, wallet, token_id), actual_balance) in adjustments {
+            let key = (*contract, *wallet, *token_id);
+            let computed = balance_cache.get(&key).copied().unwrap_or(U256::from(0u64));
+
+            if computed != *actual_balance {
+                let triggering_transfer = transfers
+                    .iter()
+                    .find(|t| t.token == *contract && t.from == *wallet && t.token_id == *token_id);
+
+                if let Some(transfer) = triggering_transfer {
+                    adjustments_to_record.push(Erc1155BalanceAdjustment {
+                        contract: *contract,
+                        wallet: *wallet,
+                        token_id: *token_id,
+                        computed_balance: computed,
+                        actual_balance: *actual_balance,
+                        adjusted_at_block: transfer.block_number,
+                        tx_hash: transfer.tx_hash,
+                    });
+                }
+            }
+
+            balance_cache.insert(key, *actual_balance);
+        }
+
+        let mut last_block_per_key: HashMap<(Felt, Felt, U256), u64> = HashMap::new();
+        for transfer in transfers {
+            if transfer.from != Felt::ZERO {
+                let key = (transfer.token, transfer.from, transfer.token_id);
+                let current = balance_cache.get(&key).copied().unwrap_or(U256::from(0u64));
+                let new_balance = if current >= transfer.amount {
+                    current - transfer.amount
+                } else {
+                    U256::from(0u64)
+                };
+                balance_cache.insert(key, new_balance);
+                last_block_per_key.insert(key, transfer.block_number);
+            }
+
+            if transfer.to != Felt::ZERO {
+                let key = (transfer.token, transfer.to, transfer.token_id);
+                let current = balance_cache.get(&key).copied().unwrap_or(U256::from(0u64));
+                let new_balance = current + transfer.amount;
+                balance_cache.insert(key, new_balance);
+                last_block_per_key.insert(key, transfer.block_number);
+            }
+        }
+
+        for ((contract, wallet, token_id), balance) in &balance_cache {
+            let last_block = last_block_per_key
+                .get(&(*contract, *wallet, *token_id))
+                .copied()
+                .unwrap_or(0);
+
+            tx.execute(
+                "INSERT INTO erc1155.erc1155_balances (contract, wallet, token_id, balance, last_block)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT(contract, wallet, token_id) DO UPDATE SET
+                    balance = EXCLUDED.balance,
+                    last_block = EXCLUDED.last_block,
+                    updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT",
+                &[
+                    &felt_to_blob(*contract),
+                    &felt_to_blob(*wallet),
+                    &u256_to_blob(*token_id),
+                    &u256_to_blob(*balance),
+                    &(last_block as i64),
+                ],
+            ).await?;
+        }
+
+        for adj in &adjustments_to_record {
+            tx.execute(
+                "INSERT INTO erc1155.erc1155_balance_adjustments
+                 (contract, wallet, token_id, computed_balance, actual_balance, adjusted_at_block, tx_hash)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                &[
+                    &felt_to_blob(adj.contract),
+                    &felt_to_blob(adj.wallet),
+                    &u256_to_blob(adj.token_id),
+                    &u256_to_blob(adj.computed_balance),
+                    &u256_to_blob(adj.actual_balance),
+                    &(adj.adjusted_at_block as i64),
+                    &felt_to_blob(adj.tx_hash),
+                ],
+            ).await?;
+        }
+
+        if !adjustments_to_record.is_empty() {
+            tracing::info!(
+                target: "torii_erc1155::storage",
+                count = adjustments_to_record.len(),
+                "Applied balance adjustments (genesis/airdrop detection)"
+            );
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn pg_get_adjustment_count(&self) -> Result<u64> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one(
+                "SELECT COUNT(*) FROM erc1155.erc1155_balance_adjustments",
+                &[],
+            )
+            .await?;
+        Ok(row.get::<usize, i64>(0) as u64)
+    }
+
+    async fn pg_get_wallet_count(&self) -> Result<u64> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one(
+                "SELECT COUNT(DISTINCT wallet) FROM erc1155.erc1155_balances",
+                &[],
+            )
+            .await?;
+        Ok(row.get::<usize, i64>(0) as u64)
+    }
+
+    async fn pg_has_token_metadata(&self, token: Felt) -> Result<bool> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one(
+                "SELECT COUNT(*) FROM erc1155.token_metadata WHERE token = $1",
+                &[&felt_to_blob(token)],
+            )
+            .await?;
+        Ok(row.get::<usize, i64>(0) > 0)
+    }
+
+    async fn pg_upsert_token_metadata(
+        &self,
+        token: Felt,
+        name: Option<&str>,
+        symbol: Option<&str>,
+        total_supply: Option<U256>,
+    ) -> Result<()> {
+        let client = self.pg_client().await?;
+        client.execute(
+            "INSERT INTO erc1155.token_metadata (token, name, symbol, total_supply)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (token) DO UPDATE SET
+                name = COALESCE(EXCLUDED.name, erc1155.token_metadata.name),
+                symbol = COALESCE(EXCLUDED.symbol, erc1155.token_metadata.symbol),
+                total_supply = COALESCE(EXCLUDED.total_supply, erc1155.token_metadata.total_supply)",
+            &[&felt_to_blob(token), &name, &symbol, &total_supply.map(u256_to_blob)],
+        ).await?;
+        Ok(())
+    }
+
+    async fn pg_get_token_metadata(
+        &self,
+        token: Felt,
+    ) -> Result<Option<(Option<String>, Option<String>, Option<U256>)>> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_opt(
+                "SELECT name, symbol, total_supply FROM erc1155.token_metadata WHERE token = $1",
+                &[&felt_to_blob(token)],
+            )
+            .await?;
+        Ok(row.map(|r| {
+            let supply: Option<Vec<u8>> = r.get(2);
+            (r.get(0), r.get(1), supply.map(|b| blob_to_u256(&b)))
+        }))
+    }
+
+    async fn pg_get_all_token_metadata(
+        &self,
+    ) -> Result<Vec<(Felt, Option<String>, Option<String>, Option<U256>)>> {
+        let client = self.pg_client().await?;
+        let rows = client
+            .query(
+                "SELECT token, name, symbol, total_supply
+             FROM erc1155.token_metadata
+             ORDER BY token ASC",
+                &[],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let supply: Option<Vec<u8>> = row.get(3);
+                (
+                    blob_to_felt(&row.get::<usize, Vec<u8>>(0)),
+                    row.get(1),
+                    row.get(2),
+                    supply.map(|b| blob_to_u256(&b)),
+                )
+            })
+            .collect())
+    }
+
+    async fn pg_get_token_metadata_paginated(
+        &self,
+        cursor: Option<Felt>,
+        limit: u32,
+    ) -> Result<(
+        Vec<(Felt, Option<String>, Option<String>, Option<U256>)>,
+        Option<Felt>,
+    )> {
+        let client = self.pg_client().await?;
+        let fetch_limit = limit.clamp(1, 1000) as i64 + 1;
+        let rows = if let Some(cursor_token) = cursor {
+            client
+                .query(
+                    "SELECT token, name, symbol, total_supply
+                 FROM erc1155.token_metadata
+                 WHERE token > $1
+                 ORDER BY token ASC
+                 LIMIT $2",
+                    &[&felt_to_blob(cursor_token), &fetch_limit],
+                )
+                .await?
+        } else {
+            client
+                .query(
+                    "SELECT token, name, symbol, total_supply
+                 FROM erc1155.token_metadata
+                 ORDER BY token ASC
+                 LIMIT $1",
+                    &[&fetch_limit],
+                )
+                .await?
+        };
+
+        let mut out: Vec<(Felt, Option<String>, Option<String>, Option<U256>)> = rows
+            .into_iter()
+            .map(|row| {
+                let supply: Option<Vec<u8>> = row.get(3);
+                (
+                    blob_to_felt(&row.get::<usize, Vec<u8>>(0)),
+                    row.get(1),
+                    row.get(2),
+                    supply.map(|b| blob_to_u256(&b)),
+                )
+            })
+            .collect();
+
+        let capped = limit.clamp(1, 1000) as usize;
+        let next_cursor = if out.len() > capped {
+            let next = out[capped].0;
+            out.truncate(capped);
+            Some(next)
+        } else {
+            None
+        };
+        Ok((out, next_cursor))
+    }
+
+    async fn pg_has_token_uri(&self, token: Felt, token_id: U256) -> Result<bool> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one(
+                "SELECT COUNT(*) FROM erc1155.token_uris WHERE token = $1 AND token_id = $2",
+                &[&felt_to_blob(token), &u256_to_blob(token_id)],
+            )
+            .await?;
+        Ok(row.get::<usize, i64>(0) > 0)
+    }
 }
 
 #[async_trait::async_trait]
 impl TokenUriStore for Erc1155Storage {
     async fn store_token_uri(&self, result: &TokenUriResult) -> Result<()> {
+        if self.backend == StorageBackend::Postgres {
+            let mut client = self.pg_client().await?;
+            let tx = client.transaction().await?;
+
+            let token_blob = felt_to_blob(result.contract);
+            let token_id_blob = u256_to_blob(result.token_id);
+
+            tx.execute(
+                "INSERT INTO erc1155.token_uris (token, token_id, uri, metadata_json, updated_at)
+                 VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::BIGINT)
+                 ON CONFLICT(token, token_id) DO UPDATE SET
+                    uri = EXCLUDED.uri,
+                    metadata_json = EXCLUDED.metadata_json,
+                    updated_at = EXCLUDED.updated_at",
+                &[
+                    &token_blob,
+                    &token_id_blob,
+                    &result.uri.as_deref(),
+                    &result.metadata_json.as_deref(),
+                ],
+            )
+            .await?;
+
+            tx.execute(
+                "DELETE FROM erc1155.token_attributes WHERE token = $1 AND token_id = $2",
+                &[&token_blob, &token_id_blob],
+            )
+            .await?;
+
+            if let Some(metadata_json) = &result.metadata_json {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(metadata_json) {
+                    if let Some(attrs) = value.get("attributes").and_then(|a| a.as_array()) {
+                        for attr in attrs {
+                            let key = attr
+                                .get("trait_type")
+                                .or_else(|| attr.get("key"))
+                                .and_then(|v| v.as_str());
+                            let value = attr.get("value").and_then(|v| {
+                                v.as_str().map(ToOwned::to_owned).or_else(|| {
+                                    if v.is_null() {
+                                        None
+                                    } else {
+                                        Some(v.to_string())
+                                    }
+                                })
+                            });
+
+                            if let (Some(key), Some(value)) = (key, value) {
+                                tx.execute(
+                                    "INSERT INTO erc1155.token_attributes (token, token_id, key, value)
+                                     VALUES ($1, $2, $3, $4)
+                                     ON CONFLICT (token, token_id, key) DO UPDATE SET value = EXCLUDED.value",
+                                    &[&token_blob, &token_id_blob, &key, &value],
+                                ).await?;
+                            }
+                        }
+                    }
+                }
+            }
+
+            tx.commit().await?;
+            return Ok(());
+        }
+
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
 

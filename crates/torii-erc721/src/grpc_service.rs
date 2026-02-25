@@ -155,6 +155,7 @@ impl Erc721Trait for Erc721Service {
                 cursor,
                 limit,
             )
+            .await
             .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
 
         let proto_transfers: Vec<NftTransfer> =
@@ -202,6 +203,7 @@ impl Erc721Trait for Erc721Service {
         let (ownership, next_cursor) = self
             .storage
             .get_ownership_by_owner(owner, &tokens, cursor, limit)
+            .await
             .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
 
         let proto_ownership: Vec<Ownership> = ownership
@@ -239,6 +241,7 @@ impl Erc721Trait for Erc721Service {
         let owner = self
             .storage
             .get_owner(token, token_id)
+            .await
             .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
 
         Ok(Response::new(GetOwnerResponse {
@@ -257,7 +260,7 @@ impl Erc721Trait for Erc721Service {
             let token = bytes_to_felt(&token_bytes)
                 .ok_or_else(|| Status::invalid_argument("Invalid token address"))?;
 
-            let entries = match self.storage.get_token_metadata(token) {
+            let entries = match self.storage.get_token_metadata(token).await {
                 Ok(Some((name, symbol, total_supply))) => vec![TokenMetadataEntry {
                     token: token.to_bytes_be().to_vec(),
                     name,
@@ -284,6 +287,7 @@ impl Erc721Trait for Erc721Service {
         let (all, next_cursor) = self
             .storage
             .get_token_metadata_paginated(cursor, limit)
+            .await
             .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
 
         let entries = all
@@ -359,21 +363,25 @@ impl Erc721Trait for Erc721Service {
         let total_transfers = self
             .storage
             .get_transfer_count()
+            .await
             .map_err(|e| Status::internal(format!("Failed to get transfer count: {e}")))?;
 
         let unique_tokens = self
             .storage
             .get_token_count()
+            .await
             .map_err(|e| Status::internal(format!("Failed to get token count: {e}")))?;
 
         let unique_nfts = self
             .storage
             .get_nft_count()
+            .await
             .map_err(|e| Status::internal(format!("Failed to get NFT count: {e}")))?;
 
         let latest_block = self
             .storage
             .get_latest_block()
+            .await
             .map_err(|e| Status::internal(format!("Failed to get latest block: {e}")))?
             .unwrap_or(0);
 

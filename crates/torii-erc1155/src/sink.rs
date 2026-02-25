@@ -338,7 +338,7 @@ impl Sink for Erc1155Sink {
         if let Some(ref fetcher) = self.metadata_fetcher {
             let new_tokens: HashSet<Felt> = transfers.iter().map(|t| t.token).collect();
             for token in new_tokens {
-                match self.storage.has_token_metadata(token) {
+                match self.storage.has_token_metadata(token).await {
                     Ok(exists) => {
                         if exists {
                             continue;
@@ -352,12 +352,16 @@ impl Sink for Erc1155Sink {
                             symbol = ?meta.symbol,
                             "Fetched token metadata"
                         );
-                        if let Err(e) = self.storage.upsert_token_metadata(
-                            token,
-                            meta.name.as_deref(),
-                            meta.symbol.as_deref(),
-                            meta.total_supply,
-                        ) {
+                        if let Err(e) = self
+                            .storage
+                            .upsert_token_metadata(
+                                token,
+                                meta.name.as_deref(),
+                                meta.symbol.as_deref(),
+                                meta.total_supply,
+                            )
+                            .await
+                        {
                             tracing::warn!(
                                 target: "torii_erc1155::sink",
                                 error = %e,
@@ -403,6 +407,7 @@ impl Sink for Erc1155Sink {
                 match self
                     .storage
                     .has_token_uri(transfer.token, transfer.token_id)
+                    .await
                 {
                     Ok(false) => {
                         sender
@@ -427,7 +432,7 @@ impl Sink for Erc1155Sink {
 
         // Batch insert transfers
         if !transfers.is_empty() {
-            let transfer_count = match self.storage.insert_transfers_batch(&transfers) {
+            let transfer_count = match self.storage.insert_transfers_batch(&transfers).await {
                 Ok(count) => count,
                 Err(e) => {
                     tracing::error!(
@@ -454,7 +459,11 @@ impl Sink for Erc1155Sink {
                 // Update balances if balance tracking is enabled
                 if let Some(ref fetcher) = self.balance_fetcher {
                     // Step 1: Check which balances need adjustment (would go negative)
-                    let adjustment_requests = match self.storage.check_balances_batch(&transfers) {
+                    let adjustment_requests = match self
+                        .storage
+                        .check_balances_batch(&transfers)
+                        .await
+                    {
                         Ok(requests) => requests,
                         Err(e) => {
                             tracing::warn!(
@@ -502,6 +511,7 @@ impl Sink for Erc1155Sink {
                     if let Err(e) = self
                         .storage
                         .apply_transfers_with_adjustments(&transfers, &adjustments)
+                        .await
                     {
                         tracing::error!(
                             target: "torii_erc1155::sink",
@@ -565,6 +575,7 @@ impl Sink for Erc1155Sink {
             match self
                 .storage
                 .insert_operator_approvals_batch(&operator_approvals)
+                .await
             {
                 Ok(count) => {
                     inserted_operator_approvals = count as u64;
@@ -591,7 +602,7 @@ impl Sink for Erc1155Sink {
 
         // Batch upsert token URI updates
         if !uri_updates.is_empty() {
-            match self.storage.upsert_token_uris_batch(&uri_updates) {
+            match self.storage.upsert_token_uris_batch(&uri_updates).await {
                 Ok(count) => {
                     inserted_uri_updates = count as u64;
                     self.total_uri_updates

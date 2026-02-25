@@ -305,7 +305,7 @@ impl Sink for Erc20Sink {
             }
 
             for token in new_tokens {
-                match self.storage.has_token_metadata(token) {
+                match self.storage.has_token_metadata(token).await {
                     Ok(exists) => {
                         if exists {
                             continue;
@@ -320,12 +320,16 @@ impl Sink for Erc20Sink {
                             decimals = ?meta.decimals,
                             "Fetched token metadata"
                         );
-                        if let Err(e) = self.storage.upsert_token_metadata(
-                            token,
-                            meta.name.as_deref(),
-                            meta.symbol.as_deref(),
-                            meta.decimals,
-                        ) {
+                        if let Err(e) = self
+                            .storage
+                            .upsert_token_metadata(
+                                token,
+                                meta.name.as_deref(),
+                                meta.symbol.as_deref(),
+                                meta.decimals,
+                            )
+                            .await
+                        {
                             tracing::warn!(
                                 target: "torii_erc20::sink",
                                 token = %format!("{:#x}", token),
@@ -372,7 +376,7 @@ impl Sink for Erc20Sink {
 
         // Batch insert transfers
         if !transfers.is_empty() {
-            let transfer_count = match self.storage.insert_transfers_batch(&transfers) {
+            let transfer_count = match self.storage.insert_transfers_batch(&transfers).await {
                 Ok(count) => count,
                 Err(e) => {
                     tracing::error!(
@@ -399,7 +403,11 @@ impl Sink for Erc20Sink {
                 // Update balances if balance tracking is enabled
                 if let Some(ref fetcher) = self.balance_fetcher {
                     // Step 1: Check which balances need adjustment (would go negative)
-                    let adjustment_requests = match self.storage.check_balances_batch(&transfers) {
+                    let adjustment_requests = match self
+                        .storage
+                        .check_balances_batch(&transfers)
+                        .await
+                    {
                         Ok(requests) => requests,
                         Err(e) => {
                             tracing::warn!(
@@ -444,6 +452,7 @@ impl Sink for Erc20Sink {
                     if let Err(e) = self
                         .storage
                         .apply_transfers_with_adjustments(&transfers, &adjustments)
+                        .await
                     {
                         tracing::error!(
                             target: "torii_erc20::sink",
@@ -500,7 +509,7 @@ impl Sink for Erc20Sink {
 
         // Batch insert approvals
         if !approvals.is_empty() {
-            let approval_count = match self.storage.insert_approvals_batch(&approvals) {
+            let approval_count = match self.storage.insert_approvals_batch(&approvals).await {
                 Ok(count) => count,
                 Err(e) => {
                     tracing::error!(

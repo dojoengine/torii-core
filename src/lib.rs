@@ -111,6 +111,12 @@ pub struct ToriiConfig {
     /// Defaults to current directory if not specified.
     pub database_root: PathBuf,
 
+    /// Optional explicit engine database URL/path.
+    ///
+    /// If set, Torii uses this value directly when creating `EngineDb`.
+    /// This can be a PostgreSQL URL (`postgres://...`) or SQLite path/URL.
+    pub engine_database_url: Option<String>,
+
     /// Contract filter (explicit mappings + blacklist).
     pub contract_filter: ContractFilter,
 
@@ -172,6 +178,7 @@ pub struct ToriiConfigBuilder {
     sample_events: Vec<starknet::core::types::EmittedEvent>,
     extractor: Option<Box<dyn Extractor>>,
     database_root: Option<PathBuf>,
+    engine_database_url: Option<String>,
     contract_filter: Option<ContractFilter>,
     identification_rules: Vec<Box<dyn IdentificationRule>>,
     registry_cache: Option<
@@ -304,6 +311,17 @@ impl ToriiConfigBuilder {
     /// Defaults to current directory if not specified.
     pub fn database_root(mut self, path: impl Into<PathBuf>) -> Self {
         self.database_root = Some(path.into());
+        self
+    }
+
+    /// Sets an explicit engine database URL/path.
+    ///
+    /// Examples:
+    /// - `postgres://user:pass@localhost:5432/torii`
+    /// - `sqlite::memory:`
+    /// - `./torii-data/engine.db`
+    pub fn engine_database_url(mut self, url: impl Into<String>) -> Self {
+        self.engine_database_url = Some(url.into());
         self
     }
 
@@ -479,6 +497,7 @@ impl ToriiConfigBuilder {
             sample_events: self.sample_events,
             extractor: self.extractor,
             database_root: self.database_root.unwrap_or_else(|| PathBuf::from(".")),
+            engine_database_url: self.engine_database_url,
             contract_filter,
             identification_rules: self.identification_rules,
             registry_cache: self.registry_cache,
@@ -518,9 +537,15 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
     let multi_sink = Arc::new(MultiSink::new(initialized_sinks));
 
     // Create EngineDb (needed by DecoderContext)
-    let engine_db_path = config.database_root.join("engine.db");
+    let engine_db_path = config.engine_database_url.clone().unwrap_or_else(|| {
+        config
+            .database_root
+            .join("engine.db")
+            .to_string_lossy()
+            .to_string()
+    });
     let engine_db_config = etl::engine_db::EngineDbConfig {
-        path: engine_db_path.to_string_lossy().to_string(),
+        path: engine_db_path,
     };
     let engine_db = etl::EngineDb::new(engine_db_config).await?;
     let engine_db = Arc::new(engine_db);

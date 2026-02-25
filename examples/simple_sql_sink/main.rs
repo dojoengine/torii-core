@@ -18,7 +18,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Torii SQL Sink Example - Starting Server...\n");
 
     // 1. Create sink
-    let sql_sink = SqlSink::new("sqlite::memory:").await?;
+    let database_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite::memory:".to_string());
+    let sql_sink = SqlSink::new(&database_url).await?;
 
     // 2. Get the gRPC service implementation
     let sql_grpc_service = sql_sink.get_grpc_service_impl();

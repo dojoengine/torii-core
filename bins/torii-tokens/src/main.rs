@@ -105,6 +105,9 @@ async fn run_indexer(config: Config) -> Result<()> {
         tracing::info!("To block: following chain head");
     }
     tracing::info!("Database directory: {}", config.db_dir);
+    if let Some(url) = &config.database_url {
+        tracing::info!("Engine database URL: {}", url);
+    }
 
     if config.mode == ExtractionMode::Event && !config.has_tokens() {
         tracing::error!(
@@ -228,7 +231,10 @@ async fn run_indexer(config: Config) -> Result<()> {
     let db_dir = Path::new(&config.db_dir);
     std::fs::create_dir_all(db_dir)?;
 
-    let engine_db_path = db_dir.join("engine.db").to_string_lossy().to_string();
+    let engine_db_path = config
+        .database_url
+        .clone()
+        .unwrap_or_else(|| db_dir.join("engine.db").to_string_lossy().to_string());
     let engine_db_config = torii::etl::engine_db::EngineDbConfig {
         path: engine_db_path,
     };
@@ -253,6 +259,12 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
         .database_root(&config.db_dir)
+        .engine_database_url(
+            config
+                .database_url
+                .clone()
+                .unwrap_or_else(|| db_dir.join("engine.db").to_string_lossy().to_string()),
+        )
         .with_extractor(extractor)
         .with_contract_identifier(registry);
 
@@ -270,8 +282,11 @@ async fn run_indexer(config: Config) -> Result<()> {
     if create_erc20 {
         enabled_types.push("ERC20");
 
-        let erc20_db_path = db_dir.join("erc20.db").to_string_lossy().to_string();
-        let storage = Arc::new(Erc20Storage::new(&erc20_db_path)?);
+        let erc20_db_path = config
+            .database_url
+            .clone()
+            .unwrap_or_else(|| db_dir.join("erc20.db").to_string_lossy().to_string());
+        let storage = Arc::new(Erc20Storage::new(&erc20_db_path).await?);
         tracing::info!("ERC20 database initialized: {}", erc20_db_path);
 
         let decoder = Arc::new(Erc20Decoder::new());
@@ -307,8 +322,11 @@ async fn run_indexer(config: Config) -> Result<()> {
     if create_erc721 {
         enabled_types.push("ERC721");
 
-        let erc721_db_path = db_dir.join("erc721.db").to_string_lossy().to_string();
-        let storage = Arc::new(Erc721Storage::new(&erc721_db_path)?);
+        let erc721_db_path = config
+            .database_url
+            .clone()
+            .unwrap_or_else(|| db_dir.join("erc721.db").to_string_lossy().to_string());
+        let storage = Arc::new(Erc721Storage::new(&erc721_db_path).await?);
         tracing::info!("ERC721 database initialized: {}", erc721_db_path);
 
         let decoder = Arc::new(Erc721Decoder::new());
@@ -354,8 +372,11 @@ async fn run_indexer(config: Config) -> Result<()> {
     if create_erc1155 {
         enabled_types.push("ERC1155");
 
-        let erc1155_db_path = db_dir.join("erc1155.db").to_string_lossy().to_string();
-        let storage = Arc::new(Erc1155Storage::new(&erc1155_db_path)?);
+        let erc1155_db_path = config
+            .database_url
+            .clone()
+            .unwrap_or_else(|| db_dir.join("erc1155.db").to_string_lossy().to_string());
+        let storage = Arc::new(Erc1155Storage::new(&erc1155_db_path).await?);
         tracing::info!("ERC1155 database initialized: {}", erc1155_db_path);
 
         let decoder = Arc::new(Erc1155Decoder::new());

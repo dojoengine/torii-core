@@ -62,6 +62,9 @@ async fn main() -> Result<()> {
     tracing::info!("RPC URL: {}", config.rpc_url);
     tracing::info!("From block: {}", config.from_block);
     tracing::info!("Database: {}", config.db_path);
+    if let Some(url) = &config.database_url {
+        tracing::info!("Engine database URL: {}", url);
+    }
     tracing::info!(
         "Auto-discovery: {}",
         if config.no_auto_discovery {
@@ -72,7 +75,11 @@ async fn main() -> Result<()> {
     );
 
     // Create storage
-    let storage = Arc::new(Erc20Storage::new(&config.db_path)?);
+    let storage_path = config
+        .database_url
+        .as_deref()
+        .unwrap_or(config.db_path.as_str());
+    let storage = Arc::new(Erc20Storage::new(storage_path).await?);
     tracing::info!("Database initialized");
 
     // Create Starknet provider
@@ -119,9 +126,19 @@ async fn main() -> Result<()> {
     let db_path = Path::new(&config.db_path);
     let database_root = db_path.parent().unwrap_or(Path::new(".")).to_string_lossy();
 
+    let engine_db_url = config.database_url.clone().unwrap_or_else(|| {
+        Path::new(&config.db_path)
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("engine.db")
+            .to_string_lossy()
+            .to_string()
+    });
+
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
         .database_root(database_root.as_ref())
+        .engine_database_url(engine_db_url)
         .with_extractor(extractor)
         .add_decoder(decoder)
         .add_sink_boxed(sink)
@@ -166,16 +183,16 @@ async fn main() -> Result<()> {
 
     // Print final statistics
     tracing::info!("Final Statistics:");
-    if let Ok(transfer_count) = storage.get_transfer_count() {
+    if let Ok(transfer_count) = storage.get_transfer_count().await {
         tracing::info!("  Total transfers: {}", transfer_count);
     }
-    if let Ok(approval_count) = storage.get_approval_count() {
+    if let Ok(approval_count) = storage.get_approval_count().await {
         tracing::info!("  Total approvals: {}", approval_count);
     }
-    if let Ok(token_count) = storage.get_token_count() {
+    if let Ok(token_count) = storage.get_token_count().await {
         tracing::info!("  Unique tokens: {}", token_count);
     }
-    if let Ok(Some(latest_block)) = storage.get_latest_block() {
+    if let Ok(Some(latest_block)) = storage.get_latest_block().await {
         tracing::info!("  Latest block: {}", latest_block);
     }
 
