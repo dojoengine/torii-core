@@ -32,6 +32,8 @@ use config::Config;
 use starknet::core::types::Felt;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(feature = "profiling")]
+use std::time::{SystemTime, UNIX_EPOCH};
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{BlockRangeConfig, BlockRangeExtractor};
 
@@ -95,10 +97,12 @@ async fn main() -> Result<()> {
         from_block: config.from_block,
         to_block: config.to_block,
         batch_size: 50,
+        max_inflight_batches: 2,
         retry_policy: torii::etl::extractor::RetryPolicy::default(),
     };
 
     let extractor = Box::new(BlockRangeExtractor::new(provider.clone(), extractor_config));
+    tracing::info!("  Max in-flight batches: {}", 2);
     tracing::info!("Extractor configured");
 
     // Create decoder
@@ -200,9 +204,21 @@ async fn main() -> Result<()> {
     #[cfg(feature = "profiling")]
     {
         if let Ok(report) = guard.report().build() {
-            let file = std::fs::File::create("flamegraph.svg").unwrap();
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let db_backend = if storage_path.starts_with("postgres://")
+                || storage_path.starts_with("postgresql://")
+            {
+                "postgres"
+            } else {
+                "sqlite"
+            };
+            let filename = format!("flamegraph-torii-erc20-block-range-{db_backend}-{ts}.svg");
+            let file = std::fs::File::create(&filename).unwrap();
             report.flamegraph(file).unwrap();
-            tracing::info!("Flamegraph generated: flamegraph.svg");
+            tracing::info!("Flamegraph generated: {}", filename);
         }
     }
 

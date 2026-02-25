@@ -21,6 +21,15 @@ pub enum ExtractionMode {
     Event,
 }
 
+/// Metadata fetching behavior.
+#[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum MetadataMode {
+    /// Fetch metadata during indexing.
+    Inline,
+    /// Skip metadata fetching during indexing (faster backfills).
+    Deferred,
+}
+
 /// Unified Token Indexer for Starknet
 ///
 /// Indexes ERC20, ERC721, and ERC1155 token transfers and events.
@@ -87,6 +96,13 @@ pub struct Config {
     #[arg(long, env = "DATABASE_URL")]
     pub database_url: Option<String>,
 
+    /// Optional token storage database URL/path.
+    ///
+    /// Supports PostgreSQL (`postgres://...`) and SQLite (`sqlite:...` or file path).
+    /// When omitted, token storages use `--database-url` if set, otherwise `<db-dir>/*.db`.
+    #[arg(long, env = "STORAGE_DATABASE_URL")]
+    pub storage_database_url: Option<String>,
+
     /// Port for the HTTP/gRPC API
     #[arg(long, default_value = "3000")]
     pub port: u16,
@@ -120,6 +136,13 @@ pub struct Config {
     #[arg(long, default_value = "50")]
     pub batch_size: u64,
 
+    /// Maximum number of in-flight block-range batches.
+    ///
+    /// Values > 1 enable extractor prefetching to overlap next-batch fetch/decode
+    /// with current-batch sink processing.
+    #[arg(long, default_value = "2")]
+    pub rpc_max_inflight_batches: usize,
+
     /// Events per RPC request (event mode, max 1024 for most providers)
     #[arg(long, default_value = "1000")]
     pub event_chunk_size: u64,
@@ -127,6 +150,18 @@ pub struct Config {
     /// Block range to query per iteration in event mode
     #[arg(long, default_value = "10000")]
     pub event_block_batch_size: u64,
+
+    /// Metadata fetching mode.
+    ///
+    /// If omitted: defaults to `deferred` in block-range mode and `inline` in event mode.
+    #[arg(long, value_enum)]
+    pub metadata_mode: Option<MetadataMode>,
+
+    /// Run metadata-only flow and exit.
+    ///
+    /// Note: currently implemented as a guarded no-op placeholder.
+    #[arg(long)]
+    pub metadata_backfill_only: bool,
 }
 
 impl Config {

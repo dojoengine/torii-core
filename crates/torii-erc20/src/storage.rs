@@ -12,7 +12,7 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use starknet::core::types::{Felt, U256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio_postgres::{types::ToSql as PgToSql, Client, NoTls};
 use torii_common::{blob_to_felt, blob_to_u256, felt_to_blob, u256_to_blob};
@@ -1518,6 +1518,29 @@ impl Erc20Storage {
         Ok(count > 0)
     }
 
+    /// Returns the subset of `tokens` that already have metadata.
+    pub async fn has_token_metadata_batch(&self, tokens: &[Felt]) -> Result<HashSet<Felt>> {
+        if tokens.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_has_token_metadata_batch(tokens).await;
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut existing = HashSet::with_capacity(tokens.len());
+        let mut stmt = conn.prepare("SELECT 1 FROM token_metadata WHERE token = ? LIMIT 1")?;
+        for token in tokens {
+            let mut rows = stmt.query(params![felt_to_blob(*token)])?;
+            if rows.next()?.is_some() {
+                existing.insert(*token);
+            }
+        }
+
+        Ok(existing)
+    }
+
     /// Insert or update token metadata
     pub async fn upsert_token_metadata(
         &self,
@@ -1701,6 +1724,32 @@ impl Erc20Storage {
         let mut client = self.pg_client().await?;
         let tx = client.transaction().await?;
         let mut inserted = 0usize;
+        let insert_transfer_stmt = tx
+            .prepare(
+                "INSERT INTO erc20.transfers (token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (token, tx_hash, from_addr, to_addr) DO NOTHING
+                 RETURNING id",
+            )
+            .await?;
+        let wallet_both_stmt = tx
+            .prepare(
+                "INSERT INTO erc20.wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                 VALUES ($1, $2, $3, 'both', $4)",
+            )
+            .await?;
+        let wallet_sent_stmt = tx
+            .prepare(
+                "INSERT INTO erc20.wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                 VALUES ($1, $2, $3, 'sent', $4)",
+            )
+            .await?;
+        let wallet_received_stmt = tx
+            .prepare(
+                "INSERT INTO erc20.wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                 VALUES ($1, $2, $3, 'received', $4)",
+            )
+            .await?;
 
         for transfer in transfers {
             let token_blob = felt_to_blob(transfer.token);
@@ -1712,13 +1761,12 @@ impl Erc20Storage {
                 .timestamp
                 .unwrap_or_else(|| chrono::Utc::now().timestamp());
 
-            let row = tx.query_opt(
-                "INSERT INTO erc20.transfers (token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (token, tx_hash, from_addr, to_addr) DO NOTHING
-                 RETURNING id",
+            let row = tx
+                .query_opt(
+                &insert_transfer_stmt,
                 &[&token_blob, &from_blob, &to_blob, &amount_blob, &(transfer.block_number as i64), &tx_hash_blob, &ts],
-            ).await?;
+                )
+                .await?;
 
             if let Some(row) = row {
                 inserted += 1;
@@ -1728,22 +1776,19 @@ impl Erc20Storage {
                     && transfer.from == transfer.to
                 {
                     tx.execute(
-                        "INSERT INTO erc20.wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                         VALUES ($1, $2, $3, 'both', $4)",
+                        &wallet_both_stmt,
                         &[&from_blob, &token_blob, &transfer_id, &(transfer.block_number as i64)],
                     ).await?;
                 } else {
                     if transfer.from != Felt::ZERO {
                         tx.execute(
-                            "INSERT INTO erc20.wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                             VALUES ($1, $2, $3, 'sent', $4)",
+                            &wallet_sent_stmt,
                             &[&from_blob, &token_blob, &transfer_id, &(transfer.block_number as i64)],
                         ).await?;
                     }
                     if transfer.to != Felt::ZERO {
                         tx.execute(
-                            "INSERT INTO erc20.wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                             VALUES ($1, $2, $3, 'received', $4)",
+                            &wallet_received_stmt,
                             &[&to_blob, &token_blob, &transfer_id, &(transfer.block_number as i64)],
                         ).await?;
                     }
@@ -1762,6 +1807,32 @@ impl Erc20Storage {
         let mut client = self.pg_client().await?;
         let tx = client.transaction().await?;
         let mut inserted = 0usize;
+        let insert_approval_stmt = tx
+            .prepare(
+                "INSERT INTO erc20.approvals (token, owner, spender, amount, block_number, tx_hash, timestamp)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 ON CONFLICT (token, tx_hash, owner, spender) DO NOTHING
+                 RETURNING id",
+            )
+            .await?;
+        let approval_both_stmt = tx
+            .prepare(
+                "INSERT INTO erc20.approval_activity (account_address, token, approval_id, role, block_number)
+                 VALUES ($1, $2, $3, 'both', $4)",
+            )
+            .await?;
+        let approval_owner_stmt = tx
+            .prepare(
+                "INSERT INTO erc20.approval_activity (account_address, token, approval_id, role, block_number)
+                 VALUES ($1, $2, $3, 'owner', $4)",
+            )
+            .await?;
+        let approval_spender_stmt = tx
+            .prepare(
+                "INSERT INTO erc20.approval_activity (account_address, token, approval_id, role, block_number)
+                 VALUES ($1, $2, $3, 'spender', $4)",
+            )
+            .await?;
 
         for approval in approvals {
             let token_blob = felt_to_blob(approval.token);
@@ -1773,13 +1844,12 @@ impl Erc20Storage {
                 .timestamp
                 .unwrap_or_else(|| chrono::Utc::now().timestamp());
 
-            let row = tx.query_opt(
-                "INSERT INTO erc20.approvals (token, owner, spender, amount, block_number, tx_hash, timestamp)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (token, tx_hash, owner, spender) DO NOTHING
-                 RETURNING id",
+            let row = tx
+                .query_opt(
+                &insert_approval_stmt,
                 &[&token_blob, &owner_blob, &spender_blob, &amount_blob, &(approval.block_number as i64), &tx_hash_blob, &ts],
-            ).await?;
+                )
+                .await?;
 
             if let Some(row) = row {
                 inserted += 1;
@@ -1789,22 +1859,19 @@ impl Erc20Storage {
                     && approval.owner == approval.spender
                 {
                     tx.execute(
-                        "INSERT INTO erc20.approval_activity (account_address, token, approval_id, role, block_number)
-                         VALUES ($1, $2, $3, 'both', $4)",
+                        &approval_both_stmt,
                         &[&owner_blob, &token_blob, &approval_id, &(approval.block_number as i64)],
                     ).await?;
                 } else {
                     if approval.owner != Felt::ZERO {
                         tx.execute(
-                            "INSERT INTO erc20.approval_activity (account_address, token, approval_id, role, block_number)
-                             VALUES ($1, $2, $3, 'owner', $4)",
+                            &approval_owner_stmt,
                             &[&owner_blob, &token_blob, &approval_id, &(approval.block_number as i64)],
                         ).await?;
                     }
                     if approval.spender != Felt::ZERO {
                         tx.execute(
-                            "INSERT INTO erc20.approval_activity (account_address, token, approval_id, role, block_number)
-                             VALUES ($1, $2, $3, 'spender', $4)",
+                            &approval_spender_stmt,
                             &[&spender_blob, &token_blob, &approval_id, &(approval.block_number as i64)],
                         ).await?;
                     }
@@ -2258,6 +2325,27 @@ impl Erc20Storage {
         let mut client = self.pg_client().await?;
         let tx = client.transaction().await?;
         let mut balance_cache: HashMap<(Felt, Felt), U256> = HashMap::new();
+        let select_balance_stmt = tx
+            .prepare("SELECT balance FROM erc20.balances WHERE token = $1 AND wallet = $2")
+            .await?;
+        let upsert_balance_stmt = tx
+            .prepare(
+                "INSERT INTO erc20.balances (token, wallet, balance, last_block, last_tx_hash, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, EXTRACT(EPOCH FROM NOW())::BIGINT)
+                 ON CONFLICT (token, wallet) DO UPDATE SET
+                     balance = EXCLUDED.balance,
+                     last_block = EXCLUDED.last_block,
+                     last_tx_hash = EXCLUDED.last_tx_hash,
+                     updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT",
+            )
+            .await?;
+        let insert_adjustment_stmt = tx
+            .prepare(
+                "INSERT INTO erc20.balance_adjustments
+                 (token, wallet, computed_balance, actual_balance, adjusted_at_block, tx_hash)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .await?;
 
         for transfer in transfers {
             if transfer.from != Felt::ZERO {
@@ -2265,7 +2353,7 @@ impl Erc20Storage {
                 if let std::collections::hash_map::Entry::Vacant(e) = balance_cache.entry(key) {
                     let row = tx
                         .query_opt(
-                            "SELECT balance FROM erc20.balances WHERE token = $1 AND wallet = $2",
+                            &select_balance_stmt,
                             &[&felt_to_blob(transfer.token), &felt_to_blob(transfer.from)],
                         )
                         .await?;
@@ -2280,7 +2368,7 @@ impl Erc20Storage {
                 if let std::collections::hash_map::Entry::Vacant(e) = balance_cache.entry(key) {
                     let row = tx
                         .query_opt(
-                            "SELECT balance FROM erc20.balances WHERE token = $1 AND wallet = $2",
+                            &select_balance_stmt,
                             &[&felt_to_blob(transfer.token), &felt_to_blob(transfer.to)],
                         )
                         .await?;
@@ -2341,22 +2429,14 @@ impl Erc20Storage {
                 .copied()
                 .unwrap_or((0, Felt::ZERO));
             tx.execute(
-                "INSERT INTO erc20.balances (token, wallet, balance, last_block, last_tx_hash, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, EXTRACT(EPOCH FROM NOW())::BIGINT)
-                 ON CONFLICT (token, wallet) DO UPDATE SET
-                     balance = EXCLUDED.balance,
-                     last_block = EXCLUDED.last_block,
-                     last_tx_hash = EXCLUDED.last_tx_hash,
-                     updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT",
+                &upsert_balance_stmt,
                 &[&felt_to_blob(*token), &felt_to_blob(*wallet), &u256_to_blob(*balance), &(last_block as i64), &felt_to_blob(last_tx_hash)],
             ).await?;
         }
 
         for adj in &adjustments_to_record {
             tx.execute(
-                "INSERT INTO erc20.balance_adjustments
-                 (token, wallet, computed_balance, actual_balance, adjusted_at_block, tx_hash)
-                 VALUES ($1, $2, $3, $4, $5, $6)",
+                &insert_adjustment_stmt,
                 &[
                     &felt_to_blob(adj.token),
                     &felt_to_blob(adj.wallet),
@@ -2382,6 +2462,34 @@ impl Erc20Storage {
             )
             .await?;
         Ok(row.get::<usize, i64>(0) > 0)
+    }
+
+    async fn pg_has_token_metadata_batch(&self, tokens: &[Felt]) -> Result<HashSet<Felt>> {
+        if tokens.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        let client = self.pg_client().await?;
+        let blob_to_token: HashMap<Vec<u8>, Felt> =
+            tokens.iter().map(|t| (felt_to_blob(*t), *t)).collect();
+        let blob_params: Vec<Vec<u8>> = blob_to_token.keys().cloned().collect();
+
+        let rows = client
+            .query(
+                "SELECT token FROM erc20.token_metadata WHERE token = ANY($1::bytea[])",
+                &[&blob_params],
+            )
+            .await?;
+
+        let mut existing = HashSet::new();
+        for row in rows {
+            let token_blob: Vec<u8> = row.get(0);
+            if let Some(token) = blob_to_token.get(&token_blob) {
+                existing.insert(*token);
+            }
+        }
+
+        Ok(existing)
     }
 
     async fn pg_upsert_token_metadata(

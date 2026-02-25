@@ -304,72 +304,73 @@ impl Sink for Erc20Sink {
                 new_tokens.insert(approval.token);
             }
 
-            for token in new_tokens {
-                match self.storage.has_token_metadata(token).await {
-                    Ok(exists) => {
-                        if exists {
-                            continue;
-                        }
-
-                        let meta = fetcher.fetch_erc20_metadata(token).await;
-                        tracing::info!(
-                            target: "torii_erc20::sink",
-                            token = %format!("{:#x}", token),
-                            name = ?meta.name,
-                            symbol = ?meta.symbol,
-                            decimals = ?meta.decimals,
-                            "Fetched token metadata"
-                        );
-                        if let Err(e) = self
-                            .storage
-                            .upsert_token_metadata(
-                                token,
-                                meta.name.as_deref(),
-                                meta.symbol.as_deref(),
-                                meta.decimals,
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                target: "torii_erc20::sink",
-                                token = %format!("{:#x}", token),
-                                error = %e,
-                                "Failed to store token metadata"
-                            );
-                        } else if let Some(event_bus) = &self.event_bus {
-                            let meta_entry = proto::TokenMetadataEntry {
-                                token: token.to_bytes_be().to_vec(),
-                                name: meta.name,
-                                symbol: meta.symbol,
-                                decimals: meta.decimals.map(|d| d as u32),
-                            };
-
-                            let mut buf = Vec::new();
-                            meta_entry.encode(&mut buf)?;
-                            let any = Any {
-                                type_url:
-                                    "type.googleapis.com/torii.sinks.erc20.TokenMetadataEntry"
-                                        .to_string(),
-                                value: buf,
-                            };
-
-                            event_bus.publish_protobuf(
-                                "erc20.metadata",
-                                "erc20.metadata",
-                                &any,
-                                &meta_entry,
-                                UpdateType::Created,
-                                Self::matches_metadata_filters,
-                            );
-                        }
-                    }
+            let ordered_tokens: Vec<Felt> = new_tokens.iter().copied().collect();
+            let existing_metadata =
+                match self.storage.has_token_metadata_batch(&ordered_tokens).await {
+                    Ok(existing) => existing,
                     Err(e) => {
                         tracing::warn!(
                             target: "torii_erc20::sink",
                             error = %e,
-                            "Failed to check token metadata"
+                            "Failed to batch-check token metadata"
                         );
+                        HashSet::new()
                     }
+                };
+
+            for token in ordered_tokens
+                .into_iter()
+                .filter(|token| !existing_metadata.contains(token))
+            {
+                let meta = fetcher.fetch_erc20_metadata(token).await;
+                tracing::info!(
+                    target: "torii_erc20::sink",
+                    token = %format!("{:#x}", token),
+                    name = ?meta.name,
+                    symbol = ?meta.symbol,
+                    decimals = ?meta.decimals,
+                    "Fetched token metadata"
+                );
+                if let Err(e) = self
+                    .storage
+                    .upsert_token_metadata(
+                        token,
+                        meta.name.as_deref(),
+                        meta.symbol.as_deref(),
+                        meta.decimals,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        target: "torii_erc20::sink",
+                        token = %format!("{:#x}", token),
+                        error = %e,
+                        "Failed to store token metadata"
+                    );
+                } else if let Some(event_bus) = &self.event_bus {
+                    let meta_entry = proto::TokenMetadataEntry {
+                        token: token.to_bytes_be().to_vec(),
+                        name: meta.name,
+                        symbol: meta.symbol,
+                        decimals: meta.decimals.map(|d| d as u32),
+                    };
+
+                    let mut buf = Vec::new();
+                    meta_entry.encode(&mut buf)?;
+                    let any = Any {
+                        type_url: "type.googleapis.com/torii.sinks.erc20.TokenMetadataEntry"
+                            .to_string(),
+                        value: buf,
+                    };
+
+                    event_bus.publish_protobuf(
+                        "erc20.metadata",
+                        "erc20.metadata",
+                        &any,
+                        &meta_entry,
+                        UpdateType::Created,
+                        Self::matches_metadata_filters,
+                    );
                 }
             }
         }

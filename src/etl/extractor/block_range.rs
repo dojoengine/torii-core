@@ -8,8 +8,10 @@ use async_trait::async_trait;
 use starknet::core::types::MaybePreConfirmedBlockWithReceipts;
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use starknet::providers::{Provider, ProviderResponseData};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::time::Instant;
+use tokio::task::JoinHandle;
 
 use crate::etl::engine_db::EngineDb;
 use crate::etl::extractor::starknet_helpers::{
@@ -36,6 +38,12 @@ pub struct BlockRangeConfig {
     /// Number of blocks to fetch per batch (max efficiency: ~100-1000 depending on RPC)
     pub batch_size: u64,
 
+    /// Maximum number of in-flight batches.
+    ///
+    /// Values > 1 enable extractor-side prefetch, overlapping next-batch fetch/decode
+    /// with current-batch sink processing.
+    pub max_inflight_batches: usize,
+
     /// Retry policy for network failures
     pub retry_policy: RetryPolicy,
 }
@@ -47,9 +55,17 @@ impl Default for BlockRangeConfig {
             from_block: 0,
             to_block: None,
             batch_size: 100,
+            max_inflight_batches: 1,
             retry_policy: RetryPolicy::default(),
         }
     }
+}
+
+#[derive(Debug)]
+struct PreparedBatch {
+    from_block: u64,
+    next_block: u64,
+    batch: ExtractionBatch,
 }
 
 /// Block range extractor.
@@ -82,6 +98,15 @@ pub struct BlockRangeExtractor {
 
     /// Whether we've reached the configured end block.
     reached_end: bool,
+
+    /// Prefetched batch preparation tasks, ordered by scheduled start block.
+    prefetch_tasks: VecDeque<JoinHandle<Result<PreparedBatch>>>,
+
+    /// Next block number to schedule for preparation.
+    next_schedule_block: u64,
+
+    /// Last observed chain head from prepared batches.
+    last_chain_head: Option<u64>,
 }
 
 impl BlockRangeExtractor {
@@ -101,6 +126,9 @@ impl BlockRangeExtractor {
             config,
             current_block: 0,
             reached_end: false,
+            prefetch_tasks: VecDeque::new(),
+            next_schedule_block: 0,
+            last_chain_head: None,
         }
     }
 
@@ -148,7 +176,67 @@ impl BlockRangeExtractor {
             }
         }
 
+        self.next_schedule_block = self.current_block;
+        self.last_chain_head = None;
+        self.abort_prefetch_tasks();
+
         Ok(())
+    }
+
+    fn max_inflight_batches(&self) -> usize {
+        self.config.max_inflight_batches.max(1)
+    }
+
+    fn can_schedule_from(&self, from_block: u64) -> bool {
+        if let Some(to_block) = self.config.to_block {
+            return from_block <= to_block;
+        }
+
+        // Follow-chain mode: avoid overscheduling far beyond the latest known head.
+        // Allow at most one probe batch just past the head (`head + 1`).
+        match self.last_chain_head {
+            Some(chain_head) => from_block <= chain_head.saturating_add(1),
+            None => true,
+        }
+    }
+
+    fn planned_next_start(&self, from_block: u64) -> u64 {
+        let planned_end = if let Some(to_block) = self.config.to_block {
+            (from_block + self.config.batch_size - 1).min(to_block)
+        } else {
+            from_block + self.config.batch_size - 1
+        };
+        planned_end.saturating_add(1)
+    }
+
+    fn schedule_prefetch_task(&mut self, from_block: u64) {
+        let provider = self.provider.clone();
+        let config = self.config.clone();
+        tracing::debug!(
+            target: "torii::etl::block_range",
+            from_block,
+            queue_len = self.prefetch_tasks.len() + 1,
+            "Scheduling prefetched block-range"
+        );
+        self.prefetch_tasks.push_back(tokio::spawn(async move {
+            BlockRangeExtractor::prepare_batch_for(provider, config, from_block).await
+        }));
+    }
+
+    fn refill_prefetch_tasks(&mut self) {
+        while self.prefetch_tasks.len() < self.max_inflight_batches()
+            && self.can_schedule_from(self.next_schedule_block)
+        {
+            let from_block = self.next_schedule_block;
+            self.schedule_prefetch_task(from_block);
+            self.next_schedule_block = self.planned_next_start(from_block);
+        }
+    }
+
+    fn abort_prefetch_tasks(&mut self) {
+        for task in self.prefetch_tasks.drain(..) {
+            task.abort();
+        }
     }
 
     /// Fetches a batch of blocks with receipts using JSON-RPC batch requests.
@@ -163,18 +251,17 @@ impl BlockRangeExtractor {
     /// # Returns
     ///
     /// A vector of blocks with receipts.
-    async fn fetch_blocks_batch(
-        &self,
+    async fn fetch_blocks_batch_with(
+        provider: Arc<JsonRpcClient<HttpTransport>>,
+        retry_policy: RetryPolicy,
         from_block: u64,
         to_block: u64,
     ) -> Result<Vec<MaybePreConfirmedBlockWithReceipts>> {
         let requests = block_with_receipts_batch_from_block_range(from_block, to_block);
 
-        let responses = self
-            .config
-            .retry_policy
+        let responses = retry_policy
             .execute(|| {
-                let provider = self.provider.clone();
+                let provider = provider.clone();
                 let requests_ref = &requests;
                 async move {
                     provider
@@ -185,7 +272,7 @@ impl BlockRangeExtractor {
             })
             .await?;
 
-        let mut blocks = Vec::new();
+        let mut blocks = Vec::with_capacity((to_block - from_block + 1) as usize);
         for (idx, response) in responses.into_iter().enumerate() {
             let block_num = from_block + idx as u64;
             match response {
@@ -210,6 +297,111 @@ impl BlockRangeExtractor {
         } else {
             false // Never stop if to_block is None
         }
+    }
+
+    async fn prepare_batch_for(
+        provider: Arc<JsonRpcClient<HttpTransport>>,
+        config: BlockRangeConfig,
+        current_block: u64,
+    ) -> Result<PreparedBatch> {
+        let total_start = Instant::now();
+        let chain_head = provider.block_number().await?;
+
+        let batch_end = if let Some(to_block) = config.to_block {
+            (current_block + config.batch_size - 1).min(to_block)
+        } else if current_block > chain_head {
+            let batch = ExtractionBatch {
+                events: Vec::new(),
+                blocks: HashMap::new(),
+                transactions: HashMap::new(),
+                declared_classes: Vec::new(),
+                deployed_contracts: Vec::new(),
+                cursor: Some(format!("block:{}", current_block.saturating_sub(1))),
+                chain_head: Some(chain_head),
+            };
+            return Ok(PreparedBatch {
+                from_block: current_block,
+                next_block: current_block,
+                batch,
+            });
+        } else {
+            (current_block + config.batch_size - 1).min(chain_head)
+        };
+
+        tracing::info!(
+            target: "torii::etl::block_range",
+            "Fetching blocks {}-{} (batch size: {})",
+            current_block,
+            batch_end,
+            batch_end - current_block + 1
+        );
+
+        let fetch_start = Instant::now();
+        let blocks = Self::fetch_blocks_batch_with(
+            provider.clone(),
+            config.retry_policy.clone(),
+            current_block,
+            batch_end,
+        )
+        .await?;
+        let fetch_ms = fetch_start.elapsed().as_millis();
+
+        let transform_start = Instant::now();
+        let mut all_events = Vec::new();
+        let mut blocks_map = HashMap::with_capacity(blocks.len());
+        let mut transactions_map = HashMap::new();
+        let mut all_declared_classes = Vec::new();
+        let mut all_deployed_contracts = Vec::new();
+
+        for block in blocks {
+            let block_data = block_into_contexts(block)?;
+
+            all_events.reserve(block_data.events.len());
+            transactions_map.reserve(block_data.transactions.len());
+            all_declared_classes.reserve(block_data.declared_classes.len());
+            all_deployed_contracts.reserve(block_data.deployed_contracts.len());
+
+            blocks_map.insert(block_data.block_context.number, block_data.block_context);
+
+            for tx_ctx in block_data.transactions {
+                transactions_map.insert(tx_ctx.hash, tx_ctx);
+            }
+
+            all_events.extend(block_data.events);
+            all_declared_classes.extend(block_data.declared_classes);
+            all_deployed_contracts.extend(block_data.deployed_contracts);
+        }
+        let transform_ms = transform_start.elapsed().as_millis();
+        let total_ms = total_start.elapsed().as_millis();
+
+        tracing::info!(
+            target: "torii::etl::block_range",
+            "Extracted {} events, {} declared classes, {} deployed contracts from {} blocks ({} transactions) [fetch={}ms transform={}ms total={}ms]",
+            all_events.len(),
+            all_declared_classes.len(),
+            all_deployed_contracts.len(),
+            blocks_map.len(),
+            transactions_map.len(),
+            fetch_ms,
+            transform_ms,
+            total_ms
+        );
+
+        let batch = ExtractionBatch {
+            events: all_events,
+            blocks: blocks_map,
+            transactions: transactions_map,
+            declared_classes: all_declared_classes,
+            deployed_contracts: all_deployed_contracts,
+            cursor: Some(format!("block:{batch_end}")),
+            chain_head: Some(chain_head),
+        };
+
+        Ok(PreparedBatch {
+            from_block: current_block,
+            next_block: batch_end + 1,
+            batch,
+        })
     }
 }
 
@@ -264,98 +456,46 @@ impl Extractor for BlockRangeExtractor {
             return Ok(ExtractionBatch::empty());
         }
 
-        // Fetch chain head for live detection
-        let chain_head = self.provider.block_number().await?;
-
-        // Determine the batch end block
-        let batch_end = if let Some(to_block) = self.config.to_block {
-            (self.current_block + self.config.batch_size - 1).min(to_block)
-        } else {
-            // No end block configured - follow chain head
-            if self.current_block > chain_head {
-                // We're ahead of the chain - return empty batch for polling
-                tracing::debug!(
-                    target: "torii::etl::block_range",
-                    "Waiting for new blocks (current: {}, chain head: {})",
-                    self.current_block,
-                    chain_head
-                );
-                return Ok(ExtractionBatch {
-                    events: Vec::new(),
-                    blocks: HashMap::new(),
-                    transactions: HashMap::new(),
-                    declared_classes: Vec::new(),
-                    deployed_contracts: Vec::new(),
-                    cursor: Some(format!("block:{}", self.current_block.saturating_sub(1))),
-                    chain_head: Some(chain_head),
-                });
-            }
-
-            (self.current_block + self.config.batch_size - 1).min(chain_head)
-        };
-
-        tracing::info!(
-            target: "torii::etl::block_range",
-            "Fetching blocks {}-{} (batch size: {})",
-            self.current_block,
-            batch_end,
-            batch_end - self.current_block + 1
-        );
-
-        // Fetch blocks
-        let blocks = self
-            .fetch_blocks_batch(self.current_block, batch_end)
-            .await?;
-
-        // Extract data from blocks and build enriched batch
-        let mut all_events = Vec::new();
-        let mut blocks_map = HashMap::new();
-        let mut transactions_map = HashMap::new();
-        let mut all_declared_classes = Vec::new();
-        let mut all_deployed_contracts = Vec::new();
-
-        for block in blocks {
-            let block_data = block_into_contexts(block)?;
-
-            blocks_map.insert(block_data.block_context.number, block_data.block_context);
-
-            for tx_ctx in block_data.transactions {
-                transactions_map.insert(tx_ctx.hash, tx_ctx);
-            }
-
-            all_events.extend(block_data.events);
-            all_declared_classes.extend(block_data.declared_classes);
-            all_deployed_contracts.extend(block_data.deployed_contracts);
+        self.refill_prefetch_tasks();
+        if self.prefetch_tasks.is_empty() {
+            return Ok(ExtractionBatch::empty());
         }
 
-        tracing::info!(
+        let prepared = self
+            .prefetch_tasks
+            .pop_front()
+            .expect("prefetch task queue checked as non-empty")
+            .await
+            .context("Block-range prefetch task failed to join")??;
+
+        if prepared.from_block != self.current_block {
+            anyhow::bail!(
+                "Prefetch ordering mismatch: expected from_block {}, got {}",
+                self.current_block,
+                prepared.from_block
+            );
+        }
+
+        self.last_chain_head = prepared.batch.chain_head;
+        self.current_block = prepared.next_block;
+
+        tracing::debug!(
             target: "torii::etl::block_range",
-            "Extracted {} events, {} declared classes, {} deployed contracts from {} blocks ({} transactions)",
-            all_events.len(),
-            all_declared_classes.len(),
-            all_deployed_contracts.len(),
-            blocks_map.len(),
-            transactions_map.len()
+            fetched_from = prepared.from_block,
+            next_block = self.current_block,
+            queue_len = self.prefetch_tasks.len(),
+            "Using prefetched block-range batch"
         );
 
-        // Update cursor
-        let cursor = format!("block:{batch_end}");
+        if self.config.to_block.is_none() && prepared.batch.is_empty() {
+            // Follow-chain mode: if we reached chain head, drop speculative work and
+            // restart scheduling from the same block on the next extract call.
+            self.abort_prefetch_tasks();
+            self.next_schedule_block = self.current_block;
+        } else {
+            self.refill_prefetch_tasks();
+        }
 
-        // NOTE: Cursor persistence is now handled by commit_cursor() which is called
-        // AFTER sink processing completes. This ensures no data loss if the process
-        // is killed between extraction and sink processing.
-
-        // Update internal state
-        self.current_block = batch_end + 1;
-
-        Ok(ExtractionBatch {
-            events: all_events,
-            blocks: blocks_map,
-            transactions: transactions_map,
-            declared_classes: all_declared_classes,
-            deployed_contracts: all_deployed_contracts,
-            cursor: Some(cursor),
-            chain_head: Some(chain_head),
-        })
+        Ok(prepared.batch)
     }
 }
