@@ -162,6 +162,54 @@ message GetOwnerResponse {
     optional bytes owner = 1;
 }
 
+// ===== Attribute Search =====
+
+// OR-within-key filter values; AND logic is applied across keys.
+message AttributeFilter {
+    // Attribute key / trait_type
+    string key = 1;
+    // Accepted values for this key (OR)
+    repeated string values = 2;
+}
+
+// Facet count entry for UI filtering
+message AttributeFacetCount {
+    // Attribute key / trait_type
+    string key = 1;
+    // Attribute value
+    string value = 2;
+    // Number of matching tokens containing this key/value
+    uint64 count = 3;
+}
+
+// Request for QueryTokensByAttributes RPC
+message QueryTokensByAttributesRequest {
+    // Token contract address (required, 32 bytes)
+    bytes token = 1;
+    // Attribute filters (AND across entries)
+    repeated AttributeFilter filters = 2;
+    // Cursor token_id (exclusive) for pagination
+    optional bytes cursor_token_id = 3;
+    // Maximum number of token IDs to return (default: 100, max: 1000)
+    uint32 limit = 4;
+    // Include facet counts in response
+    bool include_facets = 5;
+    // Maximum number of facet rows to return (default: 100, max: 1000)
+    uint32 facet_limit = 6;
+}
+
+// Response for QueryTokensByAttributes RPC
+message QueryTokensByAttributesResponse {
+    // Matched token IDs (U256 bytes)
+    repeated bytes token_ids = 1;
+    // Cursor for next page (absent if no more results)
+    optional bytes next_cursor_token_id = 2;
+    // Total number of matched token IDs (without pagination)
+    uint64 total_hits = 3;
+    // Facet counts over the matched set
+    repeated AttributeFacetCount facets = 4;
+}
+
 // ===== Subscription RPCs =====
 
 // Request for SubscribeTransfers RPC
@@ -244,6 +292,9 @@ service Erc721 {
 
     // Get token metadata (name, symbol)
     rpc GetTokenMetadata(GetTokenMetadataRequest) returns (GetTokenMetadataResponse);
+
+    // Query token IDs by flattened metadata attributes (supports intersections)
+    rpc QueryTokensByAttributes(QueryTokensByAttributesRequest) returns (QueryTokensByAttributesResponse);
 
     // Subscribe to real-time transfer events with filtering
     rpc SubscribeTransfers(SubscribeTransfersRequest) returns (stream TransferUpdate);

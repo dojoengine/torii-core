@@ -469,11 +469,19 @@ impl Extractor for BlockRangeExtractor {
             .context("Block-range prefetch task failed to join")??;
 
         if prepared.from_block != self.current_block {
-            anyhow::bail!(
-                "Prefetch ordering mismatch: expected from_block {}, got {}",
-                self.current_block,
-                prepared.from_block
+            tracing::warn!(
+                target: "torii::etl::block_range",
+                expected_from_block = self.current_block,
+                got_from_block = prepared.from_block,
+                "Prefetch ordering mismatch detected, resetting prefetch queue"
             );
+            // Recover by dropping speculative work and restarting scheduling from
+            // the exact current block. This prevents the ETL loop from getting
+            // stuck in repeated extract errors.
+            self.abort_prefetch_tasks();
+            self.next_schedule_block = self.current_block;
+            self.refill_prefetch_tasks();
+            return Ok(ExtractionBatch::empty());
         }
 
         self.last_chain_head = prepared.batch.chain_head;

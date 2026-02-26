@@ -1,10 +1,11 @@
 //! gRPC service implementation for ERC1155 queries and subscriptions
 
 use crate::proto::{
-    erc1155_server::Erc1155 as Erc1155Trait, Cursor, GetBalanceRequest, GetBalanceResponse,
-    GetStatsRequest, GetStatsResponse, GetTokenMetadataRequest, GetTokenMetadataResponse,
-    GetTransfersRequest, GetTransfersResponse, SubscribeTransfersRequest, TokenMetadataEntry,
-    TokenTransfer, TransferFilter, TransferUpdate,
+    erc1155_server::Erc1155 as Erc1155Trait, AttributeFacetCount, Cursor, GetBalanceRequest,
+    GetBalanceResponse, GetStatsRequest, GetStatsResponse, GetTokenMetadataRequest,
+    GetTokenMetadataResponse, GetTransfersRequest, GetTransfersResponse,
+    QueryTokensByAttributesRequest, QueryTokensByAttributesResponse, SubscribeTransfersRequest,
+    TokenMetadataEntry, TokenTransfer, TransferFilter, TransferUpdate,
 };
 use crate::storage::{Erc1155Storage, TokenTransferData, TransferCursor};
 use async_trait::async_trait;
@@ -272,6 +273,58 @@ impl Erc1155Trait for Erc1155Service {
         Ok(Response::new(GetTokenMetadataResponse {
             tokens: entries,
             next_cursor: next_cursor.map(|c| c.to_bytes_be().to_vec()),
+        }))
+    }
+
+    /// Query token IDs by flattened metadata attributes (OR within key, AND across keys).
+    async fn query_tokens_by_attributes(
+        &self,
+        request: Request<QueryTokensByAttributesRequest>,
+    ) -> Result<Response<QueryTokensByAttributesResponse>, Status> {
+        let req = request.into_inner();
+        let token = bytes_to_felt(&req.token)
+            .ok_or_else(|| Status::invalid_argument("Invalid token address"))?;
+        let cursor_token_id = req.cursor_token_id.as_ref().map(|b| bytes_to_u256(b));
+        let limit = if req.limit == 0 {
+            100
+        } else {
+            req.limit.min(1000)
+        };
+        let facet_limit = if req.facet_limit == 0 {
+            100
+        } else {
+            req.facet_limit.min(1000)
+        };
+
+        let filters: Vec<(String, Vec<String>)> =
+            req.filters.into_iter().map(|f| (f.key, f.values)).collect();
+
+        let result = self
+            .storage
+            .query_token_ids_by_attributes(
+                token,
+                &filters,
+                cursor_token_id,
+                limit,
+                req.include_facets,
+                facet_limit,
+            )
+            .await
+            .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
+
+        Ok(Response::new(QueryTokensByAttributesResponse {
+            token_ids: result.token_ids.into_iter().map(u256_to_bytes).collect(),
+            next_cursor_token_id: result.next_cursor_token_id.map(u256_to_bytes),
+            total_hits: result.total_hits,
+            facets: result
+                .facets
+                .into_iter()
+                .map(|f| AttributeFacetCount {
+                    key: f.key,
+                    value: f.value,
+                    count: f.count,
+                })
+                .collect(),
         }))
     }
 

@@ -1763,8 +1763,16 @@ impl Erc20Storage {
 
             let row = tx
                 .query_opt(
-                &insert_transfer_stmt,
-                &[&token_blob, &from_blob, &to_blob, &amount_blob, &(transfer.block_number as i64), &tx_hash_blob, &ts],
+                    &insert_transfer_stmt,
+                    &[
+                        &token_blob,
+                        &from_blob,
+                        &to_blob,
+                        &amount_blob,
+                        &(transfer.block_number as i64),
+                        &tx_hash_blob,
+                        &ts,
+                    ],
                 )
                 .await?;
 
@@ -1777,20 +1785,38 @@ impl Erc20Storage {
                 {
                     tx.execute(
                         &wallet_both_stmt,
-                        &[&from_blob, &token_blob, &transfer_id, &(transfer.block_number as i64)],
-                    ).await?;
+                        &[
+                            &from_blob,
+                            &token_blob,
+                            &transfer_id,
+                            &(transfer.block_number as i64),
+                        ],
+                    )
+                    .await?;
                 } else {
                     if transfer.from != Felt::ZERO {
                         tx.execute(
                             &wallet_sent_stmt,
-                            &[&from_blob, &token_blob, &transfer_id, &(transfer.block_number as i64)],
-                        ).await?;
+                            &[
+                                &from_blob,
+                                &token_blob,
+                                &transfer_id,
+                                &(transfer.block_number as i64),
+                            ],
+                        )
+                        .await?;
                     }
                     if transfer.to != Felt::ZERO {
                         tx.execute(
                             &wallet_received_stmt,
-                            &[&to_blob, &token_blob, &transfer_id, &(transfer.block_number as i64)],
-                        ).await?;
+                            &[
+                                &to_blob,
+                                &token_blob,
+                                &transfer_id,
+                                &(transfer.block_number as i64),
+                            ],
+                        )
+                        .await?;
                     }
                 }
             }
@@ -1846,8 +1872,16 @@ impl Erc20Storage {
 
             let row = tx
                 .query_opt(
-                &insert_approval_stmt,
-                &[&token_blob, &owner_blob, &spender_blob, &amount_blob, &(approval.block_number as i64), &tx_hash_blob, &ts],
+                    &insert_approval_stmt,
+                    &[
+                        &token_blob,
+                        &owner_blob,
+                        &spender_blob,
+                        &amount_blob,
+                        &(approval.block_number as i64),
+                        &tx_hash_blob,
+                        &ts,
+                    ],
                 )
                 .await?;
 
@@ -1860,20 +1894,38 @@ impl Erc20Storage {
                 {
                     tx.execute(
                         &approval_both_stmt,
-                        &[&owner_blob, &token_blob, &approval_id, &(approval.block_number as i64)],
-                    ).await?;
+                        &[
+                            &owner_blob,
+                            &token_blob,
+                            &approval_id,
+                            &(approval.block_number as i64),
+                        ],
+                    )
+                    .await?;
                 } else {
                     if approval.owner != Felt::ZERO {
                         tx.execute(
                             &approval_owner_stmt,
-                            &[&owner_blob, &token_blob, &approval_id, &(approval.block_number as i64)],
-                        ).await?;
+                            &[
+                                &owner_blob,
+                                &token_blob,
+                                &approval_id,
+                                &(approval.block_number as i64),
+                            ],
+                        )
+                        .await?;
                     }
                     if approval.spender != Felt::ZERO {
                         tx.execute(
                             &approval_spender_stmt,
-                            &[&spender_blob, &token_blob, &approval_id, &(approval.block_number as i64)],
-                        ).await?;
+                            &[
+                                &spender_blob,
+                                &token_blob,
+                                &approval_id,
+                                &(approval.block_number as i64),
+                            ],
+                        )
+                        .await?;
                     }
                 }
             }
@@ -2430,8 +2482,15 @@ impl Erc20Storage {
                 .unwrap_or((0, Felt::ZERO));
             tx.execute(
                 &upsert_balance_stmt,
-                &[&felt_to_blob(*token), &felt_to_blob(*wallet), &u256_to_blob(*balance), &(last_block as i64), &felt_to_blob(last_tx_hash)],
-            ).await?;
+                &[
+                    &felt_to_blob(*token),
+                    &felt_to_blob(*wallet),
+                    &u256_to_blob(*balance),
+                    &(last_block as i64),
+                    &felt_to_blob(last_tx_hash),
+                ],
+            )
+            .await?;
         }
 
         for adj in &adjustments_to_record {

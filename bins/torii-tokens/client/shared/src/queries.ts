@@ -9,10 +9,12 @@ import {
   Erc721GetStatsRequest, Erc721GetStatsResponse,
   Erc721GetTransfersRequest, Erc721GetTransfersResponse,
   Erc721GetTokenMetadataRequest, Erc721GetTokenMetadataResponse,
+  Erc721QueryTokensByAttributesRequest, Erc721QueryTokensByAttributesResponse,
   Erc1155GetStatsRequest, Erc1155GetStatsResponse,
   Erc1155GetTransfersRequest, Erc1155GetTransfersResponse,
   Erc1155GetBalanceRequest, Erc1155GetBalanceResponse,
   Erc1155GetTokenMetadataRequest, Erc1155GetTokenMetadataResponse,
+  Erc1155QueryTokensByAttributesRequest, Erc1155QueryTokensByAttributesResponse,
 } from "./schemas";
 
 export interface TokenQuery {
@@ -81,6 +83,24 @@ export interface TransferCursorResult {
 export interface PageResult<TItem, TCursor> {
   items: TItem[];
   nextCursor?: TCursor;
+}
+
+export interface AttributeFilterInput {
+  key: string;
+  values: string[];
+}
+
+export interface AttributeFacetCountResult {
+  key: string;
+  value: string;
+  count: number;
+}
+
+export interface AttributeTokenQueryResult {
+  tokenIds: string[];
+  nextCursorTokenId?: string;
+  totalHits: number;
+  facets: AttributeFacetCountResult[];
 }
 
 const DEFAULT_PAGE_LIMIT = 100;
@@ -611,4 +631,112 @@ export async function getErc1155TransfersPage(
     : undefined;
 
   return { items, nextCursor };
+}
+
+export async function getErc721TokensByAttributesPage(
+  client: TokensClient,
+  options: {
+    contractAddress: string;
+    filters: AttributeFilterInput[];
+    cursorTokenId?: string;
+    limit?: number;
+    includeFacets?: boolean;
+    facetLimit?: number;
+  }
+): Promise<AttributeTokenQueryResult> {
+  const response = await client.call(
+    "/torii.sinks.erc721.Erc721/QueryTokensByAttributes",
+    {
+      token: hexToBytes(options.contractAddress),
+      filters: options.filters
+        .filter((f) => f.key.trim().length > 0 && f.values.length > 0)
+        .map((f) => ({
+          key: f.key.trim(),
+          values: f.values.map((v) => v.trim()).filter(Boolean),
+        })),
+      ...(options.cursorTokenId ? { cursorTokenId: hexToBytes(options.cursorTokenId) } : {}),
+      limit: options.limit ?? DEFAULT_PAGE_LIMIT,
+      includeFacets: options.includeFacets ?? true,
+      facetLimit: options.facetLimit ?? DEFAULT_PAGE_LIMIT,
+    },
+    Erc721QueryTokensByAttributesRequest,
+    Erc721QueryTokensByAttributesResponse
+  );
+
+  const tokenIdsRaw = response.tokenIds;
+  const tokenIds = (Array.isArray(tokenIdsRaw) ? tokenIdsRaw : tokenIdsRaw ? [tokenIdsRaw] : [])
+    .map((v) => bytesToHex(v as string | Uint8Array | undefined));
+
+  const facetsRaw = response.facets;
+  const facets = (Array.isArray(facetsRaw) ? facetsRaw : facetsRaw ? [facetsRaw] : []).map((f) => {
+    const row = f as Record<string, unknown>;
+    return {
+      key: String(row.key ?? ""),
+      value: String(row.value ?? ""),
+      count: Number(row.count ?? 0),
+    };
+  });
+
+  return {
+    tokenIds,
+    nextCursorTokenId: response.nextCursorTokenId
+      ? bytesToHex(response.nextCursorTokenId as string | Uint8Array | undefined)
+      : undefined,
+    totalHits: Number(response.totalHits ?? 0),
+    facets,
+  };
+}
+
+export async function getErc1155TokensByAttributesPage(
+  client: TokensClient,
+  options: {
+    contractAddress: string;
+    filters: AttributeFilterInput[];
+    cursorTokenId?: string;
+    limit?: number;
+    includeFacets?: boolean;
+    facetLimit?: number;
+  }
+): Promise<AttributeTokenQueryResult> {
+  const response = await client.call(
+    "/torii.sinks.erc1155.Erc1155/QueryTokensByAttributes",
+    {
+      token: hexToBytes(options.contractAddress),
+      filters: options.filters
+        .filter((f) => f.key.trim().length > 0 && f.values.length > 0)
+        .map((f) => ({
+          key: f.key.trim(),
+          values: f.values.map((v) => v.trim()).filter(Boolean),
+        })),
+      ...(options.cursorTokenId ? { cursorTokenId: hexToBytes(options.cursorTokenId) } : {}),
+      limit: options.limit ?? DEFAULT_PAGE_LIMIT,
+      includeFacets: options.includeFacets ?? true,
+      facetLimit: options.facetLimit ?? DEFAULT_PAGE_LIMIT,
+    },
+    Erc1155QueryTokensByAttributesRequest,
+    Erc1155QueryTokensByAttributesResponse
+  );
+
+  const tokenIdsRaw = response.tokenIds;
+  const tokenIds = (Array.isArray(tokenIdsRaw) ? tokenIdsRaw : tokenIdsRaw ? [tokenIdsRaw] : [])
+    .map((v) => bytesToHex(v as string | Uint8Array | undefined));
+
+  const facetsRaw = response.facets;
+  const facets = (Array.isArray(facetsRaw) ? facetsRaw : facetsRaw ? [facetsRaw] : []).map((f) => {
+    const row = f as Record<string, unknown>;
+    return {
+      key: String(row.key ?? ""),
+      value: String(row.value ?? ""),
+      count: Number(row.count ?? 0),
+    };
+  });
+
+  return {
+    tokenIds,
+    nextCursorTokenId: response.nextCursorTokenId
+      ? bytesToHex(response.nextCursorTokenId as string | Uint8Array | undefined)
+      : undefined,
+    totalHits: Number(response.totalHits ?? 0),
+    facets,
+  };
 }

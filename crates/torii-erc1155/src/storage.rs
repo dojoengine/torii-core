@@ -76,6 +76,21 @@ pub struct TransferCursor {
     pub id: i64,
 }
 
+/// Aggregated facet count for one key/value pair.
+pub struct AttributeFacetCount {
+    pub key: String,
+    pub value: String,
+    pub count: u64,
+}
+
+/// Result of token ID search by attributes.
+pub struct TokenAttributeQueryResult {
+    pub token_ids: Vec<U256>,
+    pub next_cursor_token_id: Option<U256>,
+    pub total_hits: u64,
+    pub facets: Vec<AttributeFacetCount>,
+}
+
 /// Balance data for a (contract, wallet, token_id) tuple
 #[derive(Debug, Clone)]
 pub struct Erc1155BalanceData {
@@ -179,6 +194,8 @@ impl Erc1155Storage {
                 CREATE INDEX IF NOT EXISTS idx_token_attributes_token ON erc1155.token_attributes(token);
                 CREATE INDEX IF NOT EXISTS idx_token_attributes_key ON erc1155.token_attributes(key);
                 CREATE INDEX IF NOT EXISTS idx_token_attributes_key_value ON erc1155.token_attributes(key, value);
+                CREATE INDEX IF NOT EXISTS idx_token_attributes_token_key_value ON erc1155.token_attributes(token, key, value);
+                CREATE INDEX IF NOT EXISTS idx_token_attributes_token_token_id ON erc1155.token_attributes(token, token_id);
 
                 CREATE TABLE IF NOT EXISTS erc1155.erc1155_balances (
                     id BIGSERIAL PRIMARY KEY,
@@ -352,7 +369,9 @@ impl Erc1155Storage {
             );
             CREATE INDEX IF NOT EXISTS idx_token_attributes_token ON token_attributes(token);
             CREATE INDEX IF NOT EXISTS idx_token_attributes_key ON token_attributes(key);
-            CREATE INDEX IF NOT EXISTS idx_token_attributes_key_value ON token_attributes(key, value);",
+            CREATE INDEX IF NOT EXISTS idx_token_attributes_key_value ON token_attributes(key, value);
+            CREATE INDEX IF NOT EXISTS idx_token_attributes_token_key_value ON token_attributes(token, key, value);
+            CREATE INDEX IF NOT EXISTS idx_token_attributes_token_token_id ON token_attributes(token, token_id);",
         )?;
 
         // Balance tracking tables
@@ -756,6 +775,130 @@ impl Erc1155Storage {
         };
 
         Ok((transfers, next_cursor))
+    }
+
+    /// Query token IDs by flattened metadata attributes.
+    ///
+    /// Filter semantics:
+    /// - OR within a single key (`values`)
+    /// - AND across keys (`filters`)
+    pub async fn query_token_ids_by_attributes(
+        &self,
+        token: Felt,
+        filters: &[(String, Vec<String>)],
+        cursor_token_id: Option<U256>,
+        limit: u32,
+        include_facets: bool,
+        facet_limit: u32,
+    ) -> Result<TokenAttributeQueryResult> {
+        let filters = Self::normalize_attribute_filters(filters);
+        let page_limit = limit.clamp(1, 1000);
+        let page_fetch = page_limit as i64 + 1;
+        let facet_limit = facet_limit.clamp(1, 1000) as i64;
+
+        if self.backend == StorageBackend::Postgres {
+            return self
+                .pg_query_token_ids_by_attributes(
+                    token,
+                    &filters,
+                    cursor_token_id,
+                    page_fetch,
+                    include_facets,
+                    facet_limit,
+                )
+                .await;
+        }
+
+        let conn = self.conn.lock().unwrap();
+
+        let mut query = String::from("SELECT u.token_id FROM token_uris u WHERE u.token = ?");
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(felt_to_blob(token))];
+        if let Some(cursor) = cursor_token_id {
+            query.push_str(" AND u.token_id > ?");
+            params.push(Box::new(u256_to_blob(cursor)));
+        }
+        Self::sqlite_append_attribute_exists_filters(&mut query, &mut params, &filters, "u");
+        query.push_str(" ORDER BY u.token_id ASC LIMIT ?");
+        params.push(Box::new(page_fetch));
+
+        let mut stmt = conn.prepare(&query)?;
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(std::convert::AsRef::as_ref).collect();
+        let rows = stmt.query_map(params_refs.as_slice(), |row| row.get::<_, Vec<u8>>(0))?;
+        let mut token_ids: Vec<U256> = rows
+            .collect::<Result<Vec<Vec<u8>>, _>>()?
+            .into_iter()
+            .map(|b| blob_to_u256(&b))
+            .collect();
+
+        let next_cursor_token_id = if token_ids.len() > page_limit as usize {
+            let next = token_ids[page_limit as usize];
+            token_ids.truncate(page_limit as usize);
+            Some(next)
+        } else {
+            None
+        };
+
+        let mut count_query = String::from("SELECT COUNT(*) FROM token_uris u WHERE u.token = ?");
+        let mut count_params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(felt_to_blob(token))];
+        Self::sqlite_append_attribute_exists_filters(
+            &mut count_query,
+            &mut count_params,
+            &filters,
+            "u",
+        );
+        let count_refs: Vec<&dyn rusqlite::ToSql> = count_params
+            .iter()
+            .map(std::convert::AsRef::as_ref)
+            .collect();
+        let total_hits: i64 =
+            conn.query_row(&count_query, count_refs.as_slice(), |row| row.get(0))?;
+
+        let facets = if include_facets {
+            let mut facet_query = String::from(
+                "SELECT a.key, a.value, COUNT(*) AS cnt
+                 FROM token_attributes a
+                 JOIN token_uris u ON u.token = a.token AND u.token_id = a.token_id
+                 WHERE u.token = ?",
+            );
+            let mut facet_params: Vec<Box<dyn rusqlite::ToSql>> =
+                vec![Box::new(felt_to_blob(token))];
+            Self::sqlite_append_attribute_exists_filters(
+                &mut facet_query,
+                &mut facet_params,
+                &filters,
+                "u",
+            );
+            facet_query.push_str(
+                " GROUP BY a.key, a.value
+                  ORDER BY cnt DESC, a.key ASC, a.value ASC
+                  LIMIT ?",
+            );
+            facet_params.push(Box::new(facet_limit));
+
+            let facet_refs: Vec<&dyn rusqlite::ToSql> = facet_params
+                .iter()
+                .map(std::convert::AsRef::as_ref)
+                .collect();
+            let mut stmt = conn.prepare(&facet_query)?;
+            let rows = stmt.query_map(facet_refs.as_slice(), |row| {
+                Ok(AttributeFacetCount {
+                    key: row.get(0)?,
+                    value: row.get(1)?,
+                    count: row.get::<_, i64>(2)? as u64,
+                })
+            })?;
+            rows.collect::<Result<Vec<AttributeFacetCount>, _>>()?
+        } else {
+            Vec::new()
+        };
+
+        Ok(TokenAttributeQueryResult {
+            token_ids,
+            next_cursor_token_id,
+            total_hits: total_hits as u64,
+            facets,
+        })
     }
 
     /// Get transfer count
@@ -1429,6 +1572,85 @@ impl Erc1155Storage {
         format!("${}", params.len())
     }
 
+    fn normalize_attribute_filters(
+        filters: &[(String, Vec<String>)],
+    ) -> Vec<(String, Vec<String>)> {
+        filters
+            .iter()
+            .filter_map(|(key, values)| {
+                let key = key.trim();
+                if key.is_empty() {
+                    return None;
+                }
+
+                let mut out_values: Vec<String> = Vec::new();
+                for value in values {
+                    let value = value.trim();
+                    if value.is_empty() || out_values.iter().any(|v| v == value) {
+                        continue;
+                    }
+                    out_values.push(value.to_owned());
+                }
+
+                if out_values.is_empty() {
+                    None
+                } else {
+                    Some((key.to_owned(), out_values))
+                }
+            })
+            .collect()
+    }
+
+    fn sqlite_append_attribute_exists_filters(
+        query: &mut String,
+        params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+        filters: &[(String, Vec<String>)],
+        parent_alias: &str,
+    ) {
+        for (key, values) in filters {
+            query.push_str(&format!(
+                " AND EXISTS (
+                     SELECT 1 FROM token_attributes a
+                     WHERE a.token = {parent_alias}.token
+                       AND a.token_id = {parent_alias}.token_id
+                       AND a.key = ? AND a.value IN ("
+            ));
+            params.push(Box::new(key.clone()));
+            let placeholders = values.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            query.push_str(&placeholders);
+            query.push_str("))");
+            for value in values {
+                params.push(Box::new(value.clone()));
+            }
+        }
+    }
+
+    fn pg_append_attribute_exists_filters(
+        query: &mut String,
+        params: &mut Vec<Box<dyn PgToSql + Sync + Send>>,
+        filters: &[(String, Vec<String>)],
+        parent_alias: &str,
+    ) {
+        for (key, values) in filters {
+            query.push_str(&format!(
+                " AND EXISTS (
+                     SELECT 1 FROM erc1155.token_attributes a
+                     WHERE a.token = {parent_alias}.token
+                       AND a.token_id = {parent_alias}.token_id
+                       AND a.key = "
+            ));
+            query.push_str(&Self::pg_next_param(params, key.clone()));
+            query.push_str(" AND a.value IN (");
+            let value_placeholders = values
+                .iter()
+                .map(|value| Self::pg_next_param(params, value.clone()))
+                .collect::<Vec<_>>()
+                .join(",");
+            query.push_str(&value_placeholders);
+            query.push_str("))");
+        }
+    }
+
     async fn pg_insert_transfers_batch(&self, transfers: &[TokenTransferData]) -> Result<usize> {
         if transfers.is_empty() {
             return Ok(0);
@@ -1715,6 +1937,105 @@ impl Erc1155Storage {
         };
 
         Ok((transfers, next_cursor))
+    }
+
+    async fn pg_query_token_ids_by_attributes(
+        &self,
+        token: Felt,
+        filters: &[(String, Vec<String>)],
+        cursor_token_id: Option<U256>,
+        page_fetch: i64,
+        include_facets: bool,
+        facet_limit: i64,
+    ) -> Result<TokenAttributeQueryResult> {
+        let client = self.pg_client().await?;
+
+        let mut query =
+            String::from("SELECT u.token_id FROM erc1155.token_uris u WHERE u.token = ");
+        let mut params: Vec<Box<dyn PgToSql + Sync + Send>> = Vec::new();
+        query.push_str(&Self::pg_next_param(&mut params, felt_to_blob(token)));
+        if let Some(cursor) = cursor_token_id {
+            query.push_str(" AND u.token_id > ");
+            query.push_str(&Self::pg_next_param(&mut params, u256_to_blob(cursor)));
+        }
+        Self::pg_append_attribute_exists_filters(&mut query, &mut params, filters, "u");
+        query.push_str(" ORDER BY u.token_id ASC LIMIT ");
+        query.push_str(&Self::pg_next_param(&mut params, page_fetch));
+
+        let refs: Vec<&(dyn PgToSql + Sync)> = params
+            .iter()
+            .map(|p| p.as_ref() as &(dyn PgToSql + Sync))
+            .collect();
+        let rows = client.query(&query, &refs).await?;
+        let mut token_ids: Vec<U256> = rows
+            .into_iter()
+            .map(|row| blob_to_u256(&row.get::<usize, Vec<u8>>(0)))
+            .collect();
+
+        let page_limit = (page_fetch - 1) as usize;
+        let next_cursor_token_id = if token_ids.len() > page_limit {
+            let next = token_ids[page_limit];
+            token_ids.truncate(page_limit);
+            Some(next)
+        } else {
+            None
+        };
+
+        let mut count_query =
+            String::from("SELECT COUNT(*) FROM erc1155.token_uris u WHERE u.token = ");
+        let mut count_params: Vec<Box<dyn PgToSql + Sync + Send>> = Vec::new();
+        count_query.push_str(&Self::pg_next_param(&mut count_params, felt_to_blob(token)));
+        Self::pg_append_attribute_exists_filters(&mut count_query, &mut count_params, filters, "u");
+        let count_refs: Vec<&(dyn PgToSql + Sync)> = count_params
+            .iter()
+            .map(|p| p.as_ref() as &(dyn PgToSql + Sync))
+            .collect();
+        let total_row = client.query_one(&count_query, &count_refs).await?;
+        let total_hits = total_row.get::<usize, i64>(0) as u64;
+
+        let facets = if include_facets {
+            let mut facet_query = String::from(
+                "SELECT a.key, a.value, COUNT(*) AS cnt
+                 FROM erc1155.token_attributes a
+                 JOIN erc1155.token_uris u ON u.token = a.token AND u.token_id = a.token_id
+                 WHERE u.token = ",
+            );
+            let mut facet_params: Vec<Box<dyn PgToSql + Sync + Send>> = Vec::new();
+            facet_query.push_str(&Self::pg_next_param(&mut facet_params, felt_to_blob(token)));
+            Self::pg_append_attribute_exists_filters(
+                &mut facet_query,
+                &mut facet_params,
+                filters,
+                "u",
+            );
+            facet_query.push_str(
+                " GROUP BY a.key, a.value
+                  ORDER BY cnt DESC, a.key ASC, a.value ASC
+                  LIMIT ",
+            );
+            facet_query.push_str(&Self::pg_next_param(&mut facet_params, facet_limit));
+            let facet_refs: Vec<&(dyn PgToSql + Sync)> = facet_params
+                .iter()
+                .map(|p| p.as_ref() as &(dyn PgToSql + Sync))
+                .collect();
+            let rows = client.query(&facet_query, &facet_refs).await?;
+            rows.into_iter()
+                .map(|row| AttributeFacetCount {
+                    key: row.get(0),
+                    value: row.get(1),
+                    count: row.get::<usize, i64>(2) as u64,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        Ok(TokenAttributeQueryResult {
+            token_ids,
+            next_cursor_token_id,
+            total_hits,
+            facets,
+        })
     }
 
     async fn pg_get_transfer_count(&self) -> Result<u64> {
@@ -2209,6 +2530,9 @@ impl TokenUriStore for Erc1155Storage {
                                 })
                             });
 
+                            let key = key.and_then(sanitize_metadata_text);
+                            let value = value.and_then(|v| sanitize_metadata_text(&v));
+
                             if let (Some(key), Some(value)) = (key, value) {
                                 tx.execute(
                                     "INSERT INTO erc1155.token_attributes (token, token_id, key, value)
@@ -2275,6 +2599,9 @@ impl TokenUriStore for Erc1155Storage {
                             })
                         });
 
+                        let key = key.and_then(sanitize_metadata_text);
+                        let value = value.and_then(|v| sanitize_metadata_text(&v));
+
                         if let (Some(key), Some(value)) = (key, value) {
                             attr_stmt.execute(params![&token_blob, &token_id_blob, key, value])?;
                         }
@@ -2285,5 +2612,14 @@ impl TokenUriStore for Erc1155Storage {
 
         tx.commit()?;
         Ok(())
+    }
+}
+
+fn sanitize_metadata_text(input: &str) -> Option<String> {
+    let sanitized = input.replace('\0', "").trim().to_owned();
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
     }
 }

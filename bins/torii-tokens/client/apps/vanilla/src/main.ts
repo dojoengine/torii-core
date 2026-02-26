@@ -9,7 +9,9 @@ import {
   generateClientId,
   getErc20Stats,
   getErc721Stats,
+  getErc721TokensByAttributesPage,
   getErc1155Stats,
+  getErc1155TokensByAttributesPage,
   getErc20TransfersPage,
   getErc721TransfersPage,
   getErc1155TransfersPage,
@@ -21,7 +23,13 @@ import {
   type TokenBalanceResult,
   type TransferResult,
   type TokenMetadataResult,
+  type AttributeFilterInput,
+  type AttributeFacetCountResult,
 } from "@torii-tokens/shared";
+import {
+  bindCollectionExplorerHandlers,
+  renderCollectionExplorer,
+} from "./components/collection-explorer";
 
 interface Stats {
   totalTransfers: number;
@@ -107,6 +115,18 @@ class TokensApp {
   private queryTransfersHistory: (TransferCursorResult | undefined)[] = [];
   private queryTransfersCursor?: TransferCursorResult;
   private queryTransfersNext?: TransferCursorResult;
+  private collectionStandard: "erc721" | "erc1155" = "erc721";
+  private collectionContractAddress = "";
+  private collectionFiltersText = "";
+  private collectionTokenIds: string[] = [];
+  private collectionFacets: AttributeFacetCountResult[] = [];
+  private collectionTotalHits = 0;
+  private collectionCursor?: string;
+  private collectionNextCursor?: string;
+  private collectionHistory: (string | undefined)[] = [];
+  private collectionLoading = false;
+  private collectionError: string | null = null;
+  private activePage: "dashboard" | "collection" = "dashboard";
 
   constructor() {
     this.render();
@@ -283,6 +303,82 @@ class TokensApp {
       this.queryLoading = false;
       this.render();
     }
+  }
+
+  private parseCollectionFilters(input: string): AttributeFilterInput[] {
+    return input
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [rawKey, rawValues = ""] = line.split("=", 2);
+        const key = rawKey.trim();
+        const values = rawValues
+          .split("|")
+          .map((v) => v.trim())
+          .filter(Boolean);
+        return { key, values };
+      })
+      .filter((f) => f.key.length > 0 && f.values.length > 0);
+  }
+
+  private async runCollectionQuery(cursorTokenId?: string) {
+    if (!this.collectionContractAddress.trim()) return;
+    this.collectionLoading = true;
+    this.collectionError = null;
+    this.render();
+    try {
+      const filters = this.parseCollectionFilters(this.collectionFiltersText);
+      const result = this.collectionStandard === "erc721"
+        ? await getErc721TokensByAttributesPage(this.client, {
+            contractAddress: this.collectionContractAddress.trim(),
+            filters,
+            cursorTokenId,
+            limit: this.pageSize,
+            includeFacets: true,
+            facetLimit: 300,
+          })
+        : await getErc1155TokensByAttributesPage(this.client, {
+            contractAddress: this.collectionContractAddress.trim(),
+            filters,
+            cursorTokenId,
+            limit: this.pageSize,
+            includeFacets: true,
+            facetLimit: 300,
+          });
+
+      this.collectionTokenIds = result.tokenIds;
+      this.collectionFacets = result.facets;
+      this.collectionTotalHits = result.totalHits;
+      this.collectionNextCursor = result.nextCursorTokenId;
+      this.collectionCursor = cursorTokenId;
+    } catch (err) {
+      console.error("Collection query failed:", err);
+      this.collectionError = err instanceof Error ? err.message : "Collection query failed";
+    } finally {
+      this.collectionLoading = false;
+      this.render();
+    }
+  }
+
+  private async runCollectionQueryFresh() {
+    this.collectionHistory = [];
+    this.collectionCursor = undefined;
+    this.collectionNextCursor = undefined;
+    await this.runCollectionQuery(undefined);
+  }
+
+  private async navigateCollection(dir: "next" | "prev") {
+    if (dir === "next") {
+      if (!this.collectionNextCursor) return;
+      this.collectionHistory = [...this.collectionHistory, this.collectionCursor];
+      await this.runCollectionQuery(this.collectionNextCursor);
+      return;
+    }
+    if (this.collectionHistory.length === 0) return;
+    const prevCursor = this.collectionHistory[this.collectionHistory.length - 1];
+    this.collectionHistory = this.collectionHistory.slice(0, -1);
+    await this.runCollectionQuery(prevCursor);
   }
 
   private async subscribe() {
@@ -466,20 +562,28 @@ class TokensApp {
         <header>
           <h1>Torii Tokens - Vanilla</h1>
           <p class="subtitle">ERC20 / ERC721 / ERC1155 Token Indexer</p>
+          <div class="btn-group" style="justify-content: center; margin-top: 0.75rem;">
+            <button class="btn ${this.activePage === "dashboard" ? "btn-primary" : ""}" id="nav-dashboard">Dashboard</button>
+            <button class="btn ${this.activePage === "collection" ? "btn-primary" : ""}" id="nav-collection">Collection Explorer</button>
+          </div>
         </header>
 
         ${this.renderStatusPanel()}
 
-        ${this.renderQueryPanel()}
-
-        ${this.renderQueryResults()}
-
-        <div class="panels">
-          ${this.renderErc20Panel()}
-          ${this.renderErc721Panel()}
-          ${this.renderErc1155Panel()}
-          ${this.renderUpdatesPanel()}
-        </div>
+        ${
+          this.activePage === "dashboard"
+            ? `
+          ${this.renderQueryPanel()}
+          ${this.renderQueryResults()}
+          <div class="panels">
+            ${this.renderErc20Panel()}
+            ${this.renderErc721Panel()}
+            ${this.renderErc1155Panel()}
+            ${this.renderUpdatesPanel()}
+          </div>
+        `
+            : this.renderCollectionPanel()
+        }
       </div>
     `;
 
@@ -654,6 +758,21 @@ class TokensApp {
         </div>
       </section>
     `;
+  }
+
+  private renderCollectionPanel(): string {
+    return renderCollectionExplorer({
+      standard: this.collectionStandard,
+      contractAddress: this.collectionContractAddress,
+      filtersText: this.collectionFiltersText,
+      tokenIds: this.collectionTokenIds,
+      facets: this.collectionFacets,
+      totalHits: this.collectionTotalHits,
+      loading: this.collectionLoading,
+      error: this.collectionError,
+      canPrev: this.collectionHistory.length > 0,
+      canNext: this.collectionNextCursor != null,
+    });
   }
 
   private renderStatusPanel(): string {
@@ -951,6 +1070,35 @@ class TokensApp {
       if (contractAddress || wallet) {
         this.handleQuery(contractAddress, wallet);
       }
+    });
+    document.getElementById("nav-dashboard")?.addEventListener("click", () => {
+      this.activePage = "dashboard";
+      this.render();
+    });
+    document.getElementById("nav-collection")?.addEventListener("click", () => {
+      this.activePage = "collection";
+      this.render();
+    });
+    bindCollectionExplorerHandlers({
+      onStandardChange: (value) => {
+        this.collectionStandard = value;
+      },
+      onContractChange: (value) => {
+        this.collectionContractAddress = value;
+        this.render();
+      },
+      onFiltersChange: (value) => {
+        this.collectionFiltersText = value;
+      },
+      onRun: () => {
+        void this.runCollectionQueryFresh();
+      },
+      onPrev: () => {
+        void this.navigateCollection("prev");
+      },
+      onNext: () => {
+        void this.navigateCollection("next");
+      },
     });
   }
 }

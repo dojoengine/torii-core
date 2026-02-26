@@ -201,6 +201,67 @@ pub struct GetOwnerResponse {
     #[prost(bytes = "vec", optional, tag = "1")]
     pub owner: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
+/// OR-within-key filter values; AND logic is applied across keys.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AttributeFilter {
+    /// Attribute key / trait_type
+    #[prost(string, tag = "1")]
+    pub key: ::prost::alloc::string::String,
+    /// Accepted values for this key (OR)
+    #[prost(string, repeated, tag = "2")]
+    pub values: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// Facet count entry for UI filtering
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct AttributeFacetCount {
+    /// Attribute key / trait_type
+    #[prost(string, tag = "1")]
+    pub key: ::prost::alloc::string::String,
+    /// Attribute value
+    #[prost(string, tag = "2")]
+    pub value: ::prost::alloc::string::String,
+    /// Number of matching tokens containing this key/value
+    #[prost(uint64, tag = "3")]
+    pub count: u64,
+}
+/// Request for QueryTokensByAttributes RPC
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QueryTokensByAttributesRequest {
+    /// Token contract address (required, 32 bytes)
+    #[prost(bytes = "vec", tag = "1")]
+    pub token: ::prost::alloc::vec::Vec<u8>,
+    /// Attribute filters (AND across entries)
+    #[prost(message, repeated, tag = "2")]
+    pub filters: ::prost::alloc::vec::Vec<AttributeFilter>,
+    /// Cursor token_id (exclusive) for pagination
+    #[prost(bytes = "vec", optional, tag = "3")]
+    pub cursor_token_id: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Maximum number of token IDs to return (default: 100, max: 1000)
+    #[prost(uint32, tag = "4")]
+    pub limit: u32,
+    /// Include facet counts in response
+    #[prost(bool, tag = "5")]
+    pub include_facets: bool,
+    /// Maximum number of facet rows to return (default: 100, max: 1000)
+    #[prost(uint32, tag = "6")]
+    pub facet_limit: u32,
+}
+/// Response for QueryTokensByAttributes RPC
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct QueryTokensByAttributesResponse {
+    /// Matched token IDs (U256 bytes)
+    #[prost(bytes = "vec", repeated, tag = "1")]
+    pub token_ids: ::prost::alloc::vec::Vec<::prost::alloc::vec::Vec<u8>>,
+    /// Cursor for next page (absent if no more results)
+    #[prost(bytes = "vec", optional, tag = "2")]
+    pub next_cursor_token_id: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
+    /// Total number of matched token IDs (without pagination)
+    #[prost(uint64, tag = "3")]
+    pub total_hits: u64,
+    /// Facet counts over the matched set
+    #[prost(message, repeated, tag = "4")]
+    pub facets: ::prost::alloc::vec::Vec<AttributeFacetCount>,
+}
 /// Request for SubscribeTransfers RPC
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SubscribeTransfersRequest {
@@ -322,6 +383,14 @@ pub mod erc721_server {
             request: tonic::Request<super::GetTokenMetadataRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetTokenMetadataResponse>,
+            tonic::Status,
+        >;
+        /// Query token IDs by flattened metadata attributes (supports intersections)
+        async fn query_tokens_by_attributes(
+            &self,
+            request: tonic::Request<super::QueryTokensByAttributesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::QueryTokensByAttributesResponse>,
             tonic::Status,
         >;
         /// Server streaming response type for the SubscribeTransfers method.
@@ -587,6 +656,54 @@ pub mod erc721_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetTokenMetadataSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/torii.sinks.erc721.Erc721/QueryTokensByAttributes" => {
+                    #[allow(non_camel_case_types)]
+                    struct QueryTokensByAttributesSvc<T: Erc721>(pub Arc<T>);
+                    impl<
+                        T: Erc721,
+                    > tonic::server::UnaryService<super::QueryTokensByAttributesRequest>
+                    for QueryTokensByAttributesSvc<T> {
+                        type Response = super::QueryTokensByAttributesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                super::QueryTokensByAttributesRequest,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Erc721>::query_tokens_by_attributes(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = QueryTokensByAttributesSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

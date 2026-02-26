@@ -4,12 +4,13 @@
     createTokensClient,
     SERVER_URL,
     formatTimestamp,
-    truncateAddress,
     getUpdateTypeName,
     generateClientId,
     getErc20Stats,
     getErc721Stats,
+    getErc721TokensByAttributesPage,
     getErc1155Stats,
+    getErc1155TokensByAttributesPage,
     getErc20TransfersPage,
     getErc721TransfersPage,
     getErc1155TransfersPage,
@@ -21,6 +22,8 @@
     type TokenBalanceResult,
     type TransferResult,
     type TokenMetadataResult,
+    type AttributeFilterInput,
+    type AttributeFacetCountResult,
   } from "@torii-tokens/shared";
 
   import StatusPanel from "./components/StatusPanel.svelte";
@@ -28,6 +31,7 @@
   import UpdatesFeed from "./components/UpdatesFeed.svelte";
   import QueryFilters from "./components/QueryFilters.svelte";
   import QueryResults from "./components/QueryResults.svelte";
+  import CollectionExplorer from "./components/CollectionExplorer.svelte";
 
   interface Stats {
     totalTransfers: number;
@@ -113,6 +117,18 @@
   let queryTransfersHistory = $state<(TransferCursorResult | undefined)[]>([]);
   let queryTransfersCursor = $state<TransferCursorResult | undefined>(undefined);
   let queryTransfersNext = $state<TransferCursorResult | undefined>(undefined);
+  let collectionStandard = $state<"erc721" | "erc1155">("erc721");
+  let collectionContractAddress = $state("");
+  let collectionFiltersText = $state("");
+  let collectionTokenIds = $state<string[]>([]);
+  let collectionFacets = $state<AttributeFacetCountResult[]>([]);
+  let collectionTotalHits = $state(0);
+  let collectionCursor = $state<string | undefined>(undefined);
+  let collectionNextCursor = $state<string | undefined>(undefined);
+  let collectionHistory = $state<(string | undefined)[]>([]);
+  let collectionLoading = $state(false);
+  let collectionError = $state<string | null>(null);
+  let activePage = $state<"dashboard" | "collection">("dashboard");
 
   async function handleQuery(contractAddress: string, wallet: string) {
     queryContractAddress = contractAddress;
@@ -407,6 +423,80 @@
     updates = [];
   }
 
+  function parseCollectionFilters(input: string): AttributeFilterInput[] {
+    return input
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [rawKey, rawValues = ""] = line.split("=", 2);
+        const key = rawKey.trim();
+        const values = rawValues
+          .split("|")
+          .map((v) => v.trim())
+          .filter(Boolean);
+        return { key, values };
+      })
+      .filter((f) => f.key.length > 0 && f.values.length > 0);
+  }
+
+  async function runCollectionQuery(cursorTokenId?: string) {
+    if (!collectionContractAddress.trim()) return;
+    collectionLoading = true;
+    collectionError = null;
+    try {
+      const filters = parseCollectionFilters(collectionFiltersText);
+      const result = collectionStandard === "erc721"
+        ? await getErc721TokensByAttributesPage(client, {
+            contractAddress: collectionContractAddress.trim(),
+            filters,
+            cursorTokenId,
+            limit: PAGE_SIZE,
+            includeFacets: true,
+            facetLimit: 300,
+          })
+        : await getErc1155TokensByAttributesPage(client, {
+            contractAddress: collectionContractAddress.trim(),
+            filters,
+            cursorTokenId,
+            limit: PAGE_SIZE,
+            includeFacets: true,
+            facetLimit: 300,
+          });
+
+      collectionTokenIds = result.tokenIds;
+      collectionFacets = result.facets;
+      collectionTotalHits = result.totalHits;
+      collectionNextCursor = result.nextCursorTokenId;
+      collectionCursor = cursorTokenId;
+    } catch (err) {
+      console.error("Collection query failed:", err);
+      collectionError = err instanceof Error ? err.message : "Collection query failed";
+    } finally {
+      collectionLoading = false;
+    }
+  }
+
+  async function runCollectionQueryFresh() {
+    collectionHistory = [];
+    collectionCursor = undefined;
+    collectionNextCursor = undefined;
+    await runCollectionQuery(undefined);
+  }
+
+  async function navigateCollection(dir: "next" | "prev") {
+    if (dir === "next") {
+      if (!collectionNextCursor) return;
+      collectionHistory = [...collectionHistory, collectionCursor];
+      await runCollectionQuery(collectionNextCursor);
+      return;
+    }
+    if (collectionHistory.length === 0) return;
+    const prevCursor = collectionHistory[collectionHistory.length - 1];
+    collectionHistory = collectionHistory.slice(0, -1);
+    await runCollectionQuery(prevCursor);
+  }
+
   onMount(() => {
     checkHealth();
     loadStats();
@@ -429,6 +519,14 @@
   <header>
     <h1>Torii Tokens - Svelte</h1>
     <p class="subtitle">ERC20 / ERC721 / ERC1155 Token Indexer</p>
+    <div class="btn-group" style="justify-content: center; margin-top: 0.75rem;">
+      <button class={`btn ${activePage === "dashboard" ? "btn-primary" : ""}`} onclick={() => (activePage = "dashboard")}>
+        Dashboard
+      </button>
+      <button class={`btn ${activePage === "collection" ? "btn-primary" : ""}`} onclick={() => (activePage = "collection")}>
+        Collection Explorer
+      </button>
+    </div>
   </header>
 
   <StatusPanel
@@ -440,89 +538,110 @@
     onDisconnect={disconnect}
   />
 
-  <QueryFilters onQuery={handleQuery} loading={queryLoading} />
+  {#if activePage === "dashboard"}
+    <QueryFilters onQuery={handleQuery} loading={queryLoading} />
 
-  <QueryResults
-    contractAddress={queryContractAddress}
-    wallet={queryWallet}
-    erc20Balances={queryErc20Balances}
-    erc20Transfers={queryErc20Transfers}
-    loading={queryLoading}
-    error={queryError}
-    onBalancesPrev={() => navigateQueryBalances("prev")}
-    onBalancesNext={() => navigateQueryBalances("next")}
-    balancesCanPrev={queryBalancesHistory.length > 0}
-    balancesCanNext={queryBalancesNext != null}
-    onTransfersPrev={() => navigateQueryTransfers("prev")}
-    onTransfersNext={() => navigateQueryTransfers("next")}
-    transfersCanPrev={queryTransfersHistory.length > 0}
-    transfersCanNext={queryTransfersNext != null}
-    balancesLoading={queryBalancesLoading}
-    transfersLoading={queryTransfersLoading}
-  />
-
-  <div class="panels">
-    <TokenPanel
-      title="ERC20 Tokens"
-      tokenType="erc20"
-      stats={erc20Stats}
-      transfers={erc20Transfers}
-      metadata={erc20Metadata}
-      showAmount={true}
-      onMetadataPrev={() => navigateDashboardMetadata("erc20", "prev")}
-      onMetadataNext={() => navigateDashboardMetadata("erc20", "next")}
-      metadataCanPrev={erc20MetadataHistory.length > 0}
-      metadataCanNext={erc20MetadataNext != null}
-      onTransfersPrev={() => navigateDashboardTransfers("erc20", "prev")}
-      onTransfersNext={() => navigateDashboardTransfers("erc20", "next")}
-      transfersCanPrev={erc20TransfersHistory.length > 0}
-      transfersCanNext={erc20TransfersNext != null}
-      metadataLoading={erc20MetadataLoading}
-      transfersLoading={erc20TransfersLoading}
+    <QueryResults
+      contractAddress={queryContractAddress}
+      wallet={queryWallet}
+      erc20Balances={queryErc20Balances}
+      erc20Transfers={queryErc20Transfers}
+      loading={queryLoading}
+      error={queryError}
+      onBalancesPrev={() => navigateQueryBalances("prev")}
+      onBalancesNext={() => navigateQueryBalances("next")}
+      balancesCanPrev={queryBalancesHistory.length > 0}
+      balancesCanNext={queryBalancesNext != null}
+      onTransfersPrev={() => navigateQueryTransfers("prev")}
+      onTransfersNext={() => navigateQueryTransfers("next")}
+      transfersCanPrev={queryTransfersHistory.length > 0}
+      transfersCanNext={queryTransfersNext != null}
+      balancesLoading={queryBalancesLoading}
+      transfersLoading={queryTransfersLoading}
     />
 
-    <TokenPanel
-      title="ERC721 NFTs"
-      tokenType="erc721"
-      stats={erc721Stats}
-      transfers={erc721Transfers}
-      metadata={erc721Metadata}
-      showAmount={false}
-      onMetadataPrev={() => navigateDashboardMetadata("erc721", "prev")}
-      onMetadataNext={() => navigateDashboardMetadata("erc721", "next")}
-      metadataCanPrev={erc721MetadataHistory.length > 0}
-      metadataCanNext={erc721MetadataNext != null}
-      onTransfersPrev={() => navigateDashboardTransfers("erc721", "prev")}
-      onTransfersNext={() => navigateDashboardTransfers("erc721", "next")}
-      transfersCanPrev={erc721TransfersHistory.length > 0}
-      transfersCanNext={erc721TransfersNext != null}
-      metadataLoading={erc721MetadataLoading}
-      transfersLoading={erc721TransfersLoading}
-    />
+    <div class="panels">
+      <TokenPanel
+        title="ERC20 Tokens"
+        tokenType="erc20"
+        stats={erc20Stats}
+        transfers={erc20Transfers}
+        metadata={erc20Metadata}
+        showAmount={true}
+        onMetadataPrev={() => navigateDashboardMetadata("erc20", "prev")}
+        onMetadataNext={() => navigateDashboardMetadata("erc20", "next")}
+        metadataCanPrev={erc20MetadataHistory.length > 0}
+        metadataCanNext={erc20MetadataNext != null}
+        onTransfersPrev={() => navigateDashboardTransfers("erc20", "prev")}
+        onTransfersNext={() => navigateDashboardTransfers("erc20", "next")}
+        transfersCanPrev={erc20TransfersHistory.length > 0}
+        transfersCanNext={erc20TransfersNext != null}
+        metadataLoading={erc20MetadataLoading}
+        transfersLoading={erc20TransfersLoading}
+      />
 
-    <TokenPanel
-      title="ERC1155 Multi-Tokens"
-      tokenType="erc1155"
-      stats={erc1155Stats}
-      transfers={erc1155Transfers}
-      metadata={erc1155Metadata}
-      showAmount={true}
-      onMetadataPrev={() => navigateDashboardMetadata("erc1155", "prev")}
-      onMetadataNext={() => navigateDashboardMetadata("erc1155", "next")}
-      metadataCanPrev={erc1155MetadataHistory.length > 0}
-      metadataCanNext={erc1155MetadataNext != null}
-      onTransfersPrev={() => navigateDashboardTransfers("erc1155", "prev")}
-      onTransfersNext={() => navigateDashboardTransfers("erc1155", "next")}
-      transfersCanPrev={erc1155TransfersHistory.length > 0}
-      transfersCanNext={erc1155TransfersNext != null}
-      metadataLoading={erc1155MetadataLoading}
-      transfersLoading={erc1155TransfersLoading}
-    />
+      <TokenPanel
+        title="ERC721 NFTs"
+        tokenType="erc721"
+        stats={erc721Stats}
+        transfers={erc721Transfers}
+        metadata={erc721Metadata}
+        showAmount={false}
+        onMetadataPrev={() => navigateDashboardMetadata("erc721", "prev")}
+        onMetadataNext={() => navigateDashboardMetadata("erc721", "next")}
+        metadataCanPrev={erc721MetadataHistory.length > 0}
+        metadataCanNext={erc721MetadataNext != null}
+        onTransfersPrev={() => navigateDashboardTransfers("erc721", "prev")}
+        onTransfersNext={() => navigateDashboardTransfers("erc721", "next")}
+        transfersCanPrev={erc721TransfersHistory.length > 0}
+        transfersCanNext={erc721TransfersNext != null}
+        metadataLoading={erc721MetadataLoading}
+        transfersLoading={erc721TransfersLoading}
+      />
 
-    <UpdatesFeed
-      {updates}
-      {connected}
-      onClear={clearUpdates}
+      <TokenPanel
+        title="ERC1155 Multi-Tokens"
+        tokenType="erc1155"
+        stats={erc1155Stats}
+        transfers={erc1155Transfers}
+        metadata={erc1155Metadata}
+        showAmount={true}
+        onMetadataPrev={() => navigateDashboardMetadata("erc1155", "prev")}
+        onMetadataNext={() => navigateDashboardMetadata("erc1155", "next")}
+        metadataCanPrev={erc1155MetadataHistory.length > 0}
+        metadataCanNext={erc1155MetadataNext != null}
+        onTransfersPrev={() => navigateDashboardTransfers("erc1155", "prev")}
+        onTransfersNext={() => navigateDashboardTransfers("erc1155", "next")}
+        transfersCanPrev={erc1155TransfersHistory.length > 0}
+        transfersCanNext={erc1155TransfersNext != null}
+        metadataLoading={erc1155MetadataLoading}
+        transfersLoading={erc1155TransfersLoading}
+      />
+
+      <UpdatesFeed
+        {updates}
+        {connected}
+        onClear={clearUpdates}
+      />
+    </div>
+  {:else}
+    <CollectionExplorer
+      standard={collectionStandard}
+      contractAddress={collectionContractAddress}
+      filtersText={collectionFiltersText}
+      loading={collectionLoading}
+      error={collectionError}
+      totalHits={collectionTotalHits}
+      tokenIds={collectionTokenIds}
+      facets={collectionFacets}
+      canNext={collectionNextCursor != null}
+      canPrev={collectionHistory.length > 0}
+      onStandardChange={(v) => (collectionStandard = v)}
+      onContractAddressChange={(v) => (collectionContractAddress = v)}
+      onFiltersTextChange={(v) => (collectionFiltersText = v)}
+      onRun={() => runCollectionQueryFresh()}
+      onNext={() => navigateCollection("next")}
+      onPrev={() => navigateCollection("prev")}
     />
-  </div>
+  {/if}
 </div>

@@ -264,6 +264,49 @@ export const Erc721GetTokenMetadataResponse = reg({
   },
 });
 
+export const Erc721AttributeFilter = reg({
+  name: "Erc721AttributeFilter",
+  fullName: "torii.sinks.erc721.AttributeFilter",
+  fields: {
+    key: { number: 1, type: "string", repeated: false },
+    values: { number: 2, type: "string", repeated: true },
+  },
+});
+
+export const Erc721AttributeFacetCount = reg({
+  name: "Erc721AttributeFacetCount",
+  fullName: "torii.sinks.erc721.AttributeFacetCount",
+  fields: {
+    key: { number: 1, type: "string", repeated: false },
+    value: { number: 2, type: "string", repeated: false },
+    count: { number: 3, type: "uint64", repeated: false },
+  },
+});
+
+export const Erc721QueryTokensByAttributesRequest = reg({
+  name: "Erc721QueryTokensByAttributesRequest",
+  fullName: "torii.sinks.erc721.QueryTokensByAttributesRequest",
+  fields: {
+    token: { number: 1, type: "bytes", repeated: false },
+    filters: { number: 2, type: "message", repeated: true, messageType: "Erc721AttributeFilter" },
+    cursorTokenId: { number: 3, type: "bytes", repeated: false, optional: true },
+    limit: { number: 4, type: "uint32", repeated: false },
+    includeFacets: { number: 5, type: "bool", repeated: false },
+    facetLimit: { number: 6, type: "uint32", repeated: false },
+  },
+});
+
+export const Erc721QueryTokensByAttributesResponse = reg({
+  name: "Erc721QueryTokensByAttributesResponse",
+  fullName: "torii.sinks.erc721.QueryTokensByAttributesResponse",
+  fields: {
+    tokenIds: { number: 1, type: "bytes", repeated: true },
+    nextCursorTokenId: { number: 2, type: "bytes", repeated: false, optional: true },
+    totalHits: { number: 3, type: "uint64", repeated: false },
+    facets: { number: 4, type: "message", repeated: true, messageType: "Erc721AttributeFacetCount" },
+  },
+});
+
 export const Erc721GetStatsRequest = reg({
   name: "Erc721GetStatsRequest",
   fullName: "torii.sinks.erc721.GetStatsRequest",
@@ -371,6 +414,49 @@ export const Erc1155GetTokenMetadataResponse = reg({
   fields: {
     tokens: { number: 1, type: "message", repeated: true, messageType: "Erc1155TokenMetadataEntry" },
     nextCursor: { number: 2, type: "bytes", repeated: false, optional: true },
+  },
+});
+
+export const Erc1155AttributeFilter = reg({
+  name: "Erc1155AttributeFilter",
+  fullName: "torii.sinks.erc1155.AttributeFilter",
+  fields: {
+    key: { number: 1, type: "string", repeated: false },
+    values: { number: 2, type: "string", repeated: true },
+  },
+});
+
+export const Erc1155AttributeFacetCount = reg({
+  name: "Erc1155AttributeFacetCount",
+  fullName: "torii.sinks.erc1155.AttributeFacetCount",
+  fields: {
+    key: { number: 1, type: "string", repeated: false },
+    value: { number: 2, type: "string", repeated: false },
+    count: { number: 3, type: "uint64", repeated: false },
+  },
+});
+
+export const Erc1155QueryTokensByAttributesRequest = reg({
+  name: "Erc1155QueryTokensByAttributesRequest",
+  fullName: "torii.sinks.erc1155.QueryTokensByAttributesRequest",
+  fields: {
+    token: { number: 1, type: "bytes", repeated: false },
+    filters: { number: 2, type: "message", repeated: true, messageType: "Erc1155AttributeFilter" },
+    cursorTokenId: { number: 3, type: "bytes", repeated: false, optional: true },
+    limit: { number: 4, type: "uint32", repeated: false },
+    includeFacets: { number: 5, type: "bool", repeated: false },
+    facetLimit: { number: 6, type: "uint32", repeated: false },
+  },
+});
+
+export const Erc1155QueryTokensByAttributesResponse = reg({
+  name: "Erc1155QueryTokensByAttributesResponse",
+  fullName: "torii.sinks.erc1155.QueryTokensByAttributesResponse",
+  fields: {
+    tokenIds: { number: 1, type: "bytes", repeated: true },
+    nextCursorTokenId: { number: 2, type: "bytes", repeated: false, optional: true },
+    totalHits: { number: 3, type: "uint64", repeated: false },
+    facets: { number: 4, type: "message", repeated: true, messageType: "Erc1155AttributeFacetCount" },
   },
 });
 
