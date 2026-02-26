@@ -2,12 +2,58 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: torii-postgres
+    command:
+      - postgres
+      - -c
+      - shared_buffers=4GB
+      - -c
+      - effective_cache_size=12GB
+      - -c
+      - maintenance_work_mem=1GB
+      - -c
+      - work_mem=32MB
+      - -c
+      - wal_buffers=16MB
+      - -c
+      - min_wal_size=2GB
+      - -c
+      - max_wal_size=8GB
+      - -c
+      - checkpoint_timeout=30min
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - wal_compression=on
+      - -c
+      - synchronous_commit=off
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      - -c
+      - default_statistics_target=100
+      - -c
+      - autovacuum_naptime=10s
+      - -c
+      - autovacuum_vacuum_scale_factor=0.02
+      - -c
+      - autovacuum_analyze_scale_factor=0.01
+      - -c
+      - max_worker_processes=16
+      - -c
+      - max_parallel_workers=8
+      - -c
+      - max_parallel_workers_per_gather=4
+      - -c
+      - max_parallel_maintenance_workers=4
     environment:
       POSTGRES_USER: torii
       POSTGRES_PASSWORD: torii
       POSTGRES_DB: torii
     ports:
       - "5432:5432"
+    mem_limit: 16g
+    shm_size: 4g
     volumes:
       - torii_postgres_data:/var/lib/postgresql/data
     healthcheck:
