@@ -4,12 +4,22 @@ use starknet::core::types::requests::GetClassAtRequest;
 use starknet::core::types::LegacyContractAbiEntry;
 use starknet::core::types::{
     requests::GetBlockWithReceiptsRequest, BlockId, ContractClass, DeclareTransactionContent,
-    DeployAccountTransactionContent, EmittedEvent, Felt, InvokeTransactionContent,
+    DeployAccountTransactionContent, EmittedEvent, ExecutionResult, Felt, InvokeTransactionContent,
     MaybePreConfirmedBlockWithReceipts, TransactionContent, TransactionReceipt,
 };
 use starknet::providers::{Provider, ProviderRequestData, ProviderResponseData};
 
 use super::{BlockContext, BlockData, DeclaredClass, DeployedContract, TransactionContext};
+
+#[inline]
+fn is_execution_succeeded(execution_result: &ExecutionResult) -> bool {
+    matches!(execution_result, ExecutionResult::Succeeded)
+}
+
+#[inline]
+fn is_receipt_succeeded(receipt: &TransactionReceipt) -> bool {
+    is_execution_succeeded(receipt.execution_result())
+}
 
 /// Builds a batch of `GetBlockWithReceipts` requests for a range of block numbers.
 ///
@@ -153,10 +163,13 @@ pub fn block_into_contexts(block: MaybePreConfirmedBlockWithReceipts) -> Result<
     let mut transaction_contexts = Vec::new();
     let mut declared_classes = Vec::new();
     let mut deployed_contracts = Vec::new();
+    let mut skipped_reverted = 0usize;
+    let mut processed_transactions = 0usize;
 
     for tx_with_receipt in transactions {
         let tx = tx_with_receipt.transaction;
         let receipt = tx_with_receipt.receipt;
+        processed_transactions += 1;
 
         let tx_hash = match &receipt {
             TransactionReceipt::Invoke(r) => r.transaction_hash,
@@ -165,6 +178,16 @@ pub fn block_into_contexts(block: MaybePreConfirmedBlockWithReceipts) -> Result<
             TransactionReceipt::Deploy(r) => r.transaction_hash,
             TransactionReceipt::DeployAccount(r) => r.transaction_hash,
         };
+
+        if !is_receipt_succeeded(&receipt) {
+            skipped_reverted += 1;
+            tracing::debug!(
+                target: "torii::etl::block_range",
+                tx_hash = %format!("{:#x}", tx_hash),
+                "Skipping reverted transaction"
+            );
+            continue;
+        }
 
         // Extract transaction data based on type, including metadata for declares and deploys
         let (sender_address, calldata, declare_info, deploy_account_class) = match tx {
@@ -277,6 +300,15 @@ pub fn block_into_contexts(block: MaybePreConfirmedBlockWithReceipts) -> Result<
         }
     }
 
+    tracing::debug!(
+        target: "torii::etl::block_range",
+        block_number = block_with_receipts.block_number,
+        processed_transactions,
+        skipped_reverted,
+        emitted_events_after_filter = all_events.len(),
+        "Processed block receipts with reverted transaction filtering"
+    );
+
     Ok(BlockData {
         block_context,
         transactions: transaction_contexts,
@@ -284,6 +316,19 @@ pub fn block_into_contexts(block: MaybePreConfirmedBlockWithReceipts) -> Result<
         declared_classes,
         deployed_contracts,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_success_predicate_handles_succeeded_and_reverted() {
+        assert!(is_execution_succeeded(&ExecutionResult::Succeeded));
+        assert!(!is_execution_succeeded(&ExecutionResult::Reverted {
+            reason: "reverted".to_string(),
+        }));
+    }
 }
 
 /// Parsed contract ABI

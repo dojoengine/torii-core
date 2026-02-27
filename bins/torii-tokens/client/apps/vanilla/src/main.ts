@@ -10,8 +10,14 @@ import {
   getErc20Stats,
   getErc721Stats,
   getErc721TokensByAttributesPage,
+  getErc721CollectionTokens,
+  getErc721CollectionTraitFacets,
+  getErc721CollectionOverview,
   getErc1155Stats,
   getErc1155TokensByAttributesPage,
+  getErc1155CollectionTokens,
+  getErc1155CollectionTraitFacets,
+  getErc1155CollectionOverview,
   getErc20TransfersPage,
   getErc721TransfersPage,
   getErc1155TransfersPage,
@@ -25,11 +31,18 @@ import {
   type TokenMetadataResult,
   type AttributeFilterInput,
   type AttributeFacetCountResult,
+  type CollectionTokenResult,
+  type TraitSummaryResult,
+  type CollectionOverviewResult,
 } from "@torii-tokens/shared";
 import {
   bindCollectionExplorerHandlers,
   renderCollectionExplorer,
 } from "./components/collection-explorer";
+import {
+  bindMarketplaceGrpcExplorerHandlers,
+  renderMarketplaceGrpcExplorer,
+} from "./components/marketplace-grpc-explorer";
 
 interface Stats {
   totalTransfers: number;
@@ -126,7 +139,27 @@ class TokensApp {
   private collectionHistory: (string | undefined)[] = [];
   private collectionLoading = false;
   private collectionError: string | null = null;
-  private activePage: "dashboard" | "collection" = "dashboard";
+  private marketplaceStandard: "erc721" | "erc1155" = "erc721";
+  private marketplaceContractAddress = "";
+  private marketplaceFiltersText = "";
+  private marketplaceOverviewContractsText = "";
+  private marketplaceTokens: CollectionTokenResult[] = [];
+  private marketplaceTokensFacets: AttributeFacetCountResult[] = [];
+  private marketplaceTokensTotalHits = 0;
+  private marketplaceTokensCursor?: string;
+  private marketplaceTokensNextCursor?: string;
+  private marketplaceTokensHistory: (string | undefined)[] = [];
+  private marketplaceTokensLoading = false;
+  private marketplaceTokensError: string | null = null;
+  private marketplaceTraitFacets: AttributeFacetCountResult[] = [];
+  private marketplaceTraits: TraitSummaryResult[] = [];
+  private marketplaceTraitsTotalHits = 0;
+  private marketplaceTraitsLoading = false;
+  private marketplaceTraitsError: string | null = null;
+  private marketplaceOverview: CollectionOverviewResult | null = null;
+  private marketplaceOverviewLoading = false;
+  private marketplaceOverviewError: string | null = null;
+  private activePage: "dashboard" | "collection" | "marketplaceGrpc" = "dashboard";
 
   constructor() {
     this.render();
@@ -381,6 +414,142 @@ class TokensApp {
     await this.runCollectionQuery(prevCursor);
   }
 
+  private parseOverviewContractAddresses(input: string): string[] {
+    return input
+      .split(/[\n, ]+/)
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+
+  private async runMarketplaceCollectionTokens(cursorTokenId?: string) {
+    if (!this.marketplaceContractAddress.trim()) return;
+    this.marketplaceTokensLoading = true;
+    this.marketplaceTokensError = null;
+    this.render();
+    try {
+      const filters = this.parseCollectionFilters(this.marketplaceFiltersText);
+      const result = this.marketplaceStandard === "erc721"
+        ? await getErc721CollectionTokens(this.client, {
+            contractAddress: this.marketplaceContractAddress.trim(),
+            filters,
+            cursorTokenId,
+            limit: 50,
+            includeFacets: true,
+            facetLimit: 300,
+            includeImages: true,
+          })
+        : await getErc1155CollectionTokens(this.client, {
+            contractAddress: this.marketplaceContractAddress.trim(),
+            filters,
+            cursorTokenId,
+            limit: 50,
+            includeFacets: true,
+            facetLimit: 300,
+            includeImages: true,
+          });
+
+      this.marketplaceTokens = result.tokens;
+      this.marketplaceTokensFacets = result.facets;
+      this.marketplaceTokensTotalHits = result.totalHits;
+      this.marketplaceTokensCursor = cursorTokenId;
+      this.marketplaceTokensNextCursor = result.nextCursorTokenId;
+    } catch (err) {
+      console.error("GetCollectionTokens failed:", err);
+      this.marketplaceTokensError = err instanceof Error ? err.message : "GetCollectionTokens failed";
+    } finally {
+      this.marketplaceTokensLoading = false;
+      this.render();
+    }
+  }
+
+  private async runMarketplaceCollectionTokensFresh() {
+    this.marketplaceTokensHistory = [];
+    this.marketplaceTokensCursor = undefined;
+    this.marketplaceTokensNextCursor = undefined;
+    await this.runMarketplaceCollectionTokens(undefined);
+  }
+
+  private async navigateMarketplaceCollectionTokens(dir: "next" | "prev") {
+    if (dir === "next") {
+      if (!this.marketplaceTokensNextCursor) return;
+      this.marketplaceTokensHistory = [...this.marketplaceTokensHistory, this.marketplaceTokensCursor];
+      await this.runMarketplaceCollectionTokens(this.marketplaceTokensNextCursor);
+      return;
+    }
+    if (this.marketplaceTokensHistory.length === 0) return;
+    const prevCursor = this.marketplaceTokensHistory[this.marketplaceTokensHistory.length - 1];
+    this.marketplaceTokensHistory = this.marketplaceTokensHistory.slice(0, -1);
+    await this.runMarketplaceCollectionTokens(prevCursor);
+  }
+
+  private async runMarketplaceTraitFacets() {
+    if (!this.marketplaceContractAddress.trim()) return;
+    this.marketplaceTraitsLoading = true;
+    this.marketplaceTraitsError = null;
+    this.render();
+    try {
+      const filters = this.parseCollectionFilters(this.marketplaceFiltersText);
+      const result = this.marketplaceStandard === "erc721"
+        ? await getErc721CollectionTraitFacets(this.client, {
+            contractAddress: this.marketplaceContractAddress.trim(),
+            filters,
+            facetLimit: 300,
+          })
+        : await getErc1155CollectionTraitFacets(this.client, {
+            contractAddress: this.marketplaceContractAddress.trim(),
+            filters,
+            facetLimit: 300,
+          });
+      this.marketplaceTraitFacets = result.facets;
+      this.marketplaceTraits = result.traits;
+      this.marketplaceTraitsTotalHits = result.totalHits;
+    } catch (err) {
+      console.error("GetCollectionTraitFacets failed:", err);
+      this.marketplaceTraitsError = err instanceof Error ? err.message : "GetCollectionTraitFacets failed";
+    } finally {
+      this.marketplaceTraitsLoading = false;
+      this.render();
+    }
+  }
+
+  private async runMarketplaceOverview() {
+    const contractAddresses = this.parseOverviewContractAddresses(this.marketplaceOverviewContractsText);
+    if (contractAddresses.length === 0) return;
+    this.marketplaceOverviewLoading = true;
+    this.marketplaceOverviewError = null;
+    this.render();
+    try {
+      const parsedFilters = this.parseCollectionFilters(this.marketplaceFiltersText);
+      const contractFilters = parsedFilters.length === 0
+        ? undefined
+        : contractAddresses.map((address) => ({ contractAddress: address, filters: parsedFilters }));
+      const result = this.marketplaceStandard === "erc721"
+        ? await getErc721CollectionOverview(this.client, {
+            contractAddresses,
+            perContractLimit: 20,
+            includeFacets: true,
+            facetLimit: 300,
+            includeImages: true,
+            contractFilters,
+          })
+        : await getErc1155CollectionOverview(this.client, {
+            contractAddresses,
+            perContractLimit: 20,
+            includeFacets: true,
+            facetLimit: 300,
+            includeImages: true,
+            contractFilters,
+          });
+      this.marketplaceOverview = result;
+    } catch (err) {
+      console.error("GetCollectionOverview failed:", err);
+      this.marketplaceOverviewError = err instanceof Error ? err.message : "GetCollectionOverview failed";
+    } finally {
+      this.marketplaceOverviewLoading = false;
+      this.render();
+    }
+  }
+
   private async subscribe() {
     try {
       this.unsubscribe = await this.client.subscribeTopics(
@@ -562,9 +731,10 @@ class TokensApp {
         <header>
           <h1>Torii Tokens - Vanilla</h1>
           <p class="subtitle">ERC20 / ERC721 / ERC1155 Token Indexer</p>
-          <div class="btn-group" style="justify-content: center; margin-top: 0.75rem;">
+          <div class="btn-group nav-row">
             <button class="btn ${this.activePage === "dashboard" ? "btn-primary" : ""}" id="nav-dashboard">Dashboard</button>
             <button class="btn ${this.activePage === "collection" ? "btn-primary" : ""}" id="nav-collection">Collection Explorer</button>
+            <button class="btn ${this.activePage === "marketplaceGrpc" ? "btn-primary" : ""}" id="nav-marketplace-grpc">Marketplace gRPC</button>
           </div>
         </header>
 
@@ -582,7 +752,9 @@ class TokensApp {
             ${this.renderUpdatesPanel()}
           </div>
         `
-            : this.renderCollectionPanel()
+            : this.activePage === "collection"
+              ? this.renderCollectionPanel()
+              : this.renderMarketplaceGrpcPanel()
         }
       </div>
     `;
@@ -617,7 +789,7 @@ class TokensApp {
               />
             </div>
           </div>
-          <div class="btn-group" style="margin-top: 1rem; justify-content: center;">
+          <div class="btn-group centered-row">
             <button
               type="submit"
               class="btn btn-primary"
@@ -704,7 +876,7 @@ class TokensApp {
               </div>
               ${this.queryBalancesLoading ? `<div class="table-overlay"><div class="loading-spinner table-overlay-spinner"></div><span class="table-overlay-text">Loading balances...</span></div>` : ""}
             </div>
-            <div class="btn-group" style="margin-top: 0.5rem; justify-content: flex-end;">
+            <div class="btn-group pagination-row">
               <button class="btn btn-sm" id="query-balances-prev" ${this.queryBalancesHistory.length > 0 && !this.queryBalancesLoading ? "" : "disabled"}>Prev</button>
               <button class="btn btn-sm" id="query-balances-next" ${this.queryBalancesNext != null && !this.queryBalancesLoading ? "" : "disabled"}>Next</button>
             </div>
@@ -712,7 +884,7 @@ class TokensApp {
           }
         </div>
 
-        <div class="results-section" style="margin-top: 1.5rem;">
+        <div class="results-section results-section-spaced-lg">
           <h3>Transfer History (${transfers.length})</h3>
           ${
             transfers.length === 0
@@ -749,7 +921,7 @@ class TokensApp {
               </div>
               ${this.queryTransfersLoading ? `<div class="table-overlay"><div class="loading-spinner table-overlay-spinner"></div><span class="table-overlay-text">Loading transfers...</span></div>` : ""}
             </div>
-            <div class="btn-group" style="margin-top: 0.5rem; justify-content: flex-end;">
+            <div class="btn-group pagination-row">
               <button class="btn btn-sm" id="query-transfers-prev" ${this.queryTransfersHistory.length > 0 && !this.queryTransfersLoading ? "" : "disabled"}>Prev</button>
               <button class="btn btn-sm" id="query-transfers-next" ${this.queryTransfersNext != null && !this.queryTransfersLoading ? "" : "disabled"}>Next</button>
             </div>
@@ -772,6 +944,31 @@ class TokensApp {
       error: this.collectionError,
       canPrev: this.collectionHistory.length > 0,
       canNext: this.collectionNextCursor != null,
+    });
+  }
+
+  private renderMarketplaceGrpcPanel(): string {
+    return renderMarketplaceGrpcExplorer({
+      standard: this.marketplaceStandard,
+      contractAddress: this.marketplaceContractAddress,
+      filtersText: this.marketplaceFiltersText,
+      overviewContractsText: this.marketplaceOverviewContractsText,
+      tokens: this.marketplaceTokens,
+      tokensFacets: this.marketplaceTokensFacets,
+      tokensTotalHits: this.marketplaceTokensTotalHits,
+      tokensLoading: this.marketplaceTokensLoading,
+      tokensError: this.marketplaceTokensError,
+      tokensCanPrev: this.marketplaceTokensHistory.length > 0,
+      tokensCanNext: this.marketplaceTokensNextCursor != null,
+      traits: this.marketplaceTraits,
+      traitFacets: this.marketplaceTraitFacets,
+      traitsTotalHits: this.marketplaceTraitsTotalHits,
+      traitsLoading: this.marketplaceTraitsLoading,
+      traitsError: this.marketplaceTraitsError,
+      overview: this.marketplaceOverview,
+      overviewLoading: this.marketplaceOverviewLoading,
+      overviewError: this.marketplaceOverviewError,
+      overviewCanRun: this.parseOverviewContractAddresses(this.marketplaceOverviewContractsText).length > 0,
     });
   }
 
@@ -799,7 +996,7 @@ class TokensApp {
             <div class="stat-value">${this.updates.length}</div>
           </div>
         </div>
-        <div class="btn-group" style="margin-top: 1rem; justify-content: center;">
+        <div class="btn-group centered-row">
           ${
             this.connected
               ? `<button class="btn btn-danger" id="disconnect-btn">Disconnect</button>`
@@ -818,7 +1015,7 @@ class TokensApp {
         ${
           stats
             ? `
-          <div class="status-grid" style="margin-bottom: 1rem;">
+          <div class="status-grid compact-stats">
             <div class="stat">
               <div class="stat-label">Transfers</div>
               <div class="stat-value">${stats.totalTransfers}</div>
@@ -853,7 +1050,7 @@ class TokensApp {
         ${
           stats
             ? `
-          <div class="status-grid" style="margin-bottom: 1rem;">
+          <div class="status-grid compact-stats">
             <div class="stat">
               <div class="stat-label">Transfers</div>
               <div class="stat-value">${stats.totalTransfers}</div>
@@ -870,7 +1067,7 @@ class TokensApp {
         `
             : ""
         }
-        ${this.renderMetadataTable(this.erc721Metadata, false, "erc721", this.erc721MetadataHistory.length > 0, this.erc721MetadataNext != null, this.erc721MetadataLoading)}
+        ${this.renderMetadataTable(this.erc721Metadata, false, "erc721", this.erc721MetadataHistory.length > 0, this.erc721MetadataNext != null, this.erc721MetadataLoading, true)}
         ${this.renderTransfersTable(this.erc721Transfers, false, "erc721", this.erc721TransfersHistory.length > 0, this.erc721TransfersNext != null, this.erc721TransfersLoading)}
       </section>
     `;
@@ -884,7 +1081,7 @@ class TokensApp {
         ${
           stats
             ? `
-          <div class="status-grid" style="margin-bottom: 1rem;">
+          <div class="status-grid compact-stats">
             <div class="stat">
               <div class="stat-label">Transfers</div>
               <div class="stat-value">${stats.totalTransfers}</div>
@@ -913,42 +1110,49 @@ class TokensApp {
     tokenType: "erc20" | "erc721" | "erc1155",
     canPrev: boolean,
     canNext: boolean,
-    loading: boolean
+    loading: boolean,
+    showWhenEmpty = false
   ): string {
-    if (metadata.length === 0) return "";
+    if (metadata.length === 0 && !showWhenEmpty) return "";
 
     return `
-      <div class="metadata-list" style="margin-bottom: 1rem;">
-        <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">Token Metadata</h3>
-        <div class="table-shell" aria-busy="${loading}">
-          <div class="table-container">
-            <table>
-              <thead>
-                <tr>
-                  <th>Contract</th>
-                  <th>Name</th>
-                  <th>Symbol</th>
-                  ${showDecimals ? "<th>Decimals</th>" : ""}
-                </tr>
-              </thead>
-              <tbody>
-                ${metadata.map((m) => `
+      <div class="metadata-list">
+        <h3 class="metadata-title">Token Metadata</h3>
+        ${
+          metadata.length === 0
+            ? `<div class="empty-state">No token metadata yet</div>`
+            : `
+          <div class="table-shell" aria-busy="${loading}">
+            <div class="table-container">
+              <table>
+                <thead>
                   <tr>
-                    <td class="address"><a href="${getContractExplorerUrl(m.token)}" target="_blank" rel="noopener noreferrer">${truncateAddress(m.token)}</a></td>
-                    <td>${m.name ?? "—"}</td>
-                    <td>${m.symbol ?? "—"}</td>
-                    ${showDecimals ? `<td>${m.decimals ?? "—"}</td>` : ""}
+                    <th>Contract</th>
+                    <th>Name</th>
+                    <th>Symbol</th>
+                    ${showDecimals ? "<th>Decimals</th>" : ""}
                   </tr>
-                `).join("")}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  ${metadata.map((m) => `
+                    <tr>
+                      <td class="address"><a href="${getContractExplorerUrl(m.token)}" target="_blank" rel="noopener noreferrer">${truncateAddress(m.token)}</a></td>
+                      <td>${m.name ?? "—"}</td>
+                      <td>${m.symbol ?? "—"}</td>
+                      ${showDecimals ? `<td>${m.decimals ?? "—"}</td>` : ""}
+                    </tr>
+                  `).join("")}
+                </tbody>
+              </table>
+            </div>
+            ${loading ? `<div class="table-overlay"><div class="loading-spinner table-overlay-spinner"></div><span class="table-overlay-text">Loading metadata...</span></div>` : ""}
           </div>
-          ${loading ? `<div class="table-overlay"><div class="loading-spinner table-overlay-spinner"></div><span class="table-overlay-text">Loading metadata...</span></div>` : ""}
-        </div>
-      </div>
-      <div class="btn-group" style="margin-top: 0.5rem; justify-content: flex-end;">
-        <button class="btn btn-sm" id="${tokenType}-metadata-prev" ${canPrev && !loading ? "" : "disabled"}>Prev</button>
-        <button class="btn btn-sm" id="${tokenType}-metadata-next" ${canNext && !loading ? "" : "disabled"}>Next</button>
+          <div class="btn-group pagination-row">
+            <button class="btn btn-sm" id="${tokenType}-metadata-prev" ${canPrev && !loading ? "" : "disabled"}>Prev</button>
+            <button class="btn btn-sm" id="${tokenType}-metadata-next" ${canNext && !loading ? "" : "disabled"}>Next</button>
+          </div>
+        `
+        }
       </div>
     `;
   }
@@ -997,7 +1201,7 @@ class TokensApp {
         </div>
         ${loading ? `<div class="table-overlay"><div class="loading-spinner table-overlay-spinner"></div><span class="table-overlay-text">Loading transfers...</span></div>` : ""}
       </div>
-      <div class="btn-group" style="margin-top: 0.5rem; justify-content: flex-end;">
+      <div class="btn-group pagination-row">
         <button class="btn btn-sm" id="${tokenType}-transfers-prev" ${canPrev && !loading ? "" : "disabled"}>Prev</button>
         <button class="btn btn-sm" id="${tokenType}-transfers-next" ${canNext && !loading ? "" : "disabled"}>Next</button>
       </div>
@@ -1030,7 +1234,7 @@ class TokensApp {
                   <span class="update-time">${formatTimestamp(u.timestamp)}</span>
                 </div>
                 <div class="update-body">
-                  <pre style="font-size: 0.85rem; overflow-x: auto;">${JSON.stringify(u.data, null, 2)}</pre>
+                  <pre class="update-json">${JSON.stringify(u.data, null, 2)}</pre>
                 </div>
               </div>
             `
@@ -1079,6 +1283,10 @@ class TokensApp {
       this.activePage = "collection";
       this.render();
     });
+    document.getElementById("nav-marketplace-grpc")?.addEventListener("click", () => {
+      this.activePage = "marketplaceGrpc";
+      this.render();
+    });
     bindCollectionExplorerHandlers({
       onStandardChange: (value) => {
         this.collectionStandard = value;
@@ -1098,6 +1306,38 @@ class TokensApp {
       },
       onNext: () => {
         void this.navigateCollection("next");
+      },
+    });
+    bindMarketplaceGrpcExplorerHandlers({
+      onStandardChange: (value) => {
+        this.marketplaceStandard = value;
+        this.render();
+      },
+      onContractChange: (value) => {
+        this.marketplaceContractAddress = value;
+        this.render();
+      },
+      onFiltersChange: (value) => {
+        this.marketplaceFiltersText = value;
+      },
+      onOverviewContractsChange: (value) => {
+        this.marketplaceOverviewContractsText = value;
+        this.render();
+      },
+      onRunTokens: () => {
+        void this.runMarketplaceCollectionTokensFresh();
+      },
+      onTokensPrev: () => {
+        void this.navigateMarketplaceCollectionTokens("prev");
+      },
+      onTokensNext: () => {
+        void this.navigateMarketplaceCollectionTokens("next");
+      },
+      onRunTraitFacets: () => {
+        void this.runMarketplaceTraitFacets();
+      },
+      onRunOverview: () => {
+        void this.runMarketplaceOverview();
       },
     });
   }

@@ -31,19 +31,19 @@ export function renderCollectionExplorer(vm: CollectionExplorerViewModel): strin
     .join("");
 
   return `
-    <section class="panel full-width">
+    <section class="panel full-width collection-panel">
       <h2>Collection Explorer</h2>
-      <p style="color: var(--color-text-secondary); margin-bottom: 0.75rem;">
+      <p class="collection-hint">
         Filter format: one line per key, ex: <code>Background=Blue|Red</code>
       </p>
-      <div class="query-panel" style="margin-bottom: 1rem;">
+      <div class="query-panel collection-controls">
         <form id="collection-form">
-          <div style="display: grid; grid-template-columns: 160px 1fr; gap: 0.75rem;">
+          <div class="collection-form-grid">
             <div>
               <label for="collection-standard">Standard</label>
               <select
                 id="collection-standard"
-                style="width: 100%; padding: 0.6rem; border-radius: var(--radius-sm); border: 1px solid var(--color-border);"
+                class="input select-input"
               >
                 <option value="erc721" ${vm.standard === "erc721" ? "selected" : ""}>ERC721</option>
                 <option value="erc1155" ${vm.standard === "erc1155" ? "selected" : ""}>ERC1155</option>
@@ -59,16 +59,16 @@ export function renderCollectionExplorer(vm: CollectionExplorerViewModel): strin
               />
             </div>
           </div>
-          <div style="margin-top: 0.75rem;">
+          <div class="collection-filters-wrap">
             <label for="collection-filters">Trait Filters</label>
             <textarea
               id="collection-filters"
               rows="6"
               placeholder="Background=Blue|Red&#10;Eyes=Green"
-              style="width: 100%; border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: 0.65rem; font-family: var(--font-mono); font-size: 0.9rem;"
+              class="input code-input"
             >${vm.filtersText}</textarea>
           </div>
-          <div class="btn-group" style="margin-top: 0.75rem;">
+          <div class="btn-group collection-run-row">
             <button
               type="submit"
               class="btn btn-primary"
@@ -88,13 +88,13 @@ export function renderCollectionExplorer(vm: CollectionExplorerViewModel): strin
         ${vm.tokenIds.length === 0
           ? `<div class="empty-state">No matches</div>`
           : `<div class="table-container"><table><thead><tr><th>Token ID</th></tr></thead><tbody>${tokenRows}</tbody></table></div>`}
-        <div class="btn-group" style="margin-top: 0.5rem; justify-content: flex-end;">
+        <div class="btn-group pagination-row">
           <button class="btn btn-sm" id="collection-prev" ${vm.canPrev && !vm.loading ? "" : "disabled"}>Prev</button>
           <button class="btn btn-sm" id="collection-next" ${vm.canNext && !vm.loading ? "" : "disabled"}>Next</button>
         </div>
       </div>
 
-      <div class="results-section" style="margin-top: 1rem;">
+      <div class="results-section results-section-spaced">
         <h3>Facet Counts</h3>
         ${vm.facets.length === 0
           ? `<div class="empty-state">No facet data</div>`
@@ -121,4 +121,3 @@ export function bindCollectionExplorerHandlers(handlers: CollectionExplorerHandl
   document.getElementById("collection-prev")?.addEventListener("click", handlers.onPrev);
   document.getElementById("collection-next")?.addEventListener("click", handlers.onNext);
 }
-

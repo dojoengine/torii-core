@@ -28,6 +28,7 @@ import UpdatesFeed from "./components/UpdatesFeed";
 import QueryFilters from "./components/QueryFilters";
 import QueryResults from "./components/QueryResults";
 import CollectionExplorer from "./components/CollectionExplorer";
+import MarketplaceGrpcExplorer from "./components/MarketplaceGrpcExplorer";
 
 interface Stats {
   totalTransfers: number;
@@ -125,7 +126,7 @@ export default function App() {
   const [collectionHistory, setCollectionHistory] = useState<(string | undefined)[]>([]);
   const [collectionLoading, setCollectionLoading] = useState(false);
   const [collectionError, setCollectionError] = useState<string | null>(null);
-  const [activePage, setActivePage] = useState<"dashboard" | "collection">("dashboard");
+  const [activePage, setActivePage] = useState<"dashboard" | "collection" | "marketplaceGrpc">("dashboard");
 
   const loadStats = useCallback(async () => {
     try {
@@ -541,6 +542,12 @@ export default function App() {
           >
             Collection Explorer
           </button>
+          <button
+            className={`btn ${activePage === "marketplaceGrpc" ? "btn-primary" : ""}`}
+            onClick={() => setActivePage("marketplaceGrpc")}
+          >
+            Marketplace gRPC
+          </button>
         </div>
       </header>
 
@@ -641,7 +648,7 @@ export default function App() {
             />
           </div>
         </>
-      ) : (
+      ) : activePage === "collection" ? (
         <CollectionExplorer
           standard={collectionStandard}
           contractAddress={collectionContractAddress}
@@ -660,6 +667,8 @@ export default function App() {
           onNext={() => void navigateCollection("next")}
           onPrev={() => void navigateCollection("prev")}
         />
+      ) : (
+        <MarketplaceGrpcExplorer client={client} />
       )}
     </div>
   );

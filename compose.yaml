@@ -1,17 +1,19 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     container_name: torii-postgres
     command:
       - postgres
       - -c
-      - shared_buffers=4GB
+      - shared_buffers=${PG_SHARED_BUFFERS:-8GB}
       - -c
-      - effective_cache_size=12GB
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-24GB}
       - -c
-      - maintenance_work_mem=1GB
+      - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-2GB}
       - -c
-      - work_mem=32MB
+      - work_mem=${PG_WORK_MEM:-64MB}
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS:-100}
       - -c
       - wal_buffers=16MB
       - -c
@@ -52,15 +54,11 @@ services:
       POSTGRES_DB: torii
     ports:
       - "5432:5432"
-    mem_limit: 16g
-    shm_size: 4g
+    shm_size: ${PG_SHM_SIZE:-8g}
     volumes:
-      - torii_postgres_data:/var/lib/postgresql/data
+      - ${PGDATA_DIR:-./data/torii-postgres}:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U torii -d torii"]
       interval: 5s
       timeout: 5s
       retries: 10
-
-volumes:
-  torii_postgres_data:

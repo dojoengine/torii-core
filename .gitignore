@@ -16,3 +16,5 @@ perf.data*
 .claude-modified-files
 .DS_Store
 **/.DS_Store
+/data/
+/bins/torii-tokens/torii-data/

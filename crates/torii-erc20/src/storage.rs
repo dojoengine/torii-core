@@ -13,6 +13,7 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 use starknet::core::types::{Felt, U256};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_postgres::{types::ToSql as PgToSql, Client, NoTls};
 use torii_common::{blob_to_felt, blob_to_u256, felt_to_blob, u256_to_blob};
@@ -35,7 +36,8 @@ pub enum TransferDirection {
 pub struct Erc20Storage {
     backend: StorageBackend,
     conn: Arc<Mutex<Connection>>,
-    pg_conn: Option<Arc<tokio::sync::Mutex<Client>>>,
+    pg_conns: Option<Vec<Arc<tokio::sync::Mutex<Client>>>>,
+    pg_rr: AtomicUsize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,12 +114,29 @@ impl Erc20Storage {
     /// Create or open the database
     pub async fn new(db_path: &str) -> Result<Self> {
         if db_path.starts_with("postgres://") || db_path.starts_with("postgresql://") {
-            let (client, connection) = tokio_postgres::connect(db_path, NoTls).await?;
-            tokio::spawn(async move {
-                if let Err(e) = connection.await {
-                    tracing::error!(target: "torii_erc20::storage", error = %e, "PostgreSQL connection task failed");
-                }
-            });
+            let pool_size = std::env::var("TORII_ERC20_PG_POOL_SIZE")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(8)
+                .max(1);
+
+            let mut pg_conns = Vec::with_capacity(pool_size);
+
+            for _ in 0..pool_size {
+                let (client, connection) = tokio_postgres::connect(db_path, NoTls).await?;
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        tracing::error!(target: "torii_erc20::storage", error = %e, "PostgreSQL connection task failed");
+                    }
+                });
+                pg_conns.push(Arc::new(tokio::sync::Mutex::new(client)));
+            }
+
+            let schema_client = pg_conns
+                .first()
+                .expect("PostgreSQL connection pool must contain at least one client")
+                .clone();
+            let client = schema_client.lock().await;
 
             client.batch_execute(
                 r"
@@ -216,11 +235,12 @@ impl Erc20Storage {
                 ",
             ).await?;
 
-            tracing::info!(target: "torii_erc20::storage", "PostgreSQL storage initialized");
+            tracing::info!(target: "torii_erc20::storage", pool_size, "PostgreSQL storage initialized");
             return Ok(Self {
                 backend: StorageBackend::Postgres,
                 conn: Arc::new(Mutex::new(Connection::open_in_memory()?)),
-                pg_conn: Some(Arc::new(tokio::sync::Mutex::new(client))),
+                pg_conns: Some(pg_conns),
+                pg_rr: AtomicUsize::new(0),
             });
         }
 
@@ -476,7 +496,8 @@ impl Erc20Storage {
         Ok(Self {
             backend: StorageBackend::Sqlite,
             conn: Arc::new(Mutex::new(conn)),
-            pg_conn: None,
+            pg_conns: None,
+            pg_rr: AtomicUsize::new(0),
         })
     }
 
@@ -1702,11 +1723,12 @@ impl Erc20Storage {
     }
 
     async fn pg_client(&self) -> Result<tokio::sync::MutexGuard<'_, Client>> {
-        let conn = self
-            .pg_conn
+        let conns = self
+            .pg_conns
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("PostgreSQL connection not initialized"))?;
-        Ok(conn.lock().await)
+            .ok_or_else(|| anyhow::anyhow!("PostgreSQL connections not initialized"))?;
+        let idx = self.pg_rr.fetch_add(1, Ordering::Relaxed) % conns.len();
+        Ok(conns[idx].lock().await)
     }
 
     fn pg_next_param(
@@ -1721,104 +1743,114 @@ impl Erc20Storage {
         if transfers.is_empty() {
             return Ok(0);
         }
-        let mut client = self.pg_client().await?;
-        let tx = client.transaction().await?;
-        let mut inserted = 0usize;
-        let insert_transfer_stmt = tx
-            .prepare(
-                "INSERT INTO erc20.transfers (token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (token, tx_hash, from_addr, to_addr) DO NOTHING
-                 RETURNING id",
-            )
-            .await?;
-        let wallet_both_stmt = tx
-            .prepare(
-                "INSERT INTO erc20.wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                 VALUES ($1, $2, $3, 'both', $4)",
-            )
-            .await?;
-        let wallet_sent_stmt = tx
-            .prepare(
-                "INSERT INTO erc20.wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                 VALUES ($1, $2, $3, 'sent', $4)",
-            )
-            .await?;
-        let wallet_received_stmt = tx
-            .prepare(
-                "INSERT INTO erc20.wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                 VALUES ($1, $2, $3, 'received', $4)",
-            )
-            .await?;
+
+        let zero_blob = felt_to_blob(Felt::ZERO);
+        let mut token_vec = Vec::with_capacity(transfers.len());
+        let mut from_vec = Vec::with_capacity(transfers.len());
+        let mut to_vec = Vec::with_capacity(transfers.len());
+        let mut amount_vec = Vec::with_capacity(transfers.len());
+        let mut block_vec = Vec::with_capacity(transfers.len());
+        let mut tx_hash_vec = Vec::with_capacity(transfers.len());
+        let mut ts_vec = Vec::with_capacity(transfers.len());
 
         for transfer in transfers {
-            let token_blob = felt_to_blob(transfer.token);
-            let from_blob = felt_to_blob(transfer.from);
-            let to_blob = felt_to_blob(transfer.to);
-            let amount_blob = u256_to_blob(transfer.amount);
-            let tx_hash_blob = felt_to_blob(transfer.tx_hash);
-            let ts = transfer
-                .timestamp
-                .unwrap_or_else(|| chrono::Utc::now().timestamp());
+            token_vec.push(felt_to_blob(transfer.token));
+            from_vec.push(felt_to_blob(transfer.from));
+            to_vec.push(felt_to_blob(transfer.to));
+            amount_vec.push(u256_to_blob(transfer.amount));
+            block_vec.push(transfer.block_number as i64);
+            tx_hash_vec.push(felt_to_blob(transfer.tx_hash));
+            ts_vec.push(
+                transfer
+                    .timestamp
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+            );
+        }
 
-            let row = tx
-                .query_opt(
-                    &insert_transfer_stmt,
+        let mut client = self.pg_client().await?;
+        let tx = client.transaction().await?;
+
+        let inserted_rows = tx
+            .query(
+                "INSERT INTO erc20.transfers (token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
+                 SELECT i.token, i.from_addr, i.to_addr, i.amount, i.block_number, i.tx_hash, i.timestamp
+                 FROM unnest(
+                    $1::bytea[],
+                    $2::bytea[],
+                    $3::bytea[],
+                    $4::bytea[],
+                    $5::bigint[],
+                    $6::bytea[],
+                    $7::bigint[]
+                 ) AS i(token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
+                 ON CONFLICT (token, tx_hash, from_addr, to_addr) DO NOTHING
+                 RETURNING id, token, from_addr, to_addr, block_number",
+                &[
+                    &token_vec, &from_vec, &to_vec, &amount_vec, &block_vec, &tx_hash_vec, &ts_vec,
+                ],
+            )
+            .await?;
+
+        let inserted = inserted_rows.len();
+
+        if inserted > 0 {
+            let mut wallet_vec = Vec::<Vec<u8>>::new();
+            let mut activity_token_vec = Vec::<Vec<u8>>::new();
+            let mut transfer_id_vec = Vec::<i64>::new();
+            let mut direction_vec = Vec::<String>::new();
+            let mut activity_block_vec = Vec::<i64>::new();
+
+            for row in &inserted_rows {
+                let transfer_id: i64 = row.get(0);
+                let token_blob: Vec<u8> = row.get(1);
+                let from_blob: Vec<u8> = row.get(2);
+                let to_blob: Vec<u8> = row.get(3);
+                let block_number: i64 = row.get(4);
+
+                if from_blob != zero_blob && to_blob != zero_blob && from_blob == to_blob {
+                    wallet_vec.push(from_blob.clone());
+                    activity_token_vec.push(token_blob.clone());
+                    transfer_id_vec.push(transfer_id);
+                    direction_vec.push("both".to_string());
+                    activity_block_vec.push(block_number);
+                } else {
+                    if from_blob != zero_blob {
+                        wallet_vec.push(from_blob.clone());
+                        activity_token_vec.push(token_blob.clone());
+                        transfer_id_vec.push(transfer_id);
+                        direction_vec.push("sent".to_string());
+                        activity_block_vec.push(block_number);
+                    }
+                    if to_blob != zero_blob {
+                        wallet_vec.push(to_blob.clone());
+                        activity_token_vec.push(token_blob.clone());
+                        transfer_id_vec.push(transfer_id);
+                        direction_vec.push("received".to_string());
+                        activity_block_vec.push(block_number);
+                    }
+                }
+            }
+
+            if !wallet_vec.is_empty() {
+                tx.execute(
+                    "INSERT INTO erc20.wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                     SELECT i.wallet_address, i.token, i.transfer_id, i.direction, i.block_number
+                     FROM unnest(
+                        $1::bytea[],
+                        $2::bytea[],
+                        $3::bigint[],
+                        $4::text[],
+                        $5::bigint[]
+                     ) AS i(wallet_address, token, transfer_id, direction, block_number)",
                     &[
-                        &token_blob,
-                        &from_blob,
-                        &to_blob,
-                        &amount_blob,
-                        &(transfer.block_number as i64),
-                        &tx_hash_blob,
-                        &ts,
+                        &wallet_vec,
+                        &activity_token_vec,
+                        &transfer_id_vec,
+                        &direction_vec,
+                        &activity_block_vec,
                     ],
                 )
                 .await?;
-
-            if let Some(row) = row {
-                inserted += 1;
-                let transfer_id: i64 = row.get(0);
-                if transfer.from != Felt::ZERO
-                    && transfer.to != Felt::ZERO
-                    && transfer.from == transfer.to
-                {
-                    tx.execute(
-                        &wallet_both_stmt,
-                        &[
-                            &from_blob,
-                            &token_blob,
-                            &transfer_id,
-                            &(transfer.block_number as i64),
-                        ],
-                    )
-                    .await?;
-                } else {
-                    if transfer.from != Felt::ZERO {
-                        tx.execute(
-                            &wallet_sent_stmt,
-                            &[
-                                &from_blob,
-                                &token_blob,
-                                &transfer_id,
-                                &(transfer.block_number as i64),
-                            ],
-                        )
-                        .await?;
-                    }
-                    if transfer.to != Felt::ZERO {
-                        tx.execute(
-                            &wallet_received_stmt,
-                            &[
-                                &to_blob,
-                                &token_blob,
-                                &transfer_id,
-                                &(transfer.block_number as i64),
-                            ],
-                        )
-                        .await?;
-                    }
-                }
             }
         }
 
@@ -1830,104 +1862,123 @@ impl Erc20Storage {
         if approvals.is_empty() {
             return Ok(0);
         }
-        let mut client = self.pg_client().await?;
-        let tx = client.transaction().await?;
-        let mut inserted = 0usize;
-        let insert_approval_stmt = tx
-            .prepare(
-                "INSERT INTO erc20.approvals (token, owner, spender, amount, block_number, tx_hash, timestamp)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (token, tx_hash, owner, spender) DO NOTHING
-                 RETURNING id",
-            )
-            .await?;
-        let approval_both_stmt = tx
-            .prepare(
-                "INSERT INTO erc20.approval_activity (account_address, token, approval_id, role, block_number)
-                 VALUES ($1, $2, $3, 'both', $4)",
-            )
-            .await?;
-        let approval_owner_stmt = tx
-            .prepare(
-                "INSERT INTO erc20.approval_activity (account_address, token, approval_id, role, block_number)
-                 VALUES ($1, $2, $3, 'owner', $4)",
-            )
-            .await?;
-        let approval_spender_stmt = tx
-            .prepare(
-                "INSERT INTO erc20.approval_activity (account_address, token, approval_id, role, block_number)
-                 VALUES ($1, $2, $3, 'spender', $4)",
-            )
-            .await?;
+
+        let zero_blob = felt_to_blob(Felt::ZERO);
+        let mut token_vec = Vec::with_capacity(approvals.len());
+        let mut owner_vec = Vec::with_capacity(approvals.len());
+        let mut spender_vec = Vec::with_capacity(approvals.len());
+        let mut amount_vec = Vec::with_capacity(approvals.len());
+        let mut block_vec = Vec::with_capacity(approvals.len());
+        let mut tx_hash_vec = Vec::with_capacity(approvals.len());
+        let mut ts_vec = Vec::with_capacity(approvals.len());
 
         for approval in approvals {
-            let token_blob = felt_to_blob(approval.token);
-            let owner_blob = felt_to_blob(approval.owner);
-            let spender_blob = felt_to_blob(approval.spender);
-            let amount_blob = u256_to_blob(approval.amount);
-            let tx_hash_blob = felt_to_blob(approval.tx_hash);
-            let ts = approval
-                .timestamp
-                .unwrap_or_else(|| chrono::Utc::now().timestamp());
+            token_vec.push(felt_to_blob(approval.token));
+            owner_vec.push(felt_to_blob(approval.owner));
+            spender_vec.push(felt_to_blob(approval.spender));
+            amount_vec.push(u256_to_blob(approval.amount));
+            block_vec.push(approval.block_number as i64);
+            tx_hash_vec.push(felt_to_blob(approval.tx_hash));
+            ts_vec.push(
+                approval
+                    .timestamp
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+            );
+        }
 
-            let row = tx
-                .query_opt(
-                    &insert_approval_stmt,
+        let mut client = self.pg_client().await?;
+        let tx = client.transaction().await?;
+
+        let inserted_rows = tx
+            .query(
+                "INSERT INTO erc20.approvals (token, owner, spender, amount, block_number, tx_hash, timestamp)
+                 SELECT i.token, i.owner, i.spender, i.amount, i.block_number, i.tx_hash, i.timestamp
+                 FROM unnest(
+                    $1::bytea[],
+                    $2::bytea[],
+                    $3::bytea[],
+                    $4::bytea[],
+                    $5::bigint[],
+                    $6::bytea[],
+                    $7::bigint[]
+                 ) AS i(token, owner, spender, amount, block_number, tx_hash, timestamp)
+                 ON CONFLICT (token, tx_hash, owner, spender) DO NOTHING
+                 RETURNING id, token, owner, spender, block_number",
+                &[
+                    &token_vec,
+                    &owner_vec,
+                    &spender_vec,
+                    &amount_vec,
+                    &block_vec,
+                    &tx_hash_vec,
+                    &ts_vec,
+                ],
+            )
+            .await?;
+
+        let inserted = inserted_rows.len();
+
+        if inserted > 0 {
+            let mut account_vec = Vec::<Vec<u8>>::new();
+            let mut activity_token_vec = Vec::<Vec<u8>>::new();
+            let mut approval_id_vec = Vec::<i64>::new();
+            let mut role_vec = Vec::<String>::new();
+            let mut activity_block_vec = Vec::<i64>::new();
+
+            for row in &inserted_rows {
+                let approval_id: i64 = row.get(0);
+                let token_blob: Vec<u8> = row.get(1);
+                let owner_blob: Vec<u8> = row.get(2);
+                let spender_blob: Vec<u8> = row.get(3);
+                let block_number: i64 = row.get(4);
+
+                if owner_blob != zero_blob
+                    && spender_blob != zero_blob
+                    && owner_blob == spender_blob
+                {
+                    account_vec.push(owner_blob.clone());
+                    activity_token_vec.push(token_blob.clone());
+                    approval_id_vec.push(approval_id);
+                    role_vec.push("both".to_string());
+                    activity_block_vec.push(block_number);
+                } else {
+                    if owner_blob != zero_blob {
+                        account_vec.push(owner_blob.clone());
+                        activity_token_vec.push(token_blob.clone());
+                        approval_id_vec.push(approval_id);
+                        role_vec.push("owner".to_string());
+                        activity_block_vec.push(block_number);
+                    }
+                    if spender_blob != zero_blob {
+                        account_vec.push(spender_blob.clone());
+                        activity_token_vec.push(token_blob.clone());
+                        approval_id_vec.push(approval_id);
+                        role_vec.push("spender".to_string());
+                        activity_block_vec.push(block_number);
+                    }
+                }
+            }
+
+            if !account_vec.is_empty() {
+                tx.execute(
+                    "INSERT INTO erc20.approval_activity (account_address, token, approval_id, role, block_number)
+                     SELECT i.account_address, i.token, i.approval_id, i.role, i.block_number
+                     FROM unnest(
+                        $1::bytea[],
+                        $2::bytea[],
+                        $3::bigint[],
+                        $4::text[],
+                        $5::bigint[]
+                     ) AS i(account_address, token, approval_id, role, block_number)",
                     &[
-                        &token_blob,
-                        &owner_blob,
-                        &spender_blob,
-                        &amount_blob,
-                        &(approval.block_number as i64),
-                        &tx_hash_blob,
-                        &ts,
+                        &account_vec,
+                        &activity_token_vec,
+                        &approval_id_vec,
+                        &role_vec,
+                        &activity_block_vec,
                     ],
                 )
                 .await?;
-
-            if let Some(row) = row {
-                inserted += 1;
-                let approval_id: i64 = row.get(0);
-                if approval.owner != Felt::ZERO
-                    && approval.spender != Felt::ZERO
-                    && approval.owner == approval.spender
-                {
-                    tx.execute(
-                        &approval_both_stmt,
-                        &[
-                            &owner_blob,
-                            &token_blob,
-                            &approval_id,
-                            &(approval.block_number as i64),
-                        ],
-                    )
-                    .await?;
-                } else {
-                    if approval.owner != Felt::ZERO {
-                        tx.execute(
-                            &approval_owner_stmt,
-                            &[
-                                &owner_blob,
-                                &token_blob,
-                                &approval_id,
-                                &(approval.block_number as i64),
-                            ],
-                        )
-                        .await?;
-                    }
-                    if approval.spender != Felt::ZERO {
-                        tx.execute(
-                            &approval_spender_stmt,
-                            &[
-                                &spender_blob,
-                                &token_blob,
-                                &approval_id,
-                                &(approval.block_number as i64),
-                            ],
-                        )
-                        .await?;
-                    }
-                }
             }
         }
 

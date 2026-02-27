@@ -9,8 +9,14 @@
     getErc20Stats,
     getErc721Stats,
     getErc721TokensByAttributesPage,
+    getErc721CollectionTokens,
+    getErc721CollectionTraitFacets,
+    getErc721CollectionOverview,
     getErc1155Stats,
     getErc1155TokensByAttributesPage,
+    getErc1155CollectionTokens,
+    getErc1155CollectionTraitFacets,
+    getErc1155CollectionOverview,
     getErc20TransfersPage,
     getErc721TransfersPage,
     getErc1155TransfersPage,
@@ -24,6 +30,9 @@
     type TokenMetadataResult,
     type AttributeFilterInput,
     type AttributeFacetCountResult,
+    type CollectionTokenResult,
+    type TraitSummaryResult,
+    type CollectionOverviewResult,
   } from "@torii-tokens/shared";
 
   import StatusPanel from "./components/StatusPanel.svelte";
@@ -32,6 +41,7 @@
   import QueryFilters from "./components/QueryFilters.svelte";
   import QueryResults from "./components/QueryResults.svelte";
   import CollectionExplorer from "./components/CollectionExplorer.svelte";
+  import MarketplaceGrpcExplorer from "./components/MarketplaceGrpcExplorer.svelte";
 
   interface Stats {
     totalTransfers: number;
@@ -128,7 +138,27 @@
   let collectionHistory = $state<(string | undefined)[]>([]);
   let collectionLoading = $state(false);
   let collectionError = $state<string | null>(null);
-  let activePage = $state<"dashboard" | "collection">("dashboard");
+  let marketplaceStandard = $state<"erc721" | "erc1155">("erc721");
+  let marketplaceContractAddress = $state("");
+  let marketplaceFiltersText = $state("");
+  let marketplaceOverviewContractsText = $state("");
+  let marketplaceTokens = $state<CollectionTokenResult[]>([]);
+  let marketplaceTokensFacets = $state<AttributeFacetCountResult[]>([]);
+  let marketplaceTokensTotalHits = $state(0);
+  let marketplaceTokensCursor = $state<string | undefined>(undefined);
+  let marketplaceTokensNextCursor = $state<string | undefined>(undefined);
+  let marketplaceTokensHistory = $state<(string | undefined)[]>([]);
+  let marketplaceTokensLoading = $state(false);
+  let marketplaceTokensError = $state<string | null>(null);
+  let marketplaceTraitFacets = $state<AttributeFacetCountResult[]>([]);
+  let marketplaceTraits = $state<TraitSummaryResult[]>([]);
+  let marketplaceTraitsTotalHits = $state(0);
+  let marketplaceTraitsLoading = $state(false);
+  let marketplaceTraitsError = $state<string | null>(null);
+  let marketplaceOverview = $state<CollectionOverviewResult | null>(null);
+  let marketplaceOverviewLoading = $state(false);
+  let marketplaceOverviewError = $state<string | null>(null);
+  let activePage = $state<"dashboard" | "collection" | "marketplaceGrpc">("dashboard");
 
   async function handleQuery(contractAddress: string, wallet: string) {
     queryContractAddress = contractAddress;
@@ -395,8 +425,8 @@
           { topic: "erc1155.metadata" },
           { topic: "erc1155.uri" },
         ],
-        (update: Update) => {
-          updates = [update, ...updates].slice(0, 50);
+        (update) => {
+          updates = [update as Update, ...updates].slice(0, 50);
         },
         (err: Error) => {
           console.error("Subscription error:", err);
@@ -497,6 +527,135 @@
     await runCollectionQuery(prevCursor);
   }
 
+  function parseOverviewContractAddresses(input: string): string[] {
+    return input
+      .split(/[\n, ]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  async function runMarketplaceCollectionTokens(cursorTokenId?: string) {
+    if (!marketplaceContractAddress.trim()) return;
+    marketplaceTokensLoading = true;
+    marketplaceTokensError = null;
+    try {
+      const filters = parseCollectionFilters(marketplaceFiltersText);
+      const result = marketplaceStandard === "erc721"
+        ? await getErc721CollectionTokens(client, {
+            contractAddress: marketplaceContractAddress.trim(),
+            filters,
+            cursorTokenId,
+            limit: 50,
+            includeFacets: true,
+            facetLimit: 300,
+            includeImages: true,
+          })
+        : await getErc1155CollectionTokens(client, {
+            contractAddress: marketplaceContractAddress.trim(),
+            filters,
+            cursorTokenId,
+            limit: 50,
+            includeFacets: true,
+            facetLimit: 300,
+            includeImages: true,
+          });
+      marketplaceTokens = result.tokens;
+      marketplaceTokensFacets = result.facets;
+      marketplaceTokensTotalHits = result.totalHits;
+      marketplaceTokensCursor = cursorTokenId;
+      marketplaceTokensNextCursor = result.nextCursorTokenId;
+    } catch (err) {
+      console.error("GetCollectionTokens failed:", err);
+      marketplaceTokensError = err instanceof Error ? err.message : "GetCollectionTokens failed";
+    } finally {
+      marketplaceTokensLoading = false;
+    }
+  }
+
+  async function runMarketplaceCollectionTokensFresh() {
+    marketplaceTokensHistory = [];
+    marketplaceTokensCursor = undefined;
+    marketplaceTokensNextCursor = undefined;
+    await runMarketplaceCollectionTokens(undefined);
+  }
+
+  async function navigateMarketplaceCollectionTokens(dir: "next" | "prev") {
+    if (dir === "next") {
+      if (!marketplaceTokensNextCursor) return;
+      marketplaceTokensHistory = [...marketplaceTokensHistory, marketplaceTokensCursor];
+      await runMarketplaceCollectionTokens(marketplaceTokensNextCursor);
+      return;
+    }
+    if (marketplaceTokensHistory.length === 0) return;
+    const prevCursor = marketplaceTokensHistory[marketplaceTokensHistory.length - 1];
+    marketplaceTokensHistory = marketplaceTokensHistory.slice(0, -1);
+    await runMarketplaceCollectionTokens(prevCursor);
+  }
+
+  async function runMarketplaceTraitFacets() {
+    if (!marketplaceContractAddress.trim()) return;
+    marketplaceTraitsLoading = true;
+    marketplaceTraitsError = null;
+    try {
+      const filters = parseCollectionFilters(marketplaceFiltersText);
+      const result = marketplaceStandard === "erc721"
+        ? await getErc721CollectionTraitFacets(client, {
+            contractAddress: marketplaceContractAddress.trim(),
+            filters,
+            facetLimit: 300,
+          })
+        : await getErc1155CollectionTraitFacets(client, {
+            contractAddress: marketplaceContractAddress.trim(),
+            filters,
+            facetLimit: 300,
+          });
+      marketplaceTraitFacets = result.facets;
+      marketplaceTraits = result.traits;
+      marketplaceTraitsTotalHits = result.totalHits;
+    } catch (err) {
+      console.error("GetCollectionTraitFacets failed:", err);
+      marketplaceTraitsError = err instanceof Error ? err.message : "GetCollectionTraitFacets failed";
+    } finally {
+      marketplaceTraitsLoading = false;
+    }
+  }
+
+  async function runMarketplaceOverview() {
+    const contractAddresses = parseOverviewContractAddresses(marketplaceOverviewContractsText);
+    if (contractAddresses.length === 0) return;
+    marketplaceOverviewLoading = true;
+    marketplaceOverviewError = null;
+    try {
+      const parsedFilters = parseCollectionFilters(marketplaceFiltersText);
+      const contractFilters = parsedFilters.length === 0
+        ? undefined
+        : contractAddresses.map((address) => ({ contractAddress: address, filters: parsedFilters }));
+      const result = marketplaceStandard === "erc721"
+        ? await getErc721CollectionOverview(client, {
+            contractAddresses,
+            perContractLimit: 20,
+            includeFacets: true,
+            facetLimit: 300,
+            includeImages: true,
+            contractFilters,
+          })
+        : await getErc1155CollectionOverview(client, {
+            contractAddresses,
+            perContractLimit: 20,
+            includeFacets: true,
+            facetLimit: 300,
+            includeImages: true,
+            contractFilters,
+          });
+      marketplaceOverview = result;
+    } catch (err) {
+      console.error("GetCollectionOverview failed:", err);
+      marketplaceOverviewError = err instanceof Error ? err.message : "GetCollectionOverview failed";
+    } finally {
+      marketplaceOverviewLoading = false;
+    }
+  }
+
   onMount(() => {
     checkHealth();
     loadStats();
@@ -525,6 +684,9 @@
       </button>
       <button class={`btn ${activePage === "collection" ? "btn-primary" : ""}`} onclick={() => (activePage = "collection")}>
         Collection Explorer
+      </button>
+      <button class={`btn ${activePage === "marketplaceGrpc" ? "btn-primary" : ""}`} onclick={() => (activePage = "marketplaceGrpc")}>
+        Marketplace gRPC
       </button>
     </div>
   </header>
@@ -624,7 +786,7 @@
         onClear={clearUpdates}
       />
     </div>
-  {:else}
+  {:else if activePage === "collection"}
     <CollectionExplorer
       standard={collectionStandard}
       contractAddress={collectionContractAddress}
@@ -642,6 +804,38 @@
       onRun={() => runCollectionQueryFresh()}
       onNext={() => navigateCollection("next")}
       onPrev={() => navigateCollection("prev")}
+    />
+  {:else}
+    <MarketplaceGrpcExplorer
+      standard={marketplaceStandard}
+      contractAddress={marketplaceContractAddress}
+      filtersText={marketplaceFiltersText}
+      overviewContractsText={marketplaceOverviewContractsText}
+      tokens={marketplaceTokens}
+      tokensFacets={marketplaceTokensFacets}
+      tokensTotalHits={marketplaceTokensTotalHits}
+      tokensLoading={marketplaceTokensLoading}
+      tokensError={marketplaceTokensError}
+      tokensCanPrev={marketplaceTokensHistory.length > 0}
+      tokensCanNext={marketplaceTokensNextCursor != null}
+      traits={marketplaceTraits}
+      traitFacets={marketplaceTraitFacets}
+      traitsTotalHits={marketplaceTraitsTotalHits}
+      traitsLoading={marketplaceTraitsLoading}
+      traitsError={marketplaceTraitsError}
+      overview={marketplaceOverview}
+      overviewLoading={marketplaceOverviewLoading}
+      overviewError={marketplaceOverviewError}
+      overviewCanRun={parseOverviewContractAddresses(marketplaceOverviewContractsText).length > 0}
+      onStandardChange={(v) => (marketplaceStandard = v)}
+      onContractAddressChange={(v) => (marketplaceContractAddress = v)}
+      onFiltersTextChange={(v) => (marketplaceFiltersText = v)}
+      onOverviewContractsTextChange={(v) => (marketplaceOverviewContractsText = v)}
+      onRunTokens={() => runMarketplaceCollectionTokensFresh()}
+      onTokensPrev={() => navigateMarketplaceCollectionTokens("prev")}
+      onTokensNext={() => navigateMarketplaceCollectionTokens("next")}
+      onRunTraitFacets={() => runMarketplaceTraitFacets()}
+      onRunOverview={() => runMarketplaceOverview()}
     />
   {/if}
 </div>
