@@ -1,17 +1,14 @@
 [package]
-name = "torii-introspect"
+name = "torii-introspect-json-sink"
 version = "0.1.0"
 edition = "2021"
 description = "Introspect indexer library for Torii"
 
 [dependencies]
-introspect-events = { path = "../../../introspect/crates/events" }
 introspect-types = { path = "../../../introspect/crates/types" }
 serde.workspace = true
 starknet-types-core.workspace = true
 torii.workspace = true
-blake3.workspace = true
-thiserror.workspace = true
 
 [build-dependencies]
 tonic-build = "0.12"

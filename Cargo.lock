@@ -4207,6 +4207,7 @@ dependencies = [
  "introspect-types",
  "serde",
  "starknet-types-core",
+ "thiserror 2.0.18",
  "tonic-build",
  "torii",
 ]

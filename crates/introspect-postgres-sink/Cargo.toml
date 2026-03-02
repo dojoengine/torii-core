@@ -1,0 +1,34 @@
+[package]
+name = "torii-sink-postgres"
+version = "0.1.0"
+edition = "2021"
+description = "PostgreSQL sink implementation for Torii runtime"
+authors = ["Torii Runtime <dev@torii.rs>"]
+license = "Apache-2.0"
+
+[dependencies]
+sqlx = { workspace = true, features = [
+    "postgres",
+    "runtime-tokio-rustls",
+    "macros",
+    "migrate",
+] }
+anyhow.workspace = true
+async-trait.workspace = true
+xxhash-rust.workspace = true
+rand.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+starknet.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+introspect-types.workspace = true
+starknet-types-core.workspace = true
+thiserror.workspace = true
+
+# Local crates
+torii-core = { path = "../../core/torii-core" }
+torii-types-introspect = { path = "../../types/torii-types-introspect" }
+torii-types-erc20 = { path = "../../types/torii-types-erc20" }
+torii-types-erc721 = { path = "../../types/torii-types-erc721" }

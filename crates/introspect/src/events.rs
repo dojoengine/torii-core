@@ -118,8 +118,8 @@ pub struct DropColumns {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
-    pub id: Arc<[u8; 32]>,
-    pub values: Arc<[u8]>,
+    pub id: [u8; 32],
+    pub values: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
