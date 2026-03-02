@@ -4,7 +4,7 @@
 //! It also supports runtime identification of unknown contracts by fetching their ABIs
 //! and running identification rules.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 /// Maximum number of requests per batch to avoid RPC limits
 const MAX_BATCH_SIZE: usize = 500;
@@ -70,13 +70,65 @@ pub struct ContractRegistry {
     /// Identification rules for matching contract ABIs to decoders
     rules: Vec<Box<dyn IdentificationRule>>,
 
-    /// In-memory cache: contract → decoders
-    /// Empty Vec means "identified but no decoders match"
+    /// In-memory positive cache: contract → decoders
     /// Wrapped in Arc for sharing with DecoderContext
     cache: Arc<RwLock<HashMap<Felt, Vec<DecoderId>>>>,
+
+    /// Bounded in-memory negative cache for contracts with no decoder match.
+    ///
+    /// This avoids repeated identification work for unknown contracts while
+    /// preventing unbounded memory growth.
+    negative_cache: Arc<RwLock<NegativeCache>>,
+}
+
+/// Bounded in-memory negative cache (FIFO/LRU-like).
+struct NegativeCache {
+    set: HashSet<Felt>,
+    order: VecDeque<Felt>,
+    capacity: usize,
+}
+
+impl NegativeCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            set: HashSet::new(),
+            order: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    fn contains(&self, contract: &Felt) -> bool {
+        self.set.contains(contract)
+    }
+
+    fn insert(&mut self, contract: Felt) {
+        if self.capacity == 0 {
+            return;
+        }
+
+        if self.set.contains(&contract) {
+            self.order.retain(|c| c != &contract);
+            self.order.push_back(contract);
+            return;
+        }
+
+        self.set.insert(contract);
+        self.order.push_back(contract);
+
+        while self.set.len() > self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.set.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
 }
 
 impl ContractRegistry {
+    /// Maximum number of contracts to keep in negative cache.
+    const NEGATIVE_CACHE_CAPACITY: usize = 100_000;
+
     /// Create a new contract registry.
     ///
     /// # Arguments
@@ -89,6 +141,9 @@ impl ContractRegistry {
             engine_db,
             rules: Vec::new(),
             cache: Arc::new(RwLock::new(HashMap::new())),
+            negative_cache: Arc::new(RwLock::new(NegativeCache::new(
+                Self::NEGATIVE_CACHE_CAPACITY,
+            ))),
         }
     }
 
@@ -112,20 +167,27 @@ impl ContractRegistry {
     /// previously identified contracts.
     pub async fn load_from_db(&self) -> Result<usize> {
         let mappings = self.engine_db.get_all_contract_decoders().await?;
-        let count = mappings.len();
+        let mut loaded_positive = 0usize;
+        let mut skipped_empty = 0usize;
 
         let mut cache = self.cache.write().await;
         for (contract, decoder_ids, _timestamp) in mappings {
+            if decoder_ids.is_empty() {
+                skipped_empty += 1;
+                continue;
+            }
             cache.insert(contract, decoder_ids);
+            loaded_positive += 1;
         }
 
         tracing::info!(
             target: "torii::etl::identification",
-            "Loaded {} contract mappings from database",
-            count
+            loaded_positive,
+            skipped_empty,
+            "Loaded contract mappings from database (empty mappings skipped from memory cache)"
         );
 
-        Ok(count)
+        Ok(loaded_positive)
     }
 
     /// Get a shared reference to the cache for use with DecoderContext.
@@ -143,7 +205,7 @@ impl ContractRegistry {
     /// 2. Batch fetching all class hashes at once
     /// 3. Batch fetching all unique contract classes (deduplicated by class hash)
     /// 4. Running all identification rules
-    /// 5. Caching results in both memory and database
+    /// 5. Caching positives in memory and database, negatives in bounded memory
     ///
     /// # Performance
     ///
@@ -158,7 +220,7 @@ impl ContractRegistry {
     /// # Returns
     ///
     /// HashMap of contract → decoder IDs for contracts that were successfully identified.
-    /// Contracts that fail identification are cached as empty (to avoid re-fetching).
+    /// Contracts that fail identification are cached in a bounded in-memory negative cache.
     pub async fn identify_contracts(
         &self,
         contract_addresses: &[Felt],
@@ -166,11 +228,13 @@ impl ContractRegistry {
         // Deduplicate and filter out contracts already in cache
         let unique_addresses: HashSet<Felt> = contract_addresses.iter().copied().collect();
         let cache = self.cache.read().await;
+        let negative_cache = self.negative_cache.read().await;
         let unknown: Vec<Felt> = unique_addresses
             .into_iter()
-            .filter(|addr| !cache.contains_key(addr))
+            .filter(|addr| !cache.contains_key(addr) && !negative_cache.contains(addr))
             .collect();
         drop(cache);
+        drop(negative_cache);
 
         if unknown.is_empty() {
             return Ok(HashMap::new());
@@ -302,9 +366,13 @@ impl ContractRegistry {
                 );
             }
 
-            // Cache and persist
-            self.cache_and_persist(*contract_address, decoder_ids.clone())
-                .await;
+            // Cache and persist positives; cache negatives only in bounded memory.
+            if decoder_ids.is_empty() {
+                self.cache_empty(*contract_address).await;
+            } else {
+                self.cache_and_persist(*contract_address, decoder_ids.clone())
+                    .await;
+            }
             results.insert(*contract_address, decoder_ids);
         }
 
@@ -349,22 +417,8 @@ impl ContractRegistry {
 
     /// Cache empty result for a contract that failed identification.
     async fn cache_empty(&self, contract_address: Felt) {
-        {
-            let mut cache = self.cache.write().await;
-            cache.insert(contract_address, Vec::new());
-        }
-        if let Err(e) = self
-            .engine_db
-            .set_contract_decoders(contract_address, &[])
-            .await
-        {
-            tracing::warn!(
-                target: "torii::etl::identification",
-                contract = %format!("{:#x}", contract_address),
-                error = %e,
-                "Failed to persist empty contract identification"
-            );
-        }
+        let mut negative_cache = self.negative_cache.write().await;
+        negative_cache.insert(contract_address);
     }
 
     /// Cache and persist identification result.

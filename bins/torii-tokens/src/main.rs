@@ -38,10 +38,12 @@ mod config;
 
 use anyhow::Result;
 use clap::Parser;
-use config::{Config, ExtractionMode};
+use config::{Config, ExtractionMode, MetadataMode};
 use starknet::core::types::Felt;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(feature = "profiling")]
+use std::time::{SystemTime, UNIX_EPOCH};
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{
     BlockRangeConfig, BlockRangeExtractor, ContractEventConfig, EventExtractor,
@@ -71,6 +73,28 @@ use torii_erc1155::{
     Erc1155Decoder, Erc1155Rule, Erc1155Service, Erc1155Sink, Erc1155Storage,
     FILE_DESCRIPTOR_SET as ERC1155_DESCRIPTOR_SET,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DbBackend {
+    Postgres,
+    Sqlite,
+}
+
+fn backend_from_path(path: &str) -> DbBackend {
+    if path.starts_with("postgres://") || path.starts_with("postgresql://") {
+        DbBackend::Postgres
+    } else {
+        DbBackend::Sqlite
+    }
+}
+
+fn resolve_storage_url(config: &Config, db_dir: &Path, fallback_file: &str) -> String {
+    config
+        .storage_database_url
+        .clone()
+        .or_else(|| config.database_url.clone())
+        .unwrap_or_else(|| db_dir.join(fallback_file).to_string_lossy().to_string())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -105,6 +129,12 @@ async fn run_indexer(config: Config) -> Result<()> {
         tracing::info!("To block: following chain head");
     }
     tracing::info!("Database directory: {}", config.db_dir);
+    if let Some(url) = &config.database_url {
+        tracing::info!("Engine database URL: {}", url);
+    }
+    if let Some(url) = &config.storage_database_url {
+        tracing::info!("Storage database URL: {}", url);
+    }
 
     if config.mode == ExtractionMode::Event && !config.has_tokens() {
         tracing::error!(
@@ -228,7 +258,59 @@ async fn run_indexer(config: Config) -> Result<()> {
     let db_dir = Path::new(&config.db_dir);
     std::fs::create_dir_all(db_dir)?;
 
-    let engine_db_path = db_dir.join("engine.db").to_string_lossy().to_string();
+    let effective_metadata_mode = config.metadata_mode.clone().unwrap_or(MetadataMode::Inline);
+    tracing::info!("Metadata mode: {:?}", effective_metadata_mode);
+
+    if config.metadata_backfill_only {
+        tracing::warn!(
+            "--metadata-backfill-only is set. Dedicated metadata backfill flow is not implemented yet; exiting."
+        );
+        return Ok(());
+    }
+
+    let engine_db_path = config
+        .database_url
+        .clone()
+        .unwrap_or_else(|| db_dir.join("engine.db").to_string_lossy().to_string());
+    let erc20_db_path = resolve_storage_url(&config, db_dir, "erc20.db");
+    let erc721_db_path = resolve_storage_url(&config, db_dir, "erc721.db");
+    let erc1155_db_path = resolve_storage_url(&config, db_dir, "erc1155.db");
+
+    let engine_backend = backend_from_path(&engine_db_path);
+    let erc20_backend = backend_from_path(&erc20_db_path);
+    let erc721_backend = backend_from_path(&erc721_db_path);
+    let erc1155_backend = backend_from_path(&erc1155_db_path);
+
+    tracing::info!("Engine backend: {:?} ({})", engine_backend, engine_db_path);
+    tracing::info!(
+        "ERC20 storage backend: {:?} ({})",
+        erc20_backend,
+        erc20_db_path
+    );
+    tracing::info!(
+        "ERC721 storage backend: {:?} ({})",
+        erc721_backend,
+        erc721_db_path
+    );
+    tracing::info!(
+        "ERC1155 storage backend: {:?} ({})",
+        erc1155_backend,
+        erc1155_db_path
+    );
+
+    if config
+        .database_url
+        .as_deref()
+        .is_some_and(|u| backend_from_path(u) == DbBackend::Postgres)
+        && (erc20_backend != DbBackend::Postgres
+            || erc721_backend != DbBackend::Postgres
+            || erc1155_backend != DbBackend::Postgres)
+    {
+        anyhow::bail!(
+            "Engine is configured for Postgres but one or more token storages resolved to SQLite. Set --storage-database-url to the same Postgres URL."
+        );
+    }
+
     let engine_db_config = torii::etl::engine_db::EngineDbConfig {
         path: engine_db_path,
     };
@@ -253,6 +335,12 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
         .database_root(&config.db_dir)
+        .engine_database_url(
+            config
+                .database_url
+                .clone()
+                .unwrap_or_else(|| db_dir.join("engine.db").to_string_lossy().to_string()),
+        )
         .with_extractor(extractor)
         .with_contract_identifier(registry);
 
@@ -270,8 +358,7 @@ async fn run_indexer(config: Config) -> Result<()> {
     if create_erc20 {
         enabled_types.push("ERC20");
 
-        let erc20_db_path = db_dir.join("erc20.db").to_string_lossy().to_string();
-        let storage = Arc::new(Erc20Storage::new(&erc20_db_path)?);
+        let storage = Arc::new(Erc20Storage::new(&erc20_db_path).await?);
         tracing::info!("ERC20 database initialized: {}", erc20_db_path);
 
         let decoder = Arc::new(Erc20Decoder::new());
@@ -307,29 +394,31 @@ async fn run_indexer(config: Config) -> Result<()> {
     if create_erc721 {
         enabled_types.push("ERC721");
 
-        let erc721_db_path = db_dir.join("erc721.db").to_string_lossy().to_string();
-        let storage = Arc::new(Erc721Storage::new(&erc721_db_path)?);
+        let storage = Arc::new(Erc721Storage::new(&erc721_db_path).await?);
         tracing::info!("ERC721 database initialized: {}", erc721_db_path);
 
         let decoder = Arc::new(Erc721Decoder::new());
         torii_config = torii_config.add_decoder(decoder);
 
-        // Spawn token URI service for async metadata fetching
-        let metadata_fetcher = Arc::new(MetadataFetcher::new(provider.clone()));
-        let (token_uri_sender, _token_uri_service) = TokenUriService::spawn(
-            metadata_fetcher,
-            storage.clone(),
-            1024, // buffer size
-            8,    // max concurrent fetches
-        );
-
         let grpc_service = Erc721Service::new(storage.clone());
-        let sink = Box::new(
-            Erc721Sink::new(storage)
-                .with_grpc_service(grpc_service.clone())
+        let mut sink = Erc721Sink::new(storage).with_grpc_service(grpc_service.clone());
+        if effective_metadata_mode == MetadataMode::Inline {
+            let image_cache_dir = db_dir.join("image-cache");
+            let (token_uri_sender, _token_uri_service) = TokenUriService::spawn_with_image_cache(
+                Arc::new(MetadataFetcher::new(provider.clone())),
+                sink.storage().clone(),
+                1024, // buffer size
+                8,    // max concurrent metadata fetches
+                Some(image_cache_dir),
+                8, // max concurrent image downloads
+            );
+            sink = sink
                 .with_metadata_fetching(provider.clone())
-                .with_token_uri_sender(token_uri_sender),
-        );
+                .with_token_uri_sender(token_uri_sender);
+        } else {
+            tracing::info!("ERC721 metadata fetching disabled for throughput (deferred mode)");
+        }
+        let sink = Box::new(sink);
         torii_config = torii_config.add_sink_boxed(sink);
 
         erc721_grpc_service = Some(grpc_service);
@@ -354,25 +443,33 @@ async fn run_indexer(config: Config) -> Result<()> {
     if create_erc1155 {
         enabled_types.push("ERC1155");
 
-        let erc1155_db_path = db_dir.join("erc1155.db").to_string_lossy().to_string();
-        let storage = Arc::new(Erc1155Storage::new(&erc1155_db_path)?);
+        let storage = Arc::new(Erc1155Storage::new(&erc1155_db_path).await?);
         tracing::info!("ERC1155 database initialized: {}", erc1155_db_path);
 
         let decoder = Arc::new(Erc1155Decoder::new());
         torii_config = torii_config.add_decoder(decoder);
 
-        // Spawn token URI service for ERC1155
-        let erc1155_fetcher = Arc::new(MetadataFetcher::new(provider.clone()));
-        let (erc1155_uri_sender, _erc1155_uri_service) =
-            TokenUriService::spawn(erc1155_fetcher, storage.clone(), 1024, 8);
-
         let grpc_service = Erc1155Service::new(storage.clone());
-        let sink = Box::new(
-            Erc1155Sink::new(storage)
-                .with_grpc_service(grpc_service.clone())
-                .with_balance_tracking(provider.clone())
-                .with_token_uri_sender(erc1155_uri_sender),
-        );
+        let mut sink = Erc1155Sink::new(storage)
+            .with_grpc_service(grpc_service.clone())
+            .with_balance_tracking(provider.clone());
+        if effective_metadata_mode == MetadataMode::Inline {
+            let erc1155_fetcher = Arc::new(MetadataFetcher::new(provider.clone()));
+            let image_cache_dir = db_dir.join("image-cache");
+            let (erc1155_uri_sender, _erc1155_uri_service) =
+                TokenUriService::spawn_with_image_cache(
+                    erc1155_fetcher,
+                    sink.storage().clone(),
+                    1024,
+                    8,
+                    Some(image_cache_dir),
+                    8,
+                );
+            sink = sink.with_token_uri_sender(erc1155_uri_sender);
+        } else {
+            tracing::info!("ERC1155 metadata fetching disabled for throughput (deferred mode)");
+        }
+        let sink = Box::new(sink);
         torii_config = torii_config.add_sink_boxed(sink);
 
         erc1155_grpc_service = Some(grpc_service);
@@ -465,9 +562,23 @@ async fn run_indexer(config: Config) -> Result<()> {
     #[cfg(feature = "profiling")]
     {
         if let Ok(report) = guard.report().build() {
-            let file = std::fs::File::create("flamegraph.svg").unwrap();
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let db_backend = if erc20_backend == DbBackend::Postgres {
+                "postgres"
+            } else {
+                "sqlite"
+            };
+            let mode = match config.mode {
+                ExtractionMode::BlockRange => "block-range",
+                ExtractionMode::Event => "event",
+            };
+            let filename = format!("flamegraph-torii-tokens-{mode}-{db_backend}-{ts}.svg");
+            let file = std::fs::File::create(&filename).unwrap();
             report.flamegraph(file).unwrap();
-            tracing::info!("Flamegraph generated: flamegraph.svg");
+            tracing::info!("Flamegraph generated: {}", filename);
         }
     }
 

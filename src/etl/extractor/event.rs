@@ -49,13 +49,13 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use starknet::core::types::{
-    requests::{GetBlockWithTxHashesRequest, GetEventsRequest},
-    BlockId, EmittedEvent, EventFilter, EventFilterWithPage, Felt,
+    requests::{GetBlockWithTxHashesRequest, GetEventsRequest, GetTransactionReceiptRequest},
+    BlockId, EmittedEvent, EventFilter, EventFilterWithPage, ExecutionResult, Felt,
     MaybePreConfirmedBlockWithTxHashes, ResultPageRequest,
 };
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use starknet::providers::{Provider, ProviderRequestData, ProviderResponseData};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::etl::engine_db::EngineDb;
@@ -65,6 +65,8 @@ const EXTRACTOR_TYPE: &str = "event";
 
 /// Delay between polls when following chain head and caught up.
 const CHAIN_HEAD_POLL_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+/// Max number of tx receipt lookups per JSON-RPC batch.
+const RECEIPT_LOOKUP_BATCH_SIZE: usize = 200;
 
 /// Configuration for a single contract's event extraction.
 #[derive(Debug, Clone)]
@@ -453,6 +455,69 @@ impl EventExtractor {
         Ok(result)
     }
 
+    async fn fetch_successful_transaction_hashes(
+        &self,
+        tx_hashes: &[Felt],
+    ) -> Result<HashSet<Felt>> {
+        let mut successful = HashSet::with_capacity(tx_hashes.len());
+
+        for chunk in tx_hashes.chunks(RECEIPT_LOOKUP_BATCH_SIZE) {
+            let requests: Vec<ProviderRequestData> = chunk
+                .iter()
+                .map(|tx_hash| {
+                    ProviderRequestData::GetTransactionReceipt(GetTransactionReceiptRequest {
+                        transaction_hash: *tx_hash,
+                    })
+                })
+                .collect();
+
+            let responses = self
+                .config
+                .retry_policy
+                .execute(|| {
+                    let provider = self.provider.clone();
+                    let requests_ref = &requests;
+                    async move {
+                        provider
+                            .batch_requests(requests_ref)
+                            .await
+                            .context("Failed to fetch transaction receipts in batch")
+                    }
+                })
+                .await?;
+
+            for (requested_tx_hash, response) in chunk.iter().zip(responses) {
+                match response {
+                    ProviderResponseData::GetTransactionReceipt(receipt_with_block_info) => {
+                        if matches!(
+                            receipt_with_block_info.receipt.execution_result(),
+                            ExecutionResult::Succeeded
+                        ) {
+                            successful.insert(*requested_tx_hash);
+                        }
+                    }
+                    _ => {
+                        anyhow::bail!(
+                            "Unexpected response type for tx receipt {requested_tx_hash:#x}"
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(successful)
+    }
+
+    fn filter_events_by_tx_hashes(
+        events: Vec<EmittedEvent>,
+        successful_transaction_hashes: &HashSet<Felt>,
+    ) -> Vec<EmittedEvent> {
+        events
+            .into_iter()
+            .filter(|event| successful_transaction_hashes.contains(&event.transaction_hash))
+            .collect()
+    }
+
     /// Build ExtractionBatch from events with block context.
     async fn build_batch(
         &self,
@@ -652,8 +717,33 @@ impl Extractor for EventExtractor {
             "Extracted events from batch"
         );
 
+        let unique_tx_hashes: Vec<Felt> = all_events
+            .iter()
+            .map(|event| event.transaction_hash)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let successful_transaction_hashes = self
+            .fetch_successful_transaction_hashes(&unique_tx_hashes)
+            .await?;
+        let events_before_filter = all_events.len();
+        let reverted_txs = unique_tx_hashes
+            .len()
+            .saturating_sub(successful_transaction_hashes.len());
+        let filtered_events =
+            Self::filter_events_by_tx_hashes(all_events, &successful_transaction_hashes);
+
+        tracing::info!(
+            target: "torii::etl::event",
+            events_before_filter,
+            events_after_filter = filtered_events.len(),
+            unique_txs_checked = unique_tx_hashes.len(),
+            reverted_txs,
+            "Filtered reverted transactions from event batch"
+        );
+
         // Build batch with block context
-        let mut batch = self.build_batch(all_events, engine_db).await?;
+        let mut batch = self.build_batch(filtered_events, engine_db).await?;
         batch.cursor = Some(self.build_cursor());
         batch.chain_head = self.chain_head;
 
@@ -824,5 +914,36 @@ mod tests {
 
         // Chain head beyond range_end
         assert_eq!(state.range_end(10000, Some(20000)), 14999);
+    }
+
+    #[test]
+    fn test_filter_events_by_tx_hashes() {
+        let keep = Felt::from(1u64);
+        let drop = Felt::from(2u64);
+        let events = vec![
+            EmittedEvent {
+                from_address: Felt::ZERO,
+                keys: Vec::new(),
+                data: Vec::new(),
+                block_hash: None,
+                block_number: None,
+                transaction_hash: keep,
+            },
+            EmittedEvent {
+                from_address: Felt::ZERO,
+                keys: Vec::new(),
+                data: Vec::new(),
+                block_hash: None,
+                block_number: None,
+                transaction_hash: drop,
+            },
+        ];
+
+        let mut successful = HashSet::new();
+        successful.insert(keep);
+
+        let filtered = EventExtractor::filter_events_by_tx_hashes(events, &successful);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].transaction_hash, keep);
     }
 }

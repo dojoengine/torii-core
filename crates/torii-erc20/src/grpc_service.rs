@@ -265,6 +265,7 @@ impl Erc20Trait for Erc20Service {
                 cursor,
                 limit,
             )
+            .await
             .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
 
         let proto_transfers: Vec<Transfer> =
@@ -342,6 +343,7 @@ impl Erc20Trait for Erc20Service {
                 cursor,
                 limit,
             )
+            .await
             .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
 
         let proto_approvals: Vec<Approval> =
@@ -387,6 +389,7 @@ impl Erc20Trait for Erc20Service {
         let (balance, last_block) = self
             .storage
             .get_balance_with_block(token, wallet)
+            .await
             .map_err(|e| Status::internal(format!("Query failed: {e}")))?
             .unwrap_or((starknet::core::types::U256::from(0u64), 0));
 
@@ -424,6 +427,7 @@ impl Erc20Trait for Erc20Service {
         let (balances, next_cursor) = self
             .storage
             .get_balances_filtered(token, wallet, cursor, limit)
+            .await
             .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
 
         let rows = balances
@@ -453,7 +457,7 @@ impl Erc20Trait for Erc20Service {
             let token = bytes_to_felt(&token_bytes)
                 .ok_or_else(|| Status::invalid_argument("Invalid token address"))?;
 
-            let entries = match self.storage.get_token_metadata(token) {
+            let entries = match self.storage.get_token_metadata(token).await {
                 Ok(Some((name, symbol, decimals))) => vec![TokenMetadataEntry {
                     token: token.to_bytes_be().to_vec(),
                     name,
@@ -480,6 +484,7 @@ impl Erc20Trait for Erc20Service {
         let (all, next_cursor) = self
             .storage
             .get_token_metadata_paginated(cursor, limit)
+            .await
             .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
 
         let entries = all
@@ -654,21 +659,25 @@ impl Erc20Trait for Erc20Service {
         let total_transfers = self
             .storage
             .get_transfer_count()
+            .await
             .map_err(|e| Status::internal(format!("Failed to get transfer count: {e}")))?;
 
         let total_approvals = self
             .storage
             .get_approval_count()
+            .await
             .map_err(|e| Status::internal(format!("Failed to get approval count: {e}")))?;
 
         let unique_tokens = self
             .storage
             .get_token_count()
+            .await
             .map_err(|e| Status::internal(format!("Failed to get token count: {e}")))?;
 
         let latest_block = self
             .storage
             .get_latest_block()
+            .await
             .map_err(|e| Status::internal(format!("Failed to get latest block: {e}")))?
             .unwrap_or(0);
 

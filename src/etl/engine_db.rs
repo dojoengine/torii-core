@@ -4,18 +4,15 @@
 //! This will be enhanced with actual Torii features in the future.
 
 use anyhow::{Context, Result};
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    Pool, QueryBuilder, Row, Sqlite,
-};
+use sqlx::{any::AnyPoolOptions, Any, Pool, QueryBuilder, Row};
 use starknet::core::types::Felt;
 use std::path::Path;
-use std::str::FromStr;
 
 use crate::etl::decoder::DecoderId;
 
-/// Embedded SQL schema
-const SCHEMA_SQL: &str = include_str!("../../sql/engine_schema.sql");
+/// Embedded SQL schemas
+const SQLITE_SCHEMA_SQL: &str = include_str!("../../sql/engine_schema.sql");
+const POSTGRES_SCHEMA_SQL: &str = include_str!("../../sql/engine_schema_postgres.sql");
 
 /// Engine database configuration
 #[derive(Debug, Clone)]
@@ -23,39 +20,69 @@ pub struct EngineDbConfig {
     pub path: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DbBackend {
+    Sqlite,
+    Postgres,
+}
+
 /// Engine database for tracking state
 pub struct EngineDb {
-    pool: Pool<Sqlite>,
+    pool: Pool<Any>,
+    backend: DbBackend,
 }
 
 impl EngineDb {
     /// Create a new engine database
     pub async fn new(config: EngineDbConfig) -> Result<Self> {
-        // Handle special case for in-memory database
-        let is_memory = config.path == ":memory:" || config.path == "sqlite::memory:";
+        sqlx::any::install_default_drivers();
 
-        // Ensure parent directory exists (skip for in-memory)
-        if !is_memory {
-            if let Some(parent) = Path::new(&config.path).parent() {
-                tokio::fs::create_dir_all(parent)
-                    .await
-                    .context(format!("Failed to create directory: {}", parent.display()))?;
+        let backend =
+            if config.path.starts_with("postgres://") || config.path.starts_with("postgresql://") {
+                DbBackend::Postgres
+            } else {
+                DbBackend::Sqlite
+            };
+
+        // Ensure parent directory exists for sqlite file databases.
+        if backend == DbBackend::Sqlite {
+            let is_memory = config.path == ":memory:" || config.path == "sqlite::memory:";
+            let is_url = config.path.starts_with("sqlite:");
+            if !is_memory && !is_url {
+                if let Some(parent) = Path::new(&config.path).parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .context(format!("Failed to create directory: {}", parent.display()))?;
+                }
             }
         }
 
-        tracing::debug!(target: "torii::etl::engine_db", "Connecting to database: {}", config.path);
+        let database_url = match backend {
+            DbBackend::Postgres => config.path.clone(),
+            DbBackend::Sqlite => {
+                if config.path == ":memory:" || config.path == "sqlite::memory:" {
+                    "sqlite::memory:".to_string()
+                } else if config.path.starts_with("sqlite:") {
+                    config.path.clone()
+                } else {
+                    format!("sqlite://{}", config.path)
+                }
+            }
+        };
 
-        // Create SQLite connection options
-        let opts = SqliteConnectOptions::from_str(&config.path)?.create_if_missing(true);
+        tracing::debug!(
+            target: "torii::etl::engine_db",
+            "Connecting to database: {}",
+            database_url
+        );
 
-        // Create connection pool
-        let pool = SqlitePoolOptions::new()
+        let pool = AnyPoolOptions::new()
             .max_connections(5)
-            .connect_with(opts)
+            .connect(&database_url)
             .await
             .context("Failed to connect to engine database")?;
 
-        let db = Self { pool };
+        let db = Self { pool, backend };
 
         // Initialize schema
         db.init_schema().await?;
@@ -63,9 +90,20 @@ impl EngineDb {
         Ok(db)
     }
 
-    /// Initialize database with PRAGMAs and schema
+    fn sql<'a>(&self, sqlite: &'a str, postgres: &'a str) -> &'a str {
+        match self.backend {
+            DbBackend::Sqlite => sqlite,
+            DbBackend::Postgres => postgres,
+        }
+    }
+
+    fn table<'a>(&self, sqlite: &'a str, postgres: &'a str) -> &'a str {
+        self.sql(sqlite, postgres)
+    }
+
+    /// Initialize database with backend tuning and schema
     async fn init_schema(&self) -> Result<()> {
-        // Apply PRAGMAs for performance
+        // Apply SQLite-only tuning.
         self.apply_pragmas().await?;
 
         // Load tables from SQL file
@@ -78,6 +116,10 @@ impl EngineDb {
 
     /// Apply SQLite PRAGMAs for performance
     async fn apply_pragmas(&self) -> Result<()> {
+        if self.backend != DbBackend::Sqlite {
+            return Ok(());
+        }
+
         sqlx::query("PRAGMA journal_mode=WAL")
             .execute(&self.pool)
             .await?;
@@ -97,7 +139,12 @@ impl EngineDb {
 
     /// Load schema from SQL file
     async fn load_schema_from_sql(&self) -> Result<()> {
-        for statement in SCHEMA_SQL.split(';') {
+        let schema_sql = match self.backend {
+            DbBackend::Sqlite => SQLITE_SCHEMA_SQL,
+            DbBackend::Postgres => POSTGRES_SCHEMA_SQL,
+        };
+
+        for statement in schema_sql.split(';') {
             let statement = statement.trim();
 
             // Skip empty statements
@@ -141,9 +188,12 @@ impl EngineDb {
 
     /// Get the current head (block number and event count)
     pub async fn get_head(&self) -> Result<(u64, u64)> {
-        let row = sqlx::query("SELECT block_number, event_count FROM head WHERE id = 'main'")
-            .fetch_one(&self.pool)
-            .await?;
+        let table = self.table("head", "engine.head");
+        let row = sqlx::query(&format!(
+            "SELECT block_number, event_count FROM {table} WHERE id = 'main'"
+        ))
+        .fetch_one(&self.pool)
+        .await?;
 
         let block_number: i64 = row.get(0);
         let event_count: i64 = row.get(1);
@@ -153,20 +203,34 @@ impl EngineDb {
 
     /// Update the head (increment block and event count)
     pub async fn update_head(&self, block_number: u64, events_processed: u64) -> Result<()> {
-        sqlx::query(
-            "UPDATE head SET block_number = ?, event_count = event_count + ? WHERE id = 'main'",
-        )
-        .bind(block_number as i64)
-        .bind(events_processed as i64)
-        .execute(&self.pool)
-        .await?;
+        let table = self.table("head", "engine.head");
+        let sql = match self.backend {
+            DbBackend::Sqlite => {
+                format!("UPDATE {table} SET block_number = ?, event_count = event_count + ? WHERE id = 'main'")
+            }
+            DbBackend::Postgres => {
+                format!("UPDATE {table} SET block_number = $1, event_count = event_count + $2 WHERE id = 'main'")
+            }
+        };
+
+        sqlx::query(&sql)
+            .bind(block_number as i64)
+            .bind(events_processed as i64)
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }
 
     /// Get a stat value
     pub async fn get_stat(&self, key: &str) -> Result<Option<String>> {
-        let row = sqlx::query("SELECT value FROM stats WHERE key = ?")
+        let table = self.table("stats", "engine.stats");
+        let sql = match self.backend {
+            DbBackend::Sqlite => format!("SELECT value FROM {table} WHERE key = ?"),
+            DbBackend::Postgres => format!("SELECT value FROM {table} WHERE key = $1"),
+        };
+
+        let row = sqlx::query(&sql)
             .bind(key)
             .fetch_optional(&self.pool)
             .await?;
@@ -176,7 +240,19 @@ impl EngineDb {
 
     /// Set a stat value
     pub async fn set_stat(&self, key: &str, value: &str) -> Result<()> {
-        sqlx::query("INSERT OR REPLACE INTO stats (key, value) VALUES (?, ?)")
+        let table = self.table("stats", "engine.stats");
+        let sql = match self.backend {
+            DbBackend::Sqlite => {
+                format!("INSERT OR REPLACE INTO {table} (key, value) VALUES (?, ?)")
+            }
+            DbBackend::Postgres => {
+                format!(
+                    "INSERT INTO {table} (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value"
+                )
+            }
+        };
+
+        sqlx::query(&sql)
             .bind(key)
             .bind(value)
             .execute(&self.pool)
@@ -210,13 +286,25 @@ impl EngineDb {
         extractor_type: &str,
         state_key: &str,
     ) -> Result<Option<String>> {
-        let row = sqlx::query(
-            "SELECT state_value FROM extractor_state WHERE extractor_type = ? AND state_key = ?",
-        )
-        .bind(extractor_type)
-        .bind(state_key)
-        .fetch_optional(&self.pool)
-        .await?;
+        let table = self.table("extractor_state", "engine.extractor_state");
+        let sql = match self.backend {
+            DbBackend::Sqlite => {
+                format!(
+                    "SELECT state_value FROM {table} WHERE extractor_type = ? AND state_key = ?"
+                )
+            }
+            DbBackend::Postgres => {
+                format!(
+                    "SELECT state_value FROM {table} WHERE extractor_type = $1 AND state_key = $2"
+                )
+            }
+        };
+
+        let row = sqlx::query(&sql)
+            .bind(extractor_type)
+            .bind(state_key)
+            .fetch_optional(&self.pool)
+            .await?;
 
         Ok(row.map(|r| r.get(0)))
     }
@@ -233,19 +321,29 @@ impl EngineDb {
         state_key: &str,
         state_value: &str,
     ) -> Result<()> {
-        sqlx::query(
-            r"
-            INSERT INTO extractor_state (extractor_type, state_key, state_value, updated_at)
-            VALUES (?, ?, ?, strftime('%s', 'now'))
-            ON CONFLICT(extractor_type, state_key)
-            DO UPDATE SET state_value = excluded.state_value, updated_at = strftime('%s', 'now')
-            ",
-        )
-        .bind(extractor_type)
-        .bind(state_key)
-        .bind(state_value)
-        .execute(&self.pool)
-        .await?;
+        let table = self.table("extractor_state", "engine.extractor_state");
+
+        let sql = match self.backend {
+            DbBackend::Sqlite => format!(
+                "INSERT INTO {table} (extractor_type, state_key, state_value, updated_at) \
+                 VALUES (?, ?, ?, strftime('%s', 'now')) \
+                 ON CONFLICT(extractor_type, state_key) \
+                 DO UPDATE SET state_value = excluded.state_value, updated_at = strftime('%s', 'now')"
+            ),
+            DbBackend::Postgres => format!(
+                "INSERT INTO {table} (extractor_type, state_key, state_value, updated_at) \
+                 VALUES ($1, $2, $3, EXTRACT(EPOCH FROM NOW())::BIGINT) \
+                 ON CONFLICT(extractor_type, state_key) \
+                 DO UPDATE SET state_value = EXCLUDED.state_value, updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT"
+            ),
+        };
+
+        sqlx::query(&sql)
+            .bind(extractor_type)
+            .bind(state_key)
+            .bind(state_value)
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }
@@ -260,7 +358,17 @@ impl EngineDb {
         extractor_type: &str,
         state_key: &str,
     ) -> Result<()> {
-        sqlx::query("DELETE FROM extractor_state WHERE extractor_type = ? AND state_key = ?")
+        let table = self.table("extractor_state", "engine.extractor_state");
+        let sql = match self.backend {
+            DbBackend::Sqlite => {
+                format!("DELETE FROM {table} WHERE extractor_type = ? AND state_key = ?")
+            }
+            DbBackend::Postgres => {
+                format!("DELETE FROM {table} WHERE extractor_type = $1 AND state_key = $2")
+            }
+        };
+
+        sqlx::query(&sql)
             .bind(extractor_type)
             .bind(state_key)
             .execute(&self.pool)
@@ -284,19 +392,18 @@ impl EngineDb {
             return Ok(std::collections::HashMap::new());
         }
 
-        // Build query with IN clause
-        let placeholders: Vec<String> = block_numbers.iter().map(|_| "?".to_string()).collect();
-        let query = format!(
-            "SELECT block_number, timestamp FROM block_timestamps WHERE block_number IN ({})",
-            placeholders.join(", ")
-        );
+        let table = self.table("block_timestamps", "engine.block_timestamps");
 
-        let mut query_builder = sqlx::query(&query);
+        let mut query_builder = QueryBuilder::<Any>::new(&format!(
+            "SELECT block_number, timestamp FROM {table} WHERE block_number IN ("
+        ));
+        let mut separated = query_builder.separated(", ");
         for block_num in block_numbers {
-            query_builder = query_builder.bind(*block_num as i64);
+            separated.push_bind(*block_num as i64);
         }
+        separated.push_unseparated(")");
 
-        let rows = query_builder.fetch_all(&self.pool).await?;
+        let rows = query_builder.build().fetch_all(&self.pool).await?;
 
         let mut result = std::collections::HashMap::with_capacity(rows.len());
         for row in rows {
@@ -324,16 +431,27 @@ impl EngineDb {
 
         let mut tx = self.pool.begin().await?;
 
-        // Use chunked multi-row INSERT OR IGNORE to reduce round-trips.
+        let table = self.table("block_timestamps", "engine.block_timestamps");
+
+        // Use chunked multi-row insert to reduce round-trips.
         let timestamp_items: Vec<(u64, u64)> = timestamps.iter().map(|(k, v)| (*k, *v)).collect();
         for chunk in timestamp_items.chunks(CHUNK_SIZE) {
-            let mut query_builder = QueryBuilder::<Sqlite>::new(
-                "INSERT OR IGNORE INTO block_timestamps (block_number, timestamp) ",
-            );
+            let mut query_builder = QueryBuilder::<Any>::new(match self.backend {
+                DbBackend::Sqlite => {
+                    format!("INSERT OR IGNORE INTO {table} (block_number, timestamp) ")
+                }
+                DbBackend::Postgres => {
+                    format!("INSERT INTO {table} (block_number, timestamp) ")
+                }
+            });
             query_builder.push_values(chunk, |mut b, (block_number, timestamp)| {
                 b.push_bind(*block_number as i64)
                     .push_bind(*timestamp as i64);
             });
+
+            if self.backend == DbBackend::Postgres {
+                query_builder.push(" ON CONFLICT (block_number) DO NOTHING");
+            }
 
             query_builder.build().execute(&mut *tx).await?;
         }
@@ -351,11 +469,18 @@ impl EngineDb {
     /// # Returns
     /// Timestamp if found in cache, None otherwise
     pub async fn get_block_timestamp(&self, block_number: u64) -> Result<Option<u64>> {
-        let timestamp: Option<i64> =
-            sqlx::query_scalar("SELECT timestamp FROM block_timestamps WHERE block_number = ?")
-                .bind(block_number as i64)
-                .fetch_optional(&self.pool)
-                .await?;
+        let table = self.table("block_timestamps", "engine.block_timestamps");
+        let sql = match self.backend {
+            DbBackend::Sqlite => format!("SELECT timestamp FROM {table} WHERE block_number = ?"),
+            DbBackend::Postgres => {
+                format!("SELECT timestamp FROM {table} WHERE block_number = $1")
+            }
+        };
+
+        let timestamp: Option<i64> = sqlx::query_scalar(&sql)
+            .bind(block_number as i64)
+            .fetch_optional(&self.pool)
+            .await?;
 
         Ok(timestamp.map(|ts| ts as u64))
     }
@@ -367,9 +492,10 @@ impl EngineDb {
     /// # Returns
     /// Vector of (contract_address, decoder_ids, identified_at_timestamp)
     pub async fn get_all_contract_decoders(&self) -> Result<Vec<(Felt, Vec<DecoderId>, i64)>> {
-        let rows = sqlx::query(
-            "SELECT contract_address, decoder_ids, identified_at FROM contract_decoders",
-        )
+        let table = self.table("contract_decoders", "engine.contract_decoders");
+        let rows = sqlx::query(&format!(
+            "SELECT contract_address, decoder_ids, identified_at FROM {table}"
+        ))
         .fetch_all(&self.pool)
         .await?;
 
@@ -417,18 +543,28 @@ impl EngineDb {
             .collect::<Vec<_>>()
             .join(",");
 
-        sqlx::query(
-            r"
-            INSERT INTO contract_decoders (contract_address, decoder_ids, identified_at)
-            VALUES (?, ?, strftime('%s', 'now'))
-            ON CONFLICT(contract_address)
-            DO UPDATE SET decoder_ids = excluded.decoder_ids, identified_at = strftime('%s', 'now')
-            ",
-        )
-        .bind(&addr_hex)
-        .bind(&decoder_ids_str)
-        .execute(&self.pool)
-        .await?;
+        let table = self.table("contract_decoders", "engine.contract_decoders");
+
+        let sql = match self.backend {
+            DbBackend::Sqlite => format!(
+                "INSERT INTO {table} (contract_address, decoder_ids, identified_at) \
+                 VALUES (?, ?, strftime('%s', 'now')) \
+                 ON CONFLICT(contract_address) \
+                 DO UPDATE SET decoder_ids = excluded.decoder_ids, identified_at = strftime('%s', 'now')"
+            ),
+            DbBackend::Postgres => format!(
+                "INSERT INTO {table} (contract_address, decoder_ids, identified_at) \
+                 VALUES ($1, $2, EXTRACT(EPOCH FROM NOW())::BIGINT) \
+                 ON CONFLICT(contract_address) \
+                 DO UPDATE SET decoder_ids = EXCLUDED.decoder_ids, identified_at = EXTRACT(EPOCH FROM NOW())::BIGINT"
+            ),
+        };
+
+        sqlx::query(&sql)
+            .bind(&addr_hex)
+            .bind(&decoder_ids_str)
+            .execute(&self.pool)
+            .await?;
 
         Ok(())
     }
@@ -442,12 +578,20 @@ impl EngineDb {
     /// Some(decoder_ids) if found, None otherwise
     pub async fn get_contract_decoders(&self, contract: Felt) -> Result<Option<Vec<DecoderId>>> {
         let addr_hex = format!("{contract:#x}");
+        let table = self.table("contract_decoders", "engine.contract_decoders");
+        let sql = match self.backend {
+            DbBackend::Sqlite => {
+                format!("SELECT decoder_ids FROM {table} WHERE contract_address = ?")
+            }
+            DbBackend::Postgres => {
+                format!("SELECT decoder_ids FROM {table} WHERE contract_address = $1")
+            }
+        };
 
-        let row =
-            sqlx::query("SELECT decoder_ids FROM contract_decoders WHERE contract_address = ?")
-                .bind(&addr_hex)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row = sqlx::query(&sql)
+            .bind(&addr_hex)
+            .fetch_optional(&self.pool)
+            .await?;
 
         match row {
             Some(r) => {

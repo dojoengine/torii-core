@@ -24,6 +24,7 @@ use prost_types::Any;
 use starknet::core::types::{Felt, U256};
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
@@ -52,6 +53,9 @@ pub struct Erc20Sink {
     balance_fetcher: Option<Arc<BalanceFetcher>>,
     /// Metadata fetcher for token name/symbol/decimals
     metadata_fetcher: Option<Arc<MetadataFetcher>>,
+    /// In-memory counters to avoid full-table COUNT(*) in the ingest hot path.
+    total_transfers: AtomicU64,
+    total_approvals: AtomicU64,
 }
 
 impl Erc20Sink {
@@ -62,6 +66,9 @@ impl Erc20Sink {
             grpc_service: None,
             balance_fetcher: None,
             metadata_fetcher: None,
+            // Avoid startup full-table COUNT(*) scans on large datasets.
+            total_transfers: AtomicU64::new(0),
+            total_approvals: AtomicU64::new(0),
         }
     }
 
@@ -242,6 +249,8 @@ impl Sink for Erc20Sink {
         // Collect all transfers and approvals for batch insertion
         let mut transfers: Vec<TransferData> = Vec::new();
         let mut approvals: Vec<ApprovalData> = Vec::new();
+        let mut inserted_transfers: u64 = 0;
+        let mut inserted_approvals: u64 = 0;
 
         // Get block timestamps from batch for enrichment
         let block_timestamps: HashMap<u64, i64> = batch
@@ -295,75 +304,80 @@ impl Sink for Erc20Sink {
                 new_tokens.insert(approval.token);
             }
 
-            for token in new_tokens {
-                match self.storage.has_token_metadata(token) {
-                    Ok(exists) => {
-                        if exists {
-                            continue;
-                        }
-
-                        let meta = fetcher.fetch_erc20_metadata(token).await;
-                        tracing::info!(
-                            target: "torii_erc20::sink",
-                            token = %format!("{:#x}", token),
-                            name = ?meta.name,
-                            symbol = ?meta.symbol,
-                            decimals = ?meta.decimals,
-                            "Fetched token metadata"
-                        );
-                        if let Err(e) = self.storage.upsert_token_metadata(
-                            token,
-                            meta.name.as_deref(),
-                            meta.symbol.as_deref(),
-                            meta.decimals,
-                        ) {
-                            tracing::warn!(
-                                target: "torii_erc20::sink",
-                                token = %format!("{:#x}", token),
-                                error = %e,
-                                "Failed to store token metadata"
-                            );
-                        } else if let Some(event_bus) = &self.event_bus {
-                            let meta_entry = proto::TokenMetadataEntry {
-                                token: token.to_bytes_be().to_vec(),
-                                name: meta.name,
-                                symbol: meta.symbol,
-                                decimals: meta.decimals.map(|d| d as u32),
-                            };
-
-                            let mut buf = Vec::new();
-                            meta_entry.encode(&mut buf)?;
-                            let any = Any {
-                                type_url:
-                                    "type.googleapis.com/torii.sinks.erc20.TokenMetadataEntry"
-                                        .to_string(),
-                                value: buf,
-                            };
-
-                            event_bus.publish_protobuf(
-                                "erc20.metadata",
-                                "erc20.metadata",
-                                &any,
-                                &meta_entry,
-                                UpdateType::Created,
-                                Self::matches_metadata_filters,
-                            );
-                        }
-                    }
+            let ordered_tokens: Vec<Felt> = new_tokens.iter().copied().collect();
+            let existing_metadata =
+                match self.storage.has_token_metadata_batch(&ordered_tokens).await {
+                    Ok(existing) => existing,
                     Err(e) => {
                         tracing::warn!(
                             target: "torii_erc20::sink",
                             error = %e,
-                            "Failed to check token metadata"
+                            "Failed to batch-check token metadata"
                         );
+                        HashSet::new()
                     }
+                };
+
+            for token in ordered_tokens
+                .into_iter()
+                .filter(|token| !existing_metadata.contains(token))
+            {
+                let meta = fetcher.fetch_erc20_metadata(token).await;
+                tracing::info!(
+                    target: "torii_erc20::sink",
+                    token = %format!("{:#x}", token),
+                    name = ?meta.name,
+                    symbol = ?meta.symbol,
+                    decimals = ?meta.decimals,
+                    "Fetched token metadata"
+                );
+                if let Err(e) = self
+                    .storage
+                    .upsert_token_metadata(
+                        token,
+                        meta.name.as_deref(),
+                        meta.symbol.as_deref(),
+                        meta.decimals,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        target: "torii_erc20::sink",
+                        token = %format!("{:#x}", token),
+                        error = %e,
+                        "Failed to store token metadata"
+                    );
+                } else if let Some(event_bus) = &self.event_bus {
+                    let meta_entry = proto::TokenMetadataEntry {
+                        token: token.to_bytes_be().to_vec(),
+                        name: meta.name,
+                        symbol: meta.symbol,
+                        decimals: meta.decimals.map(|d| d as u32),
+                    };
+
+                    let mut buf = Vec::new();
+                    meta_entry.encode(&mut buf)?;
+                    let any = Any {
+                        type_url: "type.googleapis.com/torii.sinks.erc20.TokenMetadataEntry"
+                            .to_string(),
+                        value: buf,
+                    };
+
+                    event_bus.publish_protobuf(
+                        "erc20.metadata",
+                        "erc20.metadata",
+                        &any,
+                        &meta_entry,
+                        UpdateType::Created,
+                        Self::matches_metadata_filters,
+                    );
                 }
             }
         }
 
         // Batch insert transfers
         if !transfers.is_empty() {
-            let transfer_count = match self.storage.insert_transfers_batch(&transfers) {
+            let transfer_count = match self.storage.insert_transfers_batch(&transfers).await {
                 Ok(count) => count,
                 Err(e) => {
                     tracing::error!(
@@ -377,6 +391,10 @@ impl Sink for Erc20Sink {
             };
 
             if transfer_count > 0 {
+                inserted_transfers = transfer_count as u64;
+                self.total_transfers
+                    .fetch_add(inserted_transfers, Ordering::Relaxed);
+
                 tracing::info!(
                     target: "torii_erc20::sink",
                     count = transfer_count,
@@ -386,7 +404,11 @@ impl Sink for Erc20Sink {
                 // Update balances if balance tracking is enabled
                 if let Some(ref fetcher) = self.balance_fetcher {
                     // Step 1: Check which balances need adjustment (would go negative)
-                    let adjustment_requests = match self.storage.check_balances_batch(&transfers) {
+                    let adjustment_requests = match self
+                        .storage
+                        .check_balances_batch(&transfers)
+                        .await
+                    {
                         Ok(requests) => requests,
                         Err(e) => {
                             tracing::warn!(
@@ -431,6 +453,7 @@ impl Sink for Erc20Sink {
                     if let Err(e) = self
                         .storage
                         .apply_transfers_with_adjustments(&transfers, &adjustments)
+                        .await
                     {
                         tracing::error!(
                             target: "torii_erc20::sink",
@@ -487,7 +510,7 @@ impl Sink for Erc20Sink {
 
         // Batch insert approvals
         if !approvals.is_empty() {
-            let approval_count = match self.storage.insert_approvals_batch(&approvals) {
+            let approval_count = match self.storage.insert_approvals_batch(&approvals).await {
                 Ok(count) => count,
                 Err(e) => {
                     tracing::error!(
@@ -501,6 +524,10 @@ impl Sink for Erc20Sink {
             };
 
             if approval_count > 0 {
+                inserted_approvals = approval_count as u64;
+                self.total_approvals
+                    .fetch_add(inserted_approvals, Ordering::Relaxed);
+
                 tracing::info!(
                     target: "torii_erc20::sink",
                     count = approval_count,
@@ -551,22 +578,17 @@ impl Sink for Erc20Sink {
             }
         }
 
-        // Log combined statistics
-        if !transfers.is_empty() || !approvals.is_empty() {
-            if let Ok(total_transfers) = self.storage.get_transfer_count() {
-                if let Ok(total_approvals) = self.storage.get_approval_count() {
-                    if let Ok(token_count) = self.storage.get_token_count() {
-                        tracing::info!(
-                            target: "torii_erc20::sink",
-                            transfers = total_transfers,
-                            approvals = total_approvals,
-                            tokens = token_count,
-                            blocks = batch.blocks.len(),
-                            "Total statistics"
-                        );
-                    }
-                }
-            }
+        // Log combined statistics without full-table scans.
+        if inserted_transfers > 0 || inserted_approvals > 0 {
+            tracing::info!(
+                target: "torii_erc20::sink",
+                batch_transfers = inserted_transfers,
+                batch_approvals = inserted_approvals,
+                total_transfers = self.total_transfers.load(Ordering::Relaxed),
+                total_approvals = self.total_approvals.load(Ordering::Relaxed),
+                blocks = batch.blocks.len(),
+                "Total statistics"
+            );
         }
 
         Ok(())

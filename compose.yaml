@@ -1,0 +1,64 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: torii-postgres
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-8GB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE_SIZE:-24GB}
+      - -c
+      - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-2GB}
+      - -c
+      - work_mem=${PG_WORK_MEM:-64MB}
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS:-100}
+      - -c
+      - wal_buffers=16MB
+      - -c
+      - min_wal_size=2GB
+      - -c
+      - max_wal_size=8GB
+      - -c
+      - checkpoint_timeout=30min
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - wal_compression=on
+      - -c
+      - synchronous_commit=off
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      - -c
+      - default_statistics_target=100
+      - -c
+      - autovacuum_naptime=10s
+      - -c
+      - autovacuum_vacuum_scale_factor=0.02
+      - -c
+      - autovacuum_analyze_scale_factor=0.01
+      - -c
+      - max_worker_processes=16
+      - -c
+      - max_parallel_workers=8
+      - -c
+      - max_parallel_workers_per_gather=4
+      - -c
+      - max_parallel_maintenance_workers=4
+    environment:
+      POSTGRES_USER: torii
+      POSTGRES_PASSWORD: torii
+      POSTGRES_DB: torii
+    ports:
+      - "5432:5432"
+    shm_size: ${PG_SHM_SIZE:-8g}
+    volumes:
+      - ${PGDATA_DIR:-./data/torii-postgres}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U torii -d torii"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

@@ -76,10 +76,13 @@ torii-erc20 \
   --from-block <START> \
   --to-block <END> \
   --db-path ./my-data.db \
+  --database-url postgres://torii:torii@localhost:5432/torii \
   --port 3000 \
   --no-auto-discovery \
   --contracts <ADDR1>,<ADDR2>
 ```
+
+`--database-url` (or `DATABASE_URL`) enables PostgreSQL-backed storage for both engine state and ERC20 data. If unset, local SQLite files are used.
 
 ## Architecture
 

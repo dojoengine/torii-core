@@ -5,13 +5,16 @@
 
 use axum::{extract::State, http::StatusCode, response::Json};
 use serde::{Deserialize, Serialize};
-use sqlx::{sqlite::SqlitePool, Column, Row};
+use sqlx::{Column, Row};
 use std::sync::Arc;
+
+use crate::DbBackend;
 
 /// Shared state for SQL sink routes
 #[derive(Clone)]
 pub struct SqlSinkState {
-    pub pool: Arc<SqlitePool>,
+    pub(crate) pool: Arc<sqlx::Pool<sqlx::Any>>,
+    pub(crate) backend: DbBackend,
 }
 
 /// Request body for SQL query endpoint
@@ -87,7 +90,14 @@ pub async fn sql_events_handler(
 ) -> Result<Json<SqlQueryResponse>, (StatusCode, String)> {
     tracing::info!(target: "torii::sinks::sql::api", "Fetching all SQL operations");
 
-    let rows = sqlx::query("SELECT * FROM sql_operation ORDER BY created_at DESC LIMIT 100")
+    let query = match state.backend {
+        DbBackend::Sqlite => "SELECT * FROM sql_operation ORDER BY created_at DESC LIMIT 100",
+        DbBackend::Postgres => {
+            "SELECT * FROM sql_sink.sql_operation ORDER BY created_at DESC LIMIT 100"
+        }
+    };
+
+    let rows = sqlx::query(query)
         .fetch_all(state.pool.as_ref())
         .await
         .map_err(|e| {
