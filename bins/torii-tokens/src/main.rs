@@ -26,6 +26,9 @@
 //! # Block range mode (default) - full chain indexing
 //! torii-tokens --include-well-known --from-block 0
 //!
+//! # Enable observability (metrics endpoint + collection)
+//! torii-tokens --observability --include-well-known --from-block 0
+//!
 //! # Event mode - per-contract cursors
 //! torii-tokens --mode event --erc20 0x...ETH,0x...STRK --from-block 0
 //!
@@ -120,6 +123,18 @@ async fn run_indexer(config: Config) -> Result<()> {
         .unwrap();
 
     tracing::info!("Starting Torii Unified Token Indexer");
+    let metrics_enabled = if config.observability {
+        "true"
+    } else {
+        "false"
+    };
+    // CLI is authoritative for torii-tokens observability behavior.
+    std::env::set_var("TORII_METRICS_ENABLED", metrics_enabled);
+    if config.observability {
+        tracing::info!("Observability: enabled via --observability");
+    } else {
+        tracing::info!("Observability: disabled (flag not set)");
+    }
     tracing::info!("Mode: {:?}", config.mode);
     tracing::info!("RPC URL: {}", config.rpc_url);
     tracing::info!("From block: {}", config.from_block);

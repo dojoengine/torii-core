@@ -49,6 +49,32 @@ Default connection string:
 export DATABASE_URL=postgres://torii:torii@localhost:5432/torii
 ```
 
+### Observability Stack (Prometheus + Grafana)
+
+```bash
+# Start metrics stack + postgres exporter
+docker compose up -d postgres postgres-exporter prometheus grafana
+```
+
+Torii exposes Prometheus metrics on `GET /metrics` (enabled by default).
+
+- Prometheus: `http://localhost:9090`
+- Grafana: `http://localhost:3002` (default `admin/admin`)
+- Postgres exporter metrics: `http://localhost:9187/metrics`
+
+If Torii runs outside Compose (default), Prometheus scrapes:
+
+- `host.containers.internal:3000/metrics` (Podman-compatible)
+- `host.docker.internal:3000/metrics` (Docker Desktop-compatible)
+
+If Torii uses a custom `--port`, update `observability/prometheus/prometheus.yml` target port accordingly.
+
+Disable metrics export in Torii with:
+
+```bash
+export TORII_METRICS_ENABLED=false
+```
+
 ### Running Examples
 
 ```bash

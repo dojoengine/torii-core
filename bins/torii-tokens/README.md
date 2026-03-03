@@ -8,6 +8,9 @@ Unified Starknet token indexer for ERC20, ERC721, and ERC1155 tokens.
 # Block-range mode: auto-discovers all token contracts
 torii-tokens --from-block 100000
 
+# Enable observability (metrics endpoint + collection)
+torii-tokens --observability --from-block 100000
+
 # Event mode: index specific contracts only
 torii-tokens --mode event --erc20 0x049D36570D4e46f48e99674bd3fcc84644DdD6b96F7C741B1562B82f9e004dC7 --from-block 100000
 ```
@@ -91,6 +94,7 @@ torii-tokens --db-dir /path/to/data --from-block 0
 | `--db-dir` | `./torii-data` | Directory for database files |
 | `--database-url` | None | Engine DB URL/path (e.g. `postgres://...`) |
 | `--port` | `3000` | HTTP/gRPC server port |
+| `--observability` | `false` | Enable observability (Prometheus metrics endpoint + metric collection) |
 | `--erc20` | None | ERC20 contract addresses (comma-separated) |
 | `--erc721` | None | ERC721 contract addresses (comma-separated) |
 | `--erc1155` | None | ERC1155 contract addresses (comma-separated) |

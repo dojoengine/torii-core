@@ -76,8 +76,14 @@ impl EngineDb {
             database_url
         );
 
+        let max_connections = if backend == DbBackend::Sqlite && database_url == "sqlite::memory:" {
+            1
+        } else {
+            5
+        };
+
         let pool = AnyPoolOptions::new()
-            .max_connections(5)
+            .max_connections(max_connections)
             .connect(&database_url)
             .await
             .context("Failed to connect to engine database")?;

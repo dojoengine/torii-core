@@ -177,7 +177,7 @@ impl BlockRangeExtractor {
         to_block: u64,
     ) -> Result<Vec<MaybePreConfirmedBlockWithReceipts>> {
         let requests = block_with_receipts_batch_from_block_range(from_block, to_block);
-
+        let fetch_start = Instant::now();
         let responses = retry_policy
             .execute(|| {
                 let provider = provider.clone();
@@ -189,7 +189,30 @@ impl BlockRangeExtractor {
                         .context("Failed to execute batch request for blocks")
                 }
             })
-            .await?;
+            .await;
+        ::metrics::histogram!("torii_rpc_block_range_fetch_duration_seconds")
+            .record(fetch_start.elapsed().as_secs_f64());
+
+        let responses = match responses {
+            Ok(responses) => {
+                ::metrics::counter!(
+                    "torii_rpc_requests_total",
+                    "method" => "get_block_with_receipts_batch",
+                    "status" => "ok"
+                )
+                .increment(1);
+                responses
+            }
+            Err(err) => {
+                ::metrics::counter!(
+                    "torii_rpc_requests_total",
+                    "method" => "get_block_with_receipts_batch",
+                    "status" => "error"
+                )
+                .increment(1);
+                return Err(err);
+            }
+        };
 
         let mut blocks = Vec::with_capacity((to_block - from_block + 1) as usize);
         for (idx, response) in responses.into_iter().enumerate() {

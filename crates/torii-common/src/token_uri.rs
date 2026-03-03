@@ -19,13 +19,13 @@
 
 use starknet::core::types::{Felt, U256};
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
-use tokio::sync::OwnedSemaphorePermit;
 
 use crate::MetadataFetcher;
 
@@ -381,7 +381,7 @@ fn extract_image_uri(metadata_json: &str) -> Option<String> {
 }
 
 async fn cache_image_locally(
-    root_dir: &PathBuf,
+    root_dir: &Path,
     contract: Felt,
     token_id: U256,
     image_uri: &str,
@@ -390,9 +390,7 @@ async fn cache_image_locally(
         .await
         .ok_or_else(|| anyhow::anyhow!("image download failed"))?;
 
-    let contract_dir = format!("{:#x}", contract)
-        .trim_start_matches("0x")
-        .to_owned();
+    let contract_dir = format!("{contract:#x}").trim_start_matches("0x").to_owned();
     let token_name = format!("{token_id:064x}");
     let ext = image_extension(content_type.as_deref(), &source_url);
 
@@ -448,7 +446,7 @@ async fn fetch_image_bytes_with_retry(uri: &str) -> Option<(Vec<u8>, Option<Stri
                     .headers()
                     .get(reqwest::header::CONTENT_TYPE)
                     .and_then(|h| h.to_str().ok())
-                    .map(|s| s.to_owned());
+                    .map(std::borrow::ToOwned::to_owned);
                 let bytes = resp.bytes().await.ok()?.to_vec();
                 return Some((bytes, content_type, url));
             }

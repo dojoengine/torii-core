@@ -41,7 +41,6 @@ async fn main() -> Result<()> {
         from_block,
         to_block: Some(to_block),
         batch_size: 5,
-        max_inflight_batches: 1,
         retry_policy: RetryPolicy::default(),
     };
 

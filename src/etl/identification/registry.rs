@@ -101,26 +101,35 @@ impl NegativeCache {
         self.set.contains(contract)
     }
 
-    fn insert(&mut self, contract: Felt) {
+    fn insert(&mut self, contract: Felt) -> Vec<Felt> {
         if self.capacity == 0 {
-            return;
+            return Vec::new();
         }
 
         if self.set.contains(&contract) {
             self.order.retain(|c| c != &contract);
             self.order.push_back(contract);
-            return;
+            return Vec::new();
         }
 
         self.set.insert(contract);
         self.order.push_back(contract);
 
+        let mut evicted = Vec::new();
         while self.set.len() > self.capacity {
             if let Some(oldest) = self.order.pop_front() {
                 self.set.remove(&oldest);
+                evicted.push(oldest);
             } else {
                 break;
             }
+        }
+        evicted
+    }
+
+    fn remove(&mut self, contract: &Felt) {
+        if self.set.remove(contract) {
+            self.order.retain(|c| c != contract);
         }
     }
 }
@@ -168,23 +177,30 @@ impl ContractRegistry {
     pub async fn load_from_db(&self) -> Result<usize> {
         let mappings = self.engine_db.get_all_contract_decoders().await?;
         let mut loaded_positive = 0usize;
-        let mut skipped_empty = 0usize;
+        let mut loaded_empty = 0usize;
 
-        let mut cache = self.cache.write().await;
         for (contract, decoder_ids, _timestamp) in mappings {
             if decoder_ids.is_empty() {
-                skipped_empty += 1;
+                self.cache_empty(contract).await;
+                loaded_empty += 1;
                 continue;
             }
-            cache.insert(contract, decoder_ids);
+            {
+                let mut negative_cache = self.negative_cache.write().await;
+                negative_cache.remove(&contract);
+            }
+            {
+                let mut cache = self.cache.write().await;
+                cache.insert(contract, decoder_ids);
+            }
             loaded_positive += 1;
         }
 
         tracing::info!(
             target: "torii::etl::identification",
             loaded_positive,
-            skipped_empty,
-            "Loaded contract mappings from database (empty mappings skipped from memory cache)"
+            loaded_empty,
+            "Loaded contract mappings from database"
         );
 
         Ok(loaded_positive)
@@ -417,12 +433,24 @@ impl ContractRegistry {
 
     /// Cache empty result for a contract that failed identification.
     async fn cache_empty(&self, contract_address: Felt) {
-        let mut negative_cache = self.negative_cache.write().await;
-        negative_cache.insert(contract_address);
+        let evicted = {
+            let mut negative_cache = self.negative_cache.write().await;
+            negative_cache.insert(contract_address)
+        };
+
+        let mut cache = self.cache.write().await;
+        cache.insert(contract_address, Vec::new());
+        for contract in evicted {
+            cache.remove(&contract);
+        }
     }
 
     /// Cache and persist identification result.
     async fn cache_and_persist(&self, contract_address: Felt, decoder_ids: Vec<DecoderId>) {
+        {
+            let mut negative_cache = self.negative_cache.write().await;
+            negative_cache.remove(&contract_address);
+        }
         {
             let mut cache = self.cache.write().await;
             cache.insert(contract_address, decoder_ids.clone());

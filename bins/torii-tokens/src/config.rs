@@ -48,6 +48,9 @@ pub enum MetadataMode {
 /// # Block range mode (default) - index ETH and STRK
 /// torii-tokens --include-well-known --from-block 0
 ///
+/// # Enable observability (Prometheus metrics)
+/// torii-tokens --observability --include-well-known --from-block 0
+///
 /// # Event mode - per-contract cursors
 /// torii-tokens --mode event --erc20 0x...ETH,0x...STRK --from-block 0
 ///
@@ -106,6 +109,12 @@ pub struct Config {
     /// Port for the HTTP/gRPC API
     #[arg(long, default_value = "3000")]
     pub port: u16,
+
+    /// Enable observability features (Prometheus metrics endpoint and metric collection)
+    ///
+    /// If not set, observability is disabled.
+    #[arg(long)]
+    pub observability: bool,
 
     /// ERC20 contracts to index (comma-separated hex addresses)
     ///
@@ -187,5 +196,23 @@ impl Config {
             || !self.erc721.is_empty()
             || !self.erc1155.is_empty()
             || self.include_well_known
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn observability_defaults_to_disabled() {
+        let cfg = Config::parse_from(["torii-tokens"]);
+        assert!(!cfg.observability);
+    }
+
+    #[test]
+    fn observability_flag_enables_features() {
+        let cfg = Config::parse_from(["torii-tokens", "--observability"]);
+        assert!(cfg.observability);
     }
 }

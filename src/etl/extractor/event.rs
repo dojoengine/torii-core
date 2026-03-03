@@ -288,6 +288,7 @@ impl EventExtractor {
 
     /// Fetch the current chain head block number.
     async fn fetch_chain_head(&self) -> Result<u64> {
+        let start = std::time::Instant::now();
         let block = self
             .config
             .retry_policy
@@ -300,7 +301,29 @@ impl EventExtractor {
                         .context("Failed to fetch chain head")
                 }
             })
-            .await?;
+            .await;
+        ::metrics::histogram!("torii_rpc_request_duration_seconds", "method" => "block_number")
+            .record(start.elapsed().as_secs_f64());
+        let block = match block {
+            Ok(block) => {
+                ::metrics::counter!(
+                    "torii_rpc_requests_total",
+                    "method" => "block_number",
+                    "status" => "ok"
+                )
+                .increment(1);
+                block
+            }
+            Err(err) => {
+                ::metrics::counter!(
+                    "torii_rpc_requests_total",
+                    "method" => "block_number",
+                    "status" => "error"
+                )
+                .increment(1);
+                return Err(err);
+            }
+        };
         Ok(block)
     }
 
@@ -484,7 +507,27 @@ impl EventExtractor {
                             .context("Failed to fetch transaction receipts in batch")
                     }
                 })
-                .await?;
+                .await;
+            let responses = match responses {
+                Ok(responses) => {
+                    ::metrics::counter!(
+                        "torii_rpc_requests_total",
+                        "method" => "get_transaction_receipt_batch",
+                        "status" => "ok"
+                    )
+                    .increment(1);
+                    responses
+                }
+                Err(err) => {
+                    ::metrics::counter!(
+                        "torii_rpc_requests_total",
+                        "method" => "get_transaction_receipt_batch",
+                        "status" => "error"
+                    )
+                    .increment(1);
+                    return Err(err);
+                }
+            };
 
             for (requested_tx_hash, response) in chunk.iter().zip(responses) {
                 match response {
@@ -730,6 +773,8 @@ impl Extractor for EventExtractor {
         let reverted_txs = unique_tx_hashes
             .len()
             .saturating_sub(successful_transaction_hashes.len());
+        ::metrics::counter!("torii_reverted_transactions_filtered_total")
+            .increment(reverted_txs as u64);
         let filtered_events =
             Self::filter_events_by_tx_hashes(all_events, &successful_transaction_hashes);
 
