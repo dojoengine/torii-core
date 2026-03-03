@@ -734,6 +734,7 @@ fn benchmark_engine_db(c: &mut Criterion) {
 }
 
 fn benchmark_erc20_storage(c: &mut Criterion) {
+    let rt = runtime();
     let mut group = c.benchmark_group("erc20_storage");
     group.sample_size(30);
     group.measurement_time(Duration::from_secs(6));
@@ -749,7 +750,10 @@ fn benchmark_erc20_storage(c: &mut Criterion) {
                     for _ in 0..iters {
                         let dir = TempDir::new().expect("failed to create tempdir");
                         let db_path = dir.path().join("erc20_insert_bench.db");
-                        let storage = Erc20Storage::new(db_path.to_str().expect("invalid db path"))
+                        let storage = rt
+                            .block_on(Erc20Storage::new(
+                                db_path.to_str().expect("invalid db path"),
+                            ))
                             .expect("failed to create erc20 storage");
                         fixtures.push((dir, storage));
                     }
@@ -758,8 +762,7 @@ fn benchmark_erc20_storage(c: &mut Criterion) {
                     let start = Instant::now();
                     for (_dir, storage) in fixtures {
                         black_box(
-                            storage
-                                .insert_transfers_batch(black_box(&batch))
+                            rt.block_on(storage.insert_transfers_batch(black_box(&batch)))
                                 .expect("insert batch failed"),
                         );
                     }
@@ -772,31 +775,32 @@ fn benchmark_erc20_storage(c: &mut Criterion) {
 
     let dir = TempDir::new().expect("failed to create tempdir");
     let db_path = dir.path().join("erc20_query_bench.db");
-    let storage = Erc20Storage::new(db_path.to_str().expect("invalid db path"))
+    let storage = rt
+        .block_on(Erc20Storage::new(
+            db_path.to_str().expect("invalid db path"),
+        ))
         .expect("failed to create erc20 storage");
 
     let preload = make_transfer_batch(20_000, 100_000);
-    storage
-        .insert_transfers_batch(&preload)
+    rt.block_on(storage.insert_transfers_batch(&preload))
         .expect("preload insert failed");
 
     let wallet = Felt::from(0x6000 + 7);
     group.bench_function("get_transfers_filtered_wallet", |b| {
         b.iter(|| {
             black_box(
-                storage
-                    .get_transfers_filtered(
-                        Some(wallet),
-                        None,
-                        None,
-                        &[],
-                        TransferDirection::All,
-                        Some(4_000_000),
-                        None,
-                        None,
-                        100,
-                    )
-                    .expect("wallet query failed"),
+                rt.block_on(storage.get_transfers_filtered(
+                    Some(wallet),
+                    None,
+                    None,
+                    &[],
+                    TransferDirection::All,
+                    Some(4_000_000),
+                    None,
+                    None,
+                    100,
+                ))
+                .expect("wallet query failed"),
             )
         });
     });
@@ -805,19 +809,18 @@ fn benchmark_erc20_storage(c: &mut Criterion) {
     group.bench_function("get_transfers_filtered_token", |b| {
         b.iter(|| {
             black_box(
-                storage
-                    .get_transfers_filtered(
-                        None,
-                        None,
-                        None,
-                        &[token],
-                        TransferDirection::All,
-                        Some(4_000_000),
-                        None,
-                        None,
-                        100,
-                    )
-                    .expect("token query failed"),
+                rt.block_on(storage.get_transfers_filtered(
+                    None,
+                    None,
+                    None,
+                    &[token],
+                    TransferDirection::All,
+                    Some(4_000_000),
+                    None,
+                    None,
+                    100,
+                ))
+                .expect("token query failed"),
             )
         });
     });

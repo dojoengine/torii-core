@@ -131,8 +131,7 @@ impl Erc721Service {
     fn static_image_url(contract: Felt, token_id: U256) -> String {
         let token_hex = Self::hex_without_leading_zeroes(&u256_to_bytes(token_id));
         format!(
-            "https://api.cartridge.gg/x/{}/torii/static/{:#x}/0x{}/image",
-            DEFAULT_PROJECT_ID, contract, token_hex
+            "https://api.cartridge.gg/x/{DEFAULT_PROJECT_ID}/torii/static/{contract:#x}/0x{token_hex}/image"
         )
     }
 

@@ -56,18 +56,18 @@
       "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
       "gridPos": {"h": 8, "w": 8, "x": 8, "y": 4},
       "id": 2,
-      "title": "Events/sec",
+      "title": "Events Processed/sec",
       "type": "timeseries",
-      "targets": [{"expr": "sum without(instance) (rate(torii_events_extracted_total[1m]))", "refId": "A"}]
+      "targets": [{"expr": "sum without(instance) (rate(torii_events_processed_total[1m]))", "refId": "A"}]
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
       "gridPos": {"h": 8, "w": 8, "x": 16, "y": 4},
       "id": 3,
-      "title": "Tx/sec",
+      "title": "Transactions Processed/sec",
       "type": "timeseries",
-      "targets": [{"expr": "sum without(instance) (rate(torii_tx_processed_total[1m]))", "refId": "A"}]
+      "targets": [{"expr": "sum without(instance) (rate(torii_transactions_processed_total[1m]))", "refId": "A"}]
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
@@ -97,6 +97,6 @@
   "timezone": "",
   "title": "Torii Overview",
   "uid": "torii-overview",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

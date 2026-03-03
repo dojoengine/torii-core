@@ -2210,9 +2210,9 @@ impl Erc1155Storage {
                             ],
                         )
                         .await?;
-                    let balance = row
-                        .map(|r| blob_to_u256(&r.get::<usize, Vec<u8>>(0)))
-                        .unwrap_or(U256::from(0u64));
+                    let balance = row.map_or(U256::from(0u64), |r| {
+                        blob_to_u256(&r.get::<usize, Vec<u8>>(0))
+                    });
                     e.insert(balance);
                 }
             }
@@ -2231,9 +2231,9 @@ impl Erc1155Storage {
                             ],
                         )
                         .await?;
-                    let balance = row
-                        .map(|r| blob_to_u256(&r.get::<usize, Vec<u8>>(0)))
-                        .unwrap_or(U256::from(0u64));
+                    let balance = row.map_or(U256::from(0u64), |r| {
+                        blob_to_u256(&r.get::<usize, Vec<u8>>(0))
+                    });
                     e.insert(balance);
                 }
             }

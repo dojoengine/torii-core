@@ -2016,7 +2016,7 @@ impl Erc20Storage {
                 TransferDirection::All => {}
                 TransferDirection::Sent => query.push_str(" AND wa.direction IN ('sent', 'both')"),
                 TransferDirection::Received => {
-                    query.push_str(" AND wa.direction IN ('received', 'both')")
+                    query.push_str(" AND wa.direction IN ('received', 'both')");
                 }
             }
 
@@ -2398,6 +2398,7 @@ impl Erc20Storage {
                 pending_debits.insert(key, total_needed);
             } else {
                 let block_before = transfer.block_number.saturating_sub(1);
+                #[allow(clippy::suspicious_operation_groupings)]
                 let already_requested =
                     adjustment_requests.iter().any(|r: &BalanceFetchRequest| {
                         r.token == transfer.token
@@ -2460,9 +2461,9 @@ impl Erc20Storage {
                             &[&felt_to_blob(transfer.token), &felt_to_blob(transfer.from)],
                         )
                         .await?;
-                    let bal = row
-                        .map(|r| blob_to_u256(&r.get::<usize, Vec<u8>>(0)))
-                        .unwrap_or(U256::from(0u64));
+                    let bal = row.map_or(U256::from(0u64), |r| {
+                        blob_to_u256(&r.get::<usize, Vec<u8>>(0))
+                    });
                     e.insert(bal);
                 }
             }
@@ -2475,9 +2476,9 @@ impl Erc20Storage {
                             &[&felt_to_blob(transfer.token), &felt_to_blob(transfer.to)],
                         )
                         .await?;
-                    let bal = row
-                        .map(|r| blob_to_u256(&r.get::<usize, Vec<u8>>(0)))
-                        .unwrap_or(U256::from(0u64));
+                    let bal = row.map_or(U256::from(0u64), |r| {
+                        blob_to_u256(&r.get::<usize, Vec<u8>>(0))
+                    });
                     e.insert(bal);
                 }
             }

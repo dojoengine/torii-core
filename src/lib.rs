@@ -832,6 +832,11 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
                 continue;
             }
 
+            // Count successfully processed payloads (post-sink processing).
+            ::metrics::counter!("torii_events_processed_total").increment(batch.events.len() as u64);
+            ::metrics::counter!("torii_transactions_processed_total")
+                .increment(batch.transactions.len() as u64);
+
             // CRITICAL: Commit cursor ONLY AFTER successful sink processing.
             // This ensures no data loss if the process is killed during extraction or sink processing.
             if let Some(ref cursor_str) = new_cursor {
