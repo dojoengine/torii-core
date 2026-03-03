@@ -1,6 +1,6 @@
 # Torii SQL Sink
 
-A demonstration sink for Torii that processes SQL operations and stores them in SQLite.
+A demonstration sink for Torii that processes SQL operations and stores them in SQLite or PostgreSQL.
 
 ## Features
 
@@ -27,7 +27,7 @@ use tonic::transport::Server;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Create sink
-    let sql_sink = SqlSink::new("sqlite::memory:").await?;
+    let sql_sink = SqlSink::new("postgres://torii:torii@localhost:5432/torii").await?;
 
     // 2. Get the gRPC service implementation
     let sql_grpc_service = sql_sink.get_grpc_service_impl();
@@ -128,7 +128,7 @@ See `build.rs` for implementation details.
 
 ## Storage
 
-- **SQLite Database**: Stores SQL operations (insert, update, etc.)
+- **Database**: Stores SQL operations (insert, update, etc.) in SQLite or PostgreSQL.
 - **Schema**:
   ```sql
   CREATE TABLE sql_operation (
@@ -139,7 +139,7 @@ See `build.rs` for implementation details.
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
   )
   ```
-- **Thread-Safe**: Uses `Arc<SqlitePool>` for concurrent access
+- **Thread-Safe**: Uses `Arc<Pool<Any>>` for concurrent access
 
 ## Filtering
 
@@ -176,7 +176,7 @@ Due to Rust's type system limitations, gRPC services must be registered by the u
 use torii_sql_sink::proto::sql_sink_server::SqlSinkServer;
 use tonic::transport::Server;
 
-let sql_sink = SqlSink::new("sqlite::memory:").await?;
+let sql_sink = SqlSink::new("postgres://torii:torii@localhost:5432/torii").await?;
 let service = sql_sink.get_grpc_service_impl();
 
 let grpc_router = Server::builder()

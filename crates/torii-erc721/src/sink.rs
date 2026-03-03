@@ -15,7 +15,8 @@ use prost_types::Any;
 use starknet::core::types::Felt;
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
@@ -44,6 +45,11 @@ pub struct Erc721Sink {
     metadata_fetcher: Option<Arc<MetadataFetcher>>,
     /// Token URI service sender for async URI fetching
     token_uri_sender: Option<TokenUriSender>,
+    /// In-flight contract metadata fetches to avoid duplicate background jobs.
+    metadata_fetch_inflight: Arc<Mutex<HashSet<Felt>>>,
+    /// In-memory counters to avoid full-table COUNT(*) in the ingest hot path.
+    total_transfers: AtomicU64,
+    total_operator_approvals: AtomicU64,
 }
 
 impl Erc721Sink {
@@ -54,6 +60,10 @@ impl Erc721Sink {
             grpc_service: None,
             metadata_fetcher: None,
             token_uri_sender: None,
+            metadata_fetch_inflight: Arc::new(Mutex::new(HashSet::new())),
+            // Avoid startup full-table COUNT(*) scans on large datasets.
+            total_transfers: AtomicU64::new(0),
+            total_operator_approvals: AtomicU64::new(0),
         }
     }
 
@@ -179,6 +189,8 @@ impl Sink for Erc721Sink {
     async fn process(&self, envelopes: &[Envelope], batch: &ExtractionBatch) -> Result<()> {
         let mut transfers: Vec<NftTransferData> = Vec::new();
         let mut operator_approvals: Vec<OperatorApprovalData> = Vec::new();
+        let mut inserted_transfers: u64 = 0;
+        let mut inserted_operator_approvals: u64 = 0;
 
         // Get block timestamps from batch
         let block_timestamps: HashMap<u64, i64> = batch
@@ -233,13 +245,11 @@ impl Sink for Erc721Sink {
                     .downcast_ref::<DecodedMetadataUpdate>()
                 {
                     if let Some(ref sender) = self.token_uri_sender {
-                        sender
-                            .request_update(TokenUriRequest {
-                                contract: update.token,
-                                token_id: update.token_id,
-                                standard: TokenStandard::Erc721,
-                            })
-                            .await;
+                        sender.request_update(TokenUriRequest {
+                            contract: update.token,
+                            token_id: update.token_id,
+                            standard: TokenStandard::Erc721,
+                        });
                     }
                 }
             }
@@ -253,18 +263,18 @@ impl Sink for Erc721Sink {
                     if let Some(ref sender) = self.token_uri_sender {
                         // For batch updates, we need to know which token IDs exist in the range.
                         // Fetch them from storage and request URI updates for each.
-                        if let Ok(uris) = self.storage.get_token_uris_by_contract(update.token) {
+                        if let Ok(uris) =
+                            self.storage.get_token_uris_by_contract(update.token).await
+                        {
                             for (token_id, _, _) in &uris {
                                 if *token_id >= update.from_token_id
                                     && *token_id <= update.to_token_id
                                 {
-                                    sender
-                                        .request_update(TokenUriRequest {
-                                            contract: update.token,
-                                            token_id: *token_id,
-                                            standard: TokenStandard::Erc721,
-                                        })
-                                        .await;
+                                    sender.request_update(TokenUriRequest {
+                                        contract: update.token,
+                                        token_id: *token_id,
+                                        standard: TokenStandard::Erc721,
+                                    });
                                 }
                             }
                         }
@@ -279,57 +289,86 @@ impl Sink for Erc721Sink {
         if let Some(ref fetcher) = self.metadata_fetcher {
             let new_tokens: HashSet<Felt> = transfers.iter().map(|t| t.token).collect();
             for token in new_tokens {
-                match self.storage.has_token_metadata(token) {
+                match self.storage.has_token_metadata(token).await {
                     Ok(exists) => {
                         if exists {
                             continue;
                         }
 
-                        let meta = fetcher.fetch_erc721_metadata(token).await;
-                        tracing::info!(
-                            target: "torii_erc721::sink",
-                            token = %format!("{:#x}", token),
-                            name = ?meta.name,
-                            symbol = ?meta.symbol,
-                            "Fetched token metadata"
-                        );
-                        if let Err(e) = self.storage.upsert_token_metadata(
-                            token,
-                            meta.name.as_deref(),
-                            meta.symbol.as_deref(),
-                            meta.total_supply,
-                        ) {
-                            tracing::warn!(
-                                target: "torii_erc721::sink",
-                                error = %e,
-                                "Failed to store token metadata"
-                            );
-                        } else if let Some(event_bus) = &self.event_bus {
-                            let meta_entry = proto::TokenMetadataEntry {
-                                token: token.to_bytes_be().to_vec(),
-                                name: meta.name,
-                                symbol: meta.symbol,
-                                total_supply: meta.total_supply.map(u256_to_bytes),
-                            };
-
-                            let mut buf = Vec::new();
-                            meta_entry.encode(&mut buf)?;
-                            let any = Any {
-                                type_url:
-                                    "type.googleapis.com/torii.sinks.erc721.TokenMetadataEntry"
-                                        .to_string(),
-                                value: buf,
-                            };
-
-                            event_bus.publish_protobuf(
-                                "erc721.metadata",
-                                "erc721.metadata",
-                                &any,
-                                &meta_entry,
-                                UpdateType::Created,
-                                Self::matches_metadata_filters,
-                            );
+                        let scheduled = {
+                            let mut inflight = self.metadata_fetch_inflight.lock().unwrap();
+                            inflight.insert(token)
+                        };
+                        if !scheduled {
+                            continue;
                         }
+
+                        let fetcher = fetcher.clone();
+                        let storage = self.storage.clone();
+                        let event_bus = self.event_bus.clone();
+                        let inflight = self.metadata_fetch_inflight.clone();
+                        tokio::spawn(async move {
+                            let result = async {
+                                let meta = fetcher.fetch_erc721_metadata(token).await;
+                                tracing::info!(
+                                    target: "torii_erc721::sink",
+                                    token = %format!("{:#x}", token),
+                                    name = ?meta.name,
+                                    symbol = ?meta.symbol,
+                                    "Fetched token metadata"
+                                );
+                                storage
+                                    .upsert_token_metadata(
+                                        token,
+                                        meta.name.as_deref(),
+                                        meta.symbol.as_deref(),
+                                        meta.total_supply,
+                                    )
+                                    .await?;
+
+                                if let Some(event_bus) = &event_bus {
+                                    let meta_entry = proto::TokenMetadataEntry {
+                                        token: token.to_bytes_be().to_vec(),
+                                        name: meta.name,
+                                        symbol: meta.symbol,
+                                        total_supply: meta.total_supply.map(u256_to_bytes),
+                                    };
+
+                                    let mut buf = Vec::new();
+                                    meta_entry.encode(&mut buf)?;
+                                    let any = Any {
+                                        type_url:
+                                            "type.googleapis.com/torii.sinks.erc721.TokenMetadataEntry"
+                                                .to_string(),
+                                        value: buf,
+                                    };
+
+                                    event_bus.publish_protobuf(
+                                        "erc721.metadata",
+                                        "erc721.metadata",
+                                        &any,
+                                        &meta_entry,
+                                        UpdateType::Created,
+                                        Self::matches_metadata_filters,
+                                    );
+                                }
+
+                                Ok::<(), anyhow::Error>(())
+                            }
+                            .await;
+
+                            if let Err(e) = result {
+                                tracing::warn!(
+                                    target: "torii_erc721::sink",
+                                    token = %format!("{:#x}", token),
+                                    error = %e,
+                                    "Failed to fetch/store token metadata in background task"
+                                );
+                            }
+
+                            let mut inflight = inflight.lock().unwrap();
+                            inflight.remove(&token);
+                        });
                     }
                     Err(e) => {
                         tracing::warn!(target: "torii_erc721::sink", error = %e, "Failed to check token metadata");
@@ -344,15 +383,14 @@ impl Sink for Erc721Sink {
                 match self
                     .storage
                     .has_token_uri(transfer.token, transfer.token_id)
+                    .await
                 {
                     Ok(false) => {
-                        sender
-                            .request_update(TokenUriRequest {
-                                contract: transfer.token,
-                                token_id: transfer.token_id,
-                                standard: TokenStandard::Erc721,
-                            })
-                            .await;
+                        sender.request_update(TokenUriRequest {
+                            contract: transfer.token,
+                            token_id: transfer.token_id,
+                            standard: TokenStandard::Erc721,
+                        });
                     }
                     Ok(true) => {}
                     Err(e) => {
@@ -368,7 +406,7 @@ impl Sink for Erc721Sink {
 
         // Batch insert transfers
         if !transfers.is_empty() {
-            let transfer_count = match self.storage.insert_transfers_batch(&transfers) {
+            let transfer_count = match self.storage.insert_transfers_batch(&transfers).await {
                 Ok(count) => count,
                 Err(e) => {
                     tracing::error!(
@@ -382,6 +420,10 @@ impl Sink for Erc721Sink {
             };
 
             if transfer_count > 0 {
+                inserted_transfers = transfer_count as u64;
+                self.total_transfers
+                    .fetch_add(inserted_transfers, Ordering::Relaxed);
+
                 tracing::info!(
                     target: "torii_erc721::sink",
                     count = transfer_count,
@@ -437,8 +479,13 @@ impl Sink for Erc721Sink {
             match self
                 .storage
                 .insert_operator_approvals_batch(&operator_approvals)
+                .await
             {
                 Ok(count) => {
+                    inserted_operator_approvals = count as u64;
+                    self.total_operator_approvals
+                        .fetch_add(inserted_operator_approvals, Ordering::Relaxed);
+
                     tracing::info!(
                         target: "torii_erc721::sink",
                         count = count,
@@ -457,22 +504,17 @@ impl Sink for Erc721Sink {
             }
         }
 
-        // Log combined statistics
-        if !transfers.is_empty() || !operator_approvals.is_empty() {
-            if let Ok(total_transfers) = self.storage.get_transfer_count() {
-                if let Ok(nft_count) = self.storage.get_nft_count() {
-                    if let Ok(token_count) = self.storage.get_token_count() {
-                        tracing::info!(
-                            target: "torii_erc721::sink",
-                            transfers = total_transfers,
-                            nfts = nft_count,
-                            collections = token_count,
-                            blocks = batch.blocks.len(),
-                            "Total statistics"
-                        );
-                    }
-                }
-            }
+        // Log combined statistics without full-table scans.
+        if inserted_transfers > 0 || inserted_operator_approvals > 0 {
+            tracing::info!(
+                target: "torii_erc721::sink",
+                batch_transfers = inserted_transfers,
+                batch_operator_approvals = inserted_operator_approvals,
+                total_transfers = self.total_transfers.load(Ordering::Relaxed),
+                total_operator_approvals = self.total_operator_approvals.load(Ordering::Relaxed),
+                blocks = batch.blocks.len(),
+                "Total statistics"
+            );
         }
 
         Ok(())

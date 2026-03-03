@@ -18,6 +18,7 @@ starknet = "0.17"
 
 # Storage
 rusqlite = { version = "0.32", features = ["bundled"] }
+tokio-postgres = "0.7"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

@@ -3,7 +3,13 @@
 //! Provides core HTTP endpoints and a simple state pattern that can be extended.
 //! Sinks can add their own routes via the `Sink::build_routes()` method.
 
-use axum::{extract::State, response::Json, routing::get, Router};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Json},
+    routing::get,
+    Router,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -44,6 +50,7 @@ pub struct HealthResponse {
 async fn health_handler(State(state): State<Arc<HttpState>>) -> Json<HealthResponse> {
     let now = chrono::Utc::now().timestamp();
     let uptime = now - state.startup_time;
+    crate::metrics::set_uptime_seconds(uptime as f64);
 
     Json(HealthResponse {
         status: "healthy".to_string(),
@@ -52,12 +59,32 @@ async fn health_handler(State(state): State<Arc<HttpState>>) -> Json<HealthRespo
     })
 }
 
+/// Prometheus metrics endpoint.
+async fn metrics_handler() -> impl IntoResponse {
+    if let Some(payload) = crate::metrics::render() {
+        (
+            StatusCode::OK,
+            [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+            payload,
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("content-type", "text/plain; charset=utf-8")],
+            "metrics are disabled".to_string(),
+        )
+            .into_response()
+    }
+}
+
 /// Create the core HTTP router with basic endpoints.
 pub fn create_http_router() -> Router {
     let state = Arc::new(HttpState::new());
 
     Router::new()
         .route("/health", get(health_handler))
+        .route("/metrics", get(metrics_handler))
         .with_state(state)
 }
 
@@ -91,5 +118,22 @@ mod tests {
 
         assert_eq!(health_response.status, "healthy");
         assert!(health_response.uptime_seconds >= 0);
+    }
+
+    #[tokio::test]
+    async fn test_metrics_endpoint_without_recorder() {
+        let app = create_http_router();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

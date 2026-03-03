@@ -71,13 +71,15 @@ serde_json = "1.0"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+metrics = "0.24"
+metrics-exporter-prometheus = "0.17"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 
 # ETL Pipeline dependencies
 starknet = "0.17"
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "postgres", "any"] }
 async-trait = "0.1"
 anyhow = "1.0"
 chrono = "0.4"
