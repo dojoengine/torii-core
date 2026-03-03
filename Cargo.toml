@@ -8,6 +8,7 @@ members = [
     "crates/torii-erc721",
     "crates/torii-erc1155",
     "bins/torii-erc20",
+    "bins/torii-erc20-synth",
     "bins/torii-tokens",
 ]
 default-members = [
