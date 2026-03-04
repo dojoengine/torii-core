@@ -1,0 +1,144 @@
+name: Synthetic Benchmark
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '.github/**'
+      - '*.md'
+      - 'LICENSE'
+  pull_request:
+    paths-ignore:
+      - '.github/**'
+      - '*.md'
+      - 'LICENSE'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  synthetic-benchmark:
+    name: Run Synthetic Benchmarks
+    runs-on: ubuntu-latest-8-cores
+    
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: torii
+          POSTGRES_PASSWORD: torii
+          POSTGRES_DB: torii
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-on-failure: true
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v2
+        with:
+          version: "25.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build synthetic profiler
+        run: cargo build --release -p torii-tokens-synth
+
+      - name: Restore previous baseline
+        id: cache-baseline
+        uses: actions/cache@v4
+        with:
+          path: perf/synthetic-baselines
+          key: synthetic-baseline-main-${{ github.sha }}
+          restore-keys: |
+            synthetic-baseline-main-
+
+      - name: Create output directories
+        run: mkdir -p perf/synthetic-runs
+
+      - name: Run ERC20 synthetic benchmark
+        run: |
+          ./target/release/torii-tokens-synth erc20 \
+            --db-url postgres://torii:torii@localhost:5432/torii \
+            --block-count 100 \
+            --tx-per-block 500 \
+            --output-root perf/synthetic-runs \
+            --reset-schema
+
+      - name: Run ERC721 synthetic benchmark
+        run: |
+          ./target/release/torii-tokens-synth erc721 \
+            --db-url postgres://torii:torii@localhost:5432/torii \
+            --block-count 100 \
+            --tx-per-block 500 \
+            --output-root perf/synthetic-runs \
+            --reset-schema
+
+      - name: Run ERC1155 synthetic benchmark
+        run: |
+          ./target/release/torii-tokens-synth erc1155 \
+            --db-url postgres://torii:torii@localhost:5432/torii \
+            --block-count 100 \
+            --tx-per-block 500 \
+            --output-root perf/synthetic-runs \
+            --reset-schema
+
+      - name: Extract metrics
+        run: scripts/synthetic/extract_metrics.sh perf/synthetic-runs > perf/synthetic-runs/metrics.tsv
+
+      - name: Create baseline
+        run: |
+          stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+          out_dir="perf/synthetic-baselines/${stamp}"
+          mkdir -p "$out_dir"
+          
+          cp perf/synthetic-runs/metrics.tsv "$out_dir/"
+          
+          cat > "$out_dir/context.txt" <<CTX
+          commit=$(git rev-parse HEAD)
+          branch=$(git branch --show-current)
+          block_count=100
+          tx_per_block=500
+          created_at_utc=${stamp}
+          CTX
+          
+          echo "Baseline saved to $out_dir"
+
+      - name: Compare against previous baseline
+        if: steps.cache-baseline.outputs.cache-hit == 'true'
+        continue-on-error: true
+        run: |
+          echo "📊 Comparing against previous baseline..."
+          scripts/synthetic/compare_to_baseline.sh || true
+
+      - name: Save new baseline
+        uses: actions/cache/save@v4
+        with:
+          path: perf/synthetic-baselines
+          key: synthetic-baseline-main-${{ github.sha }}
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-benchmark-results-${{ github.sha }}
+          path: perf/synthetic-runs/
+          retention-days: 90
+
+      - name: Upload baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-baseline-${{ github.sha }}
+          path: perf/synthetic-baselines/
+          retention-days: 90
