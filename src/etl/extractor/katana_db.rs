@@ -449,11 +449,148 @@ impl Extractor for KatanaDbExtractor {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::LazyLock;
 
-    #[tokio::test]
-    async fn test_empty_db_returns_empty_batch() {
-        let factory = DbProviderFactory::new_in_memory();
+    use super::*;
+    use crate::etl::engine_db::{EngineDb, EngineDbConfig};
+
+    /// Path to the spawn_and_move fixture database (extracted via `make fixtures` in katana).
+    const FIXTURE_DB_PATH: &str =
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../katana/tests/fixtures/db/spawn_and_move");
+
+    /// Shared factory for the fixture DB. MDBX only allows one environment per file,
+    /// so all tests must share this single instance.
+    static FIXTURE_FACTORY: LazyLock<DbProviderFactory> = LazyLock::new(|| {
+        let db = katana_db::Db::open_ro(FIXTURE_DB_PATH)
+            .expect("Failed to open spawn_and_move fixture DB. Run `make fixtures` in katana/");
+        DbProviderFactory::new(db)
+    });
+
+    fn fixture_factory() -> DbProviderFactory {
+        FIXTURE_FACTORY.clone()
+    }
+
+    async fn test_engine_db() -> EngineDb {
+        EngineDb::new(EngineDbConfig {
+            path: "sqlite::memory:".to_string(),
+        })
+        .await
+        .expect("Failed to create in-memory EngineDb")
+    }
+
+    #[test]
+    fn extract_first_batch_from_fixture() {
+        let factory = fixture_factory();
+        let config = KatanaDbConfig {
+            from_block: 0,
+            batch_size: 5,
+            ..Default::default()
+        };
+        let extractor = KatanaDbExtractor::from_factory(factory, config);
+
+        let (batch, next_block) = extractor.extract_batch(0).expect("extract_batch failed");
+
+        assert_eq!(next_block, 5);
+        assert_eq!(batch.blocks.len(), 5);
+        assert!(batch.cursor.as_deref() == Some("block:4"));
+        assert!(batch.chain_head.is_some());
+
+        // Block 0 (genesis) should be present
+        let genesis = batch.blocks.get(&0).expect("genesis block missing");
+        assert_eq!(genesis.number, 0);
+        assert_eq!(genesis.timestamp, 0);
+    }
+
+    #[test]
+    fn extract_all_blocks_from_fixture() {
+        let factory = fixture_factory();
+        let provider = factory.provider();
+        let chain_head = provider.latest_number().unwrap();
+
+        let config = KatanaDbConfig {
+            from_block: 0,
+            batch_size: chain_head + 1,
+            ..Default::default()
+        };
+        let extractor = KatanaDbExtractor::from_factory(factory, config);
+
+        let (batch, _next) = extractor.extract_batch(0).expect("extract_batch failed");
+
+        assert_eq!(batch.blocks.len() as u64, chain_head + 1);
+        assert_eq!(batch.chain_head, Some(chain_head));
+
+        // Every block in range should be present
+        for n in 0..=chain_head {
+            assert!(batch.blocks.contains_key(&n), "missing block {n}");
+        }
+    }
+
+    #[test]
+    fn events_have_correct_context() {
+        let factory = fixture_factory();
+        let config = KatanaDbConfig {
+            from_block: 0,
+            batch_size: 100,
+            ..Default::default()
+        };
+        let extractor = KatanaDbExtractor::from_factory(factory, config);
+
+        let (batch, _) = extractor.extract_batch(0).expect("extract_batch failed");
+
+        for event in &batch.events {
+            // Every event must reference a block that exists in this batch
+            let block_num = event.block_number.expect("event missing block_number");
+            assert!(
+                batch.blocks.contains_key(&block_num),
+                "event references unknown block {block_num}"
+            );
+
+            // Every event must reference a transaction that exists in this batch
+            assert!(
+                batch.transactions.contains_key(&event.transaction_hash),
+                "event references unknown tx {:x}",
+                event.transaction_hash
+            );
+
+            // Block hash must match
+            let block_hash = event.block_hash.expect("event missing block_hash");
+            assert_eq!(
+                block_hash,
+                batch.blocks[&block_num].hash,
+                "event block_hash mismatch for block {block_num}"
+            );
+        }
+    }
+
+    #[test]
+    fn transactions_have_valid_fields() {
+        let factory = fixture_factory();
+        let config = KatanaDbConfig {
+            from_block: 0,
+            batch_size: 100,
+            ..Default::default()
+        };
+        let extractor = KatanaDbExtractor::from_factory(factory, config);
+
+        let (batch, _) = extractor.extract_batch(0).expect("extract_batch failed");
+
+        for (tx_hash, tx_ctx) in &batch.transactions {
+            assert_eq!(*tx_hash, tx_ctx.hash);
+            assert!(
+                batch.blocks.contains_key(&tx_ctx.block_number),
+                "tx references unknown block {}",
+                tx_ctx.block_number
+            );
+        }
+    }
+
+    #[test]
+    fn batch_range_boundaries() {
+        let factory = fixture_factory();
+        let provider = factory.provider();
+        let chain_head = provider.latest_number().unwrap();
+        drop(provider);
+
         let config = KatanaDbConfig {
             from_block: 0,
             batch_size: 10,
@@ -461,11 +598,88 @@ mod tests {
         };
         let extractor = KatanaDbExtractor::from_factory(factory, config);
 
-        // On an empty DB, latest_number() should return 0 or fail gracefully.
-        // With current_block=0 and chain_head=0, we should get a single block or empty batch.
-        let result = extractor.extract_batch(0);
-        // The in-memory DB has no blocks, so latest_number should be block 0 (genesis).
-        // This test just verifies the extractor doesn't panic on an empty DB.
-        assert!(result.is_ok() || result.is_err());
+        let (batch, next_block) = extractor
+            .extract_batch(chain_head + 1)
+            .expect("beyond-head batch should return empty");
+        assert!(batch.blocks.is_empty());
+        assert_eq!(next_block, chain_head + 1);
+    }
+
+    #[tokio::test]
+    async fn extractor_trait_full_extraction() {
+        let factory = fixture_factory();
+        let provider = factory.provider();
+        let chain_head = provider.latest_number().unwrap();
+        drop(provider);
+
+        let engine_db = test_engine_db().await;
+        let config = KatanaDbConfig {
+            from_block: 0,
+            to_block: Some(chain_head),
+            batch_size: 10,
+            ..Default::default()
+        };
+        let mut extractor = KatanaDbExtractor::from_factory(factory, config);
+
+        let mut total_events = 0;
+        let mut total_blocks = 0;
+
+        // Drive the extractor through the full Extractor trait interface
+        loop {
+            let batch = extractor
+                .extract(None, &engine_db)
+                .await
+                .expect("extract failed");
+
+            if batch.is_empty() && extractor.is_finished() {
+                break;
+            }
+
+            if !batch.is_empty() {
+                total_events += batch.events.len();
+                total_blocks += batch.blocks.len();
+
+                // Commit cursor after processing
+                if let Some(cursor) = &batch.cursor {
+                    extractor
+                        .commit_cursor(cursor, &engine_db)
+                        .await
+                        .expect("commit_cursor failed");
+                }
+            }
+        }
+
+        assert_eq!(total_blocks as u64, chain_head + 1);
+        assert!(extractor.is_finished());
+        // The fixture has transactions that emit events
+        assert!(total_events > 0, "expected events from the fixture DB");
+    }
+
+    #[tokio::test]
+    async fn cursor_resume_skips_processed_blocks() {
+        let factory = fixture_factory();
+        let engine_db = test_engine_db().await;
+
+        let config = KatanaDbConfig {
+            from_block: 0,
+            batch_size: 5,
+            ..Default::default()
+        };
+        let mut extractor = KatanaDbExtractor::from_factory(factory, config);
+
+        // First extraction: resume from cursor "block:4" means start at block 5
+        let batch = extractor
+            .extract(Some("block:4".to_string()), &engine_db)
+            .await
+            .expect("extract with cursor failed");
+
+        // Should NOT contain blocks 0-4
+        for n in 0..5 {
+            assert!(!batch.blocks.contains_key(&n), "block {n} should be skipped");
+        }
+        // Should contain block 5 (if it exists)
+        if !batch.blocks.is_empty() {
+            assert!(batch.blocks.contains_key(&5), "expected block 5 after cursor resume");
+        }
     }
 }
