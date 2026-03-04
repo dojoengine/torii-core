@@ -586,12 +586,12 @@ impl EventExtractor {
             let timestamp = timestamps.get(&block_num).copied().unwrap_or(0);
             blocks.insert(
                 block_num,
-                BlockContext {
+                Arc::new(BlockContext {
                     number: block_num,
                     timestamp,
                     hash: Felt::ZERO, // Not critical for event-based extraction
                     parent_hash: Felt::ZERO,
-                },
+                }),
             );
         }
 

@@ -1,5 +1,6 @@
 //! This module contains the envelope for the ETL pipeline.
 
+use starknet::core::types::Felt;
 use std::any::Any;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -109,4 +110,11 @@ impl std::fmt::Debug for Envelope {
             .field("timestamp", &self.timestamp)
             .finish()
     }
+}
+
+/// Wrapper for event bodies which correspond to a specific event
+pub struct EventBody<T> {
+    pub from_address: Felt,
+    pub transaction_hash: Felt,
+    pub body: T,
 }

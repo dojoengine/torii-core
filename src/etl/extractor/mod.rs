@@ -42,9 +42,9 @@ pub struct TransactionContext {
 
 #[derive(Debug, Clone)]
 pub struct EventContext {
-    from_address: Felt,
-    transaction: Arc<TransactionContext>,
-    block: Arc<BlockContext>,
+    pub from_address: Felt,
+    pub transaction: Arc<TransactionContext>,
+    pub block: Arc<BlockContext>,
 }
 
 /// Declared class information

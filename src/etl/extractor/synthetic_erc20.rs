@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use starknet::core::types::{EmittedEvent, Felt};
 use starknet::macros::selector;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::etl::engine_db::EngineDb;
 
@@ -188,7 +189,7 @@ impl SyntheticErc20Extractor {
         for block_number in start_block..=end_block {
             blocks.insert(
                 block_number,
-                BlockContext {
+                Arc::new(BlockContext {
                     number: block_number,
                     hash: Felt::from(0x0300_0000_u64 + block_number),
                     parent_hash: if block_number > 0 {
@@ -198,7 +199,7 @@ impl SyntheticErc20Extractor {
                     },
                     // 12-second blocks anchored to a fixed epoch.
                     timestamp: 1_700_000_000 + (block_number * 12),
-                },
+                }),
             );
 
             for tx_index in 0..self.config.tx_per_block {
@@ -230,12 +231,12 @@ impl SyntheticErc20Extractor {
 
                 transactions.insert(
                     tx_hash,
-                    TransactionContext {
+                    Arc::new(TransactionContext {
                         hash: tx_hash,
                         block_number,
                         sender_address: Some(from),
                         calldata: vec![token, from, to, amount_low],
-                    },
+                    }),
                 );
 
                 events.push(event);
