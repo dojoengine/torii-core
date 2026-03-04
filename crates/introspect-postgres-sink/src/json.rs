@@ -1,15 +1,5 @@
 use introspect_types::serialize::CairoSerialization;
-use introspect_types::serialize_def::CairoSerializer;
-use introspect_types::{Enum, PrimaryValue, Struct, Value};
-use serde::Serializer;
-use serde_json::Value::{
-    Array as JsonArray, Bool as JsonBool, Number as JsonNumber, Object as JsonObject,
-    String as JsonString,
-};
-use serde_json::{Map, Value as JsonValue};
-use starknet_types_core::felt::Felt;
-
-use crate::types::parse_variant_name;
+use serde::{ser::SerializeMap, Serialize, Serializer};
 
 pub struct PostgresJsonSerializer;
 

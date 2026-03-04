@@ -140,7 +140,7 @@ pub trait IntrospectTables {
     }
 }
 
-struct RecordAndSchema<'a, C: CairoSerialization> {
+pub struct RecordAndSchema<'a, C: CairoSerialization> {
     record: &'a Record,
     schema: &'a RecordSchema,
     cairo_se: &'a C,

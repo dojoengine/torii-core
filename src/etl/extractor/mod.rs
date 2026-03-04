@@ -11,7 +11,7 @@ use crate::etl::engine_db::EngineDb;
 use anyhow::Result;
 use async_trait::async_trait;
 use starknet::core::types::{EmittedEvent, Felt};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 pub use block_range::{BlockRangeConfig, BlockRangeExtractor};
 pub use composite::CompositeExtractor;
@@ -36,6 +36,13 @@ pub struct TransactionContext {
     pub block_number: u64,
     pub sender_address: Option<Felt>,
     pub calldata: Vec<Felt>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EventContext {
+    from_address: Felt,
+    transaction: Arc<TransactionContext>,
+    block: Arc<BlockContext>,
 }
 
 /// Declared class information
@@ -96,16 +103,16 @@ pub struct ExtractionBatch {
     pub events: Vec<EmittedEvent>,
 
     /// Block context (deduplicated by block_number for memory efficiency)
-    pub blocks: HashMap<u64, BlockContext>,
+    pub blocks: HashMap<u64, Arc<BlockContext>>,
 
     /// Transaction context (deduplicated by tx_hash for memory efficiency)
-    pub transactions: HashMap<Felt, TransactionContext>,
+    pub transactions: HashMap<Felt, Arc<TransactionContext>>,
 
     /// Declared classes from Declare transactions
-    pub declared_classes: Vec<DeclaredClass>,
+    pub declared_classes: Vec<Arc<DeclaredClass>>,
 
     /// Deployed contracts from Deploy and DeployAccount transactions
-    pub deployed_contracts: Vec<DeployedContract>,
+    pub deployed_contracts: Vec<Arc<DeployedContract>>,
 
     /// Opaque cursor for pagination (continuation token or cursor string)
     pub cursor: Option<String>,
@@ -167,6 +174,17 @@ impl ExtractionBatch {
             // If we don't know chain head, assume not live (safer for historical indexing)
             _ => false,
         }
+    }
+
+    pub fn get_event_context(&self, tx_hash: &Felt, from_address: Felt) -> Option<EventContext> {
+        let transaction = self.transactions.get(tx_hash)?.clone();
+        let block = self.blocks.get(&transaction.block_number)?.clone();
+
+        Some(EventContext {
+            from_address,
+            transaction,
+            block,
+        })
     }
 }
 
