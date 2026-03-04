@@ -1,5 +1,6 @@
 use crate::manager::DojoTableManager;
 use crate::{DojoTable, DojoToriiError, DojoToriiResult};
+pub use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use dojo_introspect_types::events::{
     EventEmitted, EventRegistered, EventUpgraded, ModelRegistered, ModelUpgraded,
@@ -8,23 +9,24 @@ use dojo_introspect_types::events::{
 };
 use dojo_introspect_types::DojoSchemaFetcher;
 use introspect_types::{
-    CairoEvent, CairoEventInfo, CairoSerde, FeltIds, IntoFeltSource, PrimaryDef, SliceFeltSource,
+    CairoEvent, CairoEventInfo, CairoSerde, FeltIds, IntoFeltSource, PrimaryDef, ResultInto,
+    SliceFeltSource,
 };
 use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
+use torii::etl::{Decoder, Envelope, EventBody};
 use torii_introspect::events::{
     CreateTable, DeleteRecords, InsertsFields, IntrospectMsg, UpdateTable,
 };
-use torii_introspect::IntrospectMsgTrait;
-
+use torii_introspect::EventId;
 pub struct DojoDecoder<M, F> {
     pub manager: M,
     pub fetcher: F,
     pub primary_field: PrimaryDef,
 }
 #[async_trait]
-trait DojoEventDecoder<M: Sync, F: Sync>: Sized {
-    type Msg: IntrospectMsgTrait;
+trait DojoEventProcessor<M: Sync, F: Sync>: Sized {
+    type Msg: EventId;
     async fn event_to_msg(self, decoder: &DojoDecoder<M, F>) -> DojoToriiResult<Self::Msg>;
     fn deserialize_data<'a>(keys: &[Felt], data: &'a [Felt]) -> DojoToriiResult<Self>
     where
@@ -34,11 +36,11 @@ trait DojoEventDecoder<M: Sync, F: Sync>: Sized {
         let mut data: CairoSerde<_> = data.into();
         Ok(Self::deserialize_and_verify_event(&mut keys, &mut data)?)
     }
-    async fn data_to_introspect_msg<'a>(
+    async fn data_to_msg<'a>(
         decoder: &DojoDecoder<M, F>,
         keys: &[Felt],
         data: &'a [Felt],
-    ) -> DojoToriiResult<IntrospectMsg>
+    ) -> DojoToriiResult<Self::Msg>
     where
         Self: CairoEvent<CairoSerde<SliceFeltSource<'a>>>,
         Self::Msg: Into<IntrospectMsg>,
@@ -46,12 +48,11 @@ trait DojoEventDecoder<M: Sync, F: Sync>: Sized {
         Self::deserialize_data(keys, data)?
             .event_to_msg(decoder)
             .await
-            .map(Into::into)
     }
 }
 
 #[async_trait]
-impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M, F>
+impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventProcessor<M, F>
     for ModelWithSchemaRegistered
 {
     type Msg = CreateTable;
@@ -64,7 +65,7 @@ impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M
 }
 
 #[async_trait]
-impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M, F>
+impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventProcessor<M, F>
     for ModelRegistered
 {
     type Msg = CreateTable;
@@ -78,7 +79,7 @@ impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M
 }
 
 #[async_trait]
-impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M, F>
+impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventProcessor<M, F>
     for EventRegistered
 {
     type Msg = CreateTable;
@@ -92,7 +93,7 @@ impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M
 }
 
 #[async_trait]
-impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M, F>
+impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventProcessor<M, F>
     for ModelUpgraded
 {
     type Msg = UpdateTable;
@@ -106,7 +107,7 @@ impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M
 }
 
 #[async_trait]
-impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M, F>
+impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventProcessor<M, F>
     for EventUpgraded
 {
     type Msg = UpdateTable;
@@ -120,7 +121,7 @@ impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M
 }
 
 #[async_trait]
-impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M, F>
+impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventProcessor<M, F>
     for StoreSetRecord
 {
     type Msg = InsertsFields;
@@ -138,7 +139,7 @@ impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M
 }
 
 #[async_trait]
-impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M, F>
+impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventProcessor<M, F>
     for StoreUpdateRecord
 {
     type Msg = InsertsFields;
@@ -155,7 +156,7 @@ impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M
 }
 
 #[async_trait]
-impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M, F>
+impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventProcessor<M, F>
     for EventEmitted
 {
     type Msg = InsertsFields;
@@ -174,7 +175,7 @@ impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M
 }
 
 #[async_trait]
-impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M, F>
+impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventProcessor<M, F>
     for StoreUpdateMember
 {
     type Msg = InsertsFields;
@@ -193,7 +194,7 @@ impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M
 }
 
 #[async_trait]
-impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M, F>
+impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventProcessor<M, F>
     for StoreDelRecord
 {
     type Msg = DeleteRecords;
@@ -206,16 +207,16 @@ impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventDecoder<M
 }
 
 impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoDecoder<M, F> {
-    async fn to_introspect_msg<'a, E>(
+    async fn to_msg<'a, E>(
         &self,
         keys: &'a [Felt],
         values: &'a [Felt],
     ) -> DojoToriiResult<IntrospectMsg>
     where
-        E: DojoEventDecoder<M, F> + CairoEvent<CairoSerde<SliceFeltSource<'a>>> + Send,
+        E: DojoEventProcessor<M, F> + CairoEvent<CairoSerde<SliceFeltSource<'a>>> + Send,
         E::Msg: Into<IntrospectMsg>,
     {
-        E::data_to_introspect_msg(self, keys, values).await
+        E::data_to_msg(self, keys, values).await.ok_into()
     }
     fn with_table<Fn, R>(&self, id: Felt, f: Fn) -> DojoToriiResult<R>
     where
@@ -224,48 +225,48 @@ impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoDecoder<M, F> 
         self.manager.with_table(id, f)?
     }
 
-    pub async fn decode_event(&self, event: &EmittedEvent) -> DojoToriiResult<IntrospectMsg> {
-        let selector = event.keys[0];
+    pub async fn decode_event_data(
+        &self,
+        selector: &Felt,
+        keys: &[Felt],
+        values: &[Felt],
+    ) -> DojoToriiResult<IntrospectMsg> {
         let selector_raw = selector.to_raw();
-        let keys = &event.keys[1..];
-        let values = &event.data;
         match selector_raw {
-            ModelRegistered::SELECTOR_RAW => {
-                self.to_introspect_msg::<ModelRegistered>(keys, values)
-                    .await
-            }
+            ModelRegistered::SELECTOR_RAW => self.to_msg::<ModelRegistered>(keys, values).await,
             ModelWithSchemaRegistered::SELECTOR_RAW => {
-                self.to_introspect_msg::<ModelWithSchemaRegistered>(keys, values)
-                    .await
+                self.to_msg::<ModelWithSchemaRegistered>(keys, values).await
             }
-            ModelUpgraded::SELECTOR_RAW => {
-                self.to_introspect_msg::<ModelUpgraded>(keys, values).await
-            }
-            EventRegistered::SELECTOR_RAW => {
-                self.to_introspect_msg::<EventRegistered>(keys, values)
-                    .await
-            }
-            EventUpgraded::SELECTOR_RAW => {
-                self.to_introspect_msg::<EventUpgraded>(keys, values).await
-            }
-            StoreSetRecord::SELECTOR_RAW => {
-                self.to_introspect_msg::<StoreSetRecord>(keys, values).await
-            }
-            StoreUpdateRecord::SELECTOR_RAW => {
-                self.to_introspect_msg::<StoreUpdateRecord>(keys, values)
-                    .await
-            }
-            StoreUpdateMember::SELECTOR_RAW => {
-                self.to_introspect_msg::<StoreUpdateMember>(keys, values)
-                    .await
-            }
-            StoreDelRecord::SELECTOR_RAW => {
-                self.to_introspect_msg::<StoreDelRecord>(keys, values).await
-            }
-            EventEmitted::SELECTOR_RAW => {
-                self.to_introspect_msg::<EventEmitted>(keys, values).await
-            }
-            _ => Err(DojoToriiError::UnknownDojoEventSelector(selector)),
+            ModelUpgraded::SELECTOR_RAW => self.to_msg::<ModelUpgraded>(keys, values).await,
+            EventRegistered::SELECTOR_RAW => self.to_msg::<EventRegistered>(keys, values).await,
+            EventUpgraded::SELECTOR_RAW => self.to_msg::<EventUpgraded>(keys, values).await,
+            StoreSetRecord::SELECTOR_RAW => self.to_msg::<StoreSetRecord>(keys, values).await,
+            StoreUpdateRecord::SELECTOR_RAW => self.to_msg::<StoreUpdateRecord>(keys, values).await,
+            StoreUpdateMember::SELECTOR_RAW => self.to_msg::<StoreUpdateMember>(keys, values).await,
+            StoreDelRecord::SELECTOR_RAW => self.to_msg::<StoreDelRecord>(keys, values).await,
+            EventEmitted::SELECTOR_RAW => self.to_msg::<EventEmitted>(keys, values).await,
+            _ => Err(DojoToriiError::UnknownDojoEventSelector(*selector)),
         }
+    }
+}
+
+#[async_trait]
+impl<M: DojoTableManager + Sync + Send, F: DojoSchemaFetcher + Sync + Send> Decoder
+    for DojoDecoder<M, F>
+{
+    fn decoder_name(&self) -> &'static str {
+        "dojo-introspect"
+    }
+
+    async fn decode_event(&self, event: &EmittedEvent) -> AnyResult<Vec<Envelope>> {
+        let (selector, keys) = event
+            .keys
+            .split_first()
+            .ok_or(DojoToriiError::MissingEventSelector)?;
+
+        self.decode_event_data(selector, keys, &event.data)
+            .await
+            .map(|msg| vec![EventBody::new_envelope(msg, event)])
+            .err_into()
     }
 }

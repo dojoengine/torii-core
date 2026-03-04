@@ -71,6 +71,18 @@ pub trait PgTableManager {
     ) -> ManagerResult<()>;
 }
 
+pub trait PgMutTableManager {
+    fn update_table(
+        &self,
+        id: Felt,
+        name: &str,
+        attributes: &[Attribute],
+        primary: &PrimaryDef,
+        columns: &[ColumnDef],
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> ManagerResult<()>;
+}
+
 impl TableManager {
     pub fn declare_table(
         &self,

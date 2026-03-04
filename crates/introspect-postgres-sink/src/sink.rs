@@ -27,14 +27,6 @@ impl Sink for PostgresSink {
     async fn process(&self, envelopes: &[Envelope], batch: &ExtractionBatch) -> AnyResult<()> {
         for envelope in envelopes {
             if let Some(msg) = envelope.downcast_ref::<IntrospectMsg>() {
-                let from_address = envelope
-                    .metadata
-                    .get("from_address")
-                    .ok_or(anyhow!("Missing from_address in metadata"))?;
-                let tx_hash = envelope
-                    .metadata
-                    .get("transaction_hash")
-                    .ok_or(anyhow!("Missing transaction_hash in metadata"))?;
                 let context = batch
                     .get_event_context(tx_hash.parse()?, from_address.parse()?)
                     .ok_or(anyhow!("Failed to get event context"))?;

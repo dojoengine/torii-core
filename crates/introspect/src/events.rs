@@ -10,37 +10,9 @@ use introspect_types::{
 };
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
-use std::collections::HashMap;
-use torii::etl::{Envelope, TypedBody};
-use torii::typed_body_impl;
+use torii::etl::envelope::EventMsg;
+use torii::etl::{EventBody, TypeId};
 
-pub const CREATE_TABLE_URL: &str = "introspect.CreateTable";
-pub const UPDATE_TABLE_URL: &str = "introspect.UpdateTable";
-pub const RENAME_TABLE_URL: &str = "introspect.RenameTable";
-pub const RENAME_PRIMARY_URL: &str = "introspect.RenamePrimary";
-pub const RETYPE_PRIMARY_URL: &str = "introspect.RetypePrimary";
-pub const RENAME_COLUMNS_URL: &str = "introspect.RenameColumns";
-pub const ADD_COLUMNS_URL: &str = "introspect.AddColumns";
-pub const RETYPE_COLUMNS_URL: &str = "introspect.RetypeColumns";
-pub const DROP_TABLE_URL: &str = "introspect.DropTable";
-pub const DROP_COLUMNS_URL: &str = "introspect.DropColumns";
-
-pub const INSERTS_FIELDS_URL: &str = "introspect.InsertsFields";
-pub const DELETE_RECORDS_URL: &str = "introspect.DeleteRecords";
-pub const DELETES_FIELDS_URL: &str = "introspect.DeletesFields";
-pub const CREATE_FIELD_GROUP_URL: &str = "introspect.CreateFieldGroup";
-pub const CREATE_TYPE_DEF_URL: &str = "introspect.CreateTypeDef";
-
-pub trait IntrospectMsgTrait: TypedBody {
-    fn event_id(&self) -> String;
-
-    fn to_envelope(self, metadata: HashMap<String, String>) -> Envelope
-    where
-        Self: Sized + 'static,
-    {
-        Envelope::new(self.event_id(), Box::new(self), metadata)
-    }
-}
 #[derive(EnumFrom)]
 pub enum IntrospectMsg {
     CreateTable(CreateTable),
@@ -58,7 +30,13 @@ pub enum IntrospectMsg {
     DeletesFields(DeletesFields),
 }
 
-impl IntrospectMsgTrait for IntrospectMsg {
+pub type IntrospectBody = EventBody<IntrospectMsg>;
+
+pub trait EventId {
+    fn event_id(&self) -> String;
+}
+
+impl EventMsg for IntrospectMsg {
     fn event_id(&self) -> String {
         match self {
             IntrospectMsg::CreateTable(e) => e.event_id(),
@@ -75,6 +53,16 @@ impl IntrospectMsgTrait for IntrospectMsg {
             IntrospectMsg::DeleteRecords(e) => e.event_id(),
             IntrospectMsg::DeletesFields(e) => e.event_id(),
         }
+    }
+
+    fn envelope_type_id(&self) -> TypeId {
+        TypeId::new("introspect")
+    }
+}
+
+impl EventId for IntrospectBody {
+    fn event_id(&self) -> String {
+        self.msg.event_id()
     }
 }
 
@@ -170,60 +158,44 @@ pub struct DeletesFields {
     pub columns: Vec<Felt>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateFieldGroup {
     pub id: Felt,
     pub columns: Vec<Felt>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTypeDef {
     pub id: Felt,
     pub type_def: TypeDef,
 }
 
-typed_body_impl!(IntrospectMsg, "introspect");
-typed_body_impl!(CreateTable, CREATE_TABLE_URL);
-typed_body_impl!(UpdateTable, UPDATE_TABLE_URL);
-typed_body_impl!(RenameTable, RENAME_TABLE_URL);
-typed_body_impl!(RenamePrimary, RENAME_PRIMARY_URL);
-typed_body_impl!(RetypePrimary, RETYPE_PRIMARY_URL);
-typed_body_impl!(RenameColumns, RENAME_COLUMNS_URL);
-typed_body_impl!(RetypeColumns, RETYPE_COLUMNS_URL);
-typed_body_impl!(AddColumns, ADD_COLUMNS_URL);
-typed_body_impl!(DropTable, DROP_TABLE_URL);
-typed_body_impl!(DropColumns, DROP_COLUMNS_URL);
-typed_body_impl!(InsertsFields, INSERTS_FIELDS_URL);
-// typed_body_impl!(UpdatesFields, UPDATES_FIELDS_URL);
-typed_body_impl!(DeleteRecords, DELETE_RECORDS_URL);
-typed_body_impl!(DeletesFields, DELETES_FIELDS_URL);
-typed_body_impl!(CreateFieldGroup, CREATE_FIELD_GROUP_URL);
-typed_body_impl!(CreateTypeDef, CREATE_TYPE_DEF_URL);
-
-impl IntrospectMsgTrait for CreateTable {
+impl EventId for CreateTable {
     fn event_id(&self) -> String {
         format!("introspect.create_table.{:064x}", self.id)
     }
 }
-impl IntrospectMsgTrait for UpdateTable {
+impl EventId for UpdateTable {
     fn event_id(&self) -> String {
         format!("introspect.update_table.{:064x}", self.id)
     }
 }
-impl IntrospectMsgTrait for RenameTable {
+impl EventId for RenameTable {
     fn event_id(&self) -> String {
         format!("introspect.rename_table.{:064x}", self.id)
     }
 }
-impl IntrospectMsgTrait for RenamePrimary {
+impl EventId for RenamePrimary {
     fn event_id(&self) -> String {
         format!("introspect.rename_primary.{:064x}", self.table)
     }
 }
-impl IntrospectMsgTrait for RetypePrimary {
+impl EventId for RetypePrimary {
     fn event_id(&self) -> String {
         format!("introspect.retype_primary.{:064x}", self.table)
     }
 }
-impl IntrospectMsgTrait for RenameColumns {
+impl EventId for RenameColumns {
     fn event_id(&self) -> String {
         format!(
             "introspect.rename_columns.{:064x}.{}",
@@ -232,7 +204,7 @@ impl IntrospectMsgTrait for RenameColumns {
         )
     }
 }
-impl IntrospectMsgTrait for RetypeColumns {
+impl EventId for RetypeColumns {
     fn event_id(&self) -> String {
         format!(
             "introspect.retype_columns.{:064x}.{}",
@@ -241,7 +213,7 @@ impl IntrospectMsgTrait for RetypeColumns {
         )
     }
 }
-impl IntrospectMsgTrait for AddColumns {
+impl EventId for AddColumns {
     fn event_id(&self) -> String {
         format!(
             "introspect.add_columns.{:064x}.{}",
@@ -250,12 +222,12 @@ impl IntrospectMsgTrait for AddColumns {
         )
     }
 }
-impl IntrospectMsgTrait for DropTable {
+impl EventId for DropTable {
     fn event_id(&self) -> String {
         format!("introspect.drop_table.{:064x}", self.id)
     }
 }
-impl IntrospectMsgTrait for DropColumns {
+impl EventId for DropColumns {
     fn event_id(&self) -> String {
         format!(
             "introspect.drop_columns.{:064x}.{}",
@@ -265,7 +237,7 @@ impl IntrospectMsgTrait for DropColumns {
     }
 }
 
-impl IntrospectMsgTrait for InsertsFields {
+impl EventId for InsertsFields {
     fn event_id(&self) -> String {
         format!(
             "introspect.insert_fields.{:064x}.{}.{}",
@@ -276,7 +248,7 @@ impl IntrospectMsgTrait for InsertsFields {
     }
 }
 
-impl IntrospectMsgTrait for DeleteRecords {
+impl EventId for DeleteRecords {
     fn event_id(&self) -> String {
         format!(
             "introspect.delete_records.{:064x}.{}",
@@ -285,7 +257,7 @@ impl IntrospectMsgTrait for DeleteRecords {
         )
     }
 }
-impl IntrospectMsgTrait for DeletesFields {
+impl EventId for DeletesFields {
     fn event_id(&self) -> String {
         format!(
             "introspect.deletes_fields.{:064x}.{}.{}",
@@ -295,12 +267,12 @@ impl IntrospectMsgTrait for DeletesFields {
         )
     }
 }
-impl IntrospectMsgTrait for CreateFieldGroup {
+impl EventId for CreateFieldGroup {
     fn event_id(&self) -> String {
         format!("introspect.create_field_group.{:064x}", self.id)
     }
 }
-impl IntrospectMsgTrait for CreateTypeDef {
+impl EventId for CreateTypeDef {
     fn event_id(&self) -> String {
         format!("introspect.create_type_def.{:064x}", self.id)
     }

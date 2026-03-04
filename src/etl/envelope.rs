@@ -1,6 +1,6 @@
 //! This module contains the envelope for the ETL pipeline.
 
-use starknet::core::types::Felt;
+use starknet::core::types::{EmittedEvent, Felt};
 use std::any::Any;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -112,9 +112,47 @@ impl std::fmt::Debug for Envelope {
     }
 }
 
-/// Wrapper for event bodies which correspond to a specific event
-pub struct EventBody<T> {
+pub trait EventMsg {
+    fn event_id(&self) -> String;
+    fn envelope_type_id(&self) -> TypeId;
+}
+
+#[derive(Debug, Clone)]
+pub struct EventBody<T: EventMsg + 'static + Send + Sync> {
     pub from_address: Felt,
     pub transaction_hash: Felt,
-    pub body: T,
+    pub msg: T,
+}
+
+impl<T> TypedBody for EventBody<T>
+where
+    T: EventMsg + Send + Sync + 'static,
+{
+    fn envelope_type_id(&self) -> TypeId {
+        self.msg.envelope_type_id()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl<T: EventMsg + 'static + Send + Sync> EventBody<T> {
+    pub fn new(msg: T, raw: &EmittedEvent) -> Self {
+        Self {
+            from_address: raw.from_address.clone(),
+            transaction_hash: raw.transaction_hash.clone(),
+            msg,
+        }
+    }
+
+    pub fn new_envelope(msg: T, raw: &EmittedEvent) -> Envelope {
+        let id = msg.event_id();
+        let event_body = Self::new(msg, raw);
+        Envelope::new(id, Box::new(event_body), HashMap::new())
+    }
 }

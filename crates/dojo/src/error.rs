@@ -7,6 +7,8 @@ use starknet_types_core::felt::Felt;
 pub enum DojoToriiError {
     #[error("Unknown Dojo Event selector {0}")]
     UnknownDojoEventSelector(Felt),
+    #[error("Missing event selector")]
+    MissingEventSelector,
     #[error("Column {0} not found in table {1}")]
     ColumnNotFound(Felt, String),
     #[error("Failed to parse field {0} in table {1}")]

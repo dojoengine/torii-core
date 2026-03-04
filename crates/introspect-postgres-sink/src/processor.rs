@@ -13,13 +13,13 @@ use std::io::Write;
 use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
-use torii::etl::{BlockContext, TransactionContext};
+use torii::etl::{BlockContext, EventContext, TransactionContext};
 use torii_introspect::events::IntrospectMsg;
 use torii_introspect::tables::{IntrospectTables, TableError as IntrospectTableError};
 use torii_introspect::{
-    AddColumns, CreateTable, DeleteRecords, DeletesFields, DropColumns, DropTable, InsertsFields,
-    IntrospectMsgTrait, Record, RenameColumns, RenamePrimary, RenameTable, RetypeColumns,
-    RetypePrimary, UpdateTable,
+    AddColumns, CreateTable, DeleteRecords, DeletesFields, DropColumns, DropTable, EventId,
+    InsertsFields, Record, RenameColumns, RenamePrimary, RenameTable, RetypeColumns, RetypePrimary,
+    UpdateTable,
 };
 
 #[derive(Debug, Error)]
@@ -47,30 +47,12 @@ pub struct PostgresDb {
     tables: TableManager,
 }
 
-impl Metadata {
-    pub fn from_address(&self) -> &Felt {
-        &self.from_address
-    }
-    pub fn transaction_hash(&self) -> &Felt {
-        &self.transaction.hash
-    }
-    pub fn block_number(&self) -> u64 {
-        self.block.number
-    }
-    pub fn block_hash(&self) -> &Felt {
-        &self.block.hash
-    }
-    pub fn block_timestamp(&self) -> u64 {
-        self.block.timestamp
-    }
-}
-
 #[async_trait]
-pub trait PGIntrospectMsgProcessor<Db>: IntrospectMsgTrait {
+pub trait PGIntrospectMsgProcessor<Db>: EventId {
     async fn process(
         &self,
         db: &Db,
-        event_data: &Metadata,
+        context: &EventContext,
         tx: &mut Transaction<'_, Postgres>,
     ) -> PGSinkResult<()>;
 }
@@ -80,7 +62,7 @@ impl<Db: PgTableManager> PGIntrospectMsgProcessor<Db> for CreateTable {
     async fn process(
         &self,
         db: &Db,
-        event_data: &Metadata,
+        context: &EventContext,
         tx: &mut Transaction<'_, Postgres>,
     ) -> PGSinkResult<()> {
         db.declare_table(
@@ -100,7 +82,7 @@ impl<Db: PgTableManager> PGIntrospectMsgProcessor<Db> for RenameTable {
     async fn process(
         &self,
         db: &Db,
-        event_data: &Metadata,
+        context: &EventContext,
         tx: &mut Transaction<'_, Postgres>,
     ) -> PGSinkResult<()> {
         db.rename_table(self.id, &self.name, tx).err_into()
@@ -112,7 +94,7 @@ impl<Db: PgTableManager> PGIntrospectMsgProcessor<Db> for AddColumns {
     async fn process(
         &self,
         db: &Db,
-        event_data: &Metadata,
+        context: &EventContext,
         tx: &mut Transaction<'_, Postgres>,
     ) -> PGSinkResult<()> {
         db.add_columns(self.id, &self.columns, tx).err_into()
@@ -124,7 +106,7 @@ impl<Db: PgTableManager> PGIntrospectMsgProcessor<Db> for RenameColumns {
     async fn process(
         &self,
         db: &Db,
-        event_data: &Metadata,
+        context: &EventContext,
         tx: &mut Transaction<'_, Postgres>,
     ) -> PGSinkResult<()> {
         db.rename_columns(self.id, &self.columns, tx).err_into()
@@ -136,7 +118,7 @@ impl<Db: IntrospectTables> PGIntrospectMsgProcessor<Db> for InsertsFields {
     async fn process(
         &self,
         db: &Db,
-        event_data: &Metadata,
+        context: &EventContext,
         tx: &mut Transaction<'_, Postgres>,
     ) -> PGSinkResult<()> {
         let schema = db.get_record_schema(self.table, &self.columns)?;
@@ -167,7 +149,7 @@ impl<Db: IntrospectTables> PGIntrospectMsgProcessor<Db> for InsertsFields {
             sink = %self.label,
             table = %table_name,
             storage_table = %table_name,
-            block = %event_data.block_number(),
+            block = %context.block.number,
             "stored update_record"
         );
 
@@ -192,15 +174,15 @@ impl<Db: PgTableManager + IntrospectTables> PGIntrospectMsgProcessor<Db> for Int
     async fn process(
         &self,
         db: &Db,
-        event_data: &Metadata,
+        context: &EventContext,
         tx: &mut Transaction<'_, Postgres>,
     ) -> PGSinkResult<()> {
         match self {
-            IntrospectMsg::CreateTable(event) => event.process(db, event_data, tx).await,
-            IntrospectMsg::RenameTable(event) => event.process(db, event_data, tx).await,
-            IntrospectMsg::AddColumns(event) => event.process(db, event_data, tx).await,
-            IntrospectMsg::RenameColumns(event) => event.process(db, event_data, tx).await,
-            IntrospectMsg::InsertsFields(event) => event.process(db, event_data, tx).await,
+            IntrospectMsg::CreateTable(event) => event.process(db, context, tx).await,
+            IntrospectMsg::RenameTable(event) => event.process(db, context, tx).await,
+            IntrospectMsg::AddColumns(event) => event.process(db, context, tx).await,
+            IntrospectMsg::RenameColumns(event) => event.process(db, context, tx).await,
+            IntrospectMsg::InsertsFields(event) => event.process(db, context, tx).await,
             _ => {
                 println!("Unsupported event type: {:?}", self);
                 Ok(())
@@ -247,74 +229,74 @@ impl PostgresSink {
     }
 }
 
-#[async_trait]
-impl Sink for PostgresSink {
-    fn label(&self) -> &str {
-        &self.label
-    }
+// #[async_trait]
+// impl Sink for PostgresSink {
+//     fn label(&self) -> &str {
+//         &self.label
+//     }
 
-    async fn handle_batch(&self, batch: Batch) -> anyhow::Result<()> {
-        let mut tx = self.pool.begin().await?;
+//     async fn handle_batch(&self, batch: Batch) -> anyhow::Result<()> {
+//         let mut tx = self.pool.begin().await?;
 
-        for env in &batch.items {
-            if env.type_id == CreateTable::TYPE_ID {
-                if let Some(event) = env.downcast::<CreateTable>() {
-                    println!("{}", event.name);
-                    match self
-                        .handle_declare_table(&mut tx, env.raw.clone(), event)
-                        .await
-                    {
-                        Ok(_) => (),
-                        Err(err) => {
-                            println!("Error declaring table: {err:#?}");
-                            return Err(err.into());
-                        }
-                    }
-                }
-            }
-            if env.type_id == UpdateTable::TYPE_ID {
-                if let Some(event) = env.downcast::<UpdateTable>() {
-                    println!("{}", event.name);
-                    match self
-                        .handle_update_table(&mut tx, env.raw.clone(), event)
-                        .await
-                    {
-                        Ok(_) => (),
-                        Err(err) => {
-                            println!("Error declaring table: {err:#?}");
-                            return Err(err.into());
-                        }
-                    }
-                }
-            } else if env.type_id == UpdateRecordFields::TYPE_ID {
-                if let Some(event) = env.downcast::<UpdateRecordFields>() {
-                    match self
-                        .handle_update_record(&mut tx, env.raw.clone(), event)
-                        .await
-                    {
-                        Ok(_) => (),
-                        Err(err) => {
-                            println!("Error updating record: {err:#?}");
-                        }
-                    }
-                }
-            } else if env.type_id == DeleteRecords::TYPE_ID {
-                if let Some(event) = env.downcast::<DeleteRecords>() {
-                    match self
-                        .handle_delete_records(&mut tx, env.raw.clone(), event)
-                        .await
-                    {
-                        Ok(_) => (),
-                        Err(_err) => {
-                            println!("Error deleting records");
-                        }
-                    }
-                }
-            }
-        }
-        tx.commit().await?;
+//         for env in &batch.items {
+//             if env.type_id == CreateTable::TYPE_ID {
+//                 if let Some(event) = env.downcast::<CreateTable>() {
+//                     println!("{}", event.name);
+//                     match self
+//                         .handle_declare_table(&mut tx, env.raw.clone(), event)
+//                         .await
+//                     {
+//                         Ok(_) => (),
+//                         Err(err) => {
+//                             println!("Error declaring table: {err:#?}");
+//                             return Err(err.into());
+//                         }
+//                     }
+//                 }
+//             }
+//             if env.type_id == UpdateTable::TYPE_ID {
+//                 if let Some(event) = env.downcast::<UpdateTable>() {
+//                     println!("{}", event.name);
+//                     match self
+//                         .handle_update_table(&mut tx, env.raw.clone(), event)
+//                         .await
+//                     {
+//                         Ok(_) => (),
+//                         Err(err) => {
+//                             println!("Error declaring table: {err:#?}");
+//                             return Err(err.into());
+//                         }
+//                     }
+//                 }
+//             } else if env.type_id == UpdateRecordFields::TYPE_ID {
+//                 if let Some(event) = env.downcast::<UpdateRecordFields>() {
+//                     match self
+//                         .handle_update_record(&mut tx, env.raw.clone(), event)
+//                         .await
+//                     {
+//                         Ok(_) => (),
+//                         Err(err) => {
+//                             println!("Error updating record: {err:#?}");
+//                         }
+//                     }
+//                 }
+//             } else if env.type_id == DeleteRecords::TYPE_ID {
+//                 if let Some(event) = env.downcast::<DeleteRecords>() {
+//                     match self
+//                         .handle_delete_records(&mut tx, env.raw.clone(), event)
+//                         .await
+//                     {
+//                         Ok(_) => (),
+//                         Err(_err) => {
+//                             println!("Error deleting records");
+//                         }
+//                     }
+//                 }
+//             }
+//         }
+//         tx.commit().await?;
 
-        tracing::info!(sink = %self.label, processed = batch.items.len(), "sqlite sink processed batch");
-        Ok(())
-    }
-}
+//         tracing::info!(sink = %self.label, processed = batch.items.len(), "sqlite sink processed batch");
+//         Ok(())
+//     }
+// }
