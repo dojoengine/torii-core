@@ -3,7 +3,7 @@ use clap::Parser;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio_postgres::NoTls;
@@ -472,7 +472,7 @@ async fn build_report(
     })
 }
 
-fn write_artifacts(output_dir: &PathBuf, report: &RunReport) -> Result<()> {
+fn write_artifacts(output_dir: &Path, report: &RunReport) -> Result<()> {
     let json_path = output_dir.join("report.json");
     let md_path = output_dir.join("report.md");
     let env_path = output_dir.join("context.env");
@@ -497,7 +497,7 @@ fn write_artifacts(output_dir: &PathBuf, report: &RunReport) -> Result<()> {
 }
 
 #[cfg(feature = "profiling")]
-fn write_flamegraph(output_dir: &PathBuf, guard: pprof::ProfilerGuard<'_>) -> Result<()> {
+fn write_flamegraph(output_dir: &Path, guard: pprof::ProfilerGuard<'_>) -> Result<()> {
     if let Ok(report) = guard.report().build() {
         let file = fs::File::create(output_dir.join("flamegraph.svg"))?;
         report.flamegraph(file)?;
@@ -614,7 +614,7 @@ fn ms(d: Duration) -> f64 {
 fn redact_db_url(db_url: &str) -> String {
     if let Some((scheme, rest)) = db_url.split_once("://") {
         let host_part = rest.rsplit('@').next().unwrap_or(rest);
-        return format!("{}://***@{}", scheme, host_part);
+        return format!("{scheme}://***@{host_part}");
     }
     "***".to_string()
 }
