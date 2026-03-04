@@ -38,6 +38,8 @@ pub enum PostgresSinkError {
     TableManagerError(#[from] TableManagerError),
     #[error(transparent)]
     IntrospectError(#[from] IntrospectTableError),
+    #[error("IO error: {0}")]
+    IoWriteError(#[from] std::io::Error),
 }
 
 type PGSinkResult<T> = std::result::Result<T, PostgresSinkError>;
@@ -58,11 +60,11 @@ pub trait PGIntrospectMsgProcessor<Db>: EventId {
 }
 
 #[async_trait]
-impl<Db: PgTableManager> PGIntrospectMsgProcessor<Db> for CreateTable {
+impl<Db: PgTableManager + Sync> PGIntrospectMsgProcessor<Db> for CreateTable {
     async fn process(
         &self,
         db: &Db,
-        context: &EventContext,
+        _context: &EventContext,
         tx: &mut Transaction<'_, Postgres>,
     ) -> PGSinkResult<()> {
         db.declare_table(
@@ -78,11 +80,11 @@ impl<Db: PgTableManager> PGIntrospectMsgProcessor<Db> for CreateTable {
 }
 
 #[async_trait]
-impl<Db: PgTableManager> PGIntrospectMsgProcessor<Db> for RenameTable {
+impl<Db: PgTableManager + Sync> PGIntrospectMsgProcessor<Db> for RenameTable {
     async fn process(
         &self,
         db: &Db,
-        context: &EventContext,
+        _context: &EventContext,
         tx: &mut Transaction<'_, Postgres>,
     ) -> PGSinkResult<()> {
         db.rename_table(self.id, &self.name, tx).err_into()
@@ -90,31 +92,31 @@ impl<Db: PgTableManager> PGIntrospectMsgProcessor<Db> for RenameTable {
 }
 
 #[async_trait]
-impl<Db: PgTableManager> PGIntrospectMsgProcessor<Db> for AddColumns {
+impl<Db: PgTableManager + Sync> PGIntrospectMsgProcessor<Db> for AddColumns {
     async fn process(
         &self,
         db: &Db,
-        context: &EventContext,
+        _context: &EventContext,
         tx: &mut Transaction<'_, Postgres>,
     ) -> PGSinkResult<()> {
-        db.add_columns(self.id, &self.columns, tx).err_into()
+        db.add_columns(self.table, &self.columns, tx).err_into()
     }
 }
 
 #[async_trait]
-impl<Db: PgTableManager> PGIntrospectMsgProcessor<Db> for RenameColumns {
+impl<Db: PgTableManager + Sync> PGIntrospectMsgProcessor<Db> for RenameColumns {
     async fn process(
         &self,
         db: &Db,
-        context: &EventContext,
+        _context: &EventContext,
         tx: &mut Transaction<'_, Postgres>,
     ) -> PGSinkResult<()> {
-        db.rename_columns(self.id, &self.columns, tx).err_into()
+        db.rename_columns(self.table, &self.columns, tx).err_into()
     }
 }
 
 #[async_trait]
-impl<Db: IntrospectTables> PGIntrospectMsgProcessor<Db> for InsertsFields {
+impl<Db: IntrospectTables + Sync> PGIntrospectMsgProcessor<Db> for InsertsFields {
     async fn process(
         &self,
         db: &Db,
@@ -131,22 +133,27 @@ impl<Db: IntrospectTables> PGIntrospectMsgProcessor<Db> for InsertsFields {
             SELECT * FROM jsonb_populate_record(NULL::"{table_name}", $$"#
         );
         let serializer = &mut JsonSerializer::new(writer);
-        schema.parse_records(&self.records, serializer, &PostgresJsonSerializer)?;
+        schema.parse_records_with_metadata(
+            &self.records,
+            &self.metadata,
+            serializer,
+            &PostgresJsonSerializer,
+        )?;
         write!(
             writer,
             r#"$$) ON CONFLICT ("{}") DO UPDATE SET "#,
             schema.primary().name
         );
-        if let Some((cols, coln)) = schema.columns().split_last() {
+        if let Some((coln, cols)) = schema.columns().split_last() {
             for column in cols {
-                write_conflict_res::<true>(&mut writer, table_name, &column.name)?;
+                write_conflict_res::<true, _>(&mut writer, table_name, &column.name)?;
             }
-            write_conflict_res::<false>(&mut writer, table_name, &coln.name)?;
+            write_conflict_res::<false, _>(&mut writer, table_name, &coln.name)?;
         }
         let string = unsafe { String::from_utf8_unchecked(writer) };
         sqlx::query(&string).execute(&mut **tx).await?;
         tracing::info!(
-            sink = %self.label,
+            sink = "Postgres-introspect",
             table = %table_name,
             storage_table = %table_name,
             block = %context.block.number,
@@ -170,7 +177,9 @@ pub fn write_conflict_res<const DELIMINATOR: bool, W: Write>(
 }
 
 #[async_trait]
-impl<Db: PgTableManager + IntrospectTables> PGIntrospectMsgProcessor<Db> for IntrospectMsg {
+impl<Db: PgTableManager + IntrospectTables + Send + Sync> PGIntrospectMsgProcessor<Db>
+    for IntrospectMsg
+{
     async fn process(
         &self,
         db: &Db,
@@ -191,12 +200,8 @@ impl<Db: PgTableManager + IntrospectTables> PGIntrospectMsgProcessor<Db> for Int
     }
 }
 
-impl PostgresSink {
-    pub async fn connect(
-        label: impl Into<String>,
-        database_url: &str,
-        max_connections: Option<u32>,
-    ) -> Result<Self> {
+impl PostgresDb {
+    pub async fn connect(database_url: &str, max_connections: Option<u32>) -> PGSinkResult<Self> {
         let options = PgConnectOptions::from_str(database_url)?;
         let pool = PgPoolOptions::new()
             .max_connections(max_connections.unwrap_or(5))
@@ -204,13 +209,12 @@ impl PostgresSink {
             .await?;
 
         Ok(Self {
-            label: label.into(),
             pool,
-            manager: TableManager::default(),
+            tables: TableManager::default(),
         })
     }
 
-    pub async fn initialize(&self) -> Result<()> {
+    pub async fn initialize(&self) -> PGSinkResult<()> {
         match sqlx::migrate!("./migrations")
             .run(&self.pool)
             .await

@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result as AnyResult};
 use async_trait::async_trait;
 use torii::etl::{Envelope, EventContext, ExtractionBatch, Sink, TypeId};
-use torii_introspect::events::IntrospectMsg;
+use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 
 pub struct PostgresSink {
     label: String,
@@ -26,9 +26,9 @@ impl Sink for PostgresSink {
 
     async fn process(&self, envelopes: &[Envelope], batch: &ExtractionBatch) -> AnyResult<()> {
         for envelope in envelopes {
-            if let Some(msg) = envelope.downcast_ref::<IntrospectMsg>() {
+            if let Some(body) = envelope.downcast_ref::<IntrospectBody>() {
                 let context = batch
-                    .get_event_context(tx_hash.parse()?, from_address.parse()?)
+                    .get_event_context(&body.transaction_hash, body.from_address)
                     .ok_or(anyhow!("Failed to get event context"))?;
             }
         }

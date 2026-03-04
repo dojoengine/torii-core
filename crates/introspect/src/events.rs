@@ -13,7 +13,7 @@ use starknet_types_core::felt::Felt;
 use torii::etl::envelope::EventMsg;
 use torii::etl::{EventBody, TypeId};
 
-#[derive(EnumFrom)]
+#[derive(EnumFrom, Debug)]
 pub enum IntrospectMsg {
     CreateTable(CreateTable),
     UpdateTable(UpdateTable),
