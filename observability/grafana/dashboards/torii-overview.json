@@ -1,0 +1,102 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "id": 10,
+      "title": "Torii Build Info",
+      "type": "stat",
+      "targets": [{"expr": "max without(instance) (torii_build_info)", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "id": 11,
+      "title": "Torii Uptime",
+      "type": "timeseries",
+      "targets": [{"expr": "max without(instance) (torii_uptime_seconds)", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "id": 12,
+      "title": "Prometheus Up (Torii)",
+      "type": "stat",
+      "targets": [{"expr": "max(up{job=~\"torii.*\"})", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "id": 13,
+      "title": "ETL Cycles (last 5m)",
+      "type": "stat",
+      "targets": [{"expr": "sum without(instance) (increase(torii_etl_cycle_total[5m]))", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 4},
+      "id": 1,
+      "title": "ETL Cycle p95",
+      "type": "timeseries",
+      "targets": [{"expr": "max without(instance) (torii_etl_cycle_duration_seconds{quantile=\"0.95\"})", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 4},
+      "id": 2,
+      "title": "Events Processed/sec",
+      "type": "timeseries",
+      "targets": [{"expr": "sum without(instance) (rate(torii_events_processed_total[1m]))", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 4},
+      "id": 3,
+      "title": "Transactions Processed/sec",
+      "type": "timeseries",
+      "targets": [{"expr": "sum without(instance) (rate(torii_transactions_processed_total[1m]))", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "id": 4,
+      "title": "Mean Block-Range RPC Fetch",
+      "type": "timeseries",
+      "targets": [{"expr": "sum without(instance) (rate(torii_rpc_block_range_fetch_duration_seconds_sum[5m])) / sum without(instance) (rate(torii_rpc_block_range_fetch_duration_seconds_count[5m]))", "refId": "A"}]
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "id": 5,
+      "title": "Decoded Events/sec",
+      "type": "timeseries",
+      "targets": [{"expr": "sum without(instance) (rate(torii_events_decoded_total[1m]))", "refId": "A"}]
+    }
+  ],
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": ["torii"],
+  "templating": {"list": []},
+  "time": {"from": "now-15m", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "Torii Overview",
+  "uid": "torii-overview",
+  "version": 3,
+  "weekStart": ""
+}

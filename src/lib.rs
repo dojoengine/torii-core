@@ -6,6 +6,7 @@
 pub mod etl;
 pub mod grpc;
 pub mod http;
+pub mod metrics;
 
 // Include generated protobuf code
 pub mod proto {
@@ -111,6 +112,12 @@ pub struct ToriiConfig {
     /// Defaults to current directory if not specified.
     pub database_root: PathBuf,
 
+    /// Optional explicit engine database URL/path.
+    ///
+    /// If set, Torii uses this value directly when creating `EngineDb`.
+    /// This can be a PostgreSQL URL (`postgres://...`) or SQLite path/URL.
+    pub engine_database_url: Option<String>,
+
     /// Contract filter (explicit mappings + blacklist).
     pub contract_filter: ContractFilter,
 
@@ -172,6 +179,7 @@ pub struct ToriiConfigBuilder {
     sample_events: Vec<starknet::core::types::EmittedEvent>,
     extractor: Option<Box<dyn Extractor>>,
     database_root: Option<PathBuf>,
+    engine_database_url: Option<String>,
     contract_filter: Option<ContractFilter>,
     identification_rules: Vec<Box<dyn IdentificationRule>>,
     registry_cache: Option<
@@ -304,6 +312,17 @@ impl ToriiConfigBuilder {
     /// Defaults to current directory if not specified.
     pub fn database_root(mut self, path: impl Into<PathBuf>) -> Self {
         self.database_root = Some(path.into());
+        self
+    }
+
+    /// Sets an explicit engine database URL/path.
+    ///
+    /// Examples:
+    /// - `postgres://user:pass@localhost:5432/torii`
+    /// - `sqlite::memory:`
+    /// - `./torii-data/engine.db`
+    pub fn engine_database_url(mut self, url: impl Into<String>) -> Self {
+        self.engine_database_url = Some(url.into());
         self
     }
 
@@ -479,6 +498,7 @@ impl ToriiConfigBuilder {
             sample_events: self.sample_events,
             extractor: self.extractor,
             database_root: self.database_root.unwrap_or_else(|| PathBuf::from(".")),
+            engine_database_url: self.engine_database_url,
             contract_filter,
             identification_rules: self.identification_rules,
             registry_cache: self.registry_cache,
@@ -497,6 +517,19 @@ impl ToriiConfigBuilder {
 pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(target: "torii::main", "Starting Torii with {} sink(s) and {} decoder(s)",
         config.sinks.len(), config.decoders.len());
+
+    match metrics::init_from_env() {
+        Ok(true) => {
+            tracing::info!(target: "torii::main", "Prometheus metrics enabled at /metrics");
+            metrics::set_build_info(env!("CARGO_PKG_VERSION"));
+        }
+        Ok(false) => {
+            tracing::info!(target: "torii::main", "Prometheus metrics disabled by TORII_METRICS_ENABLED");
+        }
+        Err(e) => {
+            tracing::warn!(target: "torii::main", error = %e, "Failed to initialize metrics recorder");
+        }
+    }
 
     let subscription_manager = Arc::new(SubscriptionManager::new());
     let event_bus = Arc::new(EventBus::new(subscription_manager.clone()));
@@ -518,9 +551,15 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
     let multi_sink = Arc::new(MultiSink::new(initialized_sinks));
 
     // Create EngineDb (needed by DecoderContext)
-    let engine_db_path = config.database_root.join("engine.db");
+    let engine_db_path = config.engine_database_url.clone().unwrap_or_else(|| {
+        config
+            .database_root
+            .join("engine.db")
+            .to_string_lossy()
+            .to_string()
+    });
     let engine_db_config = etl::engine_db::EngineDbConfig {
-        path: engine_db_path.to_string_lossy().to_string(),
+        path: engine_db_path,
     };
     let engine_db = etl::EngineDb::new(engine_db_config).await?;
     let engine_db = Arc::new(engine_db);
@@ -659,9 +698,13 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
         let mut cursor: Option<String> = None;
 
         loop {
+            let cycle_start = std::time::Instant::now();
+            ::metrics::gauge!("torii_etl_inflight_cycles").set(1.0);
+
             // Check for shutdown signal BEFORE starting extraction
             if etl_shutdown_token.is_cancelled() {
                 tracing::info!(target: "torii::etl", "Shutdown requested, stopping ETL loop");
+                ::metrics::gauge!("torii_etl_inflight_cycles").set(0.0);
                 break;
             }
 
@@ -670,6 +713,11 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
                 Ok(batch) => batch,
                 Err(e) => {
                     tracing::error!(target: "torii::etl", "Extract failed: {}", e);
+                    ::metrics::counter!("torii_etl_cycle_total", "status" => "extract_error")
+                        .increment(1);
+                    ::metrics::histogram!("torii_etl_cycle_duration_seconds")
+                        .record(cycle_start.elapsed().as_secs_f64());
+                    ::metrics::gauge!("torii_etl_inflight_cycles").set(0.0);
                     // Check shutdown before sleeping
                     if etl_shutdown_token.is_cancelled() {
                         tracing::info!(target: "torii::etl", "Shutdown requested during error recovery");
@@ -686,15 +734,27 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
             if batch.is_empty() {
                 if extractor.is_finished() {
                     tracing::info!(target: "torii::etl", "Extractor finished, stopping ETL loop");
+                    ::metrics::counter!("torii_etl_cycle_total", "status" => "empty").increment(1);
+                    ::metrics::histogram!("torii_etl_cycle_duration_seconds")
+                        .record(cycle_start.elapsed().as_secs_f64());
+                    ::metrics::gauge!("torii_etl_inflight_cycles").set(0.0);
                     break;
                 }
 
                 // Check shutdown before sleeping
                 if etl_shutdown_token.is_cancelled() {
                     tracing::info!(target: "torii::etl", "Shutdown requested while waiting for blocks");
+                    ::metrics::counter!("torii_etl_cycle_total", "status" => "empty").increment(1);
+                    ::metrics::histogram!("torii_etl_cycle_duration_seconds")
+                        .record(cycle_start.elapsed().as_secs_f64());
+                    ::metrics::gauge!("torii_etl_inflight_cycles").set(0.0);
                     break;
                 }
 
+                ::metrics::counter!("torii_etl_cycle_total", "status" => "empty").increment(1);
+                ::metrics::histogram!("torii_etl_cycle_duration_seconds")
+                    .record(cycle_start.elapsed().as_secs_f64());
+                ::metrics::gauge!("torii_etl_inflight_cycles").set(0.0);
                 // Wait before polling again
                 tokio::time::sleep(tokio::time::Duration::from_secs(cycle_interval)).await;
                 continue;
@@ -705,6 +765,15 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
                 "Extracted {} events",
                 batch.len()
             );
+            ::metrics::counter!("torii_events_extracted_total").increment(batch.len() as u64);
+            ::metrics::counter!("torii_tx_processed_total")
+                .increment(batch.transactions.len() as u64);
+            ::metrics::counter!("torii_extract_batch_size_total", "unit" => "events")
+                .increment(batch.events.len() as u64);
+            ::metrics::counter!("torii_extract_batch_size_total", "unit" => "blocks")
+                .increment(batch.blocks.len() as u64);
+            ::metrics::counter!("torii_extract_batch_size_total", "unit" => "transactions")
+                .increment(batch.transactions.len() as u64);
 
             // Update the engine DB stats for now here. Temporary.
             let latest_block = batch.blocks.keys().max().copied().unwrap_or(0);
@@ -740,26 +809,55 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
                 Ok(envelopes) => envelopes,
                 Err(e) => {
                     tracing::error!(target: "torii::etl", "Decode failed: {}", e);
+                    ::metrics::counter!("torii_decode_failures_total", "stage" => "decode")
+                        .increment(1);
+                    ::metrics::counter!("torii_etl_cycle_total", "status" => "decode_error")
+                        .increment(1);
+                    ::metrics::histogram!("torii_etl_cycle_duration_seconds")
+                        .record(cycle_start.elapsed().as_secs_f64());
+                    ::metrics::gauge!("torii_etl_inflight_cycles").set(0.0);
                     continue;
                 }
             };
+            ::metrics::counter!("torii_events_decoded_total").increment(batch.events.len() as u64);
+            ::metrics::counter!("torii_decode_envelopes_total").increment(envelopes.len() as u64);
 
             // Load the envelopes into the sinks.
             if let Err(e) = etl_multi_sink.process(&envelopes, &batch).await {
                 tracing::error!(target: "torii::etl", "Sink processing failed: {}", e);
+                ::metrics::counter!("torii_etl_cycle_total", "status" => "sink_error").increment(1);
+                ::metrics::histogram!("torii_etl_cycle_duration_seconds")
+                    .record(cycle_start.elapsed().as_secs_f64());
+                ::metrics::gauge!("torii_etl_inflight_cycles").set(0.0);
                 continue;
             }
+
+            // Count successfully processed payloads (post-sink processing).
+            ::metrics::counter!("torii_events_processed_total").increment(batch.events.len() as u64);
+            ::metrics::counter!("torii_transactions_processed_total")
+                .increment(batch.transactions.len() as u64);
 
             // CRITICAL: Commit cursor ONLY AFTER successful sink processing.
             // This ensures no data loss if the process is killed during extraction or sink processing.
             if let Some(ref cursor_str) = new_cursor {
                 if let Err(e) = extractor.commit_cursor(cursor_str, &etl_engine_db).await {
                     tracing::error!(target: "torii::etl", "Failed to commit cursor: {}", e);
+                    ::metrics::counter!("torii_cursor_commit_failures_total").increment(1);
                     // Continue anyway - cursor will be re-processed on restart (safe, just duplicate work)
                 }
             }
 
             cursor = new_cursor;
+            if let Some(chain_head) = batch.chain_head {
+                let gap = chain_head.saturating_sub(latest_block);
+                ::metrics::gauge!("torii_etl_cycle_gap_blocks").set(gap as f64);
+            }
+            ::metrics::gauge!("torii_etl_last_success_timestamp_seconds")
+                .set(chrono::Utc::now().timestamp() as f64);
+            ::metrics::counter!("torii_etl_cycle_total", "status" => "ok").increment(1);
+            ::metrics::histogram!("torii_etl_cycle_duration_seconds")
+                .record(cycle_start.elapsed().as_secs_f64());
+            ::metrics::gauge!("torii_etl_inflight_cycles").set(0.0);
 
             tracing::info!(target: "torii::etl", "ETL cycle complete");
         }

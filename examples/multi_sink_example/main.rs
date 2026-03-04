@@ -27,10 +27,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("📦 Creating sinks...");
 
-    // Create SQL sink (in-memory SQLite)
-    let sql_sink = SqlSink::new("sqlite::memory:").await?;
+    // Create SQL sink (DATABASE_URL or in-memory SQLite fallback)
+    let database_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite::memory:".to_string());
+    let sql_sink = SqlSink::new(&database_url).await?;
     let sql_grpc_service = sql_sink.get_grpc_service_impl();
-    println!("   ✅ SqlSink created (in-memory SQLite)");
+    println!("   ✅ SqlSink created ({database_url})");
 
     // Create Log sink (in-memory, max 100 logs)
     let log_sink = LogSink::new(100);

@@ -17,8 +17,8 @@ use axum::{
     Router,
 };
 use prost::Message;
-use prost_types::Any;
-use sqlx::sqlite::SqlitePool;
+use prost_types::Any as ProtoAny;
+use sqlx::{any::AnyPoolOptions, Any as SqlxAny, QueryBuilder};
 use std::sync::Arc;
 
 use starknet::core::types::EmittedEvent;
@@ -33,14 +33,21 @@ pub use decoder::{SqlDecoder, SqlInsert, SqlUpdate};
 pub use grpc_service::SqlSinkService;
 pub use proto::{SqlOperation as ProtoSqlOperation, SqlOperationUpdate};
 
-/// SqlSink stores data in SQLite and exposes SQL query endpoints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DbBackend {
+    Sqlite,
+    Postgres,
+}
+
+/// SqlSink stores data in SQL databases and exposes SQL query endpoints.
 ///
 /// This sink demonstrates all three extension points:
 /// 1. **EventBus**: Publishes to central topic-based subscriptions
 /// 2. **gRPC Service**: Provides Query, StreamQuery, GetSchema, and Subscribe RPCs
 /// 3. **REST HTTP**: Exposes `/sql/query` and `/sql/events` endpoints
 pub struct SqlSink {
-    pool: Arc<SqlitePool>,
+    pool: Arc<sqlx::Pool<SqlxAny>>,
+    backend: DbBackend,
     event_bus: Option<Arc<EventBus>>,
     /// Internal gRPC service (self-contained with broadcast channel)
     grpc_service: Arc<SqlSinkService>,
@@ -81,27 +88,69 @@ impl SqlSink {
         self.grpc_service.clone()
     }
 
+    fn table_name(&self) -> &'static str {
+        match self.backend {
+            DbBackend::Sqlite => "sql_operation",
+            DbBackend::Postgres => "sql_sink.sql_operation",
+        }
+    }
+
     pub async fn new(database_url: &str) -> anyhow::Result<Self> {
-        let pool = SqlitePool::connect(database_url).await?;
+        sqlx::any::install_default_drivers();
+
+        let backend = if database_url.starts_with("postgres://")
+            || database_url.starts_with("postgresql://")
+        {
+            DbBackend::Postgres
+        } else {
+            DbBackend::Sqlite
+        };
+
+        let db_url = if backend == DbBackend::Sqlite && database_url == ":memory:" {
+            "sqlite::memory:".to_string()
+        } else {
+            database_url.to_string()
+        };
+
+        let pool = AnyPoolOptions::new().connect(&db_url).await?;
         let pool = Arc::new(pool);
 
+        if backend == DbBackend::Postgres {
+            sqlx::query("CREATE SCHEMA IF NOT EXISTS sql_sink")
+                .execute(pool.as_ref())
+                .await?;
+        }
+
+        let create_table_sql = match backend {
+            DbBackend::Sqlite => {
+                r"
+                CREATE TABLE IF NOT EXISTS sql_operation (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    table_name TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    value INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                "
+            }
+            DbBackend::Postgres => {
+                r"
+                CREATE TABLE IF NOT EXISTS sql_sink.sql_operation (
+                    id BIGSERIAL PRIMARY KEY,
+                    table_name TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    value BIGINT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                "
+            }
+        };
+
         // Create tables for SQL operations
-        sqlx::query(
-            r"
-            CREATE TABLE IF NOT EXISTS sql_operation (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                table_name TEXT NOT NULL,
-                operation TEXT NOT NULL,
-                value INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            ",
-        )
-        .execute(pool.as_ref())
-        .await?;
+        sqlx::query(create_table_sql).execute(pool.as_ref()).await?;
 
         // Create gRPC service internally (with its own broadcast channel)
-        let grpc_service = Arc::new(SqlSinkService::new(pool.clone()));
+        let grpc_service = Arc::new(SqlSinkService::new(pool.clone(), backend));
 
         tracing::info!(
             target: "torii::sinks::sql",
@@ -111,6 +160,7 @@ impl SqlSink {
 
         Ok(Self {
             pool,
+            backend,
             event_bus: None,
             grpc_service,
         })
@@ -208,17 +258,17 @@ impl Sink for SqlSink {
         for envelope in envelopes {
             if envelope.type_id == TypeId::new("sql.insert") {
                 if let Some(insert) = envelope.downcast_ref::<SqlInsert>() {
-                    sqlx::query(
-                        r"
-                        INSERT INTO sql_operation (table_name, operation, value)
-                        VALUES (?, ?, ?)
-                        ",
-                    )
-                    .bind(&insert.table)
-                    .bind("insert")
-                    .bind(insert.value as i64)
-                    .execute(self.pool.as_ref())
-                    .await?;
+                    let mut qb = QueryBuilder::<SqlxAny>::new(format!(
+                        "INSERT INTO {} (table_name, operation, value) ",
+                        self.table_name()
+                    ));
+                    qb.push_values(
+                        std::iter::once((&insert.table, "insert", insert.value as i64)),
+                        |mut b, row| {
+                            b.push_bind(row.0).push_bind(row.1).push_bind(row.2);
+                        },
+                    );
+                    qb.build().execute(self.pool.as_ref()).await?;
 
                     tracing::info!(
                         target: "torii::sinks::sql",
@@ -237,7 +287,7 @@ impl Sink for SqlSink {
                     if let Some(event_bus) = &self.event_bus {
                         let mut buf = Vec::new();
                         proto_msg.encode(&mut buf)?;
-                        let any = Any {
+                        let any = ProtoAny {
                             type_url: "type.googleapis.com/torii.sinks.sql.SqlOperation"
                                 .to_string(),
                             value: buf,
@@ -262,17 +312,17 @@ impl Sink for SqlSink {
                 }
             } else if envelope.type_id == TypeId::new("sql.update") {
                 if let Some(update) = envelope.downcast_ref::<SqlUpdate>() {
-                    sqlx::query(
-                        r"
-                        INSERT INTO sql_operation (table_name, operation, value)
-                        VALUES (?, ?, ?)
-                        ",
-                    )
-                    .bind(&update.table)
-                    .bind("update")
-                    .bind(update.value as i64)
-                    .execute(self.pool.as_ref())
-                    .await?;
+                    let mut qb = QueryBuilder::<SqlxAny>::new(format!(
+                        "INSERT INTO {} (table_name, operation, value) ",
+                        self.table_name()
+                    ));
+                    qb.push_values(
+                        std::iter::once((&update.table, "update", update.value as i64)),
+                        |mut b, row| {
+                            b.push_bind(row.0).push_bind(row.1).push_bind(row.2);
+                        },
+                    );
+                    qb.build().execute(self.pool.as_ref()).await?;
 
                     tracing::info!(
                         target: "torii::sinks::sql",
@@ -291,7 +341,7 @@ impl Sink for SqlSink {
                     if let Some(event_bus) = &self.event_bus {
                         let mut buf = Vec::new();
                         proto_msg.encode(&mut buf)?;
-                        let any = Any {
+                        let any = ProtoAny {
                             type_url: "type.googleapis.com/torii.sinks.sql.SqlOperation"
                                 .to_string(),
                             value: buf,
@@ -339,6 +389,7 @@ impl Sink for SqlSink {
     fn build_routes(&self) -> Router {
         let state = api::SqlSinkState {
             pool: self.pool.clone(),
+            backend: self.backend,
         };
 
         Router::new()

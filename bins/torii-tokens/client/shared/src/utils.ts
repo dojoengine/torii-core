@@ -20,6 +20,18 @@ export function hexToBase64(hex: string): string {
 }
 
 /**
+ * Decode a base64 string into a Uint8Array
+ */
+function base64Decode(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/**
  * Convert bytes (Uint8Array or base64 string) to hex string for display
  */
 export function bytesToHex(value: Uint8Array | string | undefined): string {
@@ -29,7 +41,7 @@ export function bytesToHex(value: Uint8Array | string | undefined): string {
     if (value instanceof Uint8Array) {
       bytes = value;
     } else {
-      bytes = new TextEncoder().encode(value);
+      bytes = base64Decode(value);
     }
     let hex = Array.from(bytes)
       .map((b) => b.toString(16).padStart(2, "0"))
@@ -52,13 +64,16 @@ export function base64ToHex(b64: string): string {
  * Format U256 bytes to readable string
  * U256 values are base64-encoded big-endian bytes
  */
-export function formatU256(bytes: string | Uint8Array | undefined): string {
+export function formatU256(
+  bytes: string | Uint8Array | undefined,
+  decimals?: number
+): string {
   if (!bytes) return "0";
 
   try {
     let data: Uint8Array;
     if (typeof bytes === "string") {
-      data = new TextEncoder().encode(bytes);
+      data = base64Decode(bytes);
     } else {
       data = bytes;
     }
@@ -69,10 +84,40 @@ export function formatU256(bytes: string | Uint8Array | undefined): string {
     hex = hex.replace(/^0+/, "") || "0";
 
     const value = BigInt("0x" + hex);
+
+    if (decimals != null && decimals > 0) {
+      return formatBigIntWithDecimals(value, decimals);
+    }
+
     return formatBigInt(value);
   } catch {
     return String(bytes);
   }
+}
+
+/**
+ * Format a BigInt raw amount using token decimals.
+ *
+ * Example: formatBigIntWithDecimals(1000000000000000000n, 18) → "1"
+ * Example: formatBigIntWithDecimals(1500000000000000000n, 18) → "1.5"
+ */
+export function formatBigIntWithDecimals(
+  value: bigint,
+  decimals: number
+): string {
+  const divisor = 10n ** BigInt(decimals);
+  const whole = value / divisor;
+  const remainder = value % divisor;
+
+  if (remainder === 0n) {
+    return formatBigInt(whole);
+  }
+
+  const fracStr = remainder
+    .toString()
+    .padStart(decimals, "0")
+    .replace(/0+$/, "");
+  return `${formatBigInt(whole)}.${fracStr}`;
 }
 
 /**
@@ -98,6 +143,13 @@ export function truncateAddress(address: string, chars = 6): string {
   if (!address) return "";
   if (address.length <= chars * 2 + 2) return address;
   return `${address.slice(0, chars + 2)}...${address.slice(-chars)}`;
+}
+
+/**
+ * Build a Cartridge explorer URL for a contract/address.
+ */
+export function getContractExplorerUrl(address: string): string {
+  return `https://explorer.cartridge.gg/contract/${address}`;
 }
 
 /**

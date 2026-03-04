@@ -12,5 +12,10 @@ contracts/target/
 # Profiling output
 flamegraph.svg
 perf.data*
+perf/runs/
 
 .claude-modified-files
+.DS_Store
+**/.DS_Store
+/data/
+/bins/torii-tokens/torii-data/

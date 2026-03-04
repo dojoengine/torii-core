@@ -12,8 +12,10 @@
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use starknet::core::types::{Felt, U256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use tokio_postgres::{types::ToSql as PgToSql, Client, NoTls};
 use torii_common::{blob_to_felt, blob_to_u256, felt_to_blob, u256_to_blob};
 
 use crate::balance_fetcher::BalanceFetchRequest;
@@ -32,7 +34,16 @@ pub enum TransferDirection {
 
 /// Storage for ERC20 transfers and approvals
 pub struct Erc20Storage {
+    backend: StorageBackend,
     conn: Arc<Mutex<Connection>>,
+    pg_conns: Option<Vec<Arc<tokio::sync::Mutex<Client>>>>,
+    pg_rr: AtomicUsize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StorageBackend {
+    Sqlite,
+    Postgres,
 }
 
 /// Transfer data for batch insertion
@@ -101,7 +112,139 @@ pub struct BalanceAdjustment {
 
 impl Erc20Storage {
     /// Create or open the database
-    pub fn new(db_path: &str) -> Result<Self> {
+    pub async fn new(db_path: &str) -> Result<Self> {
+        if db_path.starts_with("postgres://") || db_path.starts_with("postgresql://") {
+            let pool_size = std::env::var("TORII_ERC20_PG_POOL_SIZE")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(8)
+                .max(1);
+
+            let mut pg_conns = Vec::with_capacity(pool_size);
+
+            for _ in 0..pool_size {
+                let (client, connection) = tokio_postgres::connect(db_path, NoTls).await?;
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        tracing::error!(target: "torii_erc20::storage", error = %e, "PostgreSQL connection task failed");
+                    }
+                });
+                pg_conns.push(Arc::new(tokio::sync::Mutex::new(client)));
+            }
+
+            let schema_client = pg_conns
+                .first()
+                .expect("PostgreSQL connection pool must contain at least one client")
+                .clone();
+            let client = schema_client.lock().await;
+            client
+                .batch_execute(
+                    r#"
+                CREATE SCHEMA IF NOT EXISTS erc20;
+
+                CREATE TABLE IF NOT EXISTS erc20.transfers (
+                    id BIGSERIAL PRIMARY KEY,
+                    token BYTEA NOT NULL,
+                    from_addr BYTEA NOT NULL,
+                    to_addr BYTEA NOT NULL,
+                    amount BYTEA NOT NULL,
+                    block_number BIGINT NOT NULL,
+                    tx_hash BYTEA NOT NULL,
+                    timestamp BIGINT DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+                    UNIQUE(token, tx_hash, from_addr, to_addr)
+                );
+                CREATE INDEX IF NOT EXISTS idx_transfers_token ON erc20.transfers(token);
+                CREATE INDEX IF NOT EXISTS idx_transfers_from ON erc20.transfers(from_addr);
+                CREATE INDEX IF NOT EXISTS idx_transfers_to ON erc20.transfers(to_addr);
+                CREATE INDEX IF NOT EXISTS idx_transfers_block ON erc20.transfers(block_number);
+                CREATE INDEX IF NOT EXISTS idx_transfers_token_block ON erc20.transfers(token, block_number DESC);
+                CREATE INDEX IF NOT EXISTS idx_transfers_from_block ON erc20.transfers(from_addr, block_number DESC);
+                CREATE INDEX IF NOT EXISTS idx_transfers_to_block ON erc20.transfers(to_addr, block_number DESC);
+
+                CREATE TABLE IF NOT EXISTS erc20.approvals (
+                    id BIGSERIAL PRIMARY KEY,
+                    token BYTEA NOT NULL,
+                    owner BYTEA NOT NULL,
+                    spender BYTEA NOT NULL,
+                    amount BYTEA NOT NULL,
+                    block_number BIGINT NOT NULL,
+                    tx_hash BYTEA NOT NULL,
+                    timestamp BIGINT DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+                    UNIQUE(token, tx_hash, owner, spender)
+                );
+                CREATE INDEX IF NOT EXISTS idx_approvals_owner ON erc20.approvals(owner, block_number DESC);
+                CREATE INDEX IF NOT EXISTS idx_approvals_spender ON erc20.approvals(spender, block_number DESC);
+                CREATE INDEX IF NOT EXISTS idx_approvals_token ON erc20.approvals(token, block_number DESC);
+
+                CREATE TABLE IF NOT EXISTS erc20.wallet_activity (
+                    id BIGSERIAL PRIMARY KEY,
+                    wallet_address BYTEA NOT NULL,
+                    token BYTEA NOT NULL,
+                    transfer_id BIGINT NOT NULL REFERENCES erc20.transfers(id),
+                    direction TEXT NOT NULL CHECK(direction IN ('sent', 'received', 'both')),
+                    block_number BIGINT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_wallet_activity_wallet_block ON erc20.wallet_activity(wallet_address, block_number DESC);
+                CREATE INDEX IF NOT EXISTS idx_wallet_activity_wallet_token ON erc20.wallet_activity(wallet_address, token, block_number DESC);
+                CREATE INDEX IF NOT EXISTS idx_wallet_activity_transfer ON erc20.wallet_activity(transfer_id);
+
+                CREATE TABLE IF NOT EXISTS erc20.approval_activity (
+                    id BIGSERIAL PRIMARY KEY,
+                    account_address BYTEA NOT NULL,
+                    token BYTEA NOT NULL,
+                    approval_id BIGINT NOT NULL REFERENCES erc20.approvals(id),
+                    role TEXT NOT NULL CHECK(role IN ('owner', 'spender', 'both')),
+                    block_number BIGINT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_approval_activity_account_block ON erc20.approval_activity(account_address, block_number DESC);
+                CREATE INDEX IF NOT EXISTS idx_approval_activity_account_token ON erc20.approval_activity(account_address, token, block_number DESC);
+                CREATE INDEX IF NOT EXISTS idx_approval_activity_approval ON erc20.approval_activity(approval_id);
+
+                CREATE TABLE IF NOT EXISTS erc20.balances (
+                    id BIGSERIAL PRIMARY KEY,
+                    token BYTEA NOT NULL,
+                    wallet BYTEA NOT NULL,
+                    balance BYTEA NOT NULL,
+                    last_block BIGINT NOT NULL,
+                    last_tx_hash BYTEA NOT NULL,
+                    updated_at BIGINT DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+                    UNIQUE(token, wallet)
+                );
+                CREATE INDEX IF NOT EXISTS idx_balances_token ON erc20.balances(token);
+                CREATE INDEX IF NOT EXISTS idx_balances_wallet ON erc20.balances(wallet);
+
+                CREATE TABLE IF NOT EXISTS erc20.balance_adjustments (
+                    id BIGSERIAL PRIMARY KEY,
+                    token BYTEA NOT NULL,
+                    wallet BYTEA NOT NULL,
+                    computed_balance BYTEA NOT NULL,
+                    actual_balance BYTEA NOT NULL,
+                    adjusted_at_block BIGINT NOT NULL,
+                    tx_hash BYTEA NOT NULL,
+                    created_at BIGINT DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+                );
+                CREATE INDEX IF NOT EXISTS idx_adjustments_wallet ON erc20.balance_adjustments(wallet);
+                CREATE INDEX IF NOT EXISTS idx_adjustments_token ON erc20.balance_adjustments(token);
+
+                CREATE TABLE IF NOT EXISTS erc20.token_metadata (
+                    token BYTEA PRIMARY KEY,
+                    name TEXT,
+                    symbol TEXT,
+                    decimals BIGINT
+                );
+                "#,
+                )
+                .await?;
+
+            tracing::info!(target: "torii_erc20::storage", pool_size, "PostgreSQL storage initialized");
+            return Ok(Self {
+                backend: StorageBackend::Postgres,
+                conn: Arc::new(Mutex::new(Connection::open_in_memory()?)),
+                pg_conns: Some(pg_conns),
+                pg_rr: AtomicUsize::new(0),
+            });
+        }
+
         let conn = Connection::open(db_path)?;
 
         // Enable WAL mode + Performance PRAGMAs (critical for production scale)
@@ -117,6 +260,7 @@ impl Erc20Storage {
              PRAGMA cache_size=-64000;
              PRAGMA temp_store=MEMORY;
              PRAGMA mmap_size=268435456;
+             PRAGMA wal_autocheckpoint=10000;
              PRAGMA page_size=4096;
              PRAGMA busy_timeout=5000;",
         )?;
@@ -337,10 +481,24 @@ impl Erc20Storage {
             [],
         )?;
 
+        // Token metadata table
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS token_metadata (
+                token BLOB PRIMARY KEY,
+                name TEXT,
+                symbol TEXT,
+                decimals INTEGER
+            )",
+            [],
+        )?;
+
         tracing::info!(target: "torii_erc20::storage", db_path = %db_path, "Database initialized");
 
         Ok(Self {
+            backend: StorageBackend::Sqlite,
             conn: Arc::new(Mutex::new(conn)),
+            pg_conns: None,
+            pg_rr: AtomicUsize::new(0),
         })
     }
 
@@ -350,7 +508,10 @@ impl Erc20Storage {
     /// - Single lock acquisition
     /// - Single transaction (all-or-nothing commit)
     /// - Prepared statement reuse
-    pub fn insert_transfers_batch(&self, transfers: &[TransferData]) -> Result<usize> {
+    pub async fn insert_transfers_batch(&self, transfers: &[TransferData]) -> Result<usize> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_insert_transfers_batch(transfers).await;
+        }
         if transfers.is_empty() {
             return Ok(0);
         }
@@ -443,7 +604,10 @@ impl Erc20Storage {
     }
 
     /// Insert multiple approvals in a single transaction
-    pub fn insert_approvals_batch(&self, approvals: &[ApprovalData]) -> Result<usize> {
+    pub async fn insert_approvals_batch(&self, approvals: &[ApprovalData]) -> Result<usize> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_insert_approvals_batch(approvals).await;
+        }
         if approvals.is_empty() {
             return Ok(0);
         }
@@ -545,7 +709,7 @@ impl Erc20Storage {
     /// - `block_from`/`block_to`: Block range filter
     /// - `cursor`: Cursor from previous page
     /// - `limit`: Maximum results
-    pub fn get_transfers_filtered(
+    pub async fn get_transfers_filtered(
         &self,
         wallet: Option<Felt>,
         from: Option<Felt>,
@@ -557,6 +721,13 @@ impl Erc20Storage {
         cursor: Option<TransferCursor>,
         limit: u32,
     ) -> Result<(Vec<TransferData>, Option<TransferCursor>)> {
+        if self.backend == StorageBackend::Postgres {
+            return self
+                .pg_get_transfers_filtered(
+                    wallet, from, to, tokens, direction, block_from, block_to, cursor, limit,
+                )
+                .await;
+        }
         let conn = self.conn.lock().unwrap();
 
         // Build dynamic query based on filters
@@ -692,7 +863,7 @@ impl Erc20Storage {
     /// - `block_from`/`block_to`: Block range filter
     /// - `cursor`: Cursor from previous page
     /// - `limit`: Maximum results
-    pub fn get_approvals_filtered(
+    pub async fn get_approvals_filtered(
         &self,
         account: Option<Felt>,
         owner: Option<Felt>,
@@ -703,6 +874,13 @@ impl Erc20Storage {
         cursor: Option<ApprovalCursor>,
         limit: u32,
     ) -> Result<(Vec<ApprovalData>, Option<ApprovalCursor>)> {
+        if self.backend == StorageBackend::Postgres {
+            return self
+                .pg_get_approvals_filtered(
+                    account, owner, spender, tokens, block_from, block_to, cursor, limit,
+                )
+                .await;
+        }
         let conn = self.conn.lock().unwrap();
 
         // Build dynamic query based on filters
@@ -818,21 +996,30 @@ impl Erc20Storage {
     }
 
     /// Get transfer count
-    pub fn get_transfer_count(&self) -> Result<u64> {
+    pub async fn get_transfer_count(&self) -> Result<u64> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_transfer_count().await;
+        }
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM transfers", [], |row| row.get(0))?;
         Ok(count as u64)
     }
 
     /// Get approval count
-    pub fn get_approval_count(&self) -> Result<u64> {
+    pub async fn get_approval_count(&self) -> Result<u64> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_approval_count().await;
+        }
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM approvals", [], |row| row.get(0))?;
         Ok(count as u64)
     }
 
     /// Get indexed token count
-    pub fn get_token_count(&self) -> Result<u64> {
+    pub async fn get_token_count(&self) -> Result<u64> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_token_count().await;
+        }
         let conn = self.conn.lock().unwrap();
         let count: i64 =
             conn.query_row("SELECT COUNT(DISTINCT token) FROM transfers", [], |row| {
@@ -842,7 +1029,10 @@ impl Erc20Storage {
     }
 
     /// Get latest block number indexed
-    pub fn get_latest_block(&self) -> Result<Option<u64>> {
+    pub async fn get_latest_block(&self) -> Result<Option<u64>> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_latest_block().await;
+        }
         let conn = self.conn.lock().unwrap();
         let block: Option<i64> = conn
             .query_row("SELECT MAX(block_number) FROM transfers", [], |row| {
@@ -855,7 +1045,10 @@ impl Erc20Storage {
     // ===== Balance Tracking Methods =====
 
     /// Get current balance for a wallet/token pair
-    pub fn get_balance(&self, token: Felt, wallet: Felt) -> Result<Option<U256>> {
+    pub async fn get_balance(&self, token: Felt, wallet: Felt) -> Result<Option<U256>> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_balance(token, wallet).await;
+        }
         let conn = self.conn.lock().unwrap();
         let token_blob = felt_to_blob(token);
         let wallet_blob = felt_to_blob(wallet);
@@ -872,7 +1065,14 @@ impl Erc20Storage {
     }
 
     /// Get balance with last block info for a wallet/token pair
-    pub fn get_balance_with_block(&self, token: Felt, wallet: Felt) -> Result<Option<(U256, u64)>> {
+    pub async fn get_balance_with_block(
+        &self,
+        token: Felt,
+        wallet: Felt,
+    ) -> Result<Option<(U256, u64)>> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_balance_with_block(token, wallet).await;
+        }
         let conn = self.conn.lock().unwrap();
         let token_blob = felt_to_blob(token);
         let wallet_blob = felt_to_blob(wallet);
@@ -888,11 +1088,99 @@ impl Erc20Storage {
         Ok(result.map(|(bytes, block)| (blob_to_u256(&bytes), block as u64)))
     }
 
+    /// Get balances with optional token/wallet filters and cursor pagination.
+    ///
+    /// Pagination is cursor-based on the `balances.id` primary key in ascending order.
+    /// Returns `(rows, next_cursor)`.
+    pub async fn get_balances_filtered(
+        &self,
+        token: Option<Felt>,
+        wallet: Option<Felt>,
+        cursor: Option<i64>,
+        limit: u32,
+    ) -> Result<(Vec<BalanceData>, Option<i64>)> {
+        if self.backend == StorageBackend::Postgres {
+            return self
+                .pg_get_balances_filtered(token, wallet, cursor, limit)
+                .await;
+        }
+        let conn = self.conn.lock().unwrap();
+
+        let mut query = String::from(
+            "SELECT id, token, wallet, balance, last_block, last_tx_hash
+             FROM balances
+             WHERE 1=1",
+        );
+        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+        if let Some(token_addr) = token {
+            query.push_str(" AND token = ?");
+            params_vec.push(Box::new(felt_to_blob(token_addr)));
+        }
+
+        if let Some(wallet_addr) = wallet {
+            query.push_str(" AND wallet = ?");
+            params_vec.push(Box::new(felt_to_blob(wallet_addr)));
+        }
+
+        if let Some(c) = cursor {
+            query.push_str(" AND id > ?");
+            params_vec.push(Box::new(c));
+        }
+
+        query.push_str(" ORDER BY id ASC LIMIT ?");
+        params_vec.push(Box::new(limit as i64));
+
+        let mut stmt = conn.prepare(&query)?;
+        let params_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(std::convert::AsRef::as_ref).collect();
+
+        let rows = stmt.query_map(params_refs.as_slice(), |row| {
+            let id: i64 = row.get(0)?;
+            let token_bytes: Vec<u8> = row.get(1)?;
+            let wallet_bytes: Vec<u8> = row.get(2)?;
+            let balance_bytes: Vec<u8> = row.get(3)?;
+            let last_block: i64 = row.get(4)?;
+            let last_tx_hash_bytes: Vec<u8> = row.get(5)?;
+
+            Ok((
+                id,
+                BalanceData {
+                    token: blob_to_felt(&token_bytes),
+                    wallet: blob_to_felt(&wallet_bytes),
+                    balance: blob_to_u256(&balance_bytes),
+                    last_block: last_block as u64,
+                    last_tx_hash: blob_to_felt(&last_tx_hash_bytes),
+                },
+            ))
+        })?;
+
+        let mut out: Vec<BalanceData> = Vec::new();
+        let mut last_id: Option<i64> = None;
+
+        for row in rows {
+            let (id, data) = row?;
+            last_id = Some(id);
+            out.push(data);
+        }
+
+        let next_cursor = if out.len() == limit as usize {
+            last_id
+        } else {
+            None
+        };
+
+        Ok((out, next_cursor))
+    }
+
     /// Get balances for multiple wallet/token pairs in a single query
-    pub fn get_balances_batch(
+    pub async fn get_balances_batch(
         &self,
         pairs: &[(Felt, Felt)],
     ) -> Result<HashMap<(Felt, Felt), U256>> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_balances_batch(pairs).await;
+        }
         if pairs.is_empty() {
             return Ok(HashMap::new());
         }
@@ -926,10 +1214,13 @@ impl Erc20Storage {
     ///
     /// The returned requests have block_number set to transfer.block_number - 1
     /// (the block RIGHT BEFORE the transfer occurred).
-    pub fn check_balances_batch(
+    pub async fn check_balances_batch(
         &self,
         transfers: &[TransferData],
     ) -> Result<Vec<BalanceFetchRequest>> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_check_balances_batch(transfers).await;
+        }
         if transfers.is_empty() {
             return Ok(Vec::new());
         }
@@ -945,7 +1236,7 @@ impl Erc20Storage {
             .collect();
 
         // Get current balances for all senders
-        let current_balances = self.get_balances_batch(&sender_pairs)?;
+        let current_balances = self.get_balances_batch(&sender_pairs).await?;
 
         // Track running balance changes within this batch
         // (multiple transfers from same wallet in same batch)
@@ -1023,11 +1314,16 @@ impl Erc20Storage {
     /// # Arguments
     /// * `transfers` - The transfers to apply
     /// * `adjustments` - Map of (token, wallet) -> actual_balance fetched from RPC
-    pub fn apply_transfers_with_adjustments(
+    pub async fn apply_transfers_with_adjustments(
         &self,
         transfers: &[TransferData],
         adjustments: &HashMap<(Felt, Felt), U256>,
     ) -> Result<()> {
+        if self.backend == StorageBackend::Postgres {
+            return self
+                .pg_apply_transfers_with_adjustments(transfers, adjustments)
+                .await;
+        }
         if transfers.is_empty() {
             return Ok(());
         }
@@ -1209,7 +1505,7 @@ impl Erc20Storage {
     }
 
     /// Get adjustment count (for statistics)
-    pub fn get_adjustment_count(&self) -> Result<u64> {
+    pub async fn get_adjustment_count(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM balance_adjustments", [], |row| {
             row.get(0)
@@ -1218,12 +1514,1101 @@ impl Erc20Storage {
     }
 
     /// Get unique wallet count with balances
-    pub fn get_wallet_count(&self) -> Result<u64> {
+    pub async fn get_wallet_count(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
         let count: i64 =
             conn.query_row("SELECT COUNT(DISTINCT wallet) FROM balances", [], |row| {
                 row.get(0)
             })?;
         Ok(count as u64)
+    }
+
+    // ===== Token Metadata Methods =====
+
+    /// Check if metadata exists for a token
+    pub async fn has_token_metadata(&self, token: Felt) -> Result<bool> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_has_token_metadata(token).await;
+        }
+        let conn = self.conn.lock().unwrap();
+        let token_blob = felt_to_blob(token);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM token_metadata WHERE token = ?",
+            params![&token_blob],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Returns the subset of `tokens` that already have metadata.
+    pub async fn has_token_metadata_batch(&self, tokens: &[Felt]) -> Result<HashSet<Felt>> {
+        if tokens.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_has_token_metadata_batch(tokens).await;
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut existing = HashSet::with_capacity(tokens.len());
+        let mut stmt = conn.prepare("SELECT 1 FROM token_metadata WHERE token = ? LIMIT 1")?;
+        for token in tokens {
+            let mut rows = stmt.query(params![felt_to_blob(*token)])?;
+            if rows.next()?.is_some() {
+                existing.insert(*token);
+            }
+        }
+
+        Ok(existing)
+    }
+
+    /// Insert or update token metadata
+    pub async fn upsert_token_metadata(
+        &self,
+        token: Felt,
+        name: Option<&str>,
+        symbol: Option<&str>,
+        decimals: Option<u8>,
+    ) -> Result<()> {
+        // Some on-chain metadata payloads include embedded NUL bytes.
+        // PostgreSQL TEXT rejects '\0', so normalize before persistence.
+        let clean_name = name.map(|s| s.replace('\0', ""));
+        let clean_symbol = symbol.map(|s| s.replace('\0', ""));
+        if self.backend == StorageBackend::Postgres {
+            return self
+                .pg_upsert_token_metadata(
+                    token,
+                    clean_name.as_deref(),
+                    clean_symbol.as_deref(),
+                    decimals,
+                )
+                .await;
+        }
+        let conn = self.conn.lock().unwrap();
+        let token_blob = felt_to_blob(token);
+        conn.execute(
+            "INSERT INTO token_metadata (token, name, symbol, decimals)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(token) DO UPDATE SET
+                 name = COALESCE(excluded.name, token_metadata.name),
+                 symbol = COALESCE(excluded.symbol, token_metadata.symbol),
+                 decimals = COALESCE(excluded.decimals, token_metadata.decimals)",
+            params![
+                &token_blob,
+                clean_name.as_deref(),
+                clean_symbol.as_deref(),
+                decimals.map(|d| d as i64)
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Get token metadata
+    pub async fn get_token_metadata(
+        &self,
+        token: Felt,
+    ) -> Result<Option<(Option<String>, Option<String>, Option<u8>)>> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_token_metadata(token).await;
+        }
+        let conn = self.conn.lock().unwrap();
+        let token_blob = felt_to_blob(token);
+        let result = conn
+            .query_row(
+                "SELECT name, symbol, decimals FROM token_metadata WHERE token = ?",
+                params![&token_blob],
+                |row| {
+                    let name: Option<String> = row.get(0)?;
+                    let symbol: Option<String> = row.get(1)?;
+                    let decimals: Option<i64> = row.get(2)?;
+                    Ok((name, symbol, decimals.map(|d| d as u8)))
+                },
+            )
+            .ok();
+        Ok(result)
+    }
+
+    /// Get all token metadata
+    pub async fn get_all_token_metadata(
+        &self,
+    ) -> Result<Vec<(Felt, Option<String>, Option<String>, Option<u8>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT token, name, symbol, decimals FROM token_metadata")?;
+        let rows = stmt.query_map([], |row| {
+            let token_bytes: Vec<u8> = row.get(0)?;
+            let name: Option<String> = row.get(1)?;
+            let symbol: Option<String> = row.get(2)?;
+            let decimals: Option<i64> = row.get(3)?;
+            Ok((
+                blob_to_felt(&token_bytes),
+                name,
+                symbol,
+                decimals.map(|d| d as u8),
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Get token metadata with cursor-based pagination.
+    ///
+    /// Returns at most `limit` rows and an optional next cursor token.
+    pub async fn get_token_metadata_paginated(
+        &self,
+        cursor: Option<Felt>,
+        limit: u32,
+    ) -> Result<(
+        Vec<(Felt, Option<String>, Option<String>, Option<u8>)>,
+        Option<Felt>,
+    )> {
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_get_token_metadata_paginated(cursor, limit).await;
+        }
+        let conn = self.conn.lock().unwrap();
+        let fetch_limit = limit.clamp(1, 1000) as usize + 1;
+
+        let mut out = if let Some(cursor_token) = cursor {
+            let cursor_blob = felt_to_blob(cursor_token);
+            let mut stmt = conn.prepare(
+                "SELECT token, name, symbol, decimals
+                 FROM token_metadata
+                 WHERE token > ?1
+                 ORDER BY token ASC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![&cursor_blob, fetch_limit as i64], |row| {
+                let token_bytes: Vec<u8> = row.get(0)?;
+                let name: Option<String> = row.get(1)?;
+                let symbol: Option<String> = row.get(2)?;
+                let decimals: Option<i64> = row.get(3)?;
+                Ok((
+                    blob_to_felt(&token_bytes),
+                    name,
+                    symbol,
+                    decimals.map(|d| d as u8),
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT token, name, symbol, decimals
+                 FROM token_metadata
+                 ORDER BY token ASC
+                 LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![fetch_limit as i64], |row| {
+                let token_bytes: Vec<u8> = row.get(0)?;
+                let name: Option<String> = row.get(1)?;
+                let symbol: Option<String> = row.get(2)?;
+                let decimals: Option<i64> = row.get(3)?;
+                Ok((
+                    blob_to_felt(&token_bytes),
+                    name,
+                    symbol,
+                    decimals.map(|d| d as u8),
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
+        let capped = limit.clamp(1, 1000) as usize;
+        let next_cursor = if out.len() > capped {
+            let next = out[capped].0;
+            out.truncate(capped);
+            Some(next)
+        } else {
+            None
+        };
+
+        Ok((out, next_cursor))
+    }
+
+    async fn pg_client(&self) -> Result<tokio::sync::MutexGuard<'_, Client>> {
+        let conns = self
+            .pg_conns
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("PostgreSQL connections not initialized"))?;
+        let idx = self.pg_rr.fetch_add(1, Ordering::Relaxed) % conns.len();
+        Ok(conns[idx].lock().await)
+    }
+
+    fn pg_next_param(
+        params: &mut Vec<Box<dyn PgToSql + Sync + Send>>,
+        value: impl PgToSql + Sync + Send + 'static,
+    ) -> String {
+        params.push(Box::new(value));
+        format!("${}", params.len())
+    }
+
+    async fn pg_insert_transfers_batch(&self, transfers: &[TransferData]) -> Result<usize> {
+        if transfers.is_empty() {
+            return Ok(0);
+        }
+
+        let zero_blob = felt_to_blob(Felt::ZERO);
+        let mut token_vec = Vec::with_capacity(transfers.len());
+        let mut from_vec = Vec::with_capacity(transfers.len());
+        let mut to_vec = Vec::with_capacity(transfers.len());
+        let mut amount_vec = Vec::with_capacity(transfers.len());
+        let mut block_vec = Vec::with_capacity(transfers.len());
+        let mut tx_hash_vec = Vec::with_capacity(transfers.len());
+        let mut ts_vec = Vec::with_capacity(transfers.len());
+
+        for transfer in transfers {
+            token_vec.push(felt_to_blob(transfer.token));
+            from_vec.push(felt_to_blob(transfer.from));
+            to_vec.push(felt_to_blob(transfer.to));
+            amount_vec.push(u256_to_blob(transfer.amount));
+            block_vec.push(transfer.block_number as i64);
+            tx_hash_vec.push(felt_to_blob(transfer.tx_hash));
+            ts_vec.push(
+                transfer
+                    .timestamp
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+            );
+        }
+
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one(
+                "WITH inserted AS (
+                    INSERT INTO erc20.transfers (token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
+                    SELECT i.token, i.from_addr, i.to_addr, i.amount, i.block_number, i.tx_hash, i.timestamp
+                    FROM unnest(
+                        $1::bytea[],
+                        $2::bytea[],
+                        $3::bytea[],
+                        $4::bytea[],
+                        $5::bigint[],
+                        $6::bytea[],
+                        $7::bigint[]
+                    ) AS i(token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
+                    ON CONFLICT (token, tx_hash, from_addr, to_addr) DO NOTHING
+                    RETURNING id, token, from_addr, to_addr, block_number
+                ),
+                _activity AS (
+                    INSERT INTO erc20.wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                    SELECT t.from_addr, t.token, t.id, 'both', t.block_number
+                    FROM inserted t
+                    WHERE t.from_addr <> $8::bytea AND t.to_addr <> $8::bytea AND t.from_addr = t.to_addr
+                    UNION ALL
+                    SELECT t.from_addr, t.token, t.id, 'sent', t.block_number
+                    FROM inserted t
+                    WHERE t.from_addr <> $8::bytea AND t.from_addr <> t.to_addr
+                    UNION ALL
+                    SELECT t.to_addr, t.token, t.id, 'received', t.block_number
+                    FROM inserted t
+                    WHERE t.to_addr <> $8::bytea AND t.from_addr <> t.to_addr
+                )
+                SELECT COUNT(*)::bigint FROM inserted",
+                &[
+                    &token_vec,
+                    &from_vec,
+                    &to_vec,
+                    &amount_vec,
+                    &block_vec,
+                    &tx_hash_vec,
+                    &ts_vec,
+                    &zero_blob,
+                ],
+            )
+            .await?;
+        Ok(row.get::<usize, i64>(0) as usize)
+    }
+
+    async fn pg_insert_approvals_batch(&self, approvals: &[ApprovalData]) -> Result<usize> {
+        if approvals.is_empty() {
+            return Ok(0);
+        }
+
+        let zero_blob = felt_to_blob(Felt::ZERO);
+        let mut token_vec = Vec::with_capacity(approvals.len());
+        let mut owner_vec = Vec::with_capacity(approvals.len());
+        let mut spender_vec = Vec::with_capacity(approvals.len());
+        let mut amount_vec = Vec::with_capacity(approvals.len());
+        let mut block_vec = Vec::with_capacity(approvals.len());
+        let mut tx_hash_vec = Vec::with_capacity(approvals.len());
+        let mut ts_vec = Vec::with_capacity(approvals.len());
+
+        for approval in approvals {
+            token_vec.push(felt_to_blob(approval.token));
+            owner_vec.push(felt_to_blob(approval.owner));
+            spender_vec.push(felt_to_blob(approval.spender));
+            amount_vec.push(u256_to_blob(approval.amount));
+            block_vec.push(approval.block_number as i64);
+            tx_hash_vec.push(felt_to_blob(approval.tx_hash));
+            ts_vec.push(
+                approval
+                    .timestamp
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+            );
+        }
+
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one(
+                "WITH inserted AS (
+                    INSERT INTO erc20.approvals (token, owner, spender, amount, block_number, tx_hash, timestamp)
+                    SELECT i.token, i.owner, i.spender, i.amount, i.block_number, i.tx_hash, i.timestamp
+                    FROM unnest(
+                        $1::bytea[],
+                        $2::bytea[],
+                        $3::bytea[],
+                        $4::bytea[],
+                        $5::bigint[],
+                        $6::bytea[],
+                        $7::bigint[]
+                    ) AS i(token, owner, spender, amount, block_number, tx_hash, timestamp)
+                    ON CONFLICT (token, tx_hash, owner, spender) DO NOTHING
+                    RETURNING id, token, owner, spender, block_number
+                ),
+                _activity AS (
+                    INSERT INTO erc20.approval_activity (account_address, token, approval_id, role, block_number)
+                    SELECT a.owner, a.token, a.id, 'both', a.block_number
+                    FROM inserted a
+                    WHERE a.owner <> $8::bytea AND a.spender <> $8::bytea AND a.owner = a.spender
+                    UNION ALL
+                    SELECT a.owner, a.token, a.id, 'owner', a.block_number
+                    FROM inserted a
+                    WHERE a.owner <> $8::bytea AND a.owner <> a.spender
+                    UNION ALL
+                    SELECT a.spender, a.token, a.id, 'spender', a.block_number
+                    FROM inserted a
+                    WHERE a.spender <> $8::bytea AND a.owner <> a.spender
+                )
+                SELECT COUNT(*)::bigint FROM inserted",
+                &[
+                    &token_vec,
+                    &owner_vec,
+                    &spender_vec,
+                    &amount_vec,
+                    &block_vec,
+                    &tx_hash_vec,
+                    &ts_vec,
+                    &zero_blob,
+                ],
+            )
+            .await?;
+        Ok(row.get::<usize, i64>(0) as usize)
+    }
+
+    async fn pg_get_transfers_filtered(
+        &self,
+        wallet: Option<Felt>,
+        from: Option<Felt>,
+        to: Option<Felt>,
+        tokens: &[Felt],
+        direction: TransferDirection,
+        block_from: Option<u64>,
+        block_to: Option<u64>,
+        cursor: Option<TransferCursor>,
+        limit: u32,
+    ) -> Result<(Vec<TransferData>, Option<TransferCursor>)> {
+        let client = self.pg_client().await?;
+        let mut query = String::new();
+        let mut params: Vec<Box<dyn PgToSql + Sync + Send>> = Vec::new();
+
+        if let Some(wallet_addr) = wallet {
+            let p = Self::pg_next_param(&mut params, felt_to_blob(wallet_addr));
+            query.push_str(
+                "SELECT DISTINCT t.id, t.token, t.from_addr, t.to_addr, t.amount, t.block_number, t.tx_hash, t.timestamp
+                 FROM erc20.wallet_activity wa
+                 JOIN erc20.transfers t ON wa.transfer_id = t.id
+                 WHERE wa.wallet_address = ",
+            );
+            query.push_str(&p);
+
+            match direction {
+                TransferDirection::All => {}
+                TransferDirection::Sent => query.push_str(" AND wa.direction IN ('sent', 'both')"),
+                TransferDirection::Received => {
+                    query.push_str(" AND wa.direction IN ('received', 'both')");
+                }
+            }
+
+            if !tokens.is_empty() {
+                let list = tokens
+                    .iter()
+                    .map(|token| Self::pg_next_param(&mut params, felt_to_blob(*token)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                query.push_str(&format!(" AND wa.token IN ({list})"));
+            }
+        } else {
+            query.push_str(
+                "SELECT t.id, t.token, t.from_addr, t.to_addr, t.amount, t.block_number, t.tx_hash, t.timestamp
+                 FROM erc20.transfers t
+                 WHERE 1=1",
+            );
+
+            if let Some(from_addr) = from {
+                query.push_str(" AND t.from_addr = ");
+                query.push_str(&Self::pg_next_param(&mut params, felt_to_blob(from_addr)));
+            }
+
+            if let Some(to_addr) = to {
+                query.push_str(" AND t.to_addr = ");
+                query.push_str(&Self::pg_next_param(&mut params, felt_to_blob(to_addr)));
+            }
+
+            if !tokens.is_empty() {
+                let list = tokens
+                    .iter()
+                    .map(|token| Self::pg_next_param(&mut params, felt_to_blob(*token)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                query.push_str(&format!(" AND t.token IN ({list})"));
+            }
+        }
+
+        if let Some(block_min) = block_from {
+            query.push_str(" AND t.block_number >= ");
+            query.push_str(&Self::pg_next_param(&mut params, block_min as i64));
+        }
+
+        if let Some(block_max) = block_to {
+            query.push_str(" AND t.block_number <= ");
+            query.push_str(&Self::pg_next_param(&mut params, block_max as i64));
+        }
+
+        if let Some(c) = cursor {
+            let p1 = Self::pg_next_param(&mut params, c.block_number as i64);
+            let p2 = Self::pg_next_param(&mut params, c.block_number as i64);
+            let p3 = Self::pg_next_param(&mut params, c.id);
+            query.push_str(&format!(
+                " AND (t.block_number < {p1} OR (t.block_number = {p2} AND t.id < {p3}))"
+            ));
+        }
+
+        let pl = Self::pg_next_param(&mut params, limit as i64);
+        query.push_str(&format!(
+            " ORDER BY t.block_number DESC, t.id DESC LIMIT {pl}"
+        ));
+        let refs: Vec<&(dyn PgToSql + Sync)> = params
+            .iter()
+            .map(|p| p.as_ref() as &(dyn PgToSql + Sync))
+            .collect();
+        let rows = client.query(&query, &refs).await?;
+
+        let transfers: Vec<TransferData> = rows
+            .into_iter()
+            .map(|row| TransferData {
+                id: Some(row.get::<usize, i64>(0)),
+                token: blob_to_felt(&row.get::<usize, Vec<u8>>(1)),
+                from: blob_to_felt(&row.get::<usize, Vec<u8>>(2)),
+                to: blob_to_felt(&row.get::<usize, Vec<u8>>(3)),
+                amount: blob_to_u256(&row.get::<usize, Vec<u8>>(4)),
+                block_number: row.get::<usize, i64>(5) as u64,
+                tx_hash: blob_to_felt(&row.get::<usize, Vec<u8>>(6)),
+                timestamp: Some(row.get::<usize, i64>(7)),
+            })
+            .collect();
+
+        let next_cursor = if transfers.len() == limit as usize {
+            transfers.last().map(|t| TransferCursor {
+                block_number: t.block_number,
+                id: t.id.unwrap_or_default(),
+            })
+        } else {
+            None
+        };
+
+        Ok((transfers, next_cursor))
+    }
+
+    async fn pg_get_approvals_filtered(
+        &self,
+        account: Option<Felt>,
+        owner: Option<Felt>,
+        spender: Option<Felt>,
+        tokens: &[Felt],
+        block_from: Option<u64>,
+        block_to: Option<u64>,
+        cursor: Option<ApprovalCursor>,
+        limit: u32,
+    ) -> Result<(Vec<ApprovalData>, Option<ApprovalCursor>)> {
+        let client = self.pg_client().await?;
+        let mut query = String::new();
+        let mut params: Vec<Box<dyn PgToSql + Sync + Send>> = Vec::new();
+
+        if let Some(account_addr) = account {
+            query.push_str(
+                "SELECT DISTINCT a.id, a.token, a.owner, a.spender, a.amount, a.block_number, a.tx_hash, a.timestamp
+                 FROM erc20.approval_activity aa
+                 JOIN erc20.approvals a ON aa.approval_id = a.id
+                 WHERE aa.account_address = ",
+            );
+            query.push_str(&Self::pg_next_param(
+                &mut params,
+                felt_to_blob(account_addr),
+            ));
+
+            if !tokens.is_empty() {
+                let list = tokens
+                    .iter()
+                    .map(|token| Self::pg_next_param(&mut params, felt_to_blob(*token)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                query.push_str(&format!(" AND aa.token IN ({list})"));
+            }
+        } else {
+            query.push_str(
+                "SELECT a.id, a.token, a.owner, a.spender, a.amount, a.block_number, a.tx_hash, a.timestamp
+                 FROM erc20.approvals a
+                 WHERE 1=1",
+            );
+            if let Some(owner_addr) = owner {
+                query.push_str(" AND a.owner = ");
+                query.push_str(&Self::pg_next_param(&mut params, felt_to_blob(owner_addr)));
+            }
+            if let Some(spender_addr) = spender {
+                query.push_str(" AND a.spender = ");
+                query.push_str(&Self::pg_next_param(
+                    &mut params,
+                    felt_to_blob(spender_addr),
+                ));
+            }
+            if !tokens.is_empty() {
+                let list = tokens
+                    .iter()
+                    .map(|token| Self::pg_next_param(&mut params, felt_to_blob(*token)))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                query.push_str(&format!(" AND a.token IN ({list})"));
+            }
+        }
+
+        if let Some(block_min) = block_from {
+            query.push_str(" AND a.block_number >= ");
+            query.push_str(&Self::pg_next_param(&mut params, block_min as i64));
+        }
+        if let Some(block_max) = block_to {
+            query.push_str(" AND a.block_number <= ");
+            query.push_str(&Self::pg_next_param(&mut params, block_max as i64));
+        }
+        if let Some(c) = cursor {
+            let p1 = Self::pg_next_param(&mut params, c.block_number as i64);
+            let p2 = Self::pg_next_param(&mut params, c.block_number as i64);
+            let p3 = Self::pg_next_param(&mut params, c.id);
+            query.push_str(&format!(
+                " AND (a.block_number < {p1} OR (a.block_number = {p2} AND a.id < {p3}))"
+            ));
+        }
+        let pl = Self::pg_next_param(&mut params, limit as i64);
+        query.push_str(&format!(
+            " ORDER BY a.block_number DESC, a.id DESC LIMIT {pl}"
+        ));
+
+        let refs: Vec<&(dyn PgToSql + Sync)> = params
+            .iter()
+            .map(|p| p.as_ref() as &(dyn PgToSql + Sync))
+            .collect();
+        let rows = client.query(&query, &refs).await?;
+        let approvals: Vec<ApprovalData> = rows
+            .into_iter()
+            .map(|row| ApprovalData {
+                id: Some(row.get::<usize, i64>(0)),
+                token: blob_to_felt(&row.get::<usize, Vec<u8>>(1)),
+                owner: blob_to_felt(&row.get::<usize, Vec<u8>>(2)),
+                spender: blob_to_felt(&row.get::<usize, Vec<u8>>(3)),
+                amount: blob_to_u256(&row.get::<usize, Vec<u8>>(4)),
+                block_number: row.get::<usize, i64>(5) as u64,
+                tx_hash: blob_to_felt(&row.get::<usize, Vec<u8>>(6)),
+                timestamp: Some(row.get::<usize, i64>(7)),
+            })
+            .collect();
+
+        let next_cursor = if approvals.len() == limit as usize {
+            approvals.last().map(|a| ApprovalCursor {
+                block_number: a.block_number,
+                id: a.id.unwrap_or_default(),
+            })
+        } else {
+            None
+        };
+        Ok((approvals, next_cursor))
+    }
+
+    async fn pg_get_transfer_count(&self) -> Result<u64> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one("SELECT COUNT(*) FROM erc20.transfers", &[])
+            .await?;
+        Ok(row.get::<usize, i64>(0) as u64)
+    }
+
+    async fn pg_get_approval_count(&self) -> Result<u64> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one("SELECT COUNT(*) FROM erc20.approvals", &[])
+            .await?;
+        Ok(row.get::<usize, i64>(0) as u64)
+    }
+
+    async fn pg_get_token_count(&self) -> Result<u64> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one("SELECT COUNT(DISTINCT token) FROM erc20.transfers", &[])
+            .await?;
+        Ok(row.get::<usize, i64>(0) as u64)
+    }
+
+    async fn pg_get_latest_block(&self) -> Result<Option<u64>> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one("SELECT MAX(block_number) FROM erc20.transfers", &[])
+            .await?;
+        let v: Option<i64> = row.get(0);
+        Ok(v.map(|x| x as u64))
+    }
+
+    async fn pg_get_balance(&self, token: Felt, wallet: Felt) -> Result<Option<U256>> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_opt(
+                "SELECT balance FROM erc20.balances WHERE token = $1 AND wallet = $2",
+                &[&felt_to_blob(token), &felt_to_blob(wallet)],
+            )
+            .await?;
+        Ok(row.map(|r| blob_to_u256(&r.get::<usize, Vec<u8>>(0))))
+    }
+
+    async fn pg_get_balance_with_block(
+        &self,
+        token: Felt,
+        wallet: Felt,
+    ) -> Result<Option<(U256, u64)>> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_opt(
+                "SELECT balance, last_block FROM erc20.balances WHERE token = $1 AND wallet = $2",
+                &[&felt_to_blob(token), &felt_to_blob(wallet)],
+            )
+            .await?;
+        Ok(row.map(|r| {
+            (
+                blob_to_u256(&r.get::<usize, Vec<u8>>(0)),
+                r.get::<usize, i64>(1) as u64,
+            )
+        }))
+    }
+
+    async fn pg_get_balances_filtered(
+        &self,
+        token: Option<Felt>,
+        wallet: Option<Felt>,
+        cursor: Option<i64>,
+        limit: u32,
+    ) -> Result<(Vec<BalanceData>, Option<i64>)> {
+        let client = self.pg_client().await?;
+        let mut query = String::from(
+            "SELECT id, token, wallet, balance, last_block, last_tx_hash FROM erc20.balances WHERE 1=1",
+        );
+        let mut params: Vec<Box<dyn PgToSql + Sync + Send>> = Vec::new();
+        if let Some(token_addr) = token {
+            query.push_str(" AND token = ");
+            query.push_str(&Self::pg_next_param(&mut params, felt_to_blob(token_addr)));
+        }
+        if let Some(wallet_addr) = wallet {
+            query.push_str(" AND wallet = ");
+            query.push_str(&Self::pg_next_param(&mut params, felt_to_blob(wallet_addr)));
+        }
+        if let Some(c) = cursor {
+            query.push_str(" AND id > ");
+            query.push_str(&Self::pg_next_param(&mut params, c));
+        }
+        query.push_str(" ORDER BY id ASC LIMIT ");
+        query.push_str(&Self::pg_next_param(&mut params, limit as i64));
+
+        let refs: Vec<&(dyn PgToSql + Sync)> = params
+            .iter()
+            .map(|p| p.as_ref() as &(dyn PgToSql + Sync))
+            .collect();
+        let rows = client.query(&query, &refs).await?;
+        let mut out = Vec::new();
+        let mut last_id = None;
+        for row in rows {
+            let id: i64 = row.get(0);
+            last_id = Some(id);
+            out.push(BalanceData {
+                token: blob_to_felt(&row.get::<usize, Vec<u8>>(1)),
+                wallet: blob_to_felt(&row.get::<usize, Vec<u8>>(2)),
+                balance: blob_to_u256(&row.get::<usize, Vec<u8>>(3)),
+                last_block: row.get::<usize, i64>(4) as u64,
+                last_tx_hash: blob_to_felt(&row.get::<usize, Vec<u8>>(5)),
+            });
+        }
+        let next_cursor = if out.len() == limit as usize {
+            last_id
+        } else {
+            None
+        };
+        Ok((out, next_cursor))
+    }
+
+    async fn pg_get_balances_batch(
+        &self,
+        pairs: &[(Felt, Felt)],
+    ) -> Result<HashMap<(Felt, Felt), U256>> {
+        let client = self.pg_client().await?;
+        let mut result = HashMap::new();
+        for (token, wallet) in pairs {
+            if let Some(row) = client
+                .query_opt(
+                    "SELECT balance FROM erc20.balances WHERE token = $1 AND wallet = $2",
+                    &[&felt_to_blob(*token), &felt_to_blob(*wallet)],
+                )
+                .await?
+            {
+                result.insert(
+                    (*token, *wallet),
+                    blob_to_u256(&row.get::<usize, Vec<u8>>(0)),
+                );
+            }
+        }
+        Ok(result)
+    }
+
+    async fn pg_check_balances_batch(
+        &self,
+        transfers: &[TransferData],
+    ) -> Result<Vec<BalanceFetchRequest>> {
+        if transfers.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sender_pairs: Vec<(Felt, Felt)> = transfers
+            .iter()
+            .filter(|t| t.from != Felt::ZERO)
+            .map(|t| (t.token, t.from))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        let current_balances = self.pg_get_balances_batch(&sender_pairs).await?;
+        let mut pending_debits: HashMap<(Felt, Felt), U256> = HashMap::new();
+        let mut adjustment_requests = Vec::new();
+        for transfer in transfers {
+            if transfer.from == Felt::ZERO {
+                continue;
+            }
+            let key = (transfer.token, transfer.from);
+            let stored_balance = current_balances
+                .get(&key)
+                .copied()
+                .unwrap_or(U256::from(0u64));
+            let total_pending = pending_debits
+                .get(&key)
+                .copied()
+                .unwrap_or(U256::from(0u64));
+            let total_needed = total_pending + transfer.amount;
+            if stored_balance >= total_needed {
+                pending_debits.insert(key, total_needed);
+            } else {
+                let block_before = transfer.block_number.saturating_sub(1);
+                #[allow(clippy::suspicious_operation_groupings)]
+                let already_requested =
+                    adjustment_requests.iter().any(|r: &BalanceFetchRequest| {
+                        r.token == transfer.token
+                            && r.wallet == transfer.from
+                            && r.block_number == block_before
+                    });
+                if !already_requested {
+                    adjustment_requests.push(BalanceFetchRequest {
+                        token: transfer.token,
+                        wallet: transfer.from,
+                        block_number: block_before,
+                    });
+                }
+            }
+        }
+        Ok(adjustment_requests)
+    }
+
+    async fn pg_apply_transfers_with_adjustments(
+        &self,
+        transfers: &[TransferData],
+        adjustments: &HashMap<(Felt, Felt), U256>,
+    ) -> Result<()> {
+        if transfers.is_empty() {
+            return Ok(());
+        }
+
+        let mut client = self.pg_client().await?;
+        let tx = client.transaction().await?;
+        let mut balance_cache: HashMap<(Felt, Felt), U256> = HashMap::new();
+        let select_balance_stmt = tx
+            .prepare("SELECT balance FROM erc20.balances WHERE token = $1 AND wallet = $2")
+            .await?;
+        let upsert_balance_stmt = tx
+            .prepare(
+                "INSERT INTO erc20.balances (token, wallet, balance, last_block, last_tx_hash, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, EXTRACT(EPOCH FROM NOW())::BIGINT)
+                 ON CONFLICT (token, wallet) DO UPDATE SET
+                     balance = EXCLUDED.balance,
+                     last_block = EXCLUDED.last_block,
+                     last_tx_hash = EXCLUDED.last_tx_hash,
+                     updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT",
+            )
+            .await?;
+        let insert_adjustment_stmt = tx
+            .prepare(
+                "INSERT INTO erc20.balance_adjustments
+                 (token, wallet, computed_balance, actual_balance, adjusted_at_block, tx_hash)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .await?;
+
+        for transfer in transfers {
+            if transfer.from != Felt::ZERO {
+                let key = (transfer.token, transfer.from);
+                if let std::collections::hash_map::Entry::Vacant(e) = balance_cache.entry(key) {
+                    let row = tx
+                        .query_opt(
+                            &select_balance_stmt,
+                            &[&felt_to_blob(transfer.token), &felt_to_blob(transfer.from)],
+                        )
+                        .await?;
+                    let bal = row.map_or(U256::from(0u64), |r| {
+                        blob_to_u256(&r.get::<usize, Vec<u8>>(0))
+                    });
+                    e.insert(bal);
+                }
+            }
+            if transfer.to != Felt::ZERO {
+                let key = (transfer.token, transfer.to);
+                if let std::collections::hash_map::Entry::Vacant(e) = balance_cache.entry(key) {
+                    let row = tx
+                        .query_opt(
+                            &select_balance_stmt,
+                            &[&felt_to_blob(transfer.token), &felt_to_blob(transfer.to)],
+                        )
+                        .await?;
+                    let bal = row.map_or(U256::from(0u64), |r| {
+                        blob_to_u256(&r.get::<usize, Vec<u8>>(0))
+                    });
+                    e.insert(bal);
+                }
+            }
+        }
+
+        let mut adjustments_to_record: Vec<BalanceAdjustment> = Vec::new();
+        for ((token, wallet), actual_balance) in adjustments {
+            let key = (*token, *wallet);
+            let computed = balance_cache.get(&key).copied().unwrap_or(U256::from(0u64));
+            if computed != *actual_balance {
+                if let Some(transfer) = transfers
+                    .iter()
+                    .find(|t| t.token == *token && t.from == *wallet)
+                {
+                    adjustments_to_record.push(BalanceAdjustment {
+                        token: *token,
+                        wallet: *wallet,
+                        computed_balance: computed,
+                        actual_balance: *actual_balance,
+                        adjusted_at_block: transfer.block_number,
+                        tx_hash: transfer.tx_hash,
+                    });
+                }
+            }
+            balance_cache.insert(key, *actual_balance);
+        }
+
+        let mut last_block_per_wallet: HashMap<(Felt, Felt), (u64, Felt)> = HashMap::new();
+        for transfer in transfers {
+            if transfer.from != Felt::ZERO {
+                let key = (transfer.token, transfer.from);
+                let current = balance_cache.get(&key).copied().unwrap_or(U256::from(0u64));
+                let new_balance = if current >= transfer.amount {
+                    current - transfer.amount
+                } else {
+                    U256::from(0u64)
+                };
+                balance_cache.insert(key, new_balance);
+                last_block_per_wallet.insert(key, (transfer.block_number, transfer.tx_hash));
+            }
+            if transfer.to != Felt::ZERO {
+                let key = (transfer.token, transfer.to);
+                let current = balance_cache.get(&key).copied().unwrap_or(U256::from(0u64));
+                balance_cache.insert(key, current + transfer.amount);
+                last_block_per_wallet.insert(key, (transfer.block_number, transfer.tx_hash));
+            }
+        }
+
+        for ((token, wallet), balance) in &balance_cache {
+            let (last_block, last_tx_hash) = last_block_per_wallet
+                .get(&(*token, *wallet))
+                .copied()
+                .unwrap_or((0, Felt::ZERO));
+            tx.execute(
+                &upsert_balance_stmt,
+                &[
+                    &felt_to_blob(*token),
+                    &felt_to_blob(*wallet),
+                    &u256_to_blob(*balance),
+                    &(last_block as i64),
+                    &felt_to_blob(last_tx_hash),
+                ],
+            )
+            .await?;
+        }
+
+        for adj in &adjustments_to_record {
+            tx.execute(
+                &insert_adjustment_stmt,
+                &[
+                    &felt_to_blob(adj.token),
+                    &felt_to_blob(adj.wallet),
+                    &u256_to_blob(adj.computed_balance),
+                    &u256_to_blob(adj.actual_balance),
+                    &(adj.adjusted_at_block as i64),
+                    &felt_to_blob(adj.tx_hash),
+                ],
+            )
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn pg_has_token_metadata(&self, token: Felt) -> Result<bool> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one(
+                "SELECT COUNT(*) FROM erc20.token_metadata WHERE token = $1",
+                &[&felt_to_blob(token)],
+            )
+            .await?;
+        Ok(row.get::<usize, i64>(0) > 0)
+    }
+
+    async fn pg_has_token_metadata_batch(&self, tokens: &[Felt]) -> Result<HashSet<Felt>> {
+        if tokens.is_empty() {
+            return Ok(HashSet::new());
+        }
+
+        let client = self.pg_client().await?;
+        let blob_to_token: HashMap<Vec<u8>, Felt> =
+            tokens.iter().map(|t| (felt_to_blob(*t), *t)).collect();
+        let blob_params: Vec<Vec<u8>> = blob_to_token.keys().cloned().collect();
+
+        let rows = client
+            .query(
+                "SELECT token FROM erc20.token_metadata WHERE token = ANY($1::bytea[])",
+                &[&blob_params],
+            )
+            .await?;
+
+        let mut existing = HashSet::new();
+        for row in rows {
+            let token_blob: Vec<u8> = row.get(0);
+            if let Some(token) = blob_to_token.get(&token_blob) {
+                existing.insert(*token);
+            }
+        }
+
+        Ok(existing)
+    }
+
+    async fn pg_upsert_token_metadata(
+        &self,
+        token: Felt,
+        name: Option<&str>,
+        symbol: Option<&str>,
+        decimals: Option<u8>,
+    ) -> Result<()> {
+        let clean_name = name.map(|s| s.replace('\0', ""));
+        let clean_symbol = symbol.map(|s| s.replace('\0', ""));
+        let client = self.pg_client().await?;
+        client
+            .execute(
+                "INSERT INTO erc20.token_metadata (token, name, symbol, decimals)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (token) DO UPDATE SET
+                 name = COALESCE(EXCLUDED.name, erc20.token_metadata.name),
+                 symbol = COALESCE(EXCLUDED.symbol, erc20.token_metadata.symbol),
+                 decimals = COALESCE(EXCLUDED.decimals, erc20.token_metadata.decimals)",
+                &[
+                    &felt_to_blob(token),
+                    &clean_name.as_deref(),
+                    &clean_symbol.as_deref(),
+                    &decimals.map(|d| d as i64),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn pg_get_token_metadata(
+        &self,
+        token: Felt,
+    ) -> Result<Option<(Option<String>, Option<String>, Option<u8>)>> {
+        let client = self.pg_client().await?;
+        let row = client
+            .query_opt(
+                "SELECT name, symbol, decimals FROM erc20.token_metadata WHERE token = $1",
+                &[&felt_to_blob(token)],
+            )
+            .await?;
+        Ok(row.map(|r| {
+            let decimals: Option<i64> = r.get(2);
+            (r.get(0), r.get(1), decimals.map(|d| d as u8))
+        }))
+    }
+
+    async fn pg_get_token_metadata_paginated(
+        &self,
+        cursor: Option<Felt>,
+        limit: u32,
+    ) -> Result<(
+        Vec<(Felt, Option<String>, Option<String>, Option<u8>)>,
+        Option<Felt>,
+    )> {
+        let client = self.pg_client().await?;
+        let fetch_limit = limit.clamp(1, 1000) as i64 + 1;
+        let rows = if let Some(cursor_token) = cursor {
+            client
+                .query(
+                    "SELECT token, name, symbol, decimals
+                 FROM erc20.token_metadata
+                 WHERE token > $1
+                 ORDER BY token ASC
+                 LIMIT $2",
+                    &[&felt_to_blob(cursor_token), &fetch_limit],
+                )
+                .await?
+        } else {
+            client
+                .query(
+                    "SELECT token, name, symbol, decimals
+                 FROM erc20.token_metadata
+                 ORDER BY token ASC
+                 LIMIT $1",
+                    &[&fetch_limit],
+                )
+                .await?
+        };
+
+        let mut out: Vec<(Felt, Option<String>, Option<String>, Option<u8>)> = rows
+            .into_iter()
+            .map(|row| {
+                let decimals: Option<i64> = row.get(3);
+                (
+                    blob_to_felt(&row.get::<usize, Vec<u8>>(0)),
+                    row.get(1),
+                    row.get(2),
+                    decimals.map(|d| d as u8),
+                )
+            })
+            .collect();
+
+        let capped = limit.clamp(1, 1000) as usize;
+        let next_cursor = if out.len() > capped {
+            let next = out[capped].0;
+            out.truncate(capped);
+            Some(next)
+        } else {
+            None
+        };
+        Ok((out, next_cursor))
     }
 }

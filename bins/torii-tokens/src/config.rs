@@ -11,6 +11,7 @@ use starknet::core::types::Felt;
 ///
 /// - **Event**: Uses `starknet_getEvents` with per-contract cursors.
 ///   Best for indexing specific contracts - easy to add new ones without re-indexing.
+///
 #[derive(Clone, Debug, Default, ValueEnum, PartialEq, Eq)]
 pub enum ExtractionMode {
     /// Fetch all events from blocks (single global cursor)
@@ -18,6 +19,15 @@ pub enum ExtractionMode {
     BlockRange,
     /// Fetch events per contract (per-contract cursors)
     Event,
+}
+
+/// Metadata fetching behavior.
+#[derive(Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum MetadataMode {
+    /// Fetch metadata during indexing.
+    Inline,
+    /// Skip metadata fetching during indexing (faster backfills).
+    Deferred,
 }
 
 /// Unified Token Indexer for Starknet
@@ -38,12 +48,16 @@ pub enum ExtractionMode {
 /// # Block range mode (default) - index ETH and STRK
 /// torii-tokens --include-well-known --from-block 0
 ///
+/// # Enable observability (Prometheus metrics)
+/// torii-tokens --observability --include-well-known --from-block 0
+///
 /// # Event mode - per-contract cursors
 /// torii-tokens --mode event --erc20 0x...ETH,0x...STRK --from-block 0
 ///
 /// # Add a new contract in event mode (just restart with updated list)
 /// torii-tokens --mode event --erc20 0x...ETH,0x...STRK,0x...USDC --from-block 0
 /// # USDC starts from block 0, ETH and STRK resume from their cursors
+///
 /// ```
 #[derive(Parser, Debug)]
 #[command(name = "torii-tokens")]
@@ -78,9 +92,29 @@ pub struct Config {
     #[arg(long, default_value = "./torii-data")]
     pub db_dir: String,
 
+    /// Optional engine database URL/path.
+    ///
+    /// Supports PostgreSQL (`postgres://...`) and SQLite (`sqlite:...` or file path).
+    /// When omitted, engine state uses `<db-dir>/engine.db`.
+    #[arg(long, env = "DATABASE_URL")]
+    pub database_url: Option<String>,
+
+    /// Optional token storage database URL/path.
+    ///
+    /// Supports PostgreSQL (`postgres://...`) and SQLite (`sqlite:...` or file path).
+    /// When omitted, token storages use `--database-url` if set, otherwise `<db-dir>/*.db`.
+    #[arg(long, env = "STORAGE_DATABASE_URL")]
+    pub storage_database_url: Option<String>,
+
     /// Port for the HTTP/gRPC API
     #[arg(long, default_value = "3000")]
     pub port: u16,
+
+    /// Enable observability features (Prometheus metrics endpoint and metric collection)
+    ///
+    /// If not set, observability is disabled.
+    #[arg(long)]
+    pub observability: bool,
 
     /// ERC20 contracts to index (comma-separated hex addresses)
     ///
@@ -118,6 +152,18 @@ pub struct Config {
     /// Block range to query per iteration in event mode
     #[arg(long, default_value = "10000")]
     pub event_block_batch_size: u64,
+
+    /// Metadata fetching mode.
+    ///
+    /// If omitted: defaults to `inline`.
+    #[arg(long, value_enum)]
+    pub metadata_mode: Option<MetadataMode>,
+
+    /// Run metadata-only flow and exit.
+    ///
+    /// Note: currently implemented as a guarded no-op placeholder.
+    #[arg(long)]
+    pub metadata_backfill_only: bool,
 }
 
 impl Config {
@@ -150,5 +196,23 @@ impl Config {
             || !self.erc721.is_empty()
             || !self.erc1155.is_empty()
             || self.include_well_known
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn observability_defaults_to_disabled() {
+        let cfg = Config::parse_from(["torii-tokens"]);
+        assert!(!cfg.observability);
+    }
+
+    #[test]
+    fn observability_flag_enables_features() {
+        let cfg = Config::parse_from(["torii-tokens", "--observability"]);
+        assert!(cfg.observability);
     }
 }

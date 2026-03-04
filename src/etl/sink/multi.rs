@@ -44,6 +44,7 @@ impl Sink for MultiSink {
         // since they are totally independent of each other.
         // Run each sink in sequence
         for sink in &self.sinks {
+            let sink_start = std::time::Instant::now();
             // Each sink processes the same envelopes
             // Sinks filter by TypeId internally
             if let Err(e) = sink.process(envelopes, batch).await {
@@ -53,9 +54,13 @@ impl Sink for MultiSink {
                     sink.name(),
                     e
                 );
+                ::metrics::counter!("torii_sink_failures_total", "sink" => sink.name().to_string())
+                    .increment(1);
                 // TODO: Currently, if a sink fails at processing an event, it will not be retried.
                 // We should see a better mechanism here, is it better to retry and stop the whole process if it fails again?
             }
+            ::metrics::histogram!("torii_sink_process_duration_seconds", "sink" => sink.name().to_string())
+                .record(sink_start.elapsed().as_secs_f64());
         }
 
         tracing::debug!(

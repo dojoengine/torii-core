@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use futures::stream::Stream;
-use sqlx::sqlite::{SqlitePool, SqliteRow};
+use sqlx::any::AnyRow;
 use sqlx::{Column, Row};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -11,23 +11,26 @@ use crate::proto::{
     sql_sink_server::SqlSink as SqlSinkTrait, GetSchemaRequest, GetSchemaResponse, QueryRequest,
     QueryResponse, QueryRow, SqlOperation, SqlOperationUpdate, SqlSubscribeRequest, TableSchema,
 };
+use crate::DbBackend;
 
 /// gRPC service implementation for SqlSink
 #[derive(Clone)]
 pub struct SqlSinkService {
-    pool: Arc<SqlitePool>,
+    pool: Arc<sqlx::Pool<sqlx::Any>>,
+    backend: DbBackend,
     /// Broadcast channel for real-time SQL operation updates
     pub update_tx: broadcast::Sender<SqlOperationUpdate>,
 }
 
 impl SqlSinkService {
     /// Creates a new SqlSinkService.
-    pub fn new(pool: Arc<SqlitePool>) -> Self {
+    pub(crate) fn new(pool: Arc<sqlx::Pool<sqlx::Any>>, backend: DbBackend) -> Self {
         // Create broadcast channel with capacity for 1000 pending updates
         let (tx, _rx) = broadcast::channel(1000);
 
         Self {
             pool,
+            backend,
             update_tx: tx,
         }
     }
@@ -43,8 +46,8 @@ impl SqlSinkService {
         let _ = self.update_tx.send(update);
     }
 
-    /// Helper to convert a SQLite row to a QueryRow proto message.
-    fn row_to_proto(row: &SqliteRow) -> Result<QueryRow, Status> {
+    /// Helper to convert a row to a QueryRow proto message.
+    fn row_to_proto(row: &AnyRow) -> QueryRow {
         let mut columns = std::collections::HashMap::new();
 
         for (idx, col) in row.columns().iter().enumerate() {
@@ -67,7 +70,7 @@ impl SqlSinkService {
             columns.insert(col_name, value);
         }
 
-        Ok(QueryRow { columns })
+        QueryRow { columns }
     }
 }
 
@@ -94,10 +97,7 @@ impl SqlSinkTrait for SqlSinkService {
             .await
             .map_err(|e| Status::invalid_argument(format!("Query failed: {e}")))?;
 
-        let proto_rows: Vec<QueryRow> = rows
-            .iter()
-            .map(Self::row_to_proto)
-            .collect::<Result<Vec<_>, _>>()?;
+        let proto_rows: Vec<QueryRow> = rows.iter().map(Self::row_to_proto).collect();
 
         let total_rows = proto_rows.len() as i32;
 
@@ -149,7 +149,7 @@ impl SqlSinkTrait for SqlSinkService {
                 Status::internal(format!("Stream error: {e}"))
             })? {
                 row_count += 1;
-                let proto_row = SqlSinkService::row_to_proto(&row)?;
+                let proto_row = SqlSinkService::row_to_proto(&row);
                 tracing::debug!(
                     target: "torii::sql_sink::grpc",
                     "Yielding row {}: {:?}",
@@ -182,46 +182,100 @@ impl SqlSinkTrait for SqlSinkService {
             req.table_name
         );
 
-        let table_query = if let Some(table_name) = req.table_name {
-            format!("SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'")
-        } else {
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-                .to_string()
-        };
-
-        let table_rows = sqlx::query(&table_query)
-            .fetch_all(self.pool.as_ref())
-            .await
-            .map_err(|e| Status::internal(format!("Failed to fetch tables: {e}")))?;
-
         let mut tables = Vec::new();
 
-        for table_row in table_rows {
-            let table_name: String = table_row
-                .try_get(0)
-                .map_err(|e| Status::internal(format!("Failed to read table name: {e}")))?;
+        match self.backend {
+            DbBackend::Sqlite => {
+                let table_query = if let Some(table_name) = req.table_name {
+                    format!(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name='{table_name}'"
+                    )
+                } else {
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                        .to_string()
+                };
 
-            let column_query = format!("PRAGMA table_info({table_name})");
-            let column_rows = sqlx::query(&column_query)
-                .fetch_all(self.pool.as_ref())
-                .await
-                .map_err(|e| Status::internal(format!("Failed to fetch columns: {e}")))?;
+                let table_rows = sqlx::query(&table_query)
+                    .fetch_all(self.pool.as_ref())
+                    .await
+                    .map_err(|e| Status::internal(format!("Failed to fetch tables: {e}")))?;
 
-            let mut columns = std::collections::HashMap::new();
-            for col_row in column_rows {
-                let col_name: String = col_row
-                    .try_get(1)
-                    .map_err(|e| Status::internal(format!("Failed to read column name: {e}")))?;
-                let col_type: String = col_row
-                    .try_get(2)
-                    .map_err(|e| Status::internal(format!("Failed to read column type: {e}")))?;
-                columns.insert(col_name, col_type);
+                for table_row in table_rows {
+                    let table_name: String = table_row
+                        .try_get(0)
+                        .map_err(|e| Status::internal(format!("Failed to read table name: {e}")))?;
+
+                    let column_query = format!("PRAGMA table_info({table_name})");
+                    let column_rows = sqlx::query(&column_query)
+                        .fetch_all(self.pool.as_ref())
+                        .await
+                        .map_err(|e| Status::internal(format!("Failed to fetch columns: {e}")))?;
+
+                    let mut columns = std::collections::HashMap::new();
+                    for col_row in column_rows {
+                        let col_name: String = col_row.try_get(1).map_err(|e| {
+                            Status::internal(format!("Failed to read column name: {e}"))
+                        })?;
+                        let col_type: String = col_row.try_get(2).map_err(|e| {
+                            Status::internal(format!("Failed to read column type: {e}"))
+                        })?;
+                        columns.insert(col_name, col_type);
+                    }
+
+                    tables.push(TableSchema {
+                        name: table_name,
+                        columns,
+                    });
+                }
             }
+            DbBackend::Postgres => {
+                let table_rows = if let Some(table_name) = req.table_name {
+                    sqlx::query(
+                        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'sql_sink' AND table_name = $1",
+                    )
+                    .bind(table_name)
+                    .fetch_all(self.pool.as_ref())
+                    .await
+                    .map_err(|e| Status::internal(format!("Failed to fetch tables: {e}")))?
+                } else {
+                    sqlx::query(
+                        "SELECT table_name FROM information_schema.tables WHERE table_schema = 'sql_sink' ORDER BY table_name",
+                    )
+                    .fetch_all(self.pool.as_ref())
+                    .await
+                    .map_err(|e| Status::internal(format!("Failed to fetch tables: {e}")))?
+                };
 
-            tables.push(TableSchema {
-                name: table_name,
-                columns,
-            });
+                for table_row in table_rows {
+                    let table_name: String = table_row
+                        .try_get(0)
+                        .map_err(|e| Status::internal(format!("Failed to read table name: {e}")))?;
+
+                    let column_rows = sqlx::query(
+                        "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'sql_sink' AND table_name = $1 ORDER BY ordinal_position",
+                    )
+                    .bind(&table_name)
+                    .fetch_all(self.pool.as_ref())
+                    .await
+                    .map_err(|e| Status::internal(format!("Failed to fetch columns: {e}")))?;
+
+                    let mut columns = std::collections::HashMap::new();
+                    for col_row in column_rows {
+                        let col_name: String = col_row.try_get(0).map_err(|e| {
+                            Status::internal(format!("Failed to read column name: {e}"))
+                        })?;
+                        let col_type: String = col_row.try_get(1).map_err(|e| {
+                            Status::internal(format!("Failed to read column type: {e}"))
+                        })?;
+                        columns.insert(col_name, col_type);
+                    }
+
+                    tables.push(TableSchema {
+                        name: table_name,
+                        columns,
+                    });
+                }
+            }
         }
 
         tracing::info!(

@@ -236,7 +236,7 @@ impl DecoderContext {
                     }
                 }
             } else {
-                tracing::warn!(
+                tracing::trace!(
                     target: "torii::etl::decoder_context",
                     "Decoder ID {:?} not found for contract {:#x}",
                     decoder_id,
@@ -309,6 +309,29 @@ impl Decoder for DecoderContext {
                     // Contract was identified but no decoders match - skip silently
                     return Ok(Vec::new());
                 }
+
+                // Registry cache can contain stale decoder IDs after decoder-ID scheme changes
+                // or upgrades. If so, evict and fall back to all decoders for this event.
+                let invalid_ids: Vec<DecoderId> = decoder_ids
+                    .iter()
+                    .copied()
+                    .filter(|id| !self.decoders.contains_key(id))
+                    .collect();
+                if !invalid_ids.is_empty() {
+                    drop(cache);
+                    {
+                        let mut cache = self.registry_cache.write().await;
+                        cache.remove(&event.from_address);
+                    }
+                    tracing::debug!(
+                        target: "torii::etl::decoder_context",
+                        contract = %format!("{:#x}", event.from_address),
+                        invalid_decoder_ids = ?invalid_ids,
+                        "Evicted stale decoder mapping from registry cache; falling back to all decoders"
+                    );
+                    return self.decode_with_all_decoders(event).await;
+                }
+
                 // Clone to release lock before async decode
                 let decoder_ids = decoder_ids.clone();
                 drop(cache);

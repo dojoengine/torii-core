@@ -108,6 +108,7 @@ impl RetryPolicy {
                 }
                 Err(err) => {
                     attempts += 1;
+                    ::metrics::counter!("torii_rpc_retries_total").increment(1);
 
                     if attempts > self.max_retries {
                         tracing::error!(

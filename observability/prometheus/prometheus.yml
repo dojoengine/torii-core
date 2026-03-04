@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: torii
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - host.containers.internal:3000
+          - host.docker.internal:3000
+
+  - job_name: postgres-exporter
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - postgres-exporter:9187
