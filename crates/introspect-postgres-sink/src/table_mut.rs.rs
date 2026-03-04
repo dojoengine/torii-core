@@ -169,13 +169,7 @@ impl PgTableSchema {
         Ok((table, queries))
     }
 
-    pub fn add_column(&mut self, name: &str, type_def: PostgresType) -> String {
-        self.order.push(name.to_string());
-        self.columns.insert(name.to_string(), type_def.clone());
-        format!(r#"ADD COLUMN "{}" {}"#, name, type_def.to_string())
-    }
-
-    pub fn append_to_schema(&mut self, name: &str, new: &[ColumnDef]) -> Result<Vec<String>> {
+    pub fn upgrade_schema(&mut self, name: &str, new: &[ColumnDef]) -> Result<Vec<String>> {
         let mut queries = vec![];
         let mut table_queries = vec![];
         let branch = Xxh3::new_based(name);
@@ -275,13 +269,13 @@ impl PgTableSchema {
             Array as PgArray, BigInt, Boolean, Bytea, Bytes31 as PgBytes31, Char31,
             EthAddress as PgEthAddress, Felt252 as PgFelt252, Int, Int128, None as PgNone,
             RustEnum as PgRustEnum, SmallInt, StarknetHash, Struct as PgStruct, Text,
-            Tuple as PgTuple, Uint128, Uint16, Uint32, Uint64, Uint8,
+            Tuple as PgTuple, Uint8, Uint16, Uint32, Uint64, Uint128,
         };
         use TypeDef::{
             Array, Bool, ByteArray, ByteArrayE, Bytes31, Bytes31E, ClassHash, ContractAddress,
-            Enum, EthAddress, Felt252, FixedArray, None as TDNone, ShortUtf8, StorageAddress,
-            StorageBaseAddress, Struct, Tuple, Utf8String, I128, I16, I32, I64, I8, U128, U16, U32,
-            U64, U8,
+            Enum, EthAddress, Felt252, FixedArray, I8, I16, I32, I64, I128, None as TDNone,
+            ShortUtf8, StorageAddress, StorageBaseAddress, Struct, Tuple, U8, U16, U32, U64, U128,
+            Utf8String,
         };
         match (old, new) {
             (PgNone, TDNone)

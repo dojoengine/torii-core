@@ -1,10 +1,12 @@
 use crate::{error::DojoToriiError, DojoToriiResult};
+use dojo_introspect_types::DojoSerde;
 use introspect_types::{
     transcode::Transcode, Attribute, Attributes, CairoSerde, ColumnDef, PrimaryDef, TableSchema,
 };
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 
+const LEGACY_ATTRIBUTE: &str = "legacy";
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct DojoTable {
     pub id: Felt,
@@ -14,6 +16,7 @@ pub struct DojoTable {
     pub columns: HashMap<Felt, ColumnDef>,
     pub key_fields: Vec<Felt>,
     pub value_fields: Vec<Felt>,
+    pub legacy: bool,
 }
 
 impl From<TableSchema> for DojoTable {
@@ -28,6 +31,7 @@ impl From<TableSchema> for DojoTable {
             }
             field_map.insert(column.id, column);
         }
+        let legacy = value.attributes.has_attribute(LEGACY_ATTRIBUTE);
         DojoTable {
             id: value.id,
             name: value.name,
@@ -36,6 +40,7 @@ impl From<TableSchema> for DojoTable {
             columns: field_map,
             key_fields,
             value_fields,
+            legacy: legacy,
         }
     }
 }
@@ -45,13 +50,16 @@ impl From<DojoTable> for TableSchema {
         let DojoTable {
             id,
             name,
-            attributes,
+            mut attributes,
             primary,
             mut columns,
             key_fields,
             value_fields,
+            legacy,
         } = value;
-
+        if legacy && !attributes.has_attribute(LEGACY_ATTRIBUTE) {
+            attributes.push(Attribute::new_empty(LEGACY_ATTRIBUTE.to_string()));
+        }
         TableSchema {
             id: id,
             name: name,
@@ -116,7 +124,7 @@ impl DojoTable {
         values: Vec<Felt>,
         output: &mut Vec<u8>,
     ) -> DojoToriiResult<()> {
-        let mut values: CairoSerde<_> = values.into();
+        let mut values: DojoSerde<_> = DojoSerde::new_from_source(values, self.legacy);
         let columns = self.get_columns(&self.value_fields)?;
         columns
             .transcode(&mut values, output)
@@ -138,7 +146,7 @@ impl DojoTable {
     }
 
     pub fn parse_field(&self, selector: Felt, data: Vec<Felt>) -> DojoToriiResult<Vec<u8>> {
-        let mut data: CairoSerde<_> = data.into();
+        let mut data: DojoSerde<_> = DojoSerde::new_from_source(data, self.legacy);
         let column = self.get_column(&selector)?;
         column
             .transcode_complete(&mut data)
@@ -146,7 +154,7 @@ impl DojoTable {
     }
 
     pub fn parse_fields(&self, selectors: &[Felt], data: &[Felt]) -> DojoToriiResult<Vec<u8>> {
-        let mut data: CairoSerde<_> = data.into();
+        let mut data: DojoSerde<_> = DojoSerde::new_from_source(data, self.legacy);
         let columns = self.get_columns(selectors)?;
         columns
             .transcode_complete(&mut data)

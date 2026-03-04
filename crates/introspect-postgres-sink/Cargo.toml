@@ -1,5 +1,5 @@
 [package]
-name = "torii-sink-postgres"
+name = "torii-introspect-postgres-sink"
 version = "0.1.0"
 edition = "2021"
 description = "PostgreSQL sink implementation for Torii runtime"
@@ -16,19 +16,16 @@ sqlx = { workspace = true, features = [
 anyhow.workspace = true
 async-trait.workspace = true
 xxhash-rust.workspace = true
-rand.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 starknet.workspace = true
 tokio.workspace = true
+torii.workspace = true
 tracing.workspace = true
-introspect-types.workspace = true
 starknet-types-core.workspace = true
 thiserror.workspace = true
 
 # Local crates
-torii-core = { path = "../../core/torii-core" }
-torii-types-introspect = { path = "../../types/torii-types-introspect" }
-torii-types-erc20 = { path = "../../types/torii-types-erc20" }
-torii-types-erc721 = { path = "../../types/torii-types-erc721" }
+introspect-types = { path = "../../../introspect/crates/types" }
+torii-introspect.path = "../introspect"

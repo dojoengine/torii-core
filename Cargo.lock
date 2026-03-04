@@ -4204,12 +4204,34 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "introspect-events",
+ "introspect-rust-macros",
  "introspect-types",
  "serde",
  "starknet-types-core",
  "thiserror 2.0.18",
  "tonic-build",
  "torii",
+]
+
+[[package]]
+name = "torii-introspect-postgres-sink"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hex",
+ "introspect-types",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "starknet",
+ "starknet-types-core",
+ "thiserror 2.0.18",
+ "tokio",
+ "torii",
+ "torii-introspect",
+ "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -5202,6 +5224,12 @@ checksum = "05f360fc0b24296329c78fda852a1e9ae82de9cf7b27dae4b7f62f118f77b9ed"
 dependencies = [
  "tap",
 ]
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
 
 [[package]]
 name = "yoke"

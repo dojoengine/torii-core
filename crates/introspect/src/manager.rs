@@ -9,7 +9,6 @@ use introspect_types::{
 };
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
-use torii_types_introspect::IdValue;
 
 pub enum Error {}
 

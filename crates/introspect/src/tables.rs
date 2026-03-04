@@ -1,9 +1,14 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use introspect_types::{
-    Attribute, CairoDeserializer, ColumnDef, ColumnInfo, DecodeError, GetRefTypeDef, PrimaryDef, PrimaryTypeDef, PrimaryValue, TableSchema, TypeDef, serialize_def::serialize_with_type_def, transcode::CairoSerializer
+    bytes::IntoByteSource,
+    serialize::{CairoSeFrom, CairoSerialization},
+    Attribute, ColumnDef, DecodeError, PrimaryDef,
 };
-use serde::{Deserialize, Serialize};
+use serde::{
+    ser::{SerializeMap, SerializeSeq},
+    Deserialize, Serialize, Serializer,
+};
 use starknet_types_core::felt::Felt;
 
 use crate::Record;
@@ -23,76 +28,137 @@ pub struct Table {
     pub id: Felt,
     pub name: String,
     pub attributes: Arc<Vec<Attribute>>,
-    pub primary: PrimaryDef,
-    pub columns: HashMap<Felt, ColumnDef>,
+    pub primary: Arc<PrimaryDef>,
+    pub columns: HashMap<Felt, Arc<ColumnDef>>,
     pub order: Vec<Felt>,
     pub alive: bool,
 }
 
-pub struct RecordSchema<'a> {
-    pub name: &'a str,
-    pub primary: &'a PrimaryDef,
-    pub columns: Vec<&'a ColumnDef>,
+pub struct RecordSchema {
+    name: String,
+    primary: Arc<PrimaryDef>,
+    columns: Vec<Arc<ColumnDef>>,
 }
 
-impl Table{
-    pub fn get_columns(&self, selectors: &[Felt]) -> TableResult<Vec<&ColumnDef>> {
+impl Table {
+    pub fn get_columns(&self, selectors: &[Felt]) -> TableResult<Vec<Arc<ColumnDef>>> {
         selectors
             .into_iter()
             .map(|selector| self.get_column(selector))
             .collect()
     }
 
-    pub fn get_column(&self, selector: &Felt) -> TableResult<&ColumnDef> {
+    pub fn get_column(&self, selector: &Felt) -> TableResult<Arc<ColumnDef>> {
         self.columns
             .get(selector)
             .ok_or_else(|| TableError::ColumnNotFound(*selector, self.name.clone()))
+            .cloned()
     }
+
     pub fn get_schema(&self, column_ids: &[Felt]) -> TableResult<RecordSchema> {
+        let columns = self.get_columns(column_ids)?;
         Ok(RecordSchema {
-            name: &self.name,
-            primary: &self.primary,
-            columns: self.get_columns(column_ids)?,
+            name: self.name.clone(),
+            primary: self.primary.clone(),
+            columns,
         })
     }
 }
 
+impl RecordSchema {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 
-impl<'a> RecordSchema<'a>{
-    pub fn parse_record<S: CairoSerializer>(&self, record: &Record, serializer: &mut S) -> Result<(), S::Error>{
-        let mut map = serializer.serialize_map(Some(self.columns.len()))?;
-        serialize_with_type_def()
+    pub fn columns(&self) -> &[Arc<ColumnDef>] {
+        &self.columns
+    }
+
+    pub fn primary(&self) -> &PrimaryDef {
+        &self.primary
+    }
+
+    pub fn parse_primary_as_entry<'a, S: Serializer, C: CairoSerialization>(
+        &self,
+        record: &Record,
+        serializer: &mut <S as Serializer>::SerializeMap,
+        cairo_se: &'a C,
+    ) -> Result<(), S::Error> {
+        let mut id = record.id.into_source();
+        let de = RefCell::new(&mut id);
+        serializer.serialize_entry(
+            &self.primary.name,
+            &CairoSeFrom::new(&(&self.primary.type_def).into(), &de, cairo_se),
+        )
+    }
+
+    pub fn parse_record_entries<'a, S: Serializer, C: CairoSerialization>(
+        &self,
+        record: &Record,
+        map: &mut <S as Serializer>::SerializeMap,
+        cairo_se: &'a C,
+    ) -> Result<(), S::Error> {
+        let mut values = record.values.as_slice().into_source();
+        let de = RefCell::new(&mut values);
+        for col in &self.columns {
+            map.serialize_entry(&col.name, &CairoSeFrom::new(&col.type_def, &de, cairo_se))?;
+        }
+        Ok(())
+    }
+
+    pub fn parse_record<'a, S: Serializer, C: CairoSerialization>(
+        &self,
+        record: &Record,
+        serializer: S,
+        cairo_se: &'a C,
+    ) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(1 + self.columns.len()))?;
+        self.parse_primary_as_entry::<S, C>(record, &mut map, cairo_se)?;
+        self.parse_record_entries::<S, C>(record, &mut map, cairo_se)?;
+        map.end()
+    }
+
+    pub fn parse_records<'a, S: Serializer, C: CairoSerialization>(
+        &self,
+        records: &[Record],
+        serializer: S,
+        cairo_se: &'a C,
+    ) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(records.len()))?;
+        for record in records {
+            seq.serialize_element(&RecordAndSchema::new(record, self, cairo_se))?;
+        }
+        seq.end()
     }
 }
 
-// pub trait TableStore {
-//     type Error;
-//     fn read_table(&self, id: Felt) -> Result<Arc<Table>, Self::Error>;
-//     fn write_table(&mut self, id: Felt, table: Table) -> Result<(), Self::Error>;
-// }
-
-pub trait TablesTrait {
+pub trait IntrospectTables {
     fn get_table(&self, id: Felt) -> Result<Arc<Table>, TableError>;
-    fn parse_records<S: CairoSerializer>(
-        &self,
-        table_id: Felt,
-        columns: Vec<Felt>,
-        records: Vec<Record>,
-        deserializer: &mut S,
-    ) -> Result<(), TableError>{
-        let table = self.get_table(table_id)?;
-        let columns 
-        for record in records {
-            let mut deserializer = CairoDeserializer::new(&record.values);
-            for column_id in &columns {
-                let column = table
-                    .columns
-                    .get(column_id)
-                    .ok_or(TableError {})?;
-                let value = deserializer.deserialize_type(&column.type_def)?;
-                println!("Parsed value for column {}: {:?}", column.name, value);
-            }
+    fn get_record_schema<'a>(&'a self, id: Felt, column_ids: &[Felt]) -> TableResult<RecordSchema> {
+        let table = self.get_table(id)?.clone();
+        table.get_schema(column_ids)
+    }
+}
+
+struct RecordAndSchema<'a, C: CairoSerialization> {
+    record: &'a Record,
+    schema: &'a RecordSchema,
+    cairo_se: &'a C,
+}
+
+impl<'a, C: CairoSerialization> RecordAndSchema<'a, C> {
+    pub fn new(record: &'a Record, schema: &'a RecordSchema, cairo_se: &'a C) -> Self {
+        Self {
+            record,
+            schema,
+            cairo_se,
         }
-        Ok(())
+    }
+}
+
+impl<'a, C: CairoSerialization> Serialize for RecordAndSchema<'a, C> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.schema
+            .parse_record(self.record, serializer, self.cairo_se)
     }
 }

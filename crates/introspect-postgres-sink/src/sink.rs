@@ -1,17 +1,24 @@
-use crate::TableManager;
-use crate::json::ToPostgresJson;
-use crate::manager::TableManagerError;
+use crate::manager::{PgTableManager, TableManagerError};
 use crate::value::PostgresValueError;
+use crate::{table, TableManager};
 use async_trait::async_trait;
-use introspect_types::TableSchema;
+use introspect_types::{ResultInto, TableSchema};
+use serde_json::Serializer as JsonSerializer;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Postgres, Transaction};
 use starknet::core::types::EmittedEvent;
+use starknet_types_core::felt::Felt;
+use std::io::Write;
 use std::str::FromStr;
 use std::sync::Arc;
 use thiserror::Error;
-use torii_core::{Batch, Event, Sink};
-use torii_types_introspect::{CreateTableV1, DeleteRecordsV1, UpdateRecordFieldsV1, UpdateTableV1};
+use torii_introspect::events::IntrospectMsg;
+use torii_introspect::tables::{IntrospectTables, TableError as IntrospectTableError};
+use torii_introspect::{
+    AddColumns, CreateTable, DeleteRecords, DeletesFields, DropColumns, DropTable, InsertsFields,
+    IntrospectMsgTrait, Record, RenameColumns, RenamePrimary, RenameTable, RetypeColumns,
+    RetypePrimary, UpdateTable,
+};
 
 #[derive(Debug, Error)]
 pub enum PostgresSinkError {
@@ -27,14 +34,186 @@ pub enum PostgresSinkError {
     PostgresValueError(#[from] PostgresValueError),
     #[error("Table manager error: {0}")]
     TableManagerError(#[from] TableManagerError),
+    #[error(transparent)]
+    IntrospectError(#[from] IntrospectTableError),
 }
 
-type Result<T> = std::result::Result<T, PostgresSinkError>;
+type PGSinkResult<T> = std::result::Result<T, PostgresSinkError>;
 
 pub struct PostgresSink {
     label: String,
     pool: PgPool,
     manager: TableManager,
+}
+
+pub struct PostgresDb {
+    pool: PgPool,
+    tables: TableManager,
+}
+
+pub struct BlockData {
+    pub block_number: u64,
+    pub block_hash: Felt,
+    pub block_timestamp: u64,
+}
+
+pub struct MetaData {
+    from_address: Felt,
+    transaction_hash: Felt,
+    block_data: Arc<BlockData>,
+}
+
+impl MetaData {
+    pub fn from_address(&self) -> &Felt {
+        &self.from_address
+    }
+    pub fn transaction_hash(&self) -> &Felt {
+        &self.transaction_hash
+    }
+    pub fn block_number(&self) -> u64 {
+        self.block_data.block_number
+    }
+    pub fn block_hash(&self) -> &Felt {
+        &self.block_data.block_hash
+    }
+    pub fn block_timestamp(&self) -> u64 {
+        self.block_data.block_timestamp
+    }
+}
+
+#[async_trait]
+pub trait PGIntrospectMsgProcessor<Db>: IntrospectMsgTrait {
+    async fn process(
+        &self,
+        db: &Db,
+        tx: &mut Transaction<'_, Postgres>,
+        event_data: &MetaData,
+    ) -> PGSinkResult<()>;
+}
+
+#[async_trait]
+impl<Db: PgTableManager> PGIntrospectMsgProcessor<Db> for CreateTable {
+    async fn process(
+        &self,
+        db: &Db,
+        tx: &mut Transaction<'_, Postgres>,
+        event_data: &MetaData,
+    ) -> PGSinkResult<()> {
+        db.declare_table(
+            self.id,
+            &self.name,
+            &self.attributes,
+            &self.primary,
+            &self.columns,
+            tx,
+        )
+        .map_err(Into::into)
+    }
+}
+
+#[async_trait]
+impl<Db: PgTableManager> PGIntrospectMsgProcessor<Db> for RenameTable {
+    async fn process(
+        &self,
+        db: &Db,
+        tx: &mut Transaction<'_, Postgres>,
+        event_data: &MetaData,
+    ) -> PGSinkResult<()> {
+        db.rename_table(self.id, &self.name, tx).map_err(Into::into)
+    }
+}
+
+#[async_trait]
+impl<Db: PgTableManager> PGIntrospectMsgProcessor<Db> for AddColumns {
+    async fn process(
+        &self,
+        db: &Db,
+        tx: &mut Transaction<'_, Postgres>,
+        event_data: &MetaData,
+    ) -> PGSinkResult<()> {
+        db.add_columns(self.id, &self.columns, tx)
+            .map_err(Into::into)
+    }
+}
+
+#[async_trait]
+impl<Db: PgTableManager> PGIntrospectMsgProcessor<Db> for RenameColumns {
+    async fn process(
+        &self,
+        db: &Db,
+        tx: &mut Transaction<'_, Postgres>,
+        event_data: &MetaData,
+    ) -> PGSinkResult<()> {
+        db.rename_columns(self.id, &self.columns, tx)
+            .map_err(Into::into)
+    }
+}
+
+#[async_trait]
+impl<Db: IntrospectTables> PGIntrospectMsgProcessor<Db> for InsertsFields {
+    async fn process(
+        &self,
+        db: &Db,
+        tx: &mut Transaction<'_, Postgres>,
+        event_data: &MetaData,
+    ) -> PGSinkResult<()> {
+        let schema = db.get_record_schema(self.table, &self.columns)?;
+        let table_name = schema.name();
+        let update_fields = self
+            .fields
+            .iter()
+            .map(|f| {
+                format!(
+                    r#""{field}" = COALESCE(EXCLUDED."{field}", "{table_name}"."{field}")"#,
+                    field = f.name,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let mut writer = String::new();
+        write!(
+            &mut writer,
+            r#"INSERT INTO "{table_name}"
+            SELECT * FROM jsonb_populate_record(NULL::"{table_name}", $$"#
+        );
+        schema.parse_record()
+        JsonSerializer::new(&mut writer).serialize_map()
+        write!(
+            &mut writer,
+            r#"$$) ON CONFLICT ("{}") DO UPDATE SET "#,
+            schema.primary().name
+        );
+        if let Some((cols, coln)) = schema.columns().split_last() {
+            for column in schema.columns() {
+                let name = &column.name;
+                write_conflict_res(&mut writer, table_name, name)?;
+                write.write_char
+            }
+        }
+        sqlx::query(&writer).execute(&mut **tx).await?;
+        tracing::info!(
+            sink = %self.label,
+            table = %event.table_name,
+            storage_table = %table_name,
+            block = %raw.block_number.unwrap_or_default(),
+            "stored update_record"
+        );
+
+        Ok(())
+    }
+}
+
+pub fn write_conflict_res<W: Write, const LAST: bool>(
+    writer: &mut W,
+    table: &str,
+    column: &str,
+) -> std::io::Result<()> {
+    let separator = if LAST { "" } else { ", " };
+    write!(
+        writer,
+        r#""{column}" = COALESCE(EXCLUDED."{column}", "{table}"."{column}"){separator}"#,
+    )
 }
 
 impl PostgresSink {
@@ -78,7 +257,7 @@ impl PostgresSink {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         raw: Arc<EmittedEvent>,
-        event: &CreateTableV1,
+        event: &CreateTable,
     ) -> Result<()> {
         let table_name = &event.name;
         let queries = self
@@ -102,7 +281,7 @@ impl PostgresSink {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         raw: Arc<EmittedEvent>,
-        event: &UpdateTableV1,
+        event: &UpdateTable,
     ) -> Result<()> {
         let table_name = &event.name;
         let queries = self
@@ -126,7 +305,7 @@ impl PostgresSink {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         raw: Arc<EmittedEvent>,
-        event: &UpdateRecordFieldsV1,
+        event: &InsertsFields,
     ) -> Result<()> {
         let table_name = &event.table_name;
         let primary_key_name = event.primary.name.clone();
@@ -165,7 +344,7 @@ impl PostgresSink {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         raw: Arc<EmittedEvent>,
-        event: &DeleteRecordsV1,
+        event: &DeleteRecords,
     ) -> Result<()> {
         let table_name = &event.table_name;
         let formatted_values: Result<Vec<String>> = event
@@ -193,6 +372,32 @@ impl PostgresSink {
 
         Ok(())
     }
+
+    async fn handle_event(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        event: IntrospectMsg,
+        metadata: &Metadata,
+    ) -> PGSinkResult<()> {
+        match event {
+            IntrospectMsg::CreateTable(event) => {
+                self.handle_declare_table(tx, metadata.raw, &event).await
+            }
+            IntrospectMsg::UpdateTable(event) => {
+                self.handle_update_table(tx, metadata.raw, &event).await
+            }
+            IntrospectMsg::InsertsFields(event) => {
+                self.handle_update_record(tx, metadata.raw, &event).await
+            }
+            IntrospectMsg::DeleteRecords(event) => {
+                self.handle_delete_records(tx, metadata.raw, &event).await
+            }
+            _ => {
+                println!("Unsupported event type: {:?}", event);
+                Ok(())
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -205,8 +410,8 @@ impl Sink for PostgresSink {
         let mut tx = self.pool.begin().await?;
 
         for env in &batch.items {
-            if env.type_id == CreateTableV1::TYPE_ID {
-                if let Some(event) = env.downcast::<CreateTableV1>() {
+            if env.type_id == CreateTable::TYPE_ID {
+                if let Some(event) = env.downcast::<CreateTable>() {
                     println!("{}", event.name);
                     match self
                         .handle_declare_table(&mut tx, env.raw.clone(), event)
@@ -220,8 +425,8 @@ impl Sink for PostgresSink {
                     }
                 }
             }
-            if env.type_id == UpdateTableV1::TYPE_ID {
-                if let Some(event) = env.downcast::<UpdateTableV1>() {
+            if env.type_id == UpdateTable::TYPE_ID {
+                if let Some(event) = env.downcast::<UpdateTable>() {
                     println!("{}", event.name);
                     match self
                         .handle_update_table(&mut tx, env.raw.clone(), event)
@@ -234,8 +439,8 @@ impl Sink for PostgresSink {
                         }
                     }
                 }
-            } else if env.type_id == UpdateRecordFieldsV1::TYPE_ID {
-                if let Some(event) = env.downcast::<UpdateRecordFieldsV1>() {
+            } else if env.type_id == UpdateRecordFields::TYPE_ID {
+                if let Some(event) = env.downcast::<UpdateRecordFields>() {
                     match self
                         .handle_update_record(&mut tx, env.raw.clone(), event)
                         .await
@@ -246,8 +451,8 @@ impl Sink for PostgresSink {
                         }
                     }
                 }
-            } else if env.type_id == DeleteRecordsV1::TYPE_ID {
-                if let Some(event) = env.downcast::<DeleteRecordsV1>() {
+            } else if env.type_id == DeleteRecords::TYPE_ID {
+                if let Some(event) = env.downcast::<DeleteRecords>() {
                     match self
                         .handle_delete_records(&mut tx, env.raw.clone(), event)
                         .await
