@@ -47,12 +47,11 @@ compare_metrics() {
   current_value=$(echo "$current_value" | awk '{printf "%.2f", $0}')
   
   if [ "$baseline_value" != "0" ] && [ "$baseline_value" != "0.00" ]; then
-    change=$(echo "scale=2; (($current_value - $baseline_value) / $baseline_value) * 100" | bc)
-    change=$(printf "%.2f" "$change")
+    change=$(awk "BEGIN {printf \"%.2f\", (($current_value - $baseline_value) / $baseline_value) * 100}")
     
-    if (( $(echo "$change > 5" | bc -l) )); then
+    if (( $(awk "BEGIN {print ($change > 5)}") )); then
       echo "⚠️  $token_type $metric: $baseline_value → $current_value (+${change}%)"
-    elif (( $(echo "$change < -5" | bc -l) )); then
+    elif (( $(awk "BEGIN {print ($change < -5)}") )); then
       echo "✅ $token_type $metric: $baseline_value → $current_value (${change}%)"
     else
       echo "   $token_type $metric: $baseline_value → $current_value (${change}%)"
