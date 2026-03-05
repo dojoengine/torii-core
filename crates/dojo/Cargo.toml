@@ -17,9 +17,9 @@ anyhow.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 
-dojo-introspect-types.path = "../../../dojo-introspect/"
-introspect-types.path = "../../../introspect/crates/types"
-torii-introspect.path = "../introspect"
+dojo-introspect.workspace = true
+introspect-types.workspace = true
+torii-introspect.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true

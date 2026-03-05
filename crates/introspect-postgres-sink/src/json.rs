@@ -1,5 +1,6 @@
 use introspect_types::serialize::CairoSerialization;
-use serde::{ser::SerializeMap, Serialize, Serializer};
+use serde::ser::SerializeMap;
+use serde::{Serialize, Serializer};
 
 pub struct PostgresJsonSerializer;
 
@@ -34,7 +35,7 @@ impl CairoSerialization for PostgresJsonSerializer {
     where
         T: Serialize,
     {
-        let mut map = serializer.serialize_map(Some(1))?;
+        let mut map = serializer.serialize_map(Some(2))?;
         map.serialize_entry("variant", variant_name)?;
         map.serialize_entry(variant_name, value)?;
         map.end()

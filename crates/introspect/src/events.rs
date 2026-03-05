@@ -15,6 +15,7 @@ use torii::etl::{EventBody, TypeId};
 
 #[derive(EnumFrom, Debug)]
 pub enum IntrospectMsg {
+    None,
     CreateTable(CreateTable),
     UpdateTable(UpdateTable),
     RenameTable(RenameTable),
@@ -39,6 +40,7 @@ pub trait EventId {
 impl EventMsg for IntrospectMsg {
     fn event_id(&self) -> String {
         match self {
+            IntrospectMsg::None => "none".to_string(),
             IntrospectMsg::CreateTable(e) => e.event_id(),
             IntrospectMsg::UpdateTable(e) => e.event_id(),
             IntrospectMsg::RenameTable(e) => e.event_id(),

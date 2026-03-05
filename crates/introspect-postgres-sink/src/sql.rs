@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use crate::{PostgresField, PostgresType};
 
 pub fn add_column_query(name: &str, pg_type: &PostgresType) -> String {
@@ -108,4 +110,16 @@ pub fn create_tuple_type_query(type_name: &str, fields: &[PostgresType]) -> Stri
 pub fn alter_table_query(table_name: &str, alterations: &[String]) -> String {
     let alterations_sql = alterations.join(", ");
     format!(r#"ALTER TABLE "{table_name}" {alterations_sql};"#)
+}
+
+pub fn write_conflict_res<const DELIMINATOR: bool, W: Write>(
+    writer: &mut W,
+    table: &str,
+    column: &str,
+) -> std::io::Result<()> {
+    let separator = if DELIMINATOR { ", " } else { "" };
+    write!(
+        writer,
+        r#""{column}" = COALESCE(EXCLUDED."{column}", "{table}"."{column}"){separator}"#,
+    )
 }

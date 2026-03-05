@@ -1,8 +1,9 @@
-use crate::{error::DojoToriiError, DojoToriiResult};
-use dojo_introspect_types::DojoSerde;
-use introspect_types::{
-    transcode::Transcode, Attribute, Attributes, CairoSerde, ColumnDef, PrimaryDef, TableSchema,
-};
+use crate::error::DojoToriiError;
+use crate::DojoToriiResult;
+use dojo_introspect::selector::compute_selector_from_namespace_and_name;
+use dojo_introspect::{DojoSchema, DojoSerde};
+use introspect_types::transcode::Transcode;
+use introspect_types::{Attribute, Attributes, CairoSerde, ColumnDef, PrimaryDef, TableSchema};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 
@@ -19,25 +20,30 @@ pub struct DojoTable {
     pub legacy: bool,
 }
 
+pub fn sort_columns(columns: Vec<ColumnDef>) -> (HashMap<Felt, ColumnDef>, Vec<Felt>, Vec<Felt>) {
+    let mut field_map = HashMap::new();
+    let mut value_fields = Vec::new();
+    let mut key_fields = Vec::new();
+    for column in columns {
+        match column.has_attribute("key") {
+            true => key_fields.push(column.id),
+            false => value_fields.push(column.id),
+        }
+        field_map.insert(column.id, column);
+    }
+    (field_map, key_fields, value_fields)
+}
+
 impl From<TableSchema> for DojoTable {
     fn from(value: TableSchema) -> Self {
-        let mut field_map = HashMap::new();
-        let mut value_fields = Vec::new();
-        let mut key_fields = Vec::new();
-        for column in value.columns {
-            match column.has_attribute("key") {
-                true => key_fields.push(column.id),
-                false => value_fields.push(column.id),
-            }
-            field_map.insert(column.id, column);
-        }
+        let (columns, key_fields, value_fields) = sort_columns(value.columns);
         let legacy = value.attributes.has_attribute(LEGACY_ATTRIBUTE);
         DojoTable {
             id: value.id,
             name: value.name,
             attributes: value.attributes,
             primary: value.primary,
-            columns: field_map,
+            columns,
             key_fields,
             value_fields,
             legacy: legacy,
@@ -75,6 +81,25 @@ impl From<DojoTable> for TableSchema {
 }
 
 impl DojoTable {
+    pub fn from_schema(
+        schema: DojoSchema,
+        namespace: &str,
+        name: &str,
+        primary: PrimaryDef,
+    ) -> Self {
+        let (columns, key_fields, value_fields) = sort_columns(schema.columns);
+        Self {
+            id: compute_selector_from_namespace_and_name(namespace, name),
+            name: format!("{}-{}", namespace, name),
+            attributes: schema.attributes.clone(),
+            primary,
+            columns,
+            key_fields,
+            value_fields,
+            legacy: schema.legacy,
+        }
+    }
+
     pub fn get_columns(&self, selectors: &[Felt]) -> DojoToriiResult<Vec<&ColumnDef>> {
         selectors
             .into_iter()
@@ -138,7 +163,6 @@ impl DojoTable {
     ) -> DojoToriiResult<(Vec<Felt>, Vec<u8>)> {
         let mut data = self.parse_keys(keys)?;
         self.add_parsed_values(values, &mut data)?;
-
         Ok((
             [self.key_fields.clone(), self.value_fields.clone()].concat(),
             data,

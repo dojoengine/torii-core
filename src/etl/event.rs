@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
-use starknet::core::types::EmittedEvent;
+use starknet::core::types::{EmittedEvent, Felt};
 
 pub trait EmittedEventExt {
     fn metadata(&self) -> HashMap<String, String>;
+    fn split_content(&self) -> Option<(&Felt, &[Felt], &[Felt])>;
 }
 
 impl EmittedEventExt for EmittedEvent {
@@ -24,5 +25,10 @@ impl EmittedEventExt for EmittedEvent {
             metadata.insert("block_number".to_string(), block_number.to_string());
         }
         metadata
+    }
+    fn split_content(&self) -> Option<(&Felt, &[Felt], &[Felt])> {
+        self.keys
+            .split_first()
+            .map(|(first_key, rest_keys)| (first_key, rest_keys, self.data.as_slice()))
     }
 }

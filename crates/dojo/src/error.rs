@@ -1,5 +1,6 @@
-use dojo_introspect_types::DojoIntrospectError;
-use introspect_types::{transcode::TranscodeError, DecodeError};
+use dojo_introspect::DojoIntrospectError;
+use introspect_types::transcode::TranscodeError;
+use introspect_types::DecodeError;
 use starknet::core::utils::NonAsciiNameError;
 use starknet_types_core::felt::Felt;
 
@@ -31,6 +32,8 @@ pub enum DojoToriiError {
     LockPoisoned(String),
     #[error(transparent)]
     DecodeError(#[from] DecodeError),
+    #[error("Failed to deserialize event data for {0}: {1:?}")]
+    EventDeserializationError(&'static str, DecodeError),
     #[error(transparent)]
     DojoIntrospectError(#[from] DojoIntrospectError),
     #[error("Transcode error: {0:?}")]

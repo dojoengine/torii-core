@@ -12,7 +12,8 @@ use crate::etl::engine_db::EngineDb;
 use anyhow::Result;
 use async_trait::async_trait;
 use starknet::core::types::{EmittedEvent, Felt};
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 pub use block_range::{BlockRangeConfig, BlockRangeExtractor};
 pub use composite::CompositeExtractor;
@@ -23,7 +24,7 @@ pub use starknet_helpers::ContractAbi;
 pub use synthetic_erc20::{SyntheticErc20Config, SyntheticErc20Extractor};
 
 /// Block context information
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BlockContext {
     pub number: u64,
     pub hash: Felt,
@@ -32,7 +33,7 @@ pub struct BlockContext {
 }
 
 /// Transaction context information
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TransactionContext {
     pub hash: Felt,
     pub block_number: u64,
@@ -40,7 +41,7 @@ pub struct TransactionContext {
     pub calldata: Vec<Felt>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EventContext {
     pub from_address: Felt,
     pub transaction: Arc<TransactionContext>,

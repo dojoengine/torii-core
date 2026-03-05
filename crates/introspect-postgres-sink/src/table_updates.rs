@@ -35,6 +35,27 @@ pub enum TableError {
     UnsupportedType(String),
 }
 
+pub trait PgMutTableManager {
+    fn update_table(
+        &self,
+        id: Felt,
+        name: &str,
+        attributes: &[Attribute],
+        primary: &PrimaryDef,
+        columns: &[ColumnDef],
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> ManagerResult<()>;
+    fn update_column(
+        &self,
+        table: Felt,
+        id: &Felt,
+        name: &str,
+        attributes: &[Attribute],
+        type_def: &TypeDef,
+        tx: &mut Transaction<'_, Postgres>,
+    ) -> ManagerResult<()>;
+}
+
 impl<T> From<PoisonError<T>> for TableError {
     fn from(_: PoisonError<T>) -> Self {
         TableError::LockError
@@ -269,13 +290,13 @@ impl PgTableSchema {
             Array as PgArray, BigInt, Boolean, Bytea, Bytes31 as PgBytes31, Char31,
             EthAddress as PgEthAddress, Felt252 as PgFelt252, Int, Int128, None as PgNone,
             RustEnum as PgRustEnum, SmallInt, StarknetHash, Struct as PgStruct, Text,
-            Tuple as PgTuple, Uint8, Uint16, Uint32, Uint64, Uint128,
+            Tuple as PgTuple, Uint128, Uint16, Uint32, Uint64, Uint8,
         };
         use TypeDef::{
             Array, Bool, ByteArray, ByteArrayE, Bytes31, Bytes31E, ClassHash, ContractAddress,
-            Enum, EthAddress, Felt252, FixedArray, I8, I16, I32, I64, I128, None as TDNone,
-            ShortUtf8, StorageAddress, StorageBaseAddress, Struct, Tuple, U8, U16, U32, U64, U128,
-            Utf8String,
+            Enum, EthAddress, Felt252, FixedArray, None as TDNone, ShortUtf8, StorageAddress,
+            StorageBaseAddress, Struct, Tuple, Utf8String, I128, I16, I32, I64, I8, U128, U16, U32,
+            U64, U8,
         };
         match (old, new) {
             (PgNone, TDNone)

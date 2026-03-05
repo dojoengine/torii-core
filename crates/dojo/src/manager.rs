@@ -1,5 +1,6 @@
 use crate::{DojoTable, DojoToriiError, DojoToriiResult};
-use dojo_introspect_types::DojoSchema;
+use dojo_introspect::serde::dojo_primary_def;
+use dojo_introspect::DojoSchema;
 use introspect_types::schema::PrimaryInfo;
 use introspect_types::{Attributes, PrimaryDef, PrimaryTypeDef, TableSchema};
 use starknet_types_core::felt::Felt;
@@ -37,6 +38,13 @@ where
 
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+impl DojoTableStore<JsonStore> {
+    pub fn new<P: Into<PathBuf>>(path: P) -> DojoToriiResult<Self> {
+        let store = JsonStore::new(&path.into());
+        Ok(Self(RwLock::new(DojoManagerInner::new(store)?)))
     }
 }
 
@@ -178,7 +186,7 @@ where
         name: &str,
         schema: DojoSchema,
     ) -> DojoToriiResult<TableSchema> {
-        let table = schema.to_table_schema(namespace, name);
+        let table = DojoTable::from_schema(schema, namespace, name, dojo_primary_def());
         if self
             .read()
             .map_err(|e| DojoToriiError::LockError(e.to_string()))?
@@ -187,17 +195,15 @@ where
         {
             return Err(DojoToriiError::TableAlreadyExists(table.id));
         }
-        let dojo_table: DojoTable = table.clone().into();
-
         let mut manager = self
             .write()
             .map_err(|e| DojoToriiError::LockError(e.to_string()))?;
         manager
             .store
-            .dump(table.id, &dojo_table)
+            .dump(table.id, &table)
             .map_err(|e| DojoToriiError::StoreError(e.to_string()))?;
-        manager.tables.insert(table.id, RwLock::new(dojo_table));
-        Ok(table)
+        manager.tables.insert(table.id, RwLock::new(table.clone()));
+        Ok(table.into())
     }
 
     fn update_table(&self, id: Felt, schema: DojoSchema) -> DojoToriiResult<TableSchema> {

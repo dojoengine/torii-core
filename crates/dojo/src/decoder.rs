@@ -2,30 +2,33 @@ use crate::manager::DojoTableManager;
 use crate::{DojoTable, DojoToriiError, DojoToriiResult};
 pub use anyhow::Result as AnyResult;
 use async_trait::async_trait;
-use dojo_introspect_types::events::{
-    EventEmitted, EventRegistered, EventUpgraded, ModelRegistered, ModelUpgraded,
+use dojo_introspect::events::{
+    DojoEvent, EventEmitted, EventRegistered, EventUpgraded, ModelRegistered, ModelUpgraded,
     ModelWithSchemaRegistered, StoreDelRecord, StoreSetRecord, StoreUpdateMember,
     StoreUpdateRecord,
 };
-use dojo_introspect_types::DojoSchemaFetcher;
+use dojo_introspect::DojoSchemaFetcher;
 use introspect_types::{
-    CairoEvent, CairoEventInfo, CairoSerde, FeltIds, IntoFeltSource, PrimaryDef, ResultInto,
-    SliceFeltSource,
+    CairoEvent, CairoEventInfo, CairoSerde, FeltIds, IntoFeltSource, PrimaryDef, PrimaryTypeDef,
+    ResultInto, SliceFeltSource,
 };
 use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
+use std::fmt::Debug;
+use torii::etl::event::EmittedEventExt;
 use torii::etl::{Decoder, Envelope, EventBody};
 use torii_introspect::events::{
     CreateTable, DeleteRecords, InsertsFields, IntrospectMsg, UpdateTable,
 };
 use torii_introspect::EventId;
+
 pub struct DojoDecoder<M, F> {
     pub manager: M,
     pub fetcher: F,
     pub primary_field: PrimaryDef,
 }
 #[async_trait]
-trait DojoEventProcessor<M: Sync, F: Sync>: Sized {
+pub trait DojoEventProcessor<M: Sync, F: Sync>: Sized + CairoEventInfo + Debug {
     type Msg: EventId;
     async fn event_to_msg(self, decoder: &DojoDecoder<M, F>) -> DojoToriiResult<Self::Msg>;
     fn deserialize_data<'a>(keys: &[Felt], data: &'a [Felt]) -> DojoToriiResult<Self>
@@ -34,7 +37,10 @@ trait DojoEventProcessor<M: Sync, F: Sync>: Sized {
     {
         let mut keys = keys.into_source();
         let mut data: CairoSerde<_> = data.into();
-        Ok(Self::deserialize_and_verify_event(&mut keys, &mut data)?)
+        match Self::deserialize_and_verify_event(&mut keys, &mut data) {
+            Ok(event) => Ok(event),
+            Err(err) => Err(DojoToriiError::EventDeserializationError(Self::NAME, err)),
+        }
     }
     async fn data_to_msg<'a>(
         decoder: &DojoDecoder<M, F>,
@@ -207,6 +213,26 @@ impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoEventProcessor
 }
 
 impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoDecoder<M, F> {
+    pub fn new(manager: M, fetcher: F, primary_field: PrimaryDef) -> Self {
+        Self {
+            manager,
+            fetcher,
+            primary_field,
+        }
+    }
+
+    pub fn new_default(manager: M, fetcher: F) -> Self {
+        Self::new(
+            manager,
+            fetcher,
+            PrimaryDef {
+                name: "__id".to_string(),
+                attributes: vec![],
+                type_def: PrimaryTypeDef::Felt252,
+            },
+        )
+    }
+
     async fn to_msg<'a, E>(
         &self,
         keys: &'a [Felt],
@@ -223,6 +249,45 @@ impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoDecoder<M, F> 
         Fn: FnOnce(&DojoTable) -> DojoToriiResult<R>,
     {
         self.manager.with_table(id, f)?
+    }
+
+    pub fn to_event<'a, E>(&self, keys: &'a [Felt], values: &'a [Felt]) -> DojoToriiResult<E>
+    where
+        E: DojoEventProcessor<M, F> + CairoEvent<CairoSerde<SliceFeltSource<'a>>> + Send,
+    {
+        E::deserialize_data(keys, values)
+    }
+
+    pub fn deserialize_dojo_event<'a>(
+        &self,
+        selector: &Felt,
+        keys: &'a [Felt],
+        values: &'a [Felt],
+    ) -> DojoToriiResult<DojoEvent> {
+        let selector_raw = selector.to_raw();
+        match selector_raw {
+            ModelRegistered::SELECTOR_RAW => {
+                self.to_event::<ModelRegistered>(keys, values).ok_into()
+            }
+            ModelWithSchemaRegistered::SELECTOR_RAW => self
+                .to_event::<ModelWithSchemaRegistered>(keys, values)
+                .ok_into(),
+            ModelUpgraded::SELECTOR_RAW => self.to_event::<ModelUpgraded>(keys, values).ok_into(),
+            EventRegistered::SELECTOR_RAW => {
+                self.to_event::<EventRegistered>(keys, values).ok_into()
+            }
+            EventUpgraded::SELECTOR_RAW => self.to_event::<EventUpgraded>(keys, values).ok_into(),
+            StoreSetRecord::SELECTOR_RAW => self.to_event::<StoreSetRecord>(keys, values).ok_into(),
+            StoreUpdateRecord::SELECTOR_RAW => {
+                self.to_event::<StoreUpdateRecord>(keys, values).ok_into()
+            }
+            StoreUpdateMember::SELECTOR_RAW => {
+                self.to_event::<StoreUpdateMember>(keys, values).ok_into()
+            }
+            StoreDelRecord::SELECTOR_RAW => self.to_event::<StoreDelRecord>(keys, values).ok_into(),
+            EventEmitted::SELECTOR_RAW => self.to_event::<EventEmitted>(keys, values).ok_into(),
+            _ => Err(DojoToriiError::UnknownDojoEventSelector(*selector)),
+        }
     }
 
     pub async fn decode_event_data(
@@ -248,6 +313,13 @@ impl<M: DojoTableManager + Sync, F: DojoSchemaFetcher + Sync> DojoDecoder<M, F> 
             _ => Err(DojoToriiError::UnknownDojoEventSelector(*selector)),
         }
     }
+
+    pub async fn decode_raw_event(&self, raw: &EmittedEvent) -> DojoToriiResult<IntrospectMsg> {
+        let (selector, keys, values) = raw
+            .split_content()
+            .ok_or(DojoToriiError::MissingEventSelector)?;
+        self.decode_event_data(selector, keys, values).await
+    }
 }
 
 #[async_trait]
@@ -259,12 +331,11 @@ impl<M: DojoTableManager + Sync + Send, F: DojoSchemaFetcher + Sync + Send> Deco
     }
 
     async fn decode_event(&self, event: &EmittedEvent) -> AnyResult<Vec<Envelope>> {
-        let (selector, keys) = event
-            .keys
-            .split_first()
+        let (selector, keys, data) = event
+            .split_content()
             .ok_or(DojoToriiError::MissingEventSelector)?;
 
-        self.decode_event_data(selector, keys, &event.data)
+        self.decode_event_data(selector, keys, data)
             .await
             .map(|msg| vec![EventBody::new_envelope(msg, event)])
             .err_into()

@@ -10,6 +10,7 @@ members = [
     "crates/introspect",
     "crates/dojo",
     "crates/introspect-postgres-sink",
+    "crates/testing",
     "bins/torii-erc20",
     "bins/torii-erc20-synth",
     "bins/torii-tokens",
@@ -91,9 +92,29 @@ starknet-types-core = "0.2.0"
 # Build
 tonic-build = "0.12"
 
+# Introspect
+introspect-events.path = "../introspect/crates/events"
+introspect-types.path = "../introspect/crates/types"
+introspect-rust-macros.path = "../introspect/crates/macros"
+dojo-introspect.path = "../dojo-introspect/"
+
+# Utils
+resolve-path = "0.1.0"
+
 # Torii core
 torii.path = "."
 torii-common = { path = "crates/torii-common" }
+
+# Internal crates
+torii-sql-sink.path = "crates/torii-sql-sink"
+torii-log-sink.path = "crates/torii-log-sink"
+torii-erc20.path = "crates/torii-erc20"
+torii-erc721.path = "crates/torii-erc721"
+torii-erc1155.path = "crates/torii-erc1155"
+torii-dojo.path = "crates/dojo"
+torii-introspect.path = "crates/introspect"
+torii-introspect-postgres-sink.path = "crates/introspect-postgres-sink"
+torii-test-utils.path = "crates/testing"
 
 
 [lib]
@@ -119,6 +140,10 @@ path = "examples/http_only_sink/main.rs"
 [[example]]
 name = "test_block_extractor"
 path = "examples/test_block_extractor/main.rs"
+
+[[example]]
+name = "introspect_simple"
+path = "examples/introspect/simple/main.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -154,14 +179,23 @@ criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
 tempfile = "3.13"
 tracing-subscriber.workspace = true
 tower.workspace = true
+resolve-path.workspace = true
+
+dojo-introspect.workspace = true
+
+torii-sql-sink.workspace = true
+torii-log-sink.workspace = true
+torii-erc20.workspace = true
+torii-erc721.workspace = true
+torii-erc1155.workspace = true
+torii-dojo.workspace = true
+torii-introspect.workspace = true
+torii-introspect-postgres-sink.workspace = true
+torii-test-utils.workspace = true
+
 
 # Example dependencies
-torii-sql-sink = { path = "crates/torii-sql-sink" }
-torii-log-sink = { path = "crates/torii-log-sink" }
-torii-common = { path = "crates/torii-common" }
-torii-erc20 = { path = "crates/torii-erc20" }
-torii-erc721 = { path = "crates/torii-erc721" }
-torii-erc1155 = { path = "crates/torii-erc1155" }
+
 
 [[bench]]
 name = "perf_harness"

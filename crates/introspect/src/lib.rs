@@ -1,5 +1,6 @@
 pub mod events;
 // pub mod manager;
+pub mod sink;
 pub mod tables;
 pub mod types;
 pub use events::{
