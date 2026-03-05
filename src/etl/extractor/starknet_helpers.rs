@@ -353,10 +353,6 @@ impl ContractAbi {
         name.to_string()
     }
 
-    fn matches_name(cached: &str, target: &str) -> bool {
-        cached == target || cached.ends_with(&format!("::{target}"))
-    }
-
     #[allow(clippy::match_wildcard_for_single_variants)]
     pub fn from_contract_class(class: ContractClass) -> Result<Self> {
         let mut abi: Option<Vec<AbiEntry>> = None;
@@ -428,10 +424,18 @@ impl ContractAbi {
     }
 
     pub fn has_function(&self, name: &str) -> bool {
-        self.functions.iter().any(|f| Self::matches_name(f, name))
+        if self.functions.contains(name) {
+            return true;
+        }
+        let suffix = format!("::{name}");
+        self.functions.iter().any(|f| f.ends_with(&suffix))
     }
 
     pub fn has_event(&self, name: &str) -> bool {
-        self.events.iter().any(|e| Self::matches_name(e, name))
+        if self.events.contains(name) {
+            return true;
+        }
+        let suffix = format!("::{name}");
+        self.events.iter().any(|e| e.ends_with(&suffix))
     }
 }
