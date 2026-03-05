@@ -18,9 +18,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  synthetic-benchmark:
-    name: Run Synthetic Benchmarks
+  benchmark:
+    name: Run ${{ matrix.token-type }} Benchmark
     runs-on: ubuntu-latest-8-cores
+    
+    strategy:
+      matrix:
+        token-type: [erc20, erc721, erc1155]
     
     services:
       postgres:
@@ -56,6 +60,53 @@ jobs:
       - name: Build synthetic profiler
         run: cargo build --release -p torii-tokens-synth
 
+      - name: Create output directory
+        run: mkdir -p perf/synthetic-runs
+
+      - name: Run ${{ matrix.token-type }} synthetic benchmark
+        run: |
+          ./target/release/torii-tokens-synth ${{ matrix.token-type }} \
+            --db-url postgres://torii:torii@localhost:5432/torii \
+            --block-count 100 \
+            --tx-per-block 500 \
+            --output-root perf/synthetic-runs \
+            --reset-schema
+
+      - name: Upload ${{ matrix.token-type }} results
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-results-${{ matrix.token-type }}
+          path: perf/synthetic-runs/
+          retention-days: 1
+
+  aggregate:
+    name: Aggregate Results
+    runs-on: ubuntu-latest
+    needs: benchmark
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download ERC20 results
+        uses: actions/download-artifact@v4
+        with:
+          name: synthetic-results-erc20
+          path: perf/synthetic-runs
+
+      - name: Download ERC721 results
+        uses: actions/download-artifact@v4
+        with:
+          name: synthetic-results-erc721
+          path: perf/synthetic-runs
+
+      - name: Download ERC1155 results
+        uses: actions/download-artifact@v4
+        with:
+          name: synthetic-results-erc1155
+          path: perf/synthetic-runs
+
       - name: Restore previous baseline
         id: cache-baseline
         uses: actions/cache@v4
@@ -64,36 +115,6 @@ jobs:
           key: synthetic-baseline-main-${{ github.sha }}
           restore-keys: |
             synthetic-baseline-main-
-
-      - name: Create output directories
-        run: mkdir -p perf/synthetic-runs
-
-      - name: Run ERC20 synthetic benchmark
-        run: |
-          ./target/release/torii-tokens-synth erc20 \
-            --db-url postgres://torii:torii@localhost:5432/torii \
-            --block-count 100 \
-            --tx-per-block 500 \
-            --output-root perf/synthetic-runs \
-            --reset-schema
-
-      - name: Run ERC721 synthetic benchmark
-        run: |
-          ./target/release/torii-tokens-synth erc721 \
-            --db-url postgres://torii:torii@localhost:5432/torii \
-            --block-count 100 \
-            --tx-per-block 500 \
-            --output-root perf/synthetic-runs \
-            --reset-schema
-
-      - name: Run ERC1155 synthetic benchmark
-        run: |
-          ./target/release/torii-tokens-synth erc1155 \
-            --db-url postgres://torii:torii@localhost:5432/torii \
-            --block-count 100 \
-            --tx-per-block 500 \
-            --output-root perf/synthetic-runs \
-            --reset-schema
 
       - name: Extract metrics
         run: scripts/synthetic/extract_metrics.sh perf/synthetic-runs > perf/synthetic-runs/metrics.tsv
