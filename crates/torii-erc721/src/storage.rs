@@ -1382,7 +1382,7 @@ impl Erc721Storage {
         client
             .execute(
                 "INSERT INTO erc721.nft_operators (token, owner, operator, approved, block_number, tx_hash, timestamp)
-                SELECT i.token, i.owner, i.operator, i.approved, i.block_number, i.tx_hash, i.timestamp
+                SELECT DISTINCT ON (token, owner, operator) i.token, i.owner, i.operator, i.approved, i.block_number, i.tx_hash, i.timestamp
                 FROM unnest(
                     $1::bytea[],
                     $2::bytea[],
@@ -1391,7 +1391,8 @@ impl Erc721Storage {
                     $5::bigint[],
                     $6::bytea[],
                     $7::bigint[]
-                ) AS i(token, owner, operator, approved, block_number, tx_hash, timestamp)
+                ) WITH ORDINALITY AS i(token, owner, operator, approved, block_number, tx_hash, timestamp, ord)
+                ORDER BY token, owner, operator, ord DESC
                 ON CONFLICT (token, owner, operator) DO UPDATE SET
                     approved = EXCLUDED.approved,
                     block_number = EXCLUDED.block_number,

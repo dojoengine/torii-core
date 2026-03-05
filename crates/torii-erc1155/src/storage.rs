@@ -1834,7 +1834,7 @@ impl Erc1155Storage {
         client
             .execute(
                 "INSERT INTO erc1155.token_operators (token, owner, operator, approved, block_number, tx_hash, timestamp)
-                SELECT i.token, i.owner, i.operator, i.approved, i.block_number, i.tx_hash, i.timestamp
+                SELECT DISTINCT ON (token, owner, operator) i.token, i.owner, i.operator, i.approved, i.block_number, i.tx_hash, i.timestamp
                 FROM unnest(
                     $1::bytea[],
                     $2::bytea[],
@@ -1843,7 +1843,8 @@ impl Erc1155Storage {
                     $5::bigint[],
                     $6::bytea[],
                     $7::bigint[]
-                ) AS i(token, owner, operator, approved, block_number, tx_hash, timestamp)
+                ) WITH ORDINALITY AS i(token, owner, operator, approved, block_number, tx_hash, timestamp, ord)
+                ORDER BY token, owner, operator, ord DESC
                 ON CONFLICT (token, owner, operator) DO UPDATE SET
                     approved = EXCLUDED.approved,
                     block_number = EXCLUDED.block_number,
@@ -1882,12 +1883,13 @@ impl Erc1155Storage {
         let rows = client
             .execute(
                 "INSERT INTO erc1155.token_uris (token, token_id, uri, updated_at)
-                SELECT i.token, i.token_id, i.uri, EXTRACT(EPOCH FROM NOW())::BIGINT
+                SELECT DISTINCT ON (token, token_id) i.token, i.token_id, i.uri, EXTRACT(EPOCH FROM NOW())::BIGINT
                 FROM unnest(
                     $1::bytea[],
                     $2::bytea[],
                     $3::text[]
-                ) AS i(token, token_id, uri)
+                ) WITH ORDINALITY AS i(token, token_id, uri, ord)
+                ORDER BY token, token_id, ord DESC
                 ON CONFLICT(token, token_id) DO UPDATE SET
                     uri = EXCLUDED.uri,
                     updated_at = EXCLUDED.updated_at",
