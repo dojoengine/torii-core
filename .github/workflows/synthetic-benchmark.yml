@@ -119,7 +119,14 @@ jobs:
       - name: Extract metrics
         run: scripts/synthetic/extract_metrics.sh perf/synthetic-runs > perf/synthetic-runs/metrics.tsv
 
-      - name: Create baseline
+      - name: Compare against previous baseline
+        if: steps.cache-baseline.outputs.cache-hit == 'true'
+        continue-on-error: true
+        run: |
+          echo "📊 Comparing against previous baseline..."
+          scripts/synthetic/compare_to_baseline.sh || true
+
+      - name: Save current results as new baseline
         run: |
           stamp="$(date -u +%Y%m%dT%H%M%SZ)"
           out_dir="perf/synthetic-baselines/${stamp}"
@@ -136,13 +143,6 @@ jobs:
           CTX
           
           echo "Baseline saved to $out_dir"
-
-      - name: Compare against previous baseline
-        if: steps.cache-baseline.outputs.cache-hit == 'true'
-        continue-on-error: true
-        run: |
-          echo "📊 Comparing against previous baseline..."
-          scripts/synthetic/compare_to_baseline.sh || true
 
       - name: Generate benchmark report
         id: report
