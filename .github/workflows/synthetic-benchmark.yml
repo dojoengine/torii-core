@@ -144,6 +144,50 @@ jobs:
           echo "📊 Comparing against previous baseline..."
           scripts/synthetic/compare_to_baseline.sh || true
 
+      - name: Generate benchmark report
+        id: report
+        run: |
+          scripts/synthetic/generate_report.sh > benchmark_report.md
+          echo "report_file=benchmark_report.md" >> $GITHUB_OUTPUT
+
+      - name: Post benchmark results to PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('benchmark_report.md', 'utf8');
+            
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('📊 Synthetic Benchmark Results')
+            );
+            
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: report
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: report
+              });
+            }
+
       - name: Save new baseline
         uses: actions/cache/save@v4
         with:
