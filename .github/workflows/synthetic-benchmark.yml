@@ -112,9 +112,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: perf/synthetic-baselines
-          key: synthetic-baseline-main-${{ github.sha }}
-          restore-keys: |
-            synthetic-baseline-main-
+          key: synthetic-baseline-main-latest
 
       - name: Extract metrics
         run: scripts/synthetic/extract_metrics.sh perf/synthetic-runs > perf/synthetic-runs/metrics.tsv
@@ -192,7 +190,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: perf/synthetic-baselines
-          key: synthetic-baseline-main-${{ github.sha }}
+          key: synthetic-baseline-main-latest
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
