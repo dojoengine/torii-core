@@ -1681,92 +1681,93 @@ impl Erc1155Storage {
             return Ok(0);
         }
 
-        let mut client = self.pg_client().await?;
-        let tx = client.transaction().await?;
-        let mut inserted = 0usize;
+        let zero_blob = felt_to_blob(Felt::ZERO);
+        let mut token_vec = Vec::with_capacity(transfers.len());
+        let mut operator_vec = Vec::with_capacity(transfers.len());
+        let mut from_vec = Vec::with_capacity(transfers.len());
+        let mut to_vec = Vec::with_capacity(transfers.len());
+        let mut token_id_vec = Vec::with_capacity(transfers.len());
+        let mut amount_vec = Vec::with_capacity(transfers.len());
+        let mut is_batch_vec = Vec::with_capacity(transfers.len());
+        let mut batch_index_vec = Vec::with_capacity(transfers.len());
+        let mut block_vec = Vec::with_capacity(transfers.len());
+        let mut tx_hash_vec = Vec::with_capacity(transfers.len());
+        let mut ts_vec = Vec::with_capacity(transfers.len());
 
         for transfer in transfers {
-            let token_blob = felt_to_blob(transfer.token);
-            let operator_blob = felt_to_blob(transfer.operator);
-            let from_blob = felt_to_blob(transfer.from);
-            let to_blob = felt_to_blob(transfer.to);
-            let token_id_blob = u256_to_blob(transfer.token_id);
-            let amount_blob = u256_to_blob(transfer.amount);
-            let tx_hash_blob = felt_to_blob(transfer.tx_hash);
-            let ts = transfer
-                .timestamp
-                .unwrap_or_else(|| chrono::Utc::now().timestamp());
-
-            let row = tx.query_opt(
-                "INSERT INTO erc1155.token_transfers
-                 (token, operator, from_addr, to_addr, token_id, amount, is_batch, batch_index, block_number, tx_hash, timestamp)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                 ON CONFLICT (token, tx_hash, token_id, from_addr, to_addr, batch_index) DO NOTHING
-                 RETURNING id",
-                &[
-                    &token_blob,
-                    &operator_blob,
-                    &from_blob,
-                    &to_blob,
-                    &token_id_blob,
-                    &amount_blob,
-                    &((transfer.is_batch as i32) as i64),
-                    &(transfer.batch_index as i64),
-                    &(transfer.block_number as i64),
-                    &tx_hash_blob,
-                    &ts,
-                ],
-            ).await?;
-
-            if let Some(row) = row {
-                inserted += 1;
-                let transfer_id: i64 = row.get(0);
-
-                if transfer.from != Felt::ZERO
-                    && transfer.to != Felt::ZERO
-                    && transfer.from == transfer.to
-                {
-                    tx.execute(
-                        "INSERT INTO erc1155.token_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                         VALUES ($1, $2, $3, 'both', $4)",
-                        &[
-                            &from_blob,
-                            &token_blob,
-                            &transfer_id,
-                            &(transfer.block_number as i64),
-                        ],
-                    ).await?;
-                } else {
-                    if transfer.from != Felt::ZERO {
-                        tx.execute(
-                            "INSERT INTO erc1155.token_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                             VALUES ($1, $2, $3, 'sent', $4)",
-                            &[
-                                &from_blob,
-                                &token_blob,
-                                &transfer_id,
-                                &(transfer.block_number as i64),
-                            ],
-                        ).await?;
-                    }
-                    if transfer.to != Felt::ZERO {
-                        tx.execute(
-                            "INSERT INTO erc1155.token_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                             VALUES ($1, $2, $3, 'received', $4)",
-                            &[
-                                &to_blob,
-                                &token_blob,
-                                &transfer_id,
-                                &(transfer.block_number as i64),
-                            ],
-                        ).await?;
-                    }
-                }
-            }
+            token_vec.push(felt_to_blob(transfer.token));
+            operator_vec.push(felt_to_blob(transfer.operator));
+            from_vec.push(felt_to_blob(transfer.from));
+            to_vec.push(felt_to_blob(transfer.to));
+            token_id_vec.push(u256_to_blob(transfer.token_id));
+            amount_vec.push(u256_to_blob(transfer.amount));
+            is_batch_vec.push((transfer.is_batch as i32) as i64);
+            batch_index_vec.push(transfer.batch_index as i64);
+            block_vec.push(transfer.block_number as i64);
+            tx_hash_vec.push(felt_to_blob(transfer.tx_hash));
+            ts_vec.push(
+                transfer
+                    .timestamp
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+            );
         }
 
-        tx.commit().await?;
-        Ok(inserted)
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one(
+                "WITH inserted AS (
+                    INSERT INTO erc1155.token_transfers
+                        (token, operator, from_addr, to_addr, token_id, amount, is_batch, batch_index, block_number, tx_hash, timestamp)
+                    SELECT
+                        i.token, i.operator, i.from_addr, i.to_addr, i.token_id, i.amount, i.is_batch, i.batch_index, i.block_number, i.tx_hash, i.timestamp
+                    FROM unnest(
+                        $1::bytea[],
+                        $2::bytea[],
+                        $3::bytea[],
+                        $4::bytea[],
+                        $5::bytea[],
+                        $6::bytea[],
+                        $7::bigint[],
+                        $8::bigint[],
+                        $9::bigint[],
+                        $10::bytea[],
+                        $11::bigint[]
+                    ) AS i(token, operator, from_addr, to_addr, token_id, amount, is_batch, batch_index, block_number, tx_hash, timestamp)
+                    ON CONFLICT (token, tx_hash, token_id, from_addr, to_addr, batch_index) DO NOTHING
+                    RETURNING id, token, from_addr, to_addr, block_number
+                ),
+                _activity AS (
+                    INSERT INTO erc1155.token_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                    SELECT from_addr, token, id, 'both', block_number
+                    FROM inserted
+                    WHERE from_addr <> $12::bytea AND to_addr <> $12::bytea AND from_addr = to_addr
+                    UNION ALL
+                    SELECT from_addr, token, id, 'sent', block_number
+                    FROM inserted
+                    WHERE from_addr <> $12::bytea AND from_addr <> to_addr
+                    UNION ALL
+                    SELECT to_addr, token, id, 'received', block_number
+                    FROM inserted
+                    WHERE to_addr <> $12::bytea AND from_addr <> to_addr
+                )
+                SELECT COUNT(*)::bigint FROM inserted",
+                &[
+                    &token_vec,
+                    &operator_vec,
+                    &from_vec,
+                    &to_vec,
+                    &token_id_vec,
+                    &amount_vec,
+                    &is_batch_vec,
+                    &batch_index_vec,
+                    &block_vec,
+                    &tx_hash_vec,
+                    &ts_vec,
+                    &zero_blob,
+                ],
+            )
+            .await?;
+        Ok(row.get::<usize, i64>(0) as usize)
     }
 
     async fn pg_insert_operator_approvals_batch(
@@ -1776,68 +1777,94 @@ impl Erc1155Storage {
         if approvals.is_empty() {
             return Ok(0);
         }
-        let mut client = self.pg_client().await?;
-        let tx = client.transaction().await?;
-        let mut inserted = 0usize;
+
+        let mut token_vec = Vec::with_capacity(approvals.len());
+        let mut owner_vec = Vec::with_capacity(approvals.len());
+        let mut operator_vec = Vec::with_capacity(approvals.len());
+        let mut approved_vec = Vec::with_capacity(approvals.len());
+        let mut block_vec = Vec::with_capacity(approvals.len());
+        let mut tx_hash_vec = Vec::with_capacity(approvals.len());
+        let mut ts_vec = Vec::with_capacity(approvals.len());
 
         for approval in approvals {
-            tx.execute(
+            token_vec.push(felt_to_blob(approval.token));
+            owner_vec.push(felt_to_blob(approval.owner));
+            operator_vec.push(felt_to_blob(approval.operator));
+            approved_vec.push((approval.approved as i32) as i64);
+            block_vec.push(approval.block_number as i64);
+            tx_hash_vec.push(felt_to_blob(approval.tx_hash));
+            ts_vec.push(
+                approval
+                    .timestamp
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+            );
+        }
+
+        let client = self.pg_client().await?;
+        client
+            .execute(
                 "INSERT INTO erc1155.token_operators (token, owner, operator, approved, block_number, tx_hash, timestamp)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (token, owner, operator) DO UPDATE SET
+                SELECT i.token, i.owner, i.operator, i.approved, i.block_number, i.tx_hash, i.timestamp
+                FROM unnest(
+                    $1::bytea[],
+                    $2::bytea[],
+                    $3::bytea[],
+                    $4::bigint[],
+                    $5::bigint[],
+                    $6::bytea[],
+                    $7::bigint[]
+                ) AS i(token, owner, operator, approved, block_number, tx_hash, timestamp)
+                ON CONFLICT (token, owner, operator) DO UPDATE SET
                     approved = EXCLUDED.approved,
                     block_number = EXCLUDED.block_number,
                     tx_hash = EXCLUDED.tx_hash,
                     timestamp = EXCLUDED.timestamp",
                 &[
-                    &felt_to_blob(approval.token),
-                    &felt_to_blob(approval.owner),
-                    &felt_to_blob(approval.operator),
-                    &((approval.approved as i32) as i64),
-                    &(approval.block_number as i64),
-                    &felt_to_blob(approval.tx_hash),
-                    &approval
-                        .timestamp
-                        .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+                    &token_vec,
+                    &owner_vec,
+                    &operator_vec,
+                    &approved_vec,
+                    &block_vec,
+                    &tx_hash_vec,
+                    &ts_vec,
                 ],
-            ).await?;
-            inserted += 1;
-        }
-
-        tx.commit().await?;
-        Ok(inserted)
+            )
+            .await?;
+        Ok(approvals.len())
     }
 
     async fn pg_upsert_token_uris_batch(&self, uris: &[TokenUriData]) -> Result<usize> {
         if uris.is_empty() {
             return Ok(0);
         }
-        let mut client = self.pg_client().await?;
-        let tx = client.transaction().await?;
-        let mut updated = 0usize;
+
+        let mut token_vec = Vec::with_capacity(uris.len());
+        let mut token_id_vec = Vec::with_capacity(uris.len());
+        let mut uri_vec = Vec::with_capacity(uris.len());
 
         for entry in uris {
-            let rows = tx
-                .execute(
-                    "INSERT INTO erc1155.token_uris (token, token_id, uri, updated_at)
-                 VALUES ($1, $2, $3, EXTRACT(EPOCH FROM NOW())::BIGINT)
-                 ON CONFLICT(token, token_id) DO UPDATE SET
-                    uri = EXCLUDED.uri,
-                    updated_at = EXCLUDED.updated_at",
-                    &[
-                        &felt_to_blob(entry.token),
-                        &u256_to_blob(entry.token_id),
-                        &entry.uri,
-                    ],
-                )
-                .await?;
-            if rows > 0 {
-                updated += 1;
-            }
+            token_vec.push(felt_to_blob(entry.token));
+            token_id_vec.push(u256_to_blob(entry.token_id));
+            uri_vec.push(entry.uri.clone());
         }
 
-        tx.commit().await?;
-        Ok(updated)
+        let client = self.pg_client().await?;
+        let rows = client
+            .execute(
+                "INSERT INTO erc1155.token_uris (token, token_id, uri, updated_at)
+                SELECT i.token, i.token_id, i.uri, EXTRACT(EPOCH FROM NOW())::BIGINT
+                FROM unnest(
+                    $1::bytea[],
+                    $2::bytea[],
+                    $3::text[]
+                ) AS i(token, token_id, uri)
+                ON CONFLICT(token, token_id) DO UPDATE SET
+                    uri = EXCLUDED.uri,
+                    updated_at = EXCLUDED.updated_at",
+                &[&token_vec, &token_id_vec, &uri_vec],
+            )
+            .await?;
+        Ok(rows as usize)
     }
 
     #[allow(clippy::too_many_arguments)]

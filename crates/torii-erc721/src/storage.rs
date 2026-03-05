@@ -1264,70 +1264,87 @@ impl Erc721Storage {
         if transfers.is_empty() {
             return Ok(0);
         }
-        let mut client = self.pg_client().await?;
-        let tx = client.transaction().await?;
-        let mut inserted = 0usize;
+
+        let zero_blob = felt_to_blob(Felt::ZERO);
+        let mut token_vec = Vec::with_capacity(transfers.len());
+        let mut token_id_vec = Vec::with_capacity(transfers.len());
+        let mut from_vec = Vec::with_capacity(transfers.len());
+        let mut to_vec = Vec::with_capacity(transfers.len());
+        let mut block_vec = Vec::with_capacity(transfers.len());
+        let mut tx_hash_vec = Vec::with_capacity(transfers.len());
+        let mut ts_vec = Vec::with_capacity(transfers.len());
 
         for transfer in transfers {
-            let token_blob = felt_to_blob(transfer.token);
-            let token_id_blob = u256_to_blob(transfer.token_id);
-            let from_blob = felt_to_blob(transfer.from);
-            let to_blob = felt_to_blob(transfer.to);
-            let tx_hash_blob = felt_to_blob(transfer.tx_hash);
-            let ts = transfer
-                .timestamp
-                .unwrap_or_else(|| chrono::Utc::now().timestamp());
-
-            let row = tx.query_opt(
-                "INSERT INTO erc721.nft_transfers (token, token_id, from_addr, to_addr, block_number, tx_hash, timestamp)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (token, tx_hash, token_id, from_addr, to_addr) DO NOTHING
-                 RETURNING id",
-                &[&token_blob, &token_id_blob, &from_blob, &to_blob, &(transfer.block_number as i64), &tx_hash_blob, &ts],
-            ).await?;
-
-            if let Some(row) = row {
-                inserted += 1;
-                let transfer_id: i64 = row.get(0);
-                if transfer.to != Felt::ZERO {
-                    tx.execute(
-                        "INSERT INTO erc721.nft_ownership (token, token_id, owner, block_number, tx_hash, timestamp)
-                         VALUES ($1, $2, $3, $4, $5, $6)
-                         ON CONFLICT (token, token_id) DO UPDATE SET owner = EXCLUDED.owner, block_number = EXCLUDED.block_number, tx_hash = EXCLUDED.tx_hash, timestamp = EXCLUDED.timestamp",
-                        &[&token_blob, &token_id_blob, &to_blob, &(transfer.block_number as i64), &tx_hash_blob, &ts],
-                    ).await?;
-                }
-
-                if transfer.from != Felt::ZERO
-                    && transfer.to != Felt::ZERO
-                    && transfer.from == transfer.to
-                {
-                    tx.execute(
-                        "INSERT INTO erc721.nft_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                         VALUES ($1, $2, $3, 'both', $4)",
-                        &[&from_blob, &token_blob, &transfer_id, &(transfer.block_number as i64)],
-                    ).await?;
-                } else {
-                    if transfer.from != Felt::ZERO {
-                        tx.execute(
-                            "INSERT INTO erc721.nft_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                             VALUES ($1, $2, $3, 'sent', $4)",
-                            &[&from_blob, &token_blob, &transfer_id, &(transfer.block_number as i64)],
-                        ).await?;
-                    }
-                    if transfer.to != Felt::ZERO {
-                        tx.execute(
-                            "INSERT INTO erc721.nft_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                             VALUES ($1, $2, $3, 'received', $4)",
-                            &[&to_blob, &token_blob, &transfer_id, &(transfer.block_number as i64)],
-                        ).await?;
-                    }
-                }
-            }
+            token_vec.push(felt_to_blob(transfer.token));
+            token_id_vec.push(u256_to_blob(transfer.token_id));
+            from_vec.push(felt_to_blob(transfer.from));
+            to_vec.push(felt_to_blob(transfer.to));
+            block_vec.push(transfer.block_number as i64);
+            tx_hash_vec.push(felt_to_blob(transfer.tx_hash));
+            ts_vec.push(
+                transfer
+                    .timestamp
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+            );
         }
 
-        tx.commit().await?;
-        Ok(inserted)
+        let client = self.pg_client().await?;
+        let row = client
+            .query_one(
+                "WITH inserted AS (
+                    INSERT INTO erc721.nft_transfers (token, token_id, from_addr, to_addr, block_number, tx_hash, timestamp)
+                    SELECT i.token, i.token_id, i.from_addr, i.to_addr, i.block_number, i.tx_hash, i.timestamp
+                    FROM unnest(
+                        $1::bytea[],
+                        $2::bytea[],
+                        $3::bytea[],
+                        $4::bytea[],
+                        $5::bigint[],
+                        $6::bytea[],
+                        $7::bigint[]
+                    ) AS i(token, token_id, from_addr, to_addr, block_number, tx_hash, timestamp)
+                    ON CONFLICT (token, tx_hash, token_id, from_addr, to_addr) DO NOTHING
+                    RETURNING id, token, token_id, from_addr, to_addr, block_number, tx_hash, timestamp
+                ),
+                _ownership AS (
+                    INSERT INTO erc721.nft_ownership (token, token_id, owner, block_number, tx_hash, timestamp)
+                    SELECT token, token_id, to_addr, block_number, tx_hash, timestamp
+                    FROM inserted
+                    WHERE to_addr <> $8::bytea
+                    ON CONFLICT (token, token_id) DO UPDATE SET
+                        owner = EXCLUDED.owner,
+                        block_number = EXCLUDED.block_number,
+                        tx_hash = EXCLUDED.tx_hash,
+                        timestamp = EXCLUDED.timestamp
+                ),
+                _activity AS (
+                    INSERT INTO erc721.nft_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
+                    SELECT from_addr, token, id, 'both', block_number
+                    FROM inserted
+                    WHERE from_addr <> $8::bytea AND to_addr <> $8::bytea AND from_addr = to_addr
+                    UNION ALL
+                    SELECT from_addr, token, id, 'sent', block_number
+                    FROM inserted
+                    WHERE from_addr <> $8::bytea AND from_addr <> to_addr
+                    UNION ALL
+                    SELECT to_addr, token, id, 'received', block_number
+                    FROM inserted
+                    WHERE to_addr <> $8::bytea AND from_addr <> to_addr
+                )
+                SELECT COUNT(*)::bigint FROM inserted",
+                &[
+                    &token_vec,
+                    &token_id_vec,
+                    &from_vec,
+                    &to_vec,
+                    &block_vec,
+                    &tx_hash_vec,
+                    &ts_vec,
+                    &zero_blob,
+                ],
+            )
+            .await?;
+        Ok(row.get::<usize, i64>(0) as usize)
     }
 
     async fn pg_insert_operator_approvals_batch(
@@ -1337,28 +1354,60 @@ impl Erc721Storage {
         if approvals.is_empty() {
             return Ok(0);
         }
-        let mut client = self.pg_client().await?;
-        let tx = client.transaction().await?;
-        let mut inserted = 0usize;
+
+        let mut token_vec = Vec::with_capacity(approvals.len());
+        let mut owner_vec = Vec::with_capacity(approvals.len());
+        let mut operator_vec = Vec::with_capacity(approvals.len());
+        let mut approved_vec = Vec::with_capacity(approvals.len());
+        let mut block_vec = Vec::with_capacity(approvals.len());
+        let mut tx_hash_vec = Vec::with_capacity(approvals.len());
+        let mut ts_vec = Vec::with_capacity(approvals.len());
+
         for approval in approvals {
-            tx.execute(
-                "INSERT INTO erc721.nft_operators (token, owner, operator, approved, block_number, tx_hash, timestamp)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)
-                 ON CONFLICT (token, owner, operator) DO UPDATE SET approved = EXCLUDED.approved, block_number = EXCLUDED.block_number, tx_hash = EXCLUDED.tx_hash, timestamp = EXCLUDED.timestamp",
-                &[
-                    &felt_to_blob(approval.token),
-                    &felt_to_blob(approval.owner),
-                    &felt_to_blob(approval.operator),
-                    &((approval.approved as i32) as i64),
-                    &(approval.block_number as i64),
-                    &felt_to_blob(approval.tx_hash),
-                    &approval.timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp()),
-                ],
-            ).await?;
-            inserted += 1;
+            token_vec.push(felt_to_blob(approval.token));
+            owner_vec.push(felt_to_blob(approval.owner));
+            operator_vec.push(felt_to_blob(approval.operator));
+            approved_vec.push((approval.approved as i32) as i64);
+            block_vec.push(approval.block_number as i64);
+            tx_hash_vec.push(felt_to_blob(approval.tx_hash));
+            ts_vec.push(
+                approval
+                    .timestamp
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+            );
         }
-        tx.commit().await?;
-        Ok(inserted)
+
+        let client = self.pg_client().await?;
+        client
+            .execute(
+                "INSERT INTO erc721.nft_operators (token, owner, operator, approved, block_number, tx_hash, timestamp)
+                SELECT i.token, i.owner, i.operator, i.approved, i.block_number, i.tx_hash, i.timestamp
+                FROM unnest(
+                    $1::bytea[],
+                    $2::bytea[],
+                    $3::bytea[],
+                    $4::bigint[],
+                    $5::bigint[],
+                    $6::bytea[],
+                    $7::bigint[]
+                ) AS i(token, owner, operator, approved, block_number, tx_hash, timestamp)
+                ON CONFLICT (token, owner, operator) DO UPDATE SET
+                    approved = EXCLUDED.approved,
+                    block_number = EXCLUDED.block_number,
+                    tx_hash = EXCLUDED.tx_hash,
+                    timestamp = EXCLUDED.timestamp",
+                &[
+                    &token_vec,
+                    &owner_vec,
+                    &operator_vec,
+                    &approved_vec,
+                    &block_vec,
+                    &tx_hash_vec,
+                    &ts_vec,
+                ],
+            )
+            .await?;
+        Ok(approvals.len())
     }
 
     #[allow(clippy::too_many_arguments)]
