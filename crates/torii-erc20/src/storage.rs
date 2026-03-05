@@ -20,6 +20,36 @@ use torii_common::{blob_to_felt, blob_to_u256, felt_to_blob, u256_to_blob};
 
 use crate::balance_fetcher::BalanceFetchRequest;
 
+/// Maximum value for U256 (2^256 - 1)
+const U256_MAX: U256 = U256::from_words(u128::MAX, u128::MAX);
+
+/// Safely adds two U256 values, capping at U256::MAX on overflow.
+///
+/// This is necessary because starknet-core's U256::Add uses checked_add().unwrap(),
+/// which panics on overflow. For token balances, overflow should be extremely rare
+/// (would require a balance > 2^256 - 1), but we handle it gracefully by capping
+/// at the maximum value rather than crashing the indexer.
+///
+/// Possible causes of overflow:
+/// - Malicious or buggy contract minting excessive tokens
+/// - Data corruption in blockchain event data
+/// - Accumulation of many transfers to the same address
+fn safe_u256_add(a: U256, b: U256) -> U256 {
+    // Check if addition would overflow
+    // If a > U256_MAX - b, then a + b would overflow
+    let max_minus_b = U256_MAX - b;
+    if a > max_minus_b {
+        tracing::warn!(
+            "U256 addition overflow detected: {} + {} would exceed U256::MAX, capping at maximum",
+            a,
+            b
+        );
+        U256_MAX
+    } else {
+        a + b
+    }
+}
+
 /// Direction filter for transfer queries
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TransferDirection {
@@ -1427,8 +1457,8 @@ impl Erc20Storage {
             if transfer.to != Felt::ZERO {
                 let key = (transfer.token, transfer.to);
                 let current = balance_cache.get(&key).copied().unwrap_or(U256::from(0u64));
-                // For addition, we just add (overflow is extremely unlikely for token balances)
-                let new_balance = current + transfer.amount;
+                // Use safe addition to handle potential overflow gracefully
+                let new_balance = safe_u256_add(current, transfer.amount);
                 balance_cache.insert(key, new_balance);
                 last_block_per_wallet.insert(key, (transfer.block_number, transfer.tx_hash));
             }
@@ -2428,7 +2458,8 @@ impl Erc20Storage {
             if transfer.to != Felt::ZERO {
                 let key = (transfer.token, transfer.to);
                 let current = balance_cache.get(&key).copied().unwrap_or(U256::from(0u64));
-                balance_cache.insert(key, current + transfer.amount);
+                // Use safe addition to handle potential overflow gracefully
+                balance_cache.insert(key, safe_u256_add(current, transfer.amount));
                 last_block_per_wallet.insert(key, (transfer.block_number, transfer.tx_hash));
             }
         }

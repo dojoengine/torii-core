@@ -1308,9 +1308,10 @@ impl Erc721Storage {
                 ),
                 _ownership AS (
                     INSERT INTO erc721.nft_ownership (token, token_id, owner, block_number, tx_hash, timestamp)
-                    SELECT token, token_id, to_addr, block_number, tx_hash, timestamp
+                    SELECT DISTINCT ON (token, token_id) token, token_id, to_addr, block_number, tx_hash, timestamp
                     FROM inserted
                     WHERE to_addr <> $8::bytea
+                    ORDER BY token, token_id, id DESC
                     ON CONFLICT (token, token_id) DO UPDATE SET
                         owner = EXCLUDED.owner,
                         block_number = EXCLUDED.block_number,
