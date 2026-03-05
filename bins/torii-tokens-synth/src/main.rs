@@ -132,7 +132,7 @@ struct CommonConfig {
     output_root: PathBuf,
 
     /// Drop and recreate schemas before each run.
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    #[arg(long, default_value_t = true)]
     reset_schema: bool,
 }
 
