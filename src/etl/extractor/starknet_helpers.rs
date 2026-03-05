@@ -8,6 +8,7 @@ use starknet::core::types::{
     MaybePreConfirmedBlockWithReceipts, TransactionContent, TransactionReceipt,
 };
 use starknet::providers::{Provider, ProviderRequestData, ProviderResponseData};
+use std::collections::HashSet;
 
 use super::{BlockContext, BlockData, DeclaredClass, DeployedContract, TransactionContext};
 
@@ -339,117 +340,98 @@ mod tests {
 pub struct ContractAbi {
     pub abi: Option<Vec<AbiEntry>>,
     pub legacy_abi: Option<Vec<LegacyContractAbiEntry>>,
+    functions: HashSet<String>,
+    events: HashSet<String>,
 }
 
 impl ContractAbi {
-    /// Parse ABI from a contract class, consume the class to avoid copying the ABI which
-    /// could be quite large.
+    fn extract_function_name(name: &str) -> String {
+        name.to_string()
+    }
+
+    fn extract_event_name(name: &str) -> String {
+        name.to_string()
+    }
+
+    fn matches_name(cached: &str, target: &str) -> bool {
+        cached == target || cached.ends_with(&format!("::{target}"))
+    }
+
+    #[allow(clippy::match_wildcard_for_single_variants)]
     pub fn from_contract_class(class: ContractClass) -> Result<Self> {
         let mut abi: Option<Vec<AbiEntry>> = None;
         let mut legacy_abi: Option<Vec<LegacyContractAbiEntry>> = None;
+        let mut functions = HashSet::new();
+        let mut events = HashSet::new();
 
         match class {
             ContractClass::Sierra(sierra) => {
-                abi = Some(serde_json::from_str(&sierra.abi)?);
+                let parsed_abi: Vec<AbiEntry> = serde_json::from_str(&sierra.abi)?;
+                for entry in &parsed_abi {
+                    match entry {
+                        AbiEntry::Function(func) => {
+                            functions.insert(Self::extract_function_name(&func.name));
+                        }
+                        AbiEntry::Interface(interface) => {
+                            for item in &interface.items {
+                                if let AbiEntry::Function(func) = item {
+                                    functions.insert(Self::extract_function_name(&func.name));
+                                }
+                            }
+                        }
+                        AbiEntry::Event(event) => {
+                            use starknet::core::types::contract::AbiEvent;
+                            match event {
+                                AbiEvent::Typed(TypedAbiEvent::Struct(s)) => {
+                                    events.insert(Self::extract_event_name(&s.name));
+                                }
+                                AbiEvent::Typed(TypedAbiEvent::Enum(e)) => {
+                                    events.insert(Self::extract_event_name(&e.name));
+                                    for variant in &e.variants {
+                                        events.insert(Self::extract_event_name(&variant.name));
+                                    }
+                                }
+                                AbiEvent::Untyped(u) => {
+                                    events.insert(Self::extract_event_name(&u.name));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                abi = Some(parsed_abi);
             }
             ContractClass::Legacy(legacy) => {
+                if let Some(ref legacy_abi_vec) = legacy.abi {
+                    for entry in legacy_abi_vec {
+                        match entry {
+                            LegacyContractAbiEntry::Function(func) => {
+                                functions.insert(Self::extract_function_name(&func.name));
+                            }
+                            LegacyContractAbiEntry::Event(event) => {
+                                events.insert(Self::extract_event_name(&event.name));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 legacy_abi = legacy.abi;
             }
         }
 
-        Ok(Self { abi, legacy_abi })
+        Ok(Self {
+            abi,
+            legacy_abi,
+            functions,
+            events,
+        })
     }
 
-    /// Check if ABI contains a function with the given name,
-    /// recursively checking interfaces.
-    ///
-    /// This matches:
-    /// - Exact function names (e.g., "transfer")
-    /// - Fully qualified names (e.g., "openzeppelin::token::erc20::ERC20::transfer")
     pub fn has_function(&self, name: &str) -> bool {
-        if let Some(abi) = &self.abi {
-            for entry in abi {
-                if let AbiEntry::Function(func) = entry {
-                    if func.name == name || func.name.ends_with(&format!("::{name}")) {
-                        return true;
-                    }
-                }
-
-                if let AbiEntry::Interface(interface) = entry {
-                    for function in &interface.items {
-                        if let AbiEntry::Function(func) = function {
-                            if func.name == name || func.name.ends_with(&format!("::{name}")) {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(legacy_abi) = &self.legacy_abi {
-            for entry in legacy_abi {
-                if let LegacyContractAbiEntry::Function(func) = entry {
-                    if func.name == name || func.name.ends_with(&format!("::{name}")) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        false
+        self.functions.iter().any(|f| Self::matches_name(f, name))
     }
 
-    /// Check if ABI contains an event with the given name.
-    ///
-    /// This matches:
-    /// - Exact event names (e.g., "Transfer")
-    /// - Fully qualified names (e.g., "openzeppelin::token::erc20::ERC20::Transfer")
-    /// - Enum variant names (e.g., "Transfer" inside an Event enum)
     pub fn has_event(&self, name: &str) -> bool {
-        if let Some(abi) = &self.abi {
-            for entry in abi {
-                if let AbiEntry::Event(event) = entry {
-                    use starknet::core::types::contract::AbiEvent;
-                    match event {
-                        AbiEvent::Typed(TypedAbiEvent::Struct(s)) => {
-                            // Check exact name or if fully qualified name ends with target name
-                            if s.name == name || s.name.ends_with(&format!("::{name}")) {
-                                return true;
-                            }
-                        }
-                        AbiEvent::Typed(TypedAbiEvent::Enum(e)) => {
-                            // Check enum name
-                            if e.name == name || e.name.ends_with(&format!("::{name}")) {
-                                return true;
-                            }
-                            // Check enum variants (for nested events like OpenZeppelin v0.7.0)
-                            for variant in &e.variants {
-                                if variant.name == name {
-                                    return true;
-                                }
-                            }
-                        }
-                        AbiEvent::Untyped(u) => {
-                            if u.name == name || u.name.ends_with(&format!("::{name}")) {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if let Some(legacy_abi) = &self.legacy_abi {
-            for entry in legacy_abi {
-                if let LegacyContractAbiEntry::Event(event) = entry {
-                    if event.name == name || event.name.ends_with(&format!("::{name}")) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        false
+        self.events.iter().any(|e| Self::matches_name(e, name))
     }
 }

@@ -246,9 +246,8 @@ impl Sink for Erc20Sink {
     }
 
     async fn process(&self, envelopes: &[Envelope], batch: &ExtractionBatch) -> Result<()> {
-        // Collect all transfers and approvals for batch insertion
-        let mut transfers: Vec<TransferData> = Vec::new();
-        let mut approvals: Vec<ApprovalData> = Vec::new();
+        let mut transfers: Vec<TransferData> = Vec::with_capacity(envelopes.len());
+        let mut approvals: Vec<ApprovalData> = Vec::with_capacity(envelopes.len());
         let mut inserted_transfers: u64 = 0;
         let mut inserted_approvals: u64 = 0;
 
