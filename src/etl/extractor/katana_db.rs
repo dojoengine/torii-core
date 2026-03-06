@@ -40,6 +40,12 @@ pub struct KatanaDbConfig {
     /// Number of blocks to fetch per batch.
     pub batch_size: u64,
 
+    /// Maximum number of events per batch. When this limit is reached, the batch
+    /// is returned early with fewer blocks than `batch_size`. This prevents memory
+    /// pressure when blocks contain dense event data.
+    /// Defaults to 100,000. Set to 0 to disable the limit.
+    pub max_events_per_batch: u64,
+
     /// How often to check for new blocks when caught up with chain head.
     pub poll_interval: Duration,
 }
@@ -51,6 +57,7 @@ impl Default for KatanaDbConfig {
             from_block: 0,
             to_block: None,
             batch_size: 100,
+            max_events_per_batch: 100_000,
             poll_interval: Duration::from_secs(1),
         }
     }
@@ -184,6 +191,9 @@ impl KatanaDbExtractor {
         let mut transactions_map = HashMap::new();
         let mut all_declared_classes = Vec::new();
         let mut all_deployed_contracts = Vec::new();
+
+        let event_limit = self.config.max_events_per_batch;
+        let mut last_processed_block = current_block.saturating_sub(1);
 
         for block_num in current_block..=batch_end {
             let block_id = block_num.into();
@@ -322,6 +332,19 @@ impl KatanaDbExtractor {
                     }
                 }
             }
+
+            last_processed_block = block_num;
+
+            // Stop early if we've accumulated enough events to avoid memory pressure
+            if event_limit > 0 && all_events.len() as u64 >= event_limit {
+                tracing::info!(
+                    target: "torii::etl::katana_db",
+                    "Event limit reached ({} events at block {}), yielding partial batch",
+                    all_events.len(),
+                    block_num
+                );
+                break;
+            }
         }
 
         let total_ms = total_start.elapsed().as_millis();
@@ -342,11 +365,11 @@ impl KatanaDbExtractor {
             transactions: transactions_map,
             declared_classes: all_declared_classes,
             deployed_contracts: all_deployed_contracts,
-            cursor: Some(format!("block:{batch_end}")),
+            cursor: Some(format!("block:{last_processed_block}")),
             chain_head: Some(chain_head),
         };
 
-        Ok((batch, batch_end + 1))
+        Ok((batch, last_processed_block + 1))
     }
 }
 
