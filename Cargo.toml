@@ -46,6 +46,14 @@ path = "examples/http_only_sink/main.rs"
 name = "test_block_extractor"
 path = "examples/test_block_extractor/main.rs"
 
+[[example]]
+name = "test_katana_db_extractor"
+path = "examples/test_katana_db_extractor.rs"
+
+[[example]]
+name = "bench_katana_db_extractor"
+path = "examples/bench_katana_db_extractor.rs"
+
 [dependencies]
 # Core async runtime
 tokio = { version = "1.41", features = ["full"] }
