@@ -85,11 +85,11 @@ impl ToString for PostgresType {
             PostgresType::Uint128 => "uint128".to_string(),
             PostgresType::Uint256 => "uint256".to_string(),
             PostgresType::Uint512 => "uint512".to_string(),
-            PostgresType::Felt252 => "bytea".to_string(),
+            PostgresType::Felt252 => "felt252".to_string(),
             PostgresType::Char31 => "char31".to_string(),
-            PostgresType::Bytes31 => "bytea".to_string(),
-            PostgresType::StarknetHash => "bytea".to_string(),
-            PostgresType::EthAddress => "bytea".to_string(),
+            PostgresType::Bytes31 => "byte31".to_string(),
+            PostgresType::StarknetHash => "starknet_hash".to_string(),
+            PostgresType::EthAddress => "eth_address".to_string(),
             PostgresType::Numeric(precision, scale) => {
                 format!("NUMERIC({}, {})", precision, scale)
             }
@@ -556,7 +556,6 @@ impl PgTableStructure {
         queries: &mut Vec<String>,
     ) -> PgTypeResult<String> {
         let name = branch.type_name("tuple");
-
         queries.push(create_tuple_type_query(&name, &elements));
         self.tuples.insert(name.clone(), elements);
         Ok(name)

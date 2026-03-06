@@ -75,7 +75,7 @@ END $$;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'felt252') THEN
-        CREATE DOMAIN felt252 AS  bytea CHECK (octet_length(VALUE) = 32);
+        CREATE DOMAIN felt252 AS bytea CHECK (octet_length(VALUE) = 32);
     END IF;
 END $$;
 

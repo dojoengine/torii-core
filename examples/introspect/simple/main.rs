@@ -8,7 +8,7 @@ use torii_dojo::DojoToriiError;
 use torii_introspect_postgres_sink::processor::PostgresSimpleDb;
 use torii_test_utils::{resolve_path_like, EventIterator, FakeProvider};
 
-const DB_URL: &str = "postgres://user:password@localhost:5432/torii_test";
+const DB_URL: &str = "postgres://torii:torii@localhost:5432/torii";
 // const CHAIN_DATA_PATH: &str = "~/tc-tests/pistols";
 const CHAIN_DATA_PATH: &str = "~/tc-tests/blob-arena";
 const MANAGER_PATH: &str = "~/tc-tests/manager/";

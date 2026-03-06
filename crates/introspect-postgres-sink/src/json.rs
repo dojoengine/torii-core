@@ -7,6 +7,13 @@ use serde::Serializer;
 pub struct PostgresJsonSerializer;
 
 impl CairoTypeSerialization for PostgresJsonSerializer {
+    fn serialize_byte_array<S: Serializer>(
+        &self,
+        serializer: S,
+        value: &[u8],
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&format!("\\x{}", hex::encode(value)))
+    }
     fn serialize_felt<S: Serializer>(
         &self,
         serializer: S,
@@ -29,7 +36,7 @@ impl CairoTypeSerialization for PostgresJsonSerializer {
     ) -> Result<S::Ok, S::Error> {
         let mut seq = serializer.serialize_map(Some(tuple.elements.len()))?;
         for (i, element) in tuple.elements.iter().enumerate() {
-            seq.serialize_entry(&format!("element_{i}"), &element.to_de_se(data, self))?;
+            seq.serialize_entry(&format!("_{i}"), &element.to_de_se(data, self))?;
         }
         seq.end()
     }
@@ -41,10 +48,20 @@ impl CairoTypeSerialization for PostgresJsonSerializer {
         name: &str,
         type_def: &'a TypeDef,
     ) -> Result<S::Ok, S::Error> {
-        let mut map = serializer.serialize_map(Some(1))?;
-        map.serialize_entry("variant", name)?;
-        map.serialize_entry(&name, &type_def.to_de_se(data, self))?;
-        map.end()
+        match type_def {
+            TypeDef::None => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("variant", name)?;
+                map
+            }
+            _ => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry("variant", name)?;
+                map.serialize_entry(&format!("_{name}"), &type_def.to_de_se(data, self))?;
+                map
+            }
+        }
+        .end()
     }
 
     fn serialize_result<'a, S: Serializer>(

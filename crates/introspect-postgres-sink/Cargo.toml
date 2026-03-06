@@ -25,7 +25,7 @@ torii.workspace = true
 tracing.workspace = true
 starknet-types-core.workspace = true
 thiserror.workspace = true
+introspect-types.workspace = true
 
 # Local crates
-introspect-types = { path = "../../../introspect/crates/types" }
-torii-introspect.path = "../introspect"
+torii-introspect.workspace = true
