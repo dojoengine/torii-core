@@ -187,8 +187,8 @@ impl Sink for Erc721Sink {
     }
 
     async fn process(&self, envelopes: &[Envelope], batch: &ExtractionBatch) -> Result<()> {
-        let mut transfers: Vec<NftTransferData> = Vec::new();
-        let mut operator_approvals: Vec<OperatorApprovalData> = Vec::new();
+        let mut transfers: Vec<NftTransferData> = Vec::with_capacity(envelopes.len());
+        let mut operator_approvals: Vec<OperatorApprovalData> = Vec::with_capacity(envelopes.len());
         let mut inserted_transfers: u64 = 0;
         let mut inserted_operator_approvals: u64 = 0;
 

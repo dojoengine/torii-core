@@ -238,9 +238,9 @@ impl Sink for Erc1155Sink {
     }
 
     async fn process(&self, envelopes: &[Envelope], batch: &ExtractionBatch) -> Result<()> {
-        let mut transfers: Vec<TokenTransferData> = Vec::new();
-        let mut operator_approvals: Vec<OperatorApprovalData> = Vec::new();
-        let mut uri_updates: Vec<TokenUriData> = Vec::new();
+        let mut transfers: Vec<TokenTransferData> = Vec::with_capacity(envelopes.len());
+        let mut operator_approvals: Vec<OperatorApprovalData> = Vec::with_capacity(envelopes.len());
+        let mut uri_updates: Vec<TokenUriData> = Vec::with_capacity(envelopes.len());
         let mut inserted_transfers: u64 = 0;
         let mut inserted_operator_approvals: u64 = 0;
         let mut inserted_uri_updates: u64 = 0;
