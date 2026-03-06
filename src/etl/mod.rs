@@ -11,7 +11,7 @@ pub use engine_db::{EngineDb, EngineStats};
 pub use envelope::{Envelope, EventBody, TypeId, TypedBody};
 pub use extractor::{
     BlockContext, ContractAbi, EventContext, ExtractionBatch, Extractor, SampleExtractor,
-    SyntheticErc20Config, SyntheticErc20Extractor, TransactionContext,
+    SyntheticErc20Config, SyntheticErc20Extractor, SyntheticExtractor, TransactionContext,
 };
 pub use identification::{ContractRegistry, IdentificationRule};
 pub use sink::{MultiSink, Sink};

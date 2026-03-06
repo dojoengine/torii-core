@@ -366,6 +366,9 @@ impl ContractRegistry {
 
         // Run identification rules for each contract
         let mut results = HashMap::new();
+        let mut positives: HashMap<Felt, Vec<DecoderId>> = HashMap::new();
+        let mut negatives: Vec<Felt> = Vec::new();
+
         for (contract_address, class_hash) in &contract_to_class {
             let decoder_ids = if let Some(abi) = class_to_abi.get(class_hash) {
                 self.run_rules(*contract_address, *class_hash, abi)
@@ -373,23 +376,59 @@ impl ContractRegistry {
                 Vec::new()
             };
 
-            if !decoder_ids.is_empty() {
+            if decoder_ids.is_empty() {
+                negatives.push(*contract_address);
+            } else {
                 tracing::info!(
                     target: "torii::etl::identification",
                     contract = %format!("{:#x}", contract_address),
                     decoders = ?decoder_ids,
                     "Contract identified"
                 );
+                positives.insert(*contract_address, decoder_ids.clone());
             }
 
-            // Cache and persist positives; cache negatives only in bounded memory.
-            if decoder_ids.is_empty() {
-                self.cache_empty(*contract_address).await;
-            } else {
-                self.cache_and_persist(*contract_address, decoder_ids.clone())
-                    .await;
-            }
             results.insert(*contract_address, decoder_ids);
+        }
+
+        // Batch update caches
+        if !negatives.is_empty() {
+            let mut negative_cache = self.negative_cache.write().await;
+            let mut cache = self.cache.write().await;
+
+            for contract_address in &negatives {
+                let evicted = negative_cache.insert(*contract_address);
+                cache.insert(*contract_address, Vec::new());
+
+                for contract in evicted {
+                    cache.remove(&contract);
+                }
+            }
+        }
+
+        if !positives.is_empty() {
+            {
+                let mut negative_cache = self.negative_cache.write().await;
+                for contract_address in positives.keys() {
+                    negative_cache.remove(contract_address);
+                }
+            }
+            {
+                let mut cache = self.cache.write().await;
+                for (contract_address, decoder_ids) in &positives {
+                    cache.insert(*contract_address, decoder_ids.clone());
+                }
+            }
+
+            // Batch persist to database
+            if let Err(e) = self.engine_db.set_contract_decoders_batch(&positives).await {
+                tracing::warn!(
+                    target: "torii::etl::identification",
+                    count = positives.len(),
+                    error = %e,
+                    "Failed to batch persist contract identifications"
+                );
+            }
         }
 
         Ok(results)
@@ -442,30 +481,6 @@ impl ContractRegistry {
         cache.insert(contract_address, Vec::new());
         for contract in evicted {
             cache.remove(&contract);
-        }
-    }
-
-    /// Cache and persist identification result.
-    async fn cache_and_persist(&self, contract_address: Felt, decoder_ids: Vec<DecoderId>) {
-        {
-            let mut negative_cache = self.negative_cache.write().await;
-            negative_cache.remove(&contract_address);
-        }
-        {
-            let mut cache = self.cache.write().await;
-            cache.insert(contract_address, decoder_ids.clone());
-        }
-        if let Err(e) = self
-            .engine_db
-            .set_contract_decoders(contract_address, &decoder_ids)
-            .await
-        {
-            tracing::warn!(
-                target: "torii::etl::identification",
-                contract = %format!("{:#x}", contract_address),
-                error = %e,
-                "Failed to persist contract identification"
-            );
         }
     }
 }

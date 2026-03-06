@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use sqlx::{any::AnyPoolOptions, Any, Pool, QueryBuilder, Row};
 use starknet::core::types::Felt;
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::etl::decoder::DecoderId;
@@ -572,6 +573,59 @@ impl EngineDb {
             .execute(&self.pool)
             .await?;
 
+        Ok(())
+    }
+
+    /// Set decoder IDs for multiple contracts in a single batch operation.
+    ///
+    /// # Arguments
+    /// * `contracts` - HashMap of contract address to decoder IDs
+    ///
+    /// # Performance
+    /// Uses a single INSERT with unnest() for PostgreSQL or a transaction with
+    /// multiple INSERTs for SQLite, reducing N database round trips to 1.
+    pub async fn set_contract_decoders_batch(
+        &self,
+        contracts: &HashMap<Felt, Vec<DecoderId>>,
+    ) -> Result<()> {
+        if contracts.is_empty() {
+            return Ok(());
+        }
+
+        let table = self.table("contract_decoders", "engine.contract_decoders");
+        let mut tx = self.pool.begin().await?;
+
+        for (contract, decoder_ids) in contracts {
+            let addr_hex = format!("{contract:#x}");
+            let decoder_ids_str: String = decoder_ids
+                .iter()
+                .map(|id| id.as_u64().to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+
+            let sql = match self.backend {
+                DbBackend::Sqlite => format!(
+                    "INSERT INTO {table} (contract_address, decoder_ids, identified_at) \
+                     VALUES (?, ?, strftime('%s', 'now')) \
+                     ON CONFLICT(contract_address) \
+                     DO UPDATE SET decoder_ids = excluded.decoder_ids, identified_at = strftime('%s', 'now')"
+                ),
+                DbBackend::Postgres => format!(
+                    "INSERT INTO {table} (contract_address, decoder_ids, identified_at) \
+                     VALUES ($1, $2, EXTRACT(EPOCH FROM NOW())::BIGINT) \
+                     ON CONFLICT(contract_address) \
+                     DO UPDATE SET decoder_ids = EXCLUDED.decoder_ids, identified_at = EXTRACT(EPOCH FROM NOW())::BIGINT"
+                ),
+            };
+
+            sqlx::query(&sql)
+                .bind(&addr_hex)
+                .bind(&decoder_ids_str)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        tx.commit().await?;
         Ok(())
     }
 
