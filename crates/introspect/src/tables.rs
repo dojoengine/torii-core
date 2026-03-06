@@ -1,14 +1,11 @@
 use crate::Record;
-use introspect_types::{
-    bytes::IntoByteSource,
-    serialize::{CairoSeFrom, CairoSerialization},
-    CairoDeserializer, ColumnDef, PrimaryDef, PrimaryTypeDef, TypeDef,
-};
-use serde::{
-    ser::{SerializeMap, SerializeSeq},
-    Serialize, Serializer,
-};
-use std::{cell::RefCell, ops::Deref};
+use introspect_types::bytes::IntoByteSource;
+use introspect_types::serialize::CairoSeFrom;
+use introspect_types::serialize_def::CairoTypeSerialization;
+use introspect_types::{CairoDeserializer, ColumnDef, PrimaryDef, PrimaryTypeDef, TypeDef};
+use serde::ser::{SerializeMap, SerializeSeq};
+use serde::{Serialize, Serializer};
+use std::ops::Deref;
 
 pub struct RecordSchema<'a> {
     primary: &'a PrimaryDef,
@@ -27,7 +24,7 @@ impl<'a> RecordSchema<'a> {
         &self.primary
     }
 
-    pub fn to_frame<C: CairoSerialization, M: SerializeEntries>(
+    pub fn to_frame<C: CairoTypeSerialization, M: SerializeEntries>(
         &'a self,
         record: &'a Record,
         metadata: &'a M,
@@ -38,11 +35,11 @@ impl<'a> RecordSchema<'a> {
 
     pub fn parse_records_with_metadata<
         S: Serializer,
-        C: CairoSerialization,
+        C: CairoTypeSerialization,
         M: SerializeEntries,
     >(
-        &self,
-        records: &[Record],
+        &'a self,
+        records: &'a [Record],
         metadata: &'a M,
         serializer: S,
         cairo_se: &'a C,
@@ -69,14 +66,14 @@ pub trait AsEntryPair {
     fn to_entry_pair(&self) -> (&Self::Key, &Self::Value);
 }
 
-impl<'a, 'de, T, D, C, E> SerializeEntries for CairoSeFrom<'a, 'de, T, D, C>
+impl<'a, T, D, C, E> SerializeEntries for CairoSeFrom<'a, T, D, C>
 where
     E: AsEntryPair + 'a,
-    C: CairoSerialization,
+    C: CairoTypeSerialization,
     D: CairoDeserializer,
     T: Deref<Target = [&'a E]>,
     <E as AsEntryPair>::Key: Serialize,
-    CairoSeFrom<'a, 'de, <E as AsEntryPair>::Value, D, C>: Serialize,
+    CairoSeFrom<'a, <E as AsEntryPair>::Value, D, C>: Serialize,
 {
     fn entry_count(&self) -> usize {
         self.schema().deref().len()
@@ -116,7 +113,7 @@ pub struct RecordWithMetadata<'a, M: SerializeEntries> {
 }
 
 impl<'a, M: SerializeEntries> RecordWithMetadata<'a, M> {
-    pub fn to_frame<C: CairoSerialization>(
+    pub fn to_frame<C: CairoTypeSerialization>(
         &self,
         schema: &'a RecordSchema<'a>,
         cairo_se: &'a C,
@@ -125,7 +122,7 @@ impl<'a, M: SerializeEntries> RecordWithMetadata<'a, M> {
     }
 }
 
-pub struct RecordFrame<'a, C: CairoSerialization, M: SerializeEntries> {
+pub struct RecordFrame<'a, C: CairoTypeSerialization, M: SerializeEntries> {
     primary: &'a PrimaryDef,
     columns: &'a [&'a ColumnDef],
     id: &'a [u8; 32],
@@ -134,7 +131,7 @@ pub struct RecordFrame<'a, C: CairoSerialization, M: SerializeEntries> {
     metadata: &'a M,
 }
 
-impl<'a, C: CairoSerialization, M: SerializeEntries> RecordFrame<'a, C, M> {
+impl<'a, C: CairoTypeSerialization, M: SerializeEntries> RecordFrame<'a, C, M> {
     pub fn new(
         record: &'a Record,
         schema: &'a RecordSchema<'a>,
@@ -156,27 +153,27 @@ impl<'a, C: CairoSerialization, M: SerializeEntries> RecordFrame<'a, C, M> {
         map: &mut <S as Serializer>::SerializeMap,
     ) -> Result<(), S::Error> {
         let mut id = self.id.into_source();
-        let de = RefCell::new(&mut id);
         map.serialize_entry(
             &self.primary.name,
-            &CairoSeFrom::new(&(&self.primary.type_def).into(), &de, self.cairo_se),
-        )
+            &CairoSeFrom::new(&self.primary.type_def, &mut id, self.cairo_se),
+        )?;
+        Ok(())
     }
 
     pub fn parse_record_entries<S: Serializer>(
         &self,
         map: &mut <S as Serializer>::SerializeMap,
     ) -> Result<(), S::Error> {
-        CairoSeFrom::new(
-            &self.columns,
-            &RefCell::new(&mut self.values.into_source()),
-            self.cairo_se,
-        )
-        .serialize_entries::<S>(map)
+        let mut source = self.values.into_source();
+        let sede = CairoSeFrom::new(&self.columns, &mut source, self.cairo_se);
+        sede.serialize_entries::<S>(map)?;
+        Ok(())
     }
 }
 
-impl<'a, C: CairoSerialization, M: SerializeEntries> SerializeEntries for RecordFrame<'a, C, M> {
+impl<'a, C: CairoTypeSerialization, M: SerializeEntries> SerializeEntries
+    for RecordFrame<'a, C, M>
+{
     fn entry_count(&self) -> usize {
         1 + self.columns.len() + self.metadata.entry_count()
     }
@@ -191,7 +188,7 @@ impl<'a, C: CairoSerialization, M: SerializeEntries> SerializeEntries for Record
     }
 }
 
-impl<'a, C: CairoSerialization, M: SerializeEntries> Serialize for RecordFrame<'a, C, M> {
+impl<'a, C: CairoTypeSerialization, M: SerializeEntries> Serialize for RecordFrame<'a, C, M> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(Some(self.entry_count()))?;
         self.serialize_entries::<S>(&mut map)?;
