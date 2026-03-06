@@ -13,19 +13,24 @@ use torii::etl::extractor::{Extractor, KatanaDbConfig, KatanaDbExtractor};
 async fn main() -> anyhow::Result<()> {
     let db_path = env::args()
         .nth(1)
-        .expect("Usage: bench_katana_db_extractor <db_path> [batch_size]");
+        .expect("Usage: bench_katana_db_extractor <db_path> [batch_size] [from_block]");
     let batch_size: u64 = env::args()
         .nth(2)
         .and_then(|s| s.parse().ok())
         .unwrap_or(1000);
+    let from_block: u64 = env::args()
+        .nth(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
 
     println!("Opening Katana DB at: {db_path}");
     println!("Batch size: {batch_size}");
+    println!("From block: {from_block}");
     println!();
 
     let config = KatanaDbConfig {
         db_path: db_path.clone(),
-        from_block: 0,
+        from_block,
         to_block: None, // run through the entire DB
         batch_size,
         ..Default::default()
@@ -51,7 +56,9 @@ async fn main() -> anyhow::Result<()> {
         let batch_start = Instant::now();
         let batch = extractor.extract(None, &engine_db).await?;
 
-        if batch.is_empty() && extractor.is_finished() {
+        if batch.is_empty() {
+            // Extractor either finished or caught up with chain head.
+            // For benchmarking we stop in both cases.
             break;
         }
 

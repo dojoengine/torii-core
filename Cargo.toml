@@ -54,6 +54,18 @@ path = "examples/test_katana_db_extractor.rs"
 name = "bench_katana_db_extractor"
 path = "examples/bench_katana_db_extractor.rs"
 
+[[example]]
+name = "probe_block_events"
+path = "examples/probe_block_events.rs"
+
+[[example]]
+name = "probe_block_detail"
+path = "examples/probe_block_detail.rs"
+
+[[example]]
+name = "probe_extract"
+path = "examples/probe_extract.rs"
+
 [dependencies]
 # Core async runtime
 tokio = { version = "1.41", features = ["full"] }
