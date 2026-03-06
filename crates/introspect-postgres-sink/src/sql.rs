@@ -3,11 +3,15 @@ use std::io::Write;
 use crate::{PostgresField, PostgresType};
 
 pub fn add_column_query(name: &str, pg_type: &PostgresType) -> String {
-    format!(r#"ADD COLUMN "{name}" {}"#, pg_type.to_string())
+    format!("ADD COLUMN \"{name}\" {pg_type}")
+}
+
+pub fn add_column_if_not_exists_query(name: &str, pg_type: &PostgresType) -> String {
+    format!("ADD COLUMN IF NOT EXISTS \"{name}\" {pg_type}")
 }
 
 pub fn modify_column_query(name: &str, pg_type: &PostgresType) -> String {
-    format!(r#"ALTER COLUMN "{name}" TYPE {}"#, pg_type.to_string())
+    format!("ALTER COLUMN \"{name}\" TYPE {pg_type}")
 }
 
 pub fn add_member_query(type_name: &str, member_name: &str, pg_type: &PostgresType) -> String {
@@ -23,15 +27,12 @@ BEGIN
     END;
 END $$;
 "#,
-        pg_type = pg_type.to_string()
+        pg_type = pg_type
     )
 }
 
 pub fn modify_member_query(type_name: &str, member_name: &str, pg_type: &PostgresType) -> String {
-    format!(
-        r#"ALTER TYPE "{type_name}" ALTER ATTRIBUTE "{member_name}" TYPE {};"#,
-        pg_type.to_string()
-    )
+    format!(r#"ALTER TYPE "{type_name}" ALTER ATTRIBUTE "{member_name}" TYPE {pg_type};"#)
 }
 
 pub fn add_enum_variant_query(type_name: &str, variant: &str) -> String {
@@ -58,7 +59,7 @@ pub fn create_table_query(table_name: &str, columns: &[String]) -> String {
 pub fn create_struct_type_query(type_name: &str, fields: &[PostgresField]) -> String {
     let field_defs = fields
         .iter()
-        .map(|f| format!(r#""{}" {}"#, f.name, f.pg_type.to_string()))
+        .map(|f| format!(r#""{}" {}"#, f.name, f.pg_type))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -79,21 +80,27 @@ pub fn create_enum_type_query(type_name: &str, variants: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
 
-    format!(
+    let create = format!(
         r#"DO $$ 
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '{type_name}') THEN
                 CREATE TYPE "{type_name}" AS ENUM ({variant_defs});
             END IF;
         END $$;"#
-    )
+    );
+    let reconcile = variants
+        .iter()
+        .map(|variant| add_enum_variant_query(type_name, variant))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{create}\n{reconcile}")
 }
 
 pub fn create_tuple_type_query(type_name: &str, fields: &[PostgresType]) -> String {
     let field_defs = fields
         .iter()
         .enumerate()
-        .map(|(i, f)| format!(r#""_{i}" {}"#, f.to_string()))
+        .map(|(i, f)| format!("\"_{i}\" {f}"))
         .collect::<Vec<_>>()
         .join(", ");
 

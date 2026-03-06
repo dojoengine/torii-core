@@ -44,7 +44,7 @@ impl PgTable {
         columns: Vec<ColumnDef>,
         queries: &mut Vec<String>,
     ) -> TableResult<Self> {
-        let postgres = PgTableStructure::new(&namespace, &name, &primary, &columns, queries)?;
+        let postgres = PgTableStructure::new(namespace, &name, &primary, &columns, queries)?;
         Ok(Self {
             name,
             postgres,
@@ -70,7 +70,7 @@ impl PgTable {
 
     pub fn get_columns(&self, selectors: &[Felt]) -> TableResult<Vec<&ColumnDef>> {
         selectors
-            .into_iter()
+            .iter()
             .map(|selector| self.get_column(selector))
             .collect()
     }

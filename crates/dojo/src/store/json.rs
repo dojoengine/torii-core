@@ -12,7 +12,7 @@ pub struct JsonStore {
 }
 
 fn felt_to_fixed_hex_string(felt: &Felt) -> String {
-    format!("0x{:0>32x}", felt)
+    format!("0x{felt:0>32x}")
 }
 fn felt_to_json_file_name(felt: &Felt) -> String {
     format!("{}.json", felt_to_fixed_hex_string(felt))

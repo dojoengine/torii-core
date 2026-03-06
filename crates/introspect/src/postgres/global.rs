@@ -124,9 +124,9 @@ fn column_insert_query(
                 attributes = EXCLUDED.attributes,
                 type_def = EXCLUDED.type_def
             "#,
-        table = felt252_type(&table),
-        id = felt252_type(&id),
-        name = string_type(&name),
+        table = felt252_type(table),
+        id = felt252_type(id),
+        name = string_type(name),
         attributes = attributes.iter().map(attribute_type).join(","),
         type_def = string_type(&serde_json::to_string(&type_def).unwrap()),
     )

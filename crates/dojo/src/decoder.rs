@@ -138,6 +138,7 @@ where
             fetcher,
         })
     }
+
     pub async fn register_table(
         &self,
         owner: &Felt,
@@ -145,7 +146,7 @@ where
         name: &str,
         schema: DojoSchema,
     ) -> DojoToriiResult<TableSchema> {
-        let full_table = DojoTable::from_schema(schema, namespace, name, dojo_primary_def()).into();
+        let full_table = DojoTable::from_schema(schema, namespace, name, dojo_primary_def());
         self.save_table(owner, &full_table).await?;
         let (id, table) = full_table.clone().into();
         {
@@ -285,6 +286,6 @@ where
         self.decode_raw_event(event)
             .await
             .map(|msg| vec![EventBody::new_envelope(msg, event)])
-            .map_err(|e| e.into())
+            .map_err(Into::into)
     }
 }

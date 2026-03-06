@@ -24,11 +24,11 @@ impl JsonFs for Path {
 
 impl JsonFs for PathBuf {
     fn load<T: DeserializeOwned>(&self) -> Result<T, JsonError> {
-        Path::load(&self)
+        Path::load(self)
     }
 
     fn dump<T: Serialize>(&self, data: &T) -> Result<(), JsonError> {
-        Path::dump(&self, data)
+        Path::dump(self, data)
     }
 }
 

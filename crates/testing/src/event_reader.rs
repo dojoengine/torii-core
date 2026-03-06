@@ -16,15 +16,15 @@ pub struct Event {
     transaction_hash: Felt,
 }
 
-impl Into<EmittedEvent> for Event {
-    fn into(self) -> EmittedEvent {
+impl From<Event> for EmittedEvent {
+    fn from(val: Event) -> Self {
         EmittedEvent {
-            block_hash: Some(self.block_hash),
-            block_number: Some(self.block_number),
-            data: self.data,
-            from_address: self.from_address,
-            keys: self.keys,
-            transaction_hash: self.transaction_hash,
+            block_hash: Some(val.block_hash),
+            block_number: Some(val.block_number),
+            data: val.data,
+            from_address: val.from_address,
+            keys: val.keys,
+            transaction_hash: val.transaction_hash,
         }
     }
 }
