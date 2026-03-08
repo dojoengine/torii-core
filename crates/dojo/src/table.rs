@@ -12,7 +12,7 @@ const LEGACY_ATTRIBUTE: &str = "legacy";
 pub struct DojoTable {
     pub id: Felt,
     pub name: String,
-    pub attributes: Vec<Attribute>,
+    pub attributes: Vec<String>,
     pub primary: PrimaryDef,
     pub columns: HashMap<Felt, ColumnDef>,
     pub key_fields: Vec<Felt>,
@@ -41,7 +41,7 @@ impl From<TableSchema> for DojoTable {
         DojoTable {
             id: value.id,
             name: value.name,
-            attributes: value.attributes,
+            attributes: value.attributes.into_iter().map(|a| a.name).collect(),
             primary: value.primary,
             columns,
             key_fields,
@@ -56,13 +56,17 @@ impl From<DojoTable> for TableSchema {
         let DojoTable {
             id,
             name,
-            mut attributes,
+            attributes,
             primary,
             mut columns,
             key_fields,
             value_fields,
             legacy,
         } = value;
+        let mut attributes = attributes
+            .into_iter()
+            .map(Attribute::new_empty)
+            .collect::<Vec<_>>();
         if legacy && !attributes.has_attribute(LEGACY_ATTRIBUTE) {
             attributes.push(Attribute::new_empty(LEGACY_ATTRIBUTE.to_string()));
         }
@@ -91,7 +95,7 @@ impl DojoTable {
         Self {
             id: compute_selector_from_namespace_and_name(namespace, name),
             name: format!("{}-{}", namespace, name),
-            attributes: schema.attributes.clone(),
+            attributes: schema.attributes.iter().map(|a| a.name.clone()).collect(),
             primary,
             columns,
             key_fields,
@@ -121,7 +125,12 @@ impl DojoTable {
         TableSchema {
             id: self.id,
             name: self.name.clone(),
-            attributes: self.attributes.clone(),
+            attributes: self
+                .attributes
+                .iter()
+                .cloned()
+                .map(Attribute::new_empty)
+                .collect::<Vec<_>>(),
             primary: self.primary.clone(),
             columns: self
                 .selectors()

@@ -1,14 +1,11 @@
+use crate::store::DojoStoreTrait;
 use crate::{DojoTable, DojoToriiError, DojoToriiResult};
+use async_trait::async_trait;
 use dojo_introspect::serde::dojo_primary_def;
 use dojo_introspect::DojoSchema;
-use introspect_types::schema::PrimaryInfo;
 use introspect_types::{Attributes, PrimaryDef, PrimaryTypeDef, TableSchema};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
-use std::fs;
-use std::ops::Deref;
-use std::path::PathBuf;
-use std::sync::RwLock;
 
 pub const DOJO_ID_FIELD_NAME: &str = "entity_id";
 
@@ -18,204 +15,49 @@ pub const DOJO_ID_FIELD_NAME: &str = "entity_id";
 //     }
 // }
 
-pub struct DojoManagerInner<Store>
-where
-    Store: Send + Sync,
-{
-    pub tables: HashMap<Felt, RwLock<DojoTable>>,
+pub struct DojoTableStore<Store> {
+    pub tables: HashMap<Felt, DojoTable>,
     pub store: Store,
 }
 
-pub struct DojoTableStore<Store>(pub RwLock<DojoManagerInner<Store>>)
-where
-    Store: Send + Sync;
-
-impl<Store> Deref for DojoTableStore<Store>
-where
-    Store: Send + Sync,
-{
-    type Target = RwLock<DojoManagerInner<Store>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl<Store: DojoStoreTrait> DojoTableStore<Store> {
+    pub async fn new(store: Store) -> DojoToriiResult<Self> {
+        Ok(Self {
+            tables: store
+                .load_table_map()
+                .await
+                .map_err(DojoToriiError::store_error)?,
+            store,
+        })
     }
-}
-
-impl DojoTableStore<JsonStore> {
-    pub fn new<P: Into<PathBuf>>(path: P) -> DojoToriiResult<Self> {
-        let store = JsonStore::new(&path.into());
-        Ok(Self(RwLock::new(DojoManagerInner::new(store)?)))
-    }
-}
-
-pub fn primary_field_def() -> PrimaryDef {
-    PrimaryDef {
-        name: DOJO_ID_FIELD_NAME.to_string(),
-        attributes: vec![],
-        type_def: PrimaryTypeDef::Felt252,
-    }
-}
-
-pub fn primary_field_info() -> PrimaryInfo {
-    PrimaryInfo {
-        name: DOJO_ID_FIELD_NAME.to_string(),
-        attributes: vec![],
-    }
-}
-
-impl<Store> DojoManagerInner<Store>
-where
-    Store: StoreTrait<Table = DojoTable> + Send + Sync + Sized + 'static,
-{
-    pub fn new(store: Store) -> DojoToriiResult<Self> {
-        let tables = store
-            .load_all()
-            .map_err(|e| DojoToriiError::StoreError(e.to_string()))?
-            .into_iter()
-            .map(|(id, table)| (id, RwLock::new(table)))
-            .collect();
-        Ok(Self { tables, store })
-    }
-}
-
-pub struct JsonStore {
-    pub path: PathBuf,
-}
-
-impl JsonStore {
-    pub fn new(path: &PathBuf) -> Self {
-        if !path.exists() {
-            std::fs::create_dir_all(path).expect("Unable to create directory");
-        }
-
-        // A temporary flag to clean the store on start, useful when debugging
-        // to avoid existing table error.
-        // TODO: @bengineer42 can be removed or kept being configurable.
-        let clean_on_start = true;
-        if clean_on_start {
-            std::fs::remove_dir_all(path).expect("Unable to clean directory");
-            std::fs::create_dir_all(path).expect("Unable to create directory");
-        }
-
-        Self {
-            path: path.to_path_buf(),
-        }
-    }
-}
-pub trait StoreTrait
-where
-    Self: Send + Sync + 'static + Sized,
-{
-    type Table;
-    type Error: std::error::Error;
-
-    fn dump(&self, table_id: Felt, data: &Self::Table) -> Result<(), Self::Error>;
-    fn load(&self, table_id: Felt) -> Result<Self::Table, Self::Error>;
-    fn load_all(&self) -> Result<Vec<(Felt, Self::Table)>, Self::Error>;
-}
-
-fn felt_to_fixed_hex_string(felt: &Felt) -> String {
-    format!("0x{:0>32x}", felt)
-}
-fn felt_to_json_file_name(felt: &Felt) -> String {
-    format!("{}.json", felt_to_fixed_hex_string(felt))
-}
-
-fn json_file_name_to_felt(file_name: &str) -> Option<Felt> {
-    let hex_str = file_name.strip_suffix(".json")?;
-    Felt::from_hex(hex_str).ok()
-}
-
-impl StoreTrait for JsonStore {
-    type Table = DojoTable;
-    type Error = serde_json::Error;
-    fn dump(&self, table_id: Felt, data: &Self::Table) -> Result<(), Self::Error> {
-        let file_path = self.path.join(felt_to_json_file_name(&table_id));
-        std::fs::write(file_path, serde_json::to_string_pretty(data).unwrap())
-            .expect("Unable to write file");
-        Ok(())
-    }
-
-    fn load(&self, table_id: Felt) -> Result<Self::Table, Self::Error> {
-        let file_path = self.path.join(felt_to_json_file_name(&table_id));
-        let data = std::fs::read_to_string(file_path).expect("Unable to read file");
-        Ok(serde_json::from_str(&data)?)
-    }
-
-    fn load_all(&self) -> Result<Vec<(Felt, Self::Table)>, Self::Error> {
-        let mut tables: Vec<(Felt, Self::Table)> = Vec::new();
-        let paths = fs::read_dir(&self.path).unwrap();
-        for path in paths {
-            let path = path.unwrap().path();
-            let table_id = path
-                .file_name()
-                .and_then(|p| json_file_name_to_felt(p.to_str()?));
-            let data: Option<DojoTable> =
-                serde_json::from_str(&fs::read_to_string(&path).unwrap()).ok();
-            match (table_id, data) {
-                (Some(id), Some(table)) => {
-                    tables.push((id, table));
-                }
-                _ => {}
-            }
-        }
-        Ok(tables)
-    }
-}
-
-pub trait DojoTableManager {
-    fn register_table(
-        &self,
-        namespace: &str,
-        name: &str,
-        schema: DojoSchema,
-    ) -> DojoToriiResult<TableSchema>;
-    fn update_table(&self, id: Felt, schema: DojoSchema) -> DojoToriiResult<TableSchema>;
-    fn with_table<F, R>(&self, id: Felt, f: F) -> DojoToriiResult<R>
-    where
-        F: FnOnce(&DojoTable) -> R;
-}
-
-impl<Store> DojoTableManager for DojoTableStore<Store>
-where
-    Store: StoreTrait<Table = DojoTable> + Send + Sync,
-{
-    fn register_table(
-        &self,
+    pub async fn register_table(
+        &mut self,
         namespace: &str,
         name: &str,
         schema: DojoSchema,
     ) -> DojoToriiResult<TableSchema> {
         let table = DojoTable::from_schema(schema, namespace, name, dojo_primary_def());
-        if self
-            .read()
-            .map_err(|e| DojoToriiError::LockError(e.to_string()))?
-            .tables
-            .contains_key(&table.id)
-        {
-            return Err(DojoToriiError::TableAlreadyExists(table.id));
+        self.save_table(&table).await?;
+        if let Some(existing) = self.tables.get(&table.id) {
+            return Err(DojoToriiError::TableAlreadyExists(
+                table.id,
+                existing.name.clone(),
+                name.to_string(),
+            ));
         }
-        let mut manager = self
-            .write()
-            .map_err(|e| DojoToriiError::LockError(e.to_string()))?;
-        manager
-            .store
-            .dump(table.id, &table)
-            .map_err(|e| DojoToriiError::StoreError(e.to_string()))?;
-        manager.tables.insert(table.id, RwLock::new(table.clone()));
+        self.tables.insert(table.id, table.clone());
         Ok(table.into())
     }
 
-    fn update_table(&self, id: Felt, schema: DojoSchema) -> DojoToriiResult<TableSchema> {
-        let manager = self
-            .read()
-            .map_err(|e| DojoToriiError::LockError(e.to_string()))?;
-        let mut table = match manager.tables.get(&id) {
-            Some(t) => t
-                .write()
-                .map_err(|e| DojoToriiError::LockError(e.to_string())),
+    pub async fn update_table(
+        &mut self,
+        id: Felt,
+        schema: DojoSchema,
+    ) -> DojoToriiResult<TableSchema> {
+        let table = match self.tables.get_mut(&id) {
+            Some(t) => t,
             None => return Err(DojoToriiError::TableNotFoundById(id)),
-        }?;
+        };
         let mut key_fields = Vec::new();
         let mut value_fields = Vec::new();
         for column in schema.columns {
@@ -227,28 +69,53 @@ where
         }
         table.key_fields = key_fields;
         table.value_fields = value_fields;
-        self.read()
-            .map_err(|e| DojoToriiError::LockError(e.to_string()))?
-            .store
-            .dump(id, &table)
-            .map_err(|e| DojoToriiError::StoreError(e.to_string()))?;
+        self.store
+            .save_table(&table)
+            .await
+            .map_err(DojoToriiError::store_error)?;
         Ok(table.to_schema())
     }
+    pub fn get_table(&self, id: &Felt) -> DojoToriiResult<&DojoTable> {
+        self.tables
+            .get(id)
+            .ok_or_else(|| DojoToriiError::TableNotFoundById(*id))
+    }
+}
 
-    fn with_table<F, R>(&self, id: Felt, f: F) -> DojoToriiResult<R>
-    where
-        F: FnOnce(&DojoTable) -> R,
-    {
-        let manager = self
-            .read()
-            .map_err(|e| DojoToriiError::LockError(e.to_string()))?;
-        let table = manager
-            .tables
-            .get(&id)
-            .ok_or_else(|| DojoToriiError::TableNotFoundById(id))?;
-        let table_guard = table
-            .read()
-            .map_err(|e| DojoToriiError::LockError(e.to_string()))?;
-        Ok(f(&*table_guard))
+#[async_trait]
+impl<Store> DojoStoreTrait for DojoTableStore<Store>
+where
+    Store: DojoStoreTrait + Send + Sync,
+    Store::Error: ToString,
+{
+    type Error = DojoToriiError;
+
+    async fn save_table(&self, table: &DojoTable) -> DojoToriiResult<()> {
+        self.store
+            .save_table(table)
+            .await
+            .map_err(DojoToriiError::store_error)
+    }
+
+    async fn load_tables(&self) -> DojoToriiResult<Vec<DojoTable>> {
+        self.store
+            .load_tables()
+            .await
+            .map_err(DojoToriiError::store_error)
+    }
+
+    async fn load_table_map(&self) -> DojoToriiResult<HashMap<Felt, DojoTable>> {
+        self.store
+            .load_table_map()
+            .await
+            .map_err(DojoToriiError::store_error)
+    }
+}
+
+pub fn primary_field_def() -> PrimaryDef {
+    PrimaryDef {
+        name: DOJO_ID_FIELD_NAME.to_string(),
+        attributes: vec![],
+        type_def: PrimaryTypeDef::Felt252,
     }
 }

@@ -3,6 +3,7 @@
 //! Provides efficient conversions between Starknet types and storage/wire formats,
 //! and shared helpers like token metadata fetching.
 
+pub mod json;
 pub mod metadata;
 pub mod token_uri;
 

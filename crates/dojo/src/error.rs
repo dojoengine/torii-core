@@ -1,3 +1,5 @@
+use std::sync::PoisonError;
+
 use dojo_introspect::DojoIntrospectError;
 use introspect_types::transcode::TranscodeError;
 use introspect_types::DecodeError;
@@ -18,8 +20,8 @@ pub enum DojoToriiError {
     TooManyFieldValues(Felt),
     #[error("Failed to parse values for table {0}")]
     ParseValuesError(String),
-    #[error("Table already exists with id {0}")]
-    TableAlreadyExists(Felt),
+    #[error("Cannot add {2} table already exists with id {0} and name {1}")]
+    TableAlreadyExists(Felt, String, String),
     #[error("Table not found with id {0}")]
     TableNotFoundById(Felt),
     #[error("Failed to acquire lock: {0}")]
@@ -45,5 +47,17 @@ pub type DojoToriiResult<T> = std::result::Result<T, DojoToriiError>;
 impl From<TranscodeError<DecodeError, ()>> for DojoToriiError {
     fn from(err: TranscodeError<DecodeError, ()>) -> Self {
         Self::TranscodeError(err)
+    }
+}
+
+impl DojoToriiError {
+    pub fn store_error<T: ToString>(err: T) -> Self {
+        Self::StoreError(err.to_string())
+    }
+}
+
+impl<T> From<PoisonError<T>> for DojoToriiError {
+    fn from(err: PoisonError<T>) -> Self {
+        Self::LockPoisoned(err.to_string())
     }
 }
