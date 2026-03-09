@@ -18,6 +18,7 @@ use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::hash::Hash;
 use std::sync::RwLock;
 use torii::etl::event::EmittedEventExt;
 use torii::etl::{Decoder, Envelope, EventBody};
@@ -48,12 +49,20 @@ where
 #[async_trait]
 pub trait DojoTableEvent<Store, F>: Sized + CairoEventInfo + Debug {
     type Msg: EventId;
-    async fn event_to_msg(self, decoder: &DojoDecoder<Store, F>) -> DojoToriiResult<Self::Msg>;
+    async fn event_to_msg(
+        self,
+        from_address: &Felt,
+        decoder: &DojoDecoder<Store, F>,
+    ) -> DojoToriiResult<Self::Msg>;
 }
 
 pub trait DojoRecordEvent<Store, F>: Sized + CairoEventInfo + Debug {
     type Msg: EventId;
-    fn event_to_msg(self, decoder: &DojoDecoder<Store, F>) -> DojoToriiResult<Self::Msg>;
+    fn event_to_msg(
+        self,
+        from_address: &Felt,
+        decoder: &DojoDecoder<Store, F>,
+    ) -> DojoToriiResult<Self::Msg>;
 }
 
 #[async_trait]
@@ -79,7 +88,9 @@ where
             .map_err(DojoToriiError::store_error)
     }
 
-    async fn load_table_map(&self) -> DojoToriiResult<HashMap<Felt, DojoTableInfo>> {
+    async fn load_table_map<K: From<(Option<Felt>, Felt)> + Eq + Hash>(
+        &self,
+    ) -> Result<HashMap<K, DojoTableInfo>, Self::Error> {
         self.store
             .load_table_map()
             .await
@@ -98,13 +109,13 @@ pub fn primary_field_def() -> PrimaryDef {
 impl<Store, F> DojoDecoder<Store, F> {
     pub fn with_table<R>(
         &self,
-        id: &Felt,
-        f: impl FnOnce(&DojoTable) -> DojoToriiResult<R>,
+        key: &TableKey,
+        f: impl FnOnce(&DojoTableInfo) -> DojoToriiResult<R>,
     ) -> DojoToriiResult<R> {
         let tables = self.tables.read()?;
         let table = tables
-            .get(id)
-            .ok_or_else(|| DojoToriiError::TableNotFoundById(*id))?;
+            .get(key)
+            .ok_or_else(|| DojoToriiError::TableNotFoundById(key.owner, key.id))?;
         f(table)
     }
 }
@@ -149,12 +160,18 @@ where
         Ok(full_table.into())
     }
 
-    pub async fn update_table(&self, id: Felt, schema: DojoSchema) -> DojoToriiResult<TableSchema> {
-        let mut table = {
+    pub async fn update_table(
+        &self,
+        owner: Option<Felt>,
+        id: Felt,
+        schema: DojoSchema,
+    ) -> DojoToriiResult<TableSchema> {
+        let key = TableKey::new(owner, id);
+        let mut info = {
             let mut tables = self.tables.write()?;
-            match tables.remove(&id) {
+            match tables.remove(&key) {
                 Some(t) => t,
-                None => return Err(DojoToriiError::TableNotFoundById(id)),
+                None => return Err(DojoToriiError::TableNotFoundById(owner, id)),
             }
         };
         let mut key_fields = Vec::new();
@@ -164,10 +181,12 @@ where
                 true => key_fields.push(column.id),
                 false => value_fields.push(column.id),
             }
-            table.columns.insert(column.id, column);
+            let (column_id, column_info) = column.into();
+            info.columns.insert(column_id, column_info);
         }
-        table.key_fields = key_fields;
-        table.value_fields = value_fields;
+        info.key_fields = key_fields;
+        info.value_fields = value_fields;
+        let table = (key, info).into();
         self.store
             .save_table(&table)
             .await

@@ -148,7 +148,6 @@ impl PostgresSchema {
             | IntrospectMsg::RenamePrimary(_) => Ok(()),
             IntrospectMsg::InsertsFields(event) => self.insert_fields(event, context, queries),
             IntrospectMsg::DeleteRecords(_) | IntrospectMsg::DeletesFields(_) => Ok(()),
-            IntrospectMsg::None => Ok(()),
         }
     }
     // pub fn handle_message(
