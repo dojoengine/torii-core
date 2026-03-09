@@ -1,7 +1,7 @@
 pub mod events;
-// pub mod manager;
 pub mod postgres;
 pub mod schema;
+pub mod store;
 pub mod tables;
 pub mod types;
 pub use events::{

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use introspect_types::{Attribute, ColumnDef, PrimaryDef};
 use starknet_types_core::felt::Felt;
 
@@ -28,6 +30,53 @@ pub struct TableSchema {
     pub primary: PrimaryDef,
     pub columns: Vec<ColumnDef>,
 }
+
+pub struct Table {
+    pub id: Felt,
+    pub name: String,
+    pub attributes: Vec<Attribute>,
+    pub primary: PrimaryDef,
+    pub columns: Vec<ColumnDef>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TableInfo {
+    pub name: String,
+    pub attributes: Vec<Attribute>,
+    pub primary: PrimaryDef,
+    pub columns: HashMap<Felt, ColumnDef>,
+    pub order: Vec<Felt>,
+    pub alive: bool,
+}
+
+// impl From<(Felt, TableInfo)> for TableSchema {
+//     fn from(value: (Felt, TableInfo)) -> Self {
+//         let (id, info) = value;
+//         TableSchema {
+//             id,
+//             name: info.name,
+//             attributes: info.attributes,
+//             primary: info.primary,
+//             columns: HashMap::with_capacity(info.order.len()),
+//             order: info.order,
+//         }
+//     }
+// }
+
+// impl From<TableSchema> for (Felt, TableInfo) {
+//     fn from(value: TableSchema) -> Self {
+//         (
+//             value.id,
+//             TableInfo {
+//                 name: value.name,
+//                 attributes: value.attributes,
+//                 primary: value.primary,
+//                 columns: HashMap::with_capacity(info.order.len()),
+//                 order: info.order,
+//             },
+//         )
+//     }
+// }
 
 pub trait ColumnKeyTrait {
     fn as_parts(&self) -> (&Felt, &Felt);
