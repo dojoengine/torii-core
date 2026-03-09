@@ -19,6 +19,14 @@ pub struct ColumnRow {
     type_def: Json<TypeDef>,
 }
 
+#[derive(FromRow)]
+pub struct TableRow {
+    id: PgFelt,
+    name: String,
+    attributes: Vec<PgAttribute>,
+    type_def: Json<TypeDef>,
+}
+
 impl<K> From<ColumnRow> for (K, ColumnInfo)
 where
     K: ColumnKeyTrait,
