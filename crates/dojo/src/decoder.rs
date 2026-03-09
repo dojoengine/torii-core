@@ -1,4 +1,5 @@
 use crate::store::DojoStoreTrait;
+use crate::table::DojoTableInfo;
 use crate::{DojoTable, DojoToriiError, DojoToriiResult};
 pub use anyhow::Result as AnyResult;
 use async_trait::async_trait;
@@ -11,7 +12,7 @@ use dojo_introspect::serde::dojo_primary_def;
 use dojo_introspect::{DojoSchema, DojoSchemaFetcher};
 use introspect_types::{
     Attributes, CairoEvent, CairoEventInfo, CairoSerde, IntoFeltSource, PrimaryDef, PrimaryTypeDef,
-    ResultInto, SliceFeltSource, TableSchema,
+    ResultInto, SliceFeltSource,
 };
 use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
@@ -21,12 +22,13 @@ use std::sync::RwLock;
 use torii::etl::event::EmittedEventExt;
 use torii::etl::{Decoder, Envelope, EventBody};
 use torii_introspect::events::IntrospectMsg;
-use torii_introspect::EventId;
+use torii_introspect::schema::TableSchema;
+use torii_introspect::{EventId, TableKey};
 
 pub const DOJO_ID_FIELD_NAME: &str = "entity_id";
 
 pub struct DojoDecoder<Store, F> {
-    pub tables: RwLock<HashMap<Felt, DojoTable>>,
+    pub tables: RwLock<HashMap<TableKey, DojoTableInfo>>,
     pub store: Store,
     pub fetcher: F,
 }
@@ -42,38 +44,6 @@ where
         Err(err) => Err(DojoToriiError::EventDeserializationError(T::NAME, err)),
     }
 }
-
-// #[async_trait]
-// pub trait DojoEventProcessor<Store: Sync + Send, F: Sync + Send>:
-//     Sized + CairoEventInfo + Debug
-// {
-//     type Msg: EventId;
-//     async fn event_to_msg(self, decoder: &DojoDecoder<Store, F>) -> DojoToriiResult<Self::Msg>;
-//     fn deserialize_data<'a>(keys: &[Felt], data: &'a [Felt]) -> DojoToriiResult<Self>
-//     where
-//         Self: CairoEvent<CairoSerde<SliceFeltSource<'a>>>,
-//     {
-//         let mut keys = keys.into_source();
-//         let mut data: CairoSerde<_> = data.into();
-//         match Self::deserialize_and_verify_event(&mut keys, &mut data) {
-//             Ok(event) => Ok(event),
-//             Err(err) => Err(DojoToriiError::EventDeserializationError(Self::NAME, err)),
-//         }
-//     }
-//     async fn data_to_msg<'a>(
-//         decoder: &DojoDecoder<Store, F>,
-//         keys: &[Felt],
-//         data: &'a [Felt],
-//     ) -> DojoToriiResult<Self::Msg>
-//     where
-//         Self: CairoEvent<CairoSerde<SliceFeltSource<'a>>>,
-//         Self::Msg: Into<IntrospectMsg>,
-//     {
-//         Self::deserialize_data(keys, data)?
-//             .event_to_msg(decoder)
-//             .await
-//     }
-// }
 
 #[async_trait]
 pub trait DojoTableEvent<Store, F>: Sized + CairoEventInfo + Debug {
@@ -109,7 +79,7 @@ where
             .map_err(DojoToriiError::store_error)
     }
 
-    async fn load_table_map(&self) -> DojoToriiResult<HashMap<Felt, DojoTable>> {
+    async fn load_table_map(&self) -> DojoToriiResult<HashMap<Felt, DojoTableInfo>> {
         self.store
             .load_table_map()
             .await
@@ -163,19 +133,20 @@ where
         name: &str,
         schema: DojoSchema,
     ) -> DojoToriiResult<TableSchema> {
-        let table = DojoTable::from_schema(schema, namespace, name, dojo_primary_def());
-        self.save_table(&table).await?;
+        let full_table = DojoTable::from_schema(schema, namespace, name, dojo_primary_def()).into();
+        self.save_table(&full_table).await?;
+        let (key, table) = full_table.clone().into();
         {
-            if let Some(existing) = self.tables.read()?.get(&table.id) {
+            if let Some(existing) = self.tables.read()?.get(&key) {
                 return Err(DojoToriiError::TableAlreadyExists(
-                    table.id,
+                    key.id,
                     existing.name.clone(),
                     name.to_string(),
                 ));
             }
         }
-        self.tables.write()?.insert(table.id, table.clone());
-        Ok(table.into())
+        self.tables.write()?.insert(key, table);
+        Ok(full_table.into())
     }
 
     pub async fn update_table(&self, id: Felt, schema: DojoSchema) -> DojoToriiResult<TableSchema> {

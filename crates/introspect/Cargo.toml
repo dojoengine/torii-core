@@ -9,10 +9,20 @@ introspect-events.workspace = true
 introspect-types.workspace = true
 introspect-rust-macros.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 starknet-types-core.workspace = true
 torii.workspace = true
 blake3.workspace = true
 thiserror.workspace = true
+hex.workspace = true
+itertools.workspace = true
+sqlx = { workspace = true, features = [
+    "postgres",
+    "runtime-tokio-rustls",
+    "macros",
+    "migrate",
+] }
+async-trait.workspace = true
 
 [build-dependencies]
 tonic-build = "0.12"

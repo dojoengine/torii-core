@@ -6,6 +6,7 @@
 pub mod json;
 pub mod metadata;
 pub mod token_uri;
+pub mod utils;
 
 use starknet::core::types::{Felt, U256};
 

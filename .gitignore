@@ -20,3 +20,4 @@ perf/runs/
 /data/
 /bins/torii-tokens/torii-data/
 HANDOFF.md
+.cargo/

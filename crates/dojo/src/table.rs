@@ -3,33 +3,47 @@ use crate::DojoToriiResult;
 use dojo_introspect::selector::compute_selector_from_namespace_and_name;
 use dojo_introspect::{DojoSchema, DojoSerde};
 use introspect_types::transcode::Transcode;
-use introspect_types::{Attribute, Attributes, CairoSerde, ColumnDef, PrimaryDef, TableSchema};
+use introspect_types::{Attribute, Attributes, CairoSerde, ColumnDef, ColumnInfo, PrimaryDef};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
+use torii_introspect::schema::TableSchema;
+use torii_introspect::TableKey;
 
 const LEGACY_ATTRIBUTE: &str = "legacy";
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct DojoTable {
+    pub owner: Option<Felt>,
     pub id: Felt,
     pub name: String,
     pub attributes: Vec<String>,
     pub primary: PrimaryDef,
-    pub columns: HashMap<Felt, ColumnDef>,
+    pub columns: HashMap<Felt, ColumnInfo>,
     pub key_fields: Vec<Felt>,
     pub value_fields: Vec<Felt>,
     pub legacy: bool,
 }
 
-pub fn sort_columns(columns: Vec<ColumnDef>) -> (HashMap<Felt, ColumnDef>, Vec<Felt>, Vec<Felt>) {
+pub struct DojoTableInfo {
+    pub name: String,
+    pub attributes: Vec<String>,
+    pub primary: PrimaryDef,
+    pub columns: HashMap<Felt, ColumnInfo>,
+    pub key_fields: Vec<Felt>,
+    pub value_fields: Vec<Felt>,
+    pub legacy: bool,
+}
+
+pub fn sort_columns(columns: Vec<ColumnDef>) -> (HashMap<Felt, ColumnInfo>, Vec<Felt>, Vec<Felt>) {
     let mut field_map = HashMap::new();
     let mut value_fields = Vec::new();
     let mut key_fields = Vec::new();
     for column in columns {
-        match column.has_attribute("key") {
-            true => key_fields.push(column.id),
-            false => value_fields.push(column.id),
+        let (id, info) = column.into();
+        match info.has_attribute("key") {
+            true => key_fields.push(id),
+            false => value_fields.push(id),
         }
-        field_map.insert(column.id, column);
+        field_map.insert(id, info);
     }
     (field_map, key_fields, value_fields)
 }
@@ -39,6 +53,7 @@ impl From<TableSchema> for DojoTable {
         let (columns, key_fields, value_fields) = sort_columns(value.columns);
         let legacy = value.attributes.has_attribute(LEGACY_ATTRIBUTE);
         DojoTable {
+            owner: value.owner,
             id: value.id,
             name: value.name,
             attributes: value.attributes.into_iter().map(|a| a.name).collect(),
@@ -54,6 +69,7 @@ impl From<TableSchema> for DojoTable {
 impl From<DojoTable> for TableSchema {
     fn from(value: DojoTable) -> Self {
         let DojoTable {
+            owner,
             id,
             name,
             attributes,
@@ -71,15 +87,51 @@ impl From<DojoTable> for TableSchema {
             attributes.push(Attribute::new_empty(LEGACY_ATTRIBUTE.to_string()));
         }
         TableSchema {
+            owner,
             id: id,
             name: name,
             primary: primary,
             columns: key_fields
                 .into_iter()
                 .chain(value_fields.into_iter())
-                .map(|selector| columns.remove(&selector).unwrap())
+                .map(|selector| (selector, columns.remove(&selector).unwrap()).into())
                 .collect(),
             attributes,
+        }
+    }
+}
+
+impl<K: From<(Option<Felt>, Felt)>> From<DojoTable> for (K, DojoTableInfo) {
+    fn from(value: DojoTable) -> Self {
+        (
+            K::from((value.owner, value.id)),
+            DojoTableInfo {
+                name: value.name,
+                attributes: value.attributes,
+                primary: value.primary,
+                columns: value.columns,
+                key_fields: value.key_fields,
+                value_fields: value.value_fields,
+                legacy: value.legacy,
+            },
+        )
+    }
+}
+
+impl<K: Into<(Option<Felt>, Felt)>> From<(K, DojoTableInfo)> for DojoTable {
+    fn from(value: (K, DojoTableInfo)) -> Self {
+        let (key, info) = value;
+        let (owner, id) = key.into();
+        DojoTable {
+            owner,
+            id,
+            name: info.name,
+            attributes: info.attributes,
+            primary: info.primary,
+            columns: info.columns,
+            key_fields: info.key_fields,
+            value_fields: info.value_fields,
+            legacy: info.legacy,
         }
     }
 }
@@ -93,6 +145,7 @@ impl DojoTable {
     ) -> Self {
         let (columns, key_fields, value_fields) = sort_columns(schema.columns);
         Self {
+            owner: None,
             id: compute_selector_from_namespace_and_name(namespace, name),
             name: format!("{}-{}", namespace, name),
             attributes: schema.attributes.iter().map(|a| a.name.clone()).collect(),
@@ -104,14 +157,21 @@ impl DojoTable {
         }
     }
 
-    pub fn get_columns(&self, selectors: &[Felt]) -> DojoToriiResult<Vec<&ColumnDef>> {
+    pub fn key(&self) -> TableKey {
+        TableKey {
+            owner: self.owner,
+            id: self.id,
+        }
+    }
+
+    pub fn get_columns(&self, selectors: &[Felt]) -> DojoToriiResult<Vec<&ColumnInfo>> {
         selectors
             .into_iter()
             .map(|selector| self.get_column(selector))
             .collect()
     }
 
-    pub fn get_column(&self, selector: &Felt) -> DojoToriiResult<&ColumnDef> {
+    pub fn get_column(&self, selector: &Felt) -> DojoToriiResult<&ColumnInfo> {
         self.columns
             .get(selector)
             .ok_or_else(|| DojoToriiError::ColumnNotFound(*selector, self.name.clone()))
@@ -123,6 +183,7 @@ impl DojoTable {
 
     pub fn to_schema(&self) -> TableSchema {
         TableSchema {
+            owner: self.owner,
             id: self.id,
             name: self.name.clone(),
             attributes: self
@@ -134,7 +195,7 @@ impl DojoTable {
             primary: self.primary.clone(),
             columns: self
                 .selectors()
-                .map(|selector| self.get_column(selector).cloned().unwrap())
+                .map(|selector| (*selector, self.get_column(selector).cloned().unwrap()).into())
                 .collect(),
         }
     }

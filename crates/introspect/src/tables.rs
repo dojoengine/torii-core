@@ -152,7 +152,7 @@ impl<'a, C: CairoTypeSerialization, M: SerializeEntries> RecordFrame<'a, C, M> {
         &self,
         map: &mut <S as Serializer>::SerializeMap,
     ) -> Result<(), S::Error> {
-        let mut id = self.id.into_source();
+        let mut id: introspect_types::bytes::DerefBytesSource<&[u8]> = self.id.into_source();
         map.serialize_entry(
             &self.primary.name,
             &CairoSeFrom::new(&self.primary.type_def, &mut id, self.cairo_se),

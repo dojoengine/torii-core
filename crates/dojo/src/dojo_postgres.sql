@@ -23,18 +23,22 @@ BEGIN
 END $$;
 
 CREATE TABLE IF NOT EXISTS dojo.table (
-    id felt252 PRIMARY KEY,
+    PRIMARY KEY (owner, id),
+    owner felt252,
+    id felt252 NOT NULL,
     name TEXT NOT NULL,
     attributes TEXT[] NOT NULL DEFAULT '{}',
     keys felt252[] NOT NULL,
     "values" felt252[] NOT NULL,
     legacy BOOLEAN NOT NULL
+
 );
 
 CREATE TABLE IF NOT EXISTS dojo.columns(
-    PRIMARY KEY (table_id, column_id),
-    table_id felt252 NOT NULL,
-    column_id felt252 NOT NULL,
+    PRIMARY KEY (owner, "table", id),
+    owner felt252,
+    "table" felt252 NOT NULL,
+    id felt252 NOT NULL,
     name TEXT NOT NULL,
     attributes introspect.attribute[] NOT NULL DEFAULT '{}',
     type_def jsonb NOT NULL
