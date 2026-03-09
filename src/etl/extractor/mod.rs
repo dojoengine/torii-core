@@ -3,6 +3,7 @@
 pub mod block_range;
 pub mod composite;
 pub mod event;
+pub mod katana_db;
 pub mod retry;
 pub mod sample;
 pub mod starknet_helpers;
@@ -17,6 +18,7 @@ use std::collections::HashMap;
 
 pub use block_range::{BlockRangeConfig, BlockRangeExtractor};
 pub use composite::CompositeExtractor;
+pub use katana_db::{KatanaDbConfig, KatanaDbExtractor};
 pub use event::{ContractEventConfig, EventExtractor, EventExtractorConfig};
 pub use retry::RetryPolicy;
 pub use sample::SampleExtractor;
