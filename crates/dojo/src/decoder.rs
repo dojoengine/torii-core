@@ -1,5 +1,5 @@
 use crate::store::DojoStoreTrait;
-use crate::table::DojoTableInfo;
+use crate::table::{sort_columns, DojoTableInfo};
 use crate::{DojoTable, DojoToriiError, DojoToriiResult};
 pub use anyhow::Result as AnyResult;
 use async_trait::async_trait;
@@ -11,25 +11,24 @@ use dojo_introspect::events::{
 use dojo_introspect::serde::dojo_primary_def;
 use dojo_introspect::{DojoSchema, DojoSchemaFetcher};
 use introspect_types::{
-    Attributes, CairoEvent, CairoEventInfo, CairoSerde, IntoFeltSource, PrimaryDef, PrimaryTypeDef,
-    ResultInto, SliceFeltSource,
+    CairoEvent, CairoEventInfo, CairoSerde, IntoFeltSource, PrimaryDef, PrimaryTypeDef, ResultInto,
+    SliceFeltSource,
 };
 use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::hash::Hash;
 use std::sync::RwLock;
 use torii::etl::event::EmittedEventExt;
 use torii::etl::{Decoder, Envelope, EventBody};
 use torii_introspect::events::IntrospectMsg;
 use torii_introspect::schema::TableSchema;
-use torii_introspect::{EventId, TableKey};
+use torii_introspect::EventId;
 
 pub const DOJO_ID_FIELD_NAME: &str = "entity_id";
 
 pub struct DojoDecoder<Store, F> {
-    pub tables: RwLock<HashMap<TableKey, DojoTableInfo>>,
+    pub tables: RwLock<HashMap<Felt, DojoTableInfo>>,
     pub store: Store,
     pub fetcher: F,
 }
@@ -51,18 +50,14 @@ pub trait DojoTableEvent<Store, F>: Sized + CairoEventInfo + Debug {
     type Msg: EventId;
     async fn event_to_msg(
         self,
-        from_address: &Felt,
+        owner: &Felt,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg>;
 }
 
 pub trait DojoRecordEvent<Store, F>: Sized + CairoEventInfo + Debug {
     type Msg: EventId;
-    fn event_to_msg(
-        self,
-        from_address: &Felt,
-        decoder: &DojoDecoder<Store, F>,
-    ) -> DojoToriiResult<Self::Msg>;
+    fn event_to_msg(self, decoder: &DojoDecoder<Store, F>) -> DojoToriiResult<Self::Msg>;
 }
 
 #[async_trait]
@@ -74,25 +69,26 @@ where
 {
     type Error = DojoToriiError;
 
-    async fn save_table(&self, table: &DojoTable) -> DojoToriiResult<()> {
+    async fn save_table(&self, owner: &Felt, table: &DojoTable) -> DojoToriiResult<()> {
         self.store
-            .save_table(table)
+            .save_table(owner, table)
             .await
             .map_err(DojoToriiError::store_error)
     }
 
-    async fn load_tables(&self) -> DojoToriiResult<Vec<DojoTable>> {
+    async fn load_tables(&self, owners: &[Felt]) -> DojoToriiResult<Vec<DojoTable>> {
         self.store
-            .load_tables()
+            .load_tables(owners)
             .await
             .map_err(DojoToriiError::store_error)
     }
 
-    async fn load_table_map<K: From<(Option<Felt>, Felt)> + Eq + Hash>(
+    async fn load_table_map(
         &self,
-    ) -> Result<HashMap<K, DojoTableInfo>, Self::Error> {
+        owners: &[Felt],
+    ) -> Result<HashMap<Felt, DojoTableInfo>, Self::Error> {
         self.store
-            .load_table_map()
+            .load_table_map(owners)
             .await
             .map_err(DojoToriiError::store_error)
     }
@@ -109,13 +105,13 @@ pub fn primary_field_def() -> PrimaryDef {
 impl<Store, F> DojoDecoder<Store, F> {
     pub fn with_table<R>(
         &self,
-        key: &TableKey,
+        id: &Felt,
         f: impl FnOnce(&DojoTableInfo) -> DojoToriiResult<R>,
     ) -> DojoToriiResult<R> {
         let tables = self.tables.read()?;
         let table = tables
-            .get(key)
-            .ok_or_else(|| DojoToriiError::TableNotFoundById(key.owner, key.id))?;
+            .get(id)
+            .ok_or_else(|| DojoToriiError::TableNotFoundById(*id))?;
         f(table)
     }
 }
@@ -125,12 +121,16 @@ where
     Store: DojoStoreTrait + Sync,
     F: DojoSchemaFetcher + Send + Sync + 'static,
 {
-    pub async fn new<S: Into<Store>>(store: S, fetcher: F) -> DojoToriiResult<Self> {
+    pub async fn new<S: Into<Store>>(
+        store: S,
+        fetcher: F,
+        owners: &[Felt],
+    ) -> DojoToriiResult<Self> {
         let store = store.into();
         Ok(Self {
             tables: RwLock::new(
                 store
-                    .load_table_map()
+                    .load_table_map(owners)
                     .await
                     .map_err(DojoToriiError::store_error)?,
             ),
@@ -140,55 +140,47 @@ where
     }
     pub async fn register_table(
         &self,
+        owner: &Felt,
         namespace: &str,
         name: &str,
         schema: DojoSchema,
     ) -> DojoToriiResult<TableSchema> {
         let full_table = DojoTable::from_schema(schema, namespace, name, dojo_primary_def()).into();
-        self.save_table(&full_table).await?;
-        let (key, table) = full_table.clone().into();
+        self.save_table(owner, &full_table).await?;
+        let (id, table) = full_table.clone().into();
         {
-            if let Some(existing) = self.tables.read()?.get(&key) {
+            if let Some(existing) = self.tables.read()?.get(&id) {
                 return Err(DojoToriiError::TableAlreadyExists(
-                    key.id,
+                    id,
                     existing.name.clone(),
                     name.to_string(),
                 ));
             }
         }
-        self.tables.write()?.insert(key, table);
+        self.tables.write()?.insert(id, table);
         Ok(full_table.into())
     }
 
     pub async fn update_table(
         &self,
-        owner: Option<Felt>,
+        owner: &Felt,
         id: Felt,
         schema: DojoSchema,
     ) -> DojoToriiResult<TableSchema> {
-        let key = TableKey::new(owner, id);
         let mut info = {
             let mut tables = self.tables.write()?;
-            match tables.remove(&key) {
+            match tables.remove(&id) {
                 Some(t) => t,
-                None => return Err(DojoToriiError::TableNotFoundById(owner, id)),
+                None => return Err(DojoToriiError::TableNotFoundById(id)),
             }
         };
-        let mut key_fields = Vec::new();
-        let mut value_fields = Vec::new();
-        for column in schema.columns {
-            match column.has_attribute("key") {
-                true => key_fields.push(column.id),
-                false => value_fields.push(column.id),
-            }
-            let (column_id, column_info) = column.into();
-            info.columns.insert(column_id, column_info);
-        }
+        let (columns, key_fields, value_fields) = sort_columns(schema.columns);
+        info.columns.extend(columns);
         info.key_fields = key_fields;
         info.value_fields = value_fields;
-        let table = (key, info).into();
+        let table = (id, info).into();
         self.store
-            .save_table(&table)
+            .save_table(owner, &table)
             .await
             .map_err(DojoToriiError::store_error)?;
         Ok(table.to_schema())
@@ -196,6 +188,7 @@ where
 
     async fn process_table_event<'a, E>(
         &self,
+        from_address: &Felt,
         keys: &'a [Felt],
         values: &'a [Felt],
     ) -> DojoToriiResult<IntrospectMsg>
@@ -204,7 +197,7 @@ where
         E::Msg: Into<IntrospectMsg>,
     {
         deserialize_data::<E>(keys, values)?
-            .event_to_msg(self)
+            .event_to_msg(from_address, self)
             .await
             .ok_into()
     }
@@ -228,27 +221,28 @@ where
         selector: &Felt,
         keys: &[Felt],
         values: &[Felt],
+        from_address: &Felt,
     ) -> DojoToriiResult<IntrospectMsg> {
         let selector_raw = selector.to_raw();
         match selector_raw {
             ModelRegistered::SELECTOR_RAW => {
-                self.process_table_event::<ModelRegistered>(keys, values)
+                self.process_table_event::<ModelRegistered>(from_address, keys, values)
                     .await
             }
             ModelWithSchemaRegistered::SELECTOR_RAW => {
-                self.process_table_event::<ModelWithSchemaRegistered>(keys, values)
+                self.process_table_event::<ModelWithSchemaRegistered>(from_address, keys, values)
                     .await
             }
             ModelUpgraded::SELECTOR_RAW => {
-                self.process_table_event::<ModelUpgraded>(keys, values)
+                self.process_table_event::<ModelUpgraded>(from_address, keys, values)
                     .await
             }
             EventRegistered::SELECTOR_RAW => {
-                self.process_table_event::<EventRegistered>(keys, values)
+                self.process_table_event::<EventRegistered>(from_address, keys, values)
                     .await
             }
             EventUpgraded::SELECTOR_RAW => {
-                self.process_table_event::<EventUpgraded>(keys, values)
+                self.process_table_event::<EventUpgraded>(from_address, keys, values)
                     .await
             }
             StoreSetRecord::SELECTOR_RAW => {
@@ -268,11 +262,12 @@ where
         }
     }
 
-    pub async fn decode_raw_event(&mut self, raw: &EmittedEvent) -> DojoToriiResult<IntrospectMsg> {
-        let (selector, keys, values) = raw
-            .split_content()
+    pub async fn decode_raw_event(&self, raw: &EmittedEvent) -> DojoToriiResult<IntrospectMsg> {
+        let (selector, keys) = raw
+            .split_keys()
             .ok_or(DojoToriiError::MissingEventSelector)?;
-        self.decode_event_data(selector, keys, values).await
+        self.decode_event_data(selector, keys, &raw.data, &raw.from_address)
+            .await
     }
 }
 
@@ -287,13 +282,9 @@ where
     }
 
     async fn decode_event(&self, event: &EmittedEvent) -> AnyResult<Vec<Envelope>> {
-        let (selector, keys, data) = event
-            .split_content()
-            .ok_or(DojoToriiError::MissingEventSelector)?;
-
-        self.decode_event_data(selector, keys, data)
+        self.decode_raw_event(event)
             .await
             .map(|msg| vec![EventBody::new_envelope(msg, event)])
-            .err_into()
+            .map_err(|e| e.into())
     }
 }

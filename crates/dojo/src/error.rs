@@ -22,8 +22,8 @@ pub enum DojoToriiError {
     ParseValuesError(String),
     #[error("Cannot add {2} table already exists with id {0} and name {1}")]
     TableAlreadyExists(Felt, String, String),
-    #[error("Table not found with owner {0:?} id {1}")]
-    TableNotFoundById(Option<Felt>, Felt),
+    #[error("Table not found with id {0}")]
+    TableNotFoundById(Felt),
     #[error("Failed to acquire lock: {0}")]
     LockError(String),
     #[error("Store error: {0}")]

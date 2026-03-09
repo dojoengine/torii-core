@@ -9,11 +9,9 @@ use starknet_types_core::felt::Felt;
 
 use crate::postgres::{attribute_type, felt252_type, string_type, PgAttribute, PgFelt, SqlxResult};
 use crate::schema::ColumnKeyTrait;
-use crate::TableKey;
 
 #[derive(FromRow)]
 pub struct ColumnRow {
-    owner: Option<PgFelt>,
     table: PgFelt,
     id: PgFelt,
     name: String,
@@ -27,11 +25,7 @@ where
 {
     fn from(value: ColumnRow) -> Self {
         (
-            K::from_parts(
-                value.owner.map(Into::into),
-                value.table.into(),
-                value.id.into(),
-            ),
+            K::from_parts(value.table.into(), value.id.into()),
             ColumnInfo {
                 name: value.name,
                 attributes: value.attributes.into_iter().map(Into::into).collect(),
@@ -41,13 +35,10 @@ where
     }
 }
 
-impl From<ColumnRow> for (TableKey, ColumnDef) {
+impl From<ColumnRow> for (Felt, ColumnDef) {
     fn from(value: ColumnRow) -> Self {
         (
-            TableKey {
-                owner: value.owner.map(Into::into),
-                id: value.table.into(),
-            },
+            value.table.into(),
             ColumnDef {
                 id: value.id.into(),
                 name: value.name,
@@ -61,24 +52,24 @@ impl From<ColumnRow> for (TableKey, ColumnDef) {
 #[async_trait]
 pub trait PgTypeDef<Key> {
     type Row;
-    fn insert_query(&self, key: &Key) -> String;
+    fn insert_query(&self, owner: &Felt, key: &Key) -> String;
     async fn get_rows(
         pool: &PgPool,
         pg_table: &str,
-        owner: Option<&Felt>,
+        owners: &[Felt],
     ) -> SqlxResult<Vec<(Key, Self)>>
     where
         Self: Sized;
     async fn get_hash_map(
         pool: &PgPool,
         pg_table: &str,
-        owner: Option<&Felt>,
+        owners: &[Felt],
     ) -> SqlxResult<HashMap<Key, Self>>
     where
         Self: Sized,
         Key: std::hash::Hash + Eq,
     {
-        Self::get_rows(pool, pg_table, owner)
+        Self::get_rows(pool, pg_table, owners)
             .await
             .map(|rows| rows.into_iter().collect())
     }
@@ -90,8 +81,8 @@ where
     K: ColumnKeyTrait + Send + Sync,
 {
     type Row = ColumnRow;
-    fn insert_query(&self, key: &K) -> String {
-        let (owner, table, id) = key.as_parts();
+    fn insert_query(&self, owner: &Felt, key: &K) -> String {
+        let (table, id) = key.as_parts();
         column_insert_query(
             owner,
             table,
@@ -102,27 +93,23 @@ where
         )
     }
 
-    async fn get_rows(
-        pool: &PgPool,
-        pg_table: &str,
-        owner: Option<&Felt>,
-    ) -> SqlxResult<Vec<(K, Self)>>
+    async fn get_rows(pool: &PgPool, pg_table: &str, owners: &[Felt]) -> SqlxResult<Vec<(K, Self)>>
     where
         Self: Sized,
     {
-        get_column_rows(pool, pg_table, owner)
+        get_column_rows(pool, pg_table, owners)
             .await
             .map(|rows| rows.into_iter().map_into().collect_vec())
     }
 }
 
 #[async_trait]
-impl PgTypeDef<TableKey> for ColumnDef {
+impl PgTypeDef<Felt> for ColumnDef {
     type Row = ColumnRow;
-    fn insert_query(&self, key: &TableKey) -> String {
+    fn insert_query(&self, owner: &Felt, key: &Felt) -> String {
         column_insert_query(
-            key.owner.as_ref(),
-            &key.id,
+            owner,
+            key,
             &self.id,
             &self.name,
             &self.attributes,
@@ -132,16 +119,16 @@ impl PgTypeDef<TableKey> for ColumnDef {
     async fn get_rows(
         pool: &PgPool,
         pg_table: &str,
-        owner: Option<&Felt>,
-    ) -> SqlxResult<Vec<(TableKey, Self)>> {
-        get_column_rows(pool, pg_table, owner)
+        owners: &[Felt],
+    ) -> SqlxResult<Vec<(Felt, Self)>> {
+        get_column_rows(pool, pg_table, owners)
             .await
             .map(|rows| rows.into_iter().map_into().collect_vec())
     }
 }
 
 fn column_insert_query(
-    owner: Option<&Felt>,
+    owner: &Felt,
     table: &Felt,
     id: &Felt,
     name: &str,
@@ -157,12 +144,10 @@ fn column_insert_query(
                 attributes = EXCLUDED.attributes,
                 type_def = EXCLUDED.type_def
             "#,
-        owner = owner
-            .map(felt252_type)
-            .unwrap_or_else(|| "NULL".to_string()),
-        table = felt252_type(&table),
-        id = felt252_type(&id),
-        name = string_type(&name),
+        owner = felt252_type(owner),
+        table = felt252_type(table),
+        id = felt252_type(id),
+        name = string_type(name),
         attributes = attributes.iter().map(attribute_type).join(","),
         type_def = string_type(&serde_json::to_string(&type_def).unwrap()),
     )
@@ -171,22 +156,23 @@ fn column_insert_query(
 async fn get_column_rows(
     pool: &PgPool,
     pg_table: &str,
-    owner: Option<&Felt>,
+    owners: &[Felt],
 ) -> SqlxResult<Vec<ColumnRow>> {
-    sqlx::query_as(&get_rows_query(pg_table, owner))
+    sqlx::query_as(&get_rows_query(pg_table, owners))
         .fetch_all(pool)
         .await
 }
 
-fn get_rows_query(table: &str, owner: Option<&Felt>) -> String {
+fn get_rows_query(table: &str, owners: &[Felt]) -> String {
     let mut string = format!(
         r#"
-            SELECT owner, "table", id, name, attributes, type_def
+            SELECT "table", id, name, attributes, type_def
             FROM {table}
         "#,
     );
-    if let Some(owner) = owner {
-        string.push_str(&format!("WHERE owner = {}", felt252_type(owner)));
+    if !owners.is_empty() {
+        let owners_str = owners.iter().map(felt252_type).join(", ");
+        string.push_str(&format!("WHERE owner IN ({})", owners_str));
     }
     string
 }

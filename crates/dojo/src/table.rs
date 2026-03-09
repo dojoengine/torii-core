@@ -7,12 +7,10 @@ use introspect_types::{Attribute, Attributes, CairoSerde, ColumnDef, ColumnInfo,
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use torii_introspect::schema::TableSchema;
-use torii_introspect::TableKey;
 
 const LEGACY_ATTRIBUTE: &str = "legacy";
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct DojoTable {
-    pub owner: Option<Felt>,
     pub id: Felt,
     pub name: String,
     pub attributes: Vec<String>,
@@ -53,7 +51,6 @@ impl From<TableSchema> for DojoTable {
         let (columns, key_fields, value_fields) = sort_columns(value.columns);
         let legacy = value.attributes.has_attribute(LEGACY_ATTRIBUTE);
         DojoTable {
-            owner: value.owner,
             id: value.id,
             name: value.name,
             attributes: value.attributes.into_iter().map(|a| a.name).collect(),
@@ -69,7 +66,6 @@ impl From<TableSchema> for DojoTable {
 impl From<DojoTable> for TableSchema {
     fn from(value: DojoTable) -> Self {
         let DojoTable {
-            owner,
             id,
             name,
             attributes,
@@ -87,7 +83,6 @@ impl From<DojoTable> for TableSchema {
             attributes.push(Attribute::new_empty(LEGACY_ATTRIBUTE.to_string()));
         }
         TableSchema {
-            owner,
             id: id,
             name: name,
             primary: primary,
@@ -101,10 +96,10 @@ impl From<DojoTable> for TableSchema {
     }
 }
 
-impl<K: From<(Option<Felt>, Felt)>> From<DojoTable> for (K, DojoTableInfo) {
+impl From<DojoTable> for (Felt, DojoTableInfo) {
     fn from(value: DojoTable) -> Self {
         (
-            K::from((value.owner, value.id)),
+            value.id,
             DojoTableInfo {
                 name: value.name,
                 attributes: value.attributes,
@@ -118,12 +113,10 @@ impl<K: From<(Option<Felt>, Felt)>> From<DojoTable> for (K, DojoTableInfo) {
     }
 }
 
-impl<K: Into<(Option<Felt>, Felt)>> From<(K, DojoTableInfo)> for DojoTable {
-    fn from(value: (K, DojoTableInfo)) -> Self {
-        let (key, info) = value;
-        let (owner, id) = key.into();
+impl From<(Felt, DojoTableInfo)> for DojoTable {
+    fn from(value: (Felt, DojoTableInfo)) -> Self {
+        let (id, info) = value.into();
         DojoTable {
-            owner,
             id,
             name: info.name,
             attributes: info.attributes,
@@ -145,7 +138,6 @@ impl DojoTable {
     ) -> Self {
         let (columns, key_fields, value_fields) = sort_columns(schema.columns);
         Self {
-            owner: None,
             id: compute_selector_from_namespace_and_name(namespace, name),
             name: format!("{}-{}", namespace, name),
             attributes: schema.attributes.iter().map(|a| a.name.clone()).collect(),
@@ -154,13 +146,6 @@ impl DojoTable {
             key_fields,
             value_fields,
             legacy: schema.legacy,
-        }
-    }
-
-    pub fn key(&self) -> TableKey {
-        TableKey {
-            owner: self.owner,
-            id: self.id,
         }
     }
 
@@ -183,8 +168,99 @@ impl DojoTable {
 
     pub fn to_schema(&self) -> TableSchema {
         TableSchema {
-            owner: self.owner,
             id: self.id,
+            name: self.name.clone(),
+            attributes: self
+                .attributes
+                .iter()
+                .cloned()
+                .map(Attribute::new_empty)
+                .collect::<Vec<_>>(),
+            primary: self.primary.clone(),
+            columns: self
+                .selectors()
+                .map(|selector| (*selector, self.get_column(selector).cloned().unwrap()).into())
+                .collect(),
+        }
+    }
+
+    pub fn parse_keys(&self, keys: Vec<Felt>) -> DojoToriiResult<Vec<u8>> {
+        let mut keys: CairoSerde<_> = keys.into();
+        let columns = self.get_columns(&self.key_fields)?;
+        columns
+            .transcode_complete(&mut keys)
+            .map_err(DojoToriiError::TranscodeError)
+    }
+
+    pub fn parse_values(&self, values: Vec<Felt>) -> DojoToriiResult<(Vec<Felt>, Vec<u8>)> {
+        let mut output = Vec::new();
+        self.add_parsed_values(values, &mut output)?;
+        Ok((self.value_fields.clone(), output))
+    }
+
+    pub fn add_parsed_values(
+        &self,
+        values: Vec<Felt>,
+        output: &mut Vec<u8>,
+    ) -> DojoToriiResult<()> {
+        let mut values: DojoSerde<_> = DojoSerde::new_from_source(values, self.legacy);
+        let columns = self.get_columns(&self.value_fields)?;
+        columns
+            .transcode(&mut values, output)
+            .map_err(DojoToriiError::TranscodeError)
+    }
+
+    pub fn parse_record(
+        &self,
+        keys: Vec<Felt>,
+        values: Vec<Felt>,
+    ) -> DojoToriiResult<(Vec<Felt>, Vec<u8>)> {
+        let mut data = self.parse_keys(keys)?;
+        self.add_parsed_values(values, &mut data)?;
+        Ok((
+            [self.key_fields.clone(), self.value_fields.clone()].concat(),
+            data,
+        ))
+    }
+
+    pub fn parse_field(&self, selector: Felt, data: Vec<Felt>) -> DojoToriiResult<Vec<u8>> {
+        let mut data: DojoSerde<_> = DojoSerde::new_from_source(data, self.legacy);
+        let column = self.get_column(&selector)?;
+        column
+            .transcode_complete(&mut data)
+            .map_err(DojoToriiError::TranscodeError)
+    }
+
+    pub fn parse_fields(&self, selectors: &[Felt], data: &[Felt]) -> DojoToriiResult<Vec<u8>> {
+        let mut data: DojoSerde<_> = DojoSerde::new_from_source(data, self.legacy);
+        let columns = self.get_columns(selectors)?;
+        columns
+            .transcode_complete(&mut data)
+            .map_err(DojoToriiError::TranscodeError)
+    }
+}
+
+impl DojoTableInfo {
+    pub fn get_columns(&self, selectors: &[Felt]) -> DojoToriiResult<Vec<&ColumnInfo>> {
+        selectors
+            .into_iter()
+            .map(|selector| self.get_column(selector))
+            .collect()
+    }
+
+    pub fn get_column(&self, selector: &Felt) -> DojoToriiResult<&ColumnInfo> {
+        self.columns
+            .get(selector)
+            .ok_or_else(|| DojoToriiError::ColumnNotFound(*selector, self.name.clone()))
+    }
+
+    pub fn selectors(&self) -> impl Iterator<Item = &Felt> + '_ {
+        self.key_fields.iter().chain(self.value_fields.iter())
+    }
+
+    pub fn to_schema(&self, id: Felt) -> TableSchema {
+        TableSchema {
+            id,
             name: self.name.clone(),
             attributes: self
                 .attributes

@@ -9,4 +9,4 @@ pub use events::{
     InsertsFields, Record, RenameColumns, RenamePrimary, RenameTable, RetypeColumns, RetypePrimary,
     UpdateTable,
 };
-pub use schema::{ColumnKey, TableKey};
+pub use schema::ColumnKey;

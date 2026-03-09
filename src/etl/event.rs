@@ -4,7 +4,7 @@ use starknet::core::types::{EmittedEvent, Felt};
 
 pub trait EmittedEventExt {
     fn metadata(&self) -> HashMap<String, String>;
-    fn split_content(&self) -> Option<(&Felt, &[Felt], &[Felt])>;
+    fn split_keys(&self) -> Option<(&Felt, &[Felt])>;
 }
 
 impl EmittedEventExt for EmittedEvent {
@@ -26,9 +26,7 @@ impl EmittedEventExt for EmittedEvent {
         }
         metadata
     }
-    fn split_content(&self) -> Option<(&Felt, &[Felt], &[Felt])> {
-        self.keys
-            .split_first()
-            .map(|(first_key, rest_keys)| (first_key, rest_keys, self.data.as_slice()))
+    fn split_keys(&self) -> Option<(&Felt, &[Felt])> {
+        self.keys.split_first()
     }
 }

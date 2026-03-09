@@ -20,9 +20,13 @@ where
     F: DojoSchemaFetcher + Sync + Send + 'static,
 {
     type Msg = CreateTable;
-    async fn event_to_msg(self, decoder: &DojoDecoder<Store, F>) -> DojoToriiResult<Self::Msg> {
+    async fn event_to_msg(
+        self,
+        owner: &Felt,
+        decoder: &DojoDecoder<Store, F>,
+    ) -> DojoToriiResult<Self::Msg> {
         decoder
-            .register_table(&self.namespace, &self.name, self.schema)
+            .register_table(owner, &self.namespace, &self.name, self.schema)
             .await
             .map(Into::into)
     }
@@ -35,10 +39,14 @@ where
     F: DojoSchemaFetcher + Sync + Send + 'static,
 {
     type Msg = CreateTable;
-    async fn event_to_msg(self, decoder: &DojoDecoder<Store, F>) -> DojoToriiResult<Self::Msg> {
+    async fn event_to_msg(
+        self,
+        owner: &Felt,
+        decoder: &DojoDecoder<Store, F>,
+    ) -> DojoToriiResult<Self::Msg> {
         let schema = decoder.fetcher.schema(self.address).await?;
         decoder
-            .register_table(&self.namespace, &self.name, schema)
+            .register_table(owner, &self.namespace, &self.name, schema)
             .await
             .map(Into::into)
     }
@@ -51,10 +59,14 @@ where
     F: DojoSchemaFetcher + Sync + Send + 'static,
 {
     type Msg = CreateTable;
-    async fn event_to_msg(self, decoder: &DojoDecoder<Store, F>) -> DojoToriiResult<Self::Msg> {
+    async fn event_to_msg(
+        self,
+        owner: &Felt,
+        decoder: &DojoDecoder<Store, F>,
+    ) -> DojoToriiResult<Self::Msg> {
         let schema = decoder.fetcher.schema(self.address).await?;
         decoder
-            .register_table(&self.namespace, &self.name, schema)
+            .register_table(owner, &self.namespace, &self.name, schema)
             .await
             .map(Into::into)
     }
@@ -67,10 +79,14 @@ where
     F: DojoSchemaFetcher + Sync + Send + 'static,
 {
     type Msg = UpdateTable;
-    async fn event_to_msg(self, decoder: &DojoDecoder<Store, F>) -> DojoToriiResult<Self::Msg> {
+    async fn event_to_msg(
+        self,
+        owner: &Felt,
+        decoder: &DojoDecoder<Store, F>,
+    ) -> DojoToriiResult<Self::Msg> {
         let schema = decoder.fetcher.schema(self.address).await?;
         decoder
-            .update_table(self.selector, schema)
+            .update_table(owner, self.selector, schema)
             .await
             .map(Into::into)
     }
@@ -83,10 +99,14 @@ where
     F: DojoSchemaFetcher + Sync + Send + 'static,
 {
     type Msg = UpdateTable;
-    async fn event_to_msg(self, decoder: &DojoDecoder<Store, F>) -> DojoToriiResult<Self::Msg> {
+    async fn event_to_msg(
+        self,
+        owner: &Felt,
+        decoder: &DojoDecoder<Store, F>,
+    ) -> DojoToriiResult<Self::Msg> {
         let schema = decoder.fetcher.schema(self.address).await?;
         decoder
-            .update_table(self.selector, schema)
+            .update_table(owner, self.selector, schema)
             .await
             .map(Into::into)
     }
