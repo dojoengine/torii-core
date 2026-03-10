@@ -294,7 +294,7 @@ impl SqliteStore {
 
     async fn initialize(&self) -> Result<(), sqlx::Error> {
         sqlx::query(
-            r#"
+            r"
             CREATE TABLE IF NOT EXISTS torii_dojo_manager_state (
                 owner BLOB NOT NULL,
                 table_id BLOB NOT NULL,
@@ -302,13 +302,13 @@ impl SqliteStore {
                 updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
                 PRIMARY KEY (owner, table_id)
             )
-            "#,
+            ",
         )
         .execute(&self.pool)
         .await?;
 
         sqlx::query(
-            r#"
+            r"
             CREATE TABLE IF NOT EXISTS torii_dojo_manager_state_history (
                 owner BLOB NOT NULL,
                 table_id BLOB NOT NULL,
@@ -317,7 +317,7 @@ impl SqliteStore {
                 updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
                 PRIMARY KEY (owner, table_id, applied_at_block)
             )
-            "#,
+            ",
         )
         .execute(&self.pool)
         .await?;
@@ -560,14 +560,14 @@ impl DojoStoreTrait for SqliteStore {
             serde_json::to_string(table).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
         let mut tx = self.pool.begin().await?;
         sqlx::query(
-            r#"
+            r"
             INSERT INTO torii_dojo_manager_state (owner, table_id, table_json, updated_at)
             VALUES (?1, ?2, ?3, unixepoch())
             ON CONFLICT (owner, table_id)
             DO UPDATE SET
                 table_json = excluded.table_json,
                 updated_at = unixepoch()
-            "#,
+            ",
         )
         .bind(owner.to_bytes_be().to_vec())
         .bind(table.id.to_bytes_be().to_vec())
@@ -579,7 +579,7 @@ impl DojoStoreTrait for SqliteStore {
             let history_json =
                 serde_json::to_string(table).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
             sqlx::query(
-                r#"
+                r"
                 INSERT INTO torii_dojo_manager_state_history
                     (owner, table_id, applied_at_block, table_json, updated_at)
                 VALUES (?1, ?2, ?3, ?4, unixepoch())
@@ -587,7 +587,7 @@ impl DojoStoreTrait for SqliteStore {
                 DO UPDATE SET
                     table_json = excluded.table_json,
                     updated_at = unixepoch()
-                "#,
+                ",
             )
             .bind(owner.to_bytes_be().to_vec())
             .bind(table.id.to_bytes_be().to_vec())
@@ -604,11 +604,11 @@ impl DojoStoreTrait for SqliteStore {
     async fn load_tables(&self, owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
         let rows = if owners.is_empty() {
             sqlx::query(
-                r#"
+                r"
                 SELECT table_json
                 FROM torii_dojo_manager_state
                 ORDER BY updated_at ASC
-                "#,
+                ",
             )
             .fetch_all(&self.pool)
             .await?

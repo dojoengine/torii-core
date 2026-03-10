@@ -200,8 +200,26 @@ async fn run_with_postgres(
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
 
+    let ecs_sink = EcsSink::new(&storage_database_url, config.max_db_connections).await?;
+    let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
+
+    let reflection = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(torii::TORII_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(ECS_DESCRIPTOR_SET)
+        .build_v1()
+        .expect("failed to build ECS reflection service");
+
+    let grpc_router = tonic::transport::Server::builder()
+        .accept_http1(true)
+        .add_service(tonic_web::enable(WorldServer::new(
+            (*ecs_grpc_service).clone(),
+        )))
+        .add_service(tonic_web::enable(reflection));
+
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
+        .with_grpc_router(grpc_router)
+        .with_custom_reflection(true)
         .engine_database_url(engine_database_url)
         .with_extractor(extractor)
         .add_decoder(decoder)
@@ -216,6 +234,7 @@ async fn run_with_postgres(
     tracing::info!("Torii configured, starting ETL pipeline...");
     tracing::info!("gRPC service available on port {}", config.port);
     tracing::info!("  - torii.Torii (core subscriptions and metrics endpoint)");
+    tracing::info!("  - world.World (legacy ECS gRPC service)");
 
     torii::run(torii_config.build())
         .await

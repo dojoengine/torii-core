@@ -4683,6 +4683,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "torii-ecs-sink"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dojo-introspect",
+ "futures",
+ "futures-util",
+ "hex",
+ "introspect-types",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "starknet",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "torii",
+ "torii-dojo",
+ "torii-introspect",
+ "tracing",
+]
+
+[[package]]
 name = "torii-erc1155"
 version = "0.1.0"
 dependencies = [
@@ -4830,9 +4858,13 @@ dependencies = [
  "sqlx",
  "starknet",
  "tokio",
+ "tonic",
+ "tonic-reflection",
+ "tonic-web",
  "torii",
  "torii-config-common",
  "torii-dojo",
+ "torii-ecs-sink",
  "torii-introspect-postgres-sink",
  "torii-introspect-sqlite-sink",
  "torii-sqlite",
