@@ -4614,6 +4614,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "torii-arcade"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "sqlx",
+ "starknet",
+ "tokio",
+ "tonic",
+ "tonic-reflection",
+ "tonic-web",
+ "torii",
+ "torii-arcade-sink",
+ "torii-common",
+ "torii-dojo",
+ "torii-ecs-sink",
+ "torii-erc1155",
+ "torii-erc20",
+ "torii-erc721",
+ "torii-introspect-postgres-sink",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "torii-arcade-sink"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "prost 0.13.5",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "starknet",
+ "tokio",
+ "tonic",
+ "tonic-build",
+ "torii",
+ "torii-common",
+ "torii-erc721",
+ "torii-introspect",
+ "tracing",
+]
+
+[[package]]
 name = "torii-common"
 version = "0.1.0"
 dependencies = [
