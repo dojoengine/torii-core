@@ -11,12 +11,57 @@ use torii::etl::{
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_postgres::PostgresConnection;
 
-pub const LOGGING_TARGET: &str = "torii::sinks::introspect::postgres";
+pub const LOGGING_TARGET: &str = "torii::sinks::introspect";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DbBackend {
+    Postgres,
+    Sqlite,
+}
+
+enum IntrospectDb {
+    Postgres(PostgresSimpleDb),
+    Sqlite(SqliteSimpleDb),
+}
+
+impl IntrospectDb {
+    async fn initialize(&mut self) -> Result<()> {
+        match self {
+            Self::Postgres(db) => db.initialize().await.map_err(Into::into),
+            Self::Sqlite(db) => db.initialize().await.map_err(Into::into),
+        }
+    }
+
+    fn has_tables(&self) -> bool {
+        match self {
+            Self::Postgres(db) => db.has_tables(),
+            Self::Sqlite(db) => db.has_tables(),
+        }
+    }
+
+    async fn bootstrap_tables(&mut self, tables: &[CreateTable]) -> Result<()> {
+        match self {
+            Self::Postgres(db) => db.bootstrap_tables(tables).await.map_err(Into::into),
+            Self::Sqlite(db) => db.bootstrap_tables(tables).await.map_err(Into::into),
+        }
+    }
+
+    async fn process_message(
+        &mut self,
+        msg: &IntrospectMsg,
+        context: &torii::etl::EventContext,
+    ) -> Result<()> {
+        match self {
+            Self::Postgres(db) => db.process_message(msg, context).await.map_err(Into::into),
+            Self::Sqlite(db) => db.process_message(msg, context).await.map_err(Into::into),
+        }
+    }
+}
 
 #[async_trait]
 impl<T: Send + Sync + PostgresConnection> Sink for IntrospectPgDb<T> {
     fn name(&self) -> &'static str {
-        "introspect-postgres"
+        "introspect-sql"
     }
 
     fn interested_types(&self) -> Vec<TypeId> {
@@ -107,8 +152,11 @@ impl<T: Send + Sync + PostgresConnection> Sink for IntrospectPgDb<T> {
         self.initialize_introspect_pg_sink().await?;
         tracing::info!(
             target: LOGGING_TARGET,
-            "Initialized introspect Postgres sink"
+            backend = ?backend,
+            "Initialized introspect sink"
         );
         Ok(())
     }
 }
+
+pub type IntrospectSqlSink = IntrospectPostgresSink;
