@@ -1,6 +1,6 @@
 use crate::schema::TableInfo;
 use async_trait::async_trait;
-use introspect_types::{Attribute, ColumnInfo, PrimaryTypeDef};
+use introspect_types::{Attribute, ColumnDef, ColumnInfo, PrimaryTypeDef, TypeDef};
 use starknet_types_core::felt::Felt;
 
 #[async_trait]
@@ -13,12 +13,12 @@ pub trait TableStore {
         table: &TableInfo,
     ) -> Result<(), Self::Error>;
     async fn load_tables(&self, owners: &[Felt]) -> Result<TableInfo, Self::Error>;
-    async fn add_column(
+    async fn add_columns(
         &self,
         owner: &Felt,
         table: &Felt,
-        column_id: &Felt,
-        column_info: &ColumnInfo,
+        columns: ColumnDef,
+        order: &[Felt],
     ) -> Result<(), Self::Error>;
     async fn update_table_name(
         &self,
@@ -38,5 +38,20 @@ pub trait TableStore {
         id: &Felt,
         attributes: &[Attribute],
         primary: &PrimaryTypeDef,
+    ) -> Result<(), Self::Error>;
+    async fn update_column_name(
+        &self,
+        owner: &Felt,
+        table: &Felt,
+        column: &Felt,
+        name: &str,
+    ) -> Result<(), Self::Error>;
+    async fn update_column_type(
+        &self,
+        owner: &Felt,
+        table: &Felt,
+        column: &Felt,
+        attributes: &[Attribute],
+        type_def: &TypeDef,
     ) -> Result<(), Self::Error>;
 }
