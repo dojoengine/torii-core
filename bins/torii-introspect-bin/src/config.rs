@@ -1,15 +1,16 @@
 use anyhow::{bail, Result};
 use clap::Parser;
 use starknet::core::types::Felt;
+use std::path::Path;
 
-/// Dojo introspect indexer backed by the PostgreSQL sink.
+/// Dojo introspect indexer backed by a SQL sink.
 ///
 /// This binary targets explicitly configured Dojo contracts and persists the
-/// decoded introspect messages into PostgreSQL tables.
+/// decoded introspect messages into PostgreSQL or SQLite tables.
 #[derive(Parser, Debug)]
 #[command(name = "torii-introspect")]
 #[command(
-    about = "Index Dojo introspect events into PostgreSQL",
+    about = "Index Dojo introspect events into PostgreSQL or SQLite",
     long_about = None
 )]
 pub struct Config {
@@ -33,9 +34,16 @@ pub struct Config {
     #[arg(long)]
     pub to_block: Option<u64>,
 
-    /// PostgreSQL URL used by the introspect sink.
+    /// Directory where the default sqlite database is stored.
+    #[arg(long, default_value = "./torii-data")]
+    pub db_dir: String,
+
+    /// Optional SQL database URL used by the introspect sink.
+    ///
+    /// Supports PostgreSQL (`postgres://...`) and SQLite (`sqlite:...` or file path).
+    /// When omitted, uses `<db-dir>/introspect.db`.
     #[arg(long, env = "STORAGE_DATABASE_URL")]
-    pub storage_database_url: String,
+    pub storage_database_url: Option<String>,
 
     /// Port for the Torii gRPC/HTTP server.
     #[arg(long, default_value = "3000")]
@@ -53,7 +61,7 @@ pub struct Config {
     #[arg(long, default_value = "10000")]
     pub event_block_batch_size: u64,
 
-    /// Maximum PostgreSQL connections for the sink.
+    /// Maximum database connections for the sink.
     #[arg(long)]
     pub max_db_connections: Option<u32>,
 
@@ -77,16 +85,29 @@ impl Config {
     }
 
     pub fn engine_database_url(&self) -> String {
-        self.storage_database_url.clone()
+        self.resolved_storage_database_url()
     }
 
-    pub fn storage_database_url(&self) -> Result<&str> {
-        if self.storage_database_url.starts_with("postgres://")
-            || self.storage_database_url.starts_with("postgresql://")
+    pub fn resolved_storage_database_url(&self) -> String {
+        self.storage_database_url.clone().unwrap_or_else(|| {
+            Path::new(&self.db_dir)
+                .join("introspect.db")
+                .to_string_lossy()
+                .to_string()
+        })
+    }
+
+    pub fn storage_database_url(&self) -> Result<String> {
+        let storage_database_url = self.resolved_storage_database_url();
+        if storage_database_url.starts_with("postgres://")
+            || storage_database_url.starts_with("postgresql://")
+            || storage_database_url.starts_with("sqlite:")
+            || storage_database_url == ":memory:"
+            || !storage_database_url.contains("://")
         {
-            Ok(&self.storage_database_url)
+            Ok(storage_database_url)
         } else {
-            bail!("--storage-database-url must be a PostgreSQL URL")
+            bail!("--storage-database-url must be a PostgreSQL or SQLite URL/path")
         }
     }
 }
@@ -98,31 +119,18 @@ mod tests {
 
     #[test]
     fn observability_defaults_to_disabled() {
-        let cfg = Config::parse_from([
-            "torii-introspect",
-            "--contracts",
-            "0x1",
-            "--storage-database-url",
-            "postgres://localhost/torii",
-        ]);
+        let cfg = Config::parse_from(["torii-introspect", "--contracts", "0x1"]);
         assert!(!cfg.observability);
     }
 
     #[test]
     fn observability_flag_enables_metrics() {
-        let cfg = Config::parse_from([
-            "torii-introspect",
-            "--contracts",
-            "0x1",
-            "--storage-database-url",
-            "postgres://localhost/torii",
-            "--observability",
-        ]);
+        let cfg = Config::parse_from(["torii-introspect", "--contracts", "0x1", "--observability"]);
         assert!(cfg.observability);
     }
 
     #[test]
-    fn storage_database_url_must_be_postgres() {
+    fn storage_database_url_accepts_sqlite() {
         let cfg = Config::parse_from([
             "torii-introspect",
             "--contracts",
@@ -131,18 +139,28 @@ mod tests {
             "sqlite://torii.db",
         ]);
 
-        assert!(cfg.storage_database_url().is_err());
+        assert_eq!(cfg.storage_database_url().unwrap(), "sqlite://torii.db");
+    }
+
+    #[test]
+    fn storage_database_url_defaults_to_sqlite_file_in_db_dir() {
+        let cfg = Config::parse_from([
+            "torii-introspect",
+            "--contracts",
+            "0x1",
+            "--db-dir",
+            "./custom-data",
+        ]);
+
+        assert_eq!(
+            cfg.storage_database_url().unwrap(),
+            "./custom-data/introspect.db"
+        );
     }
 
     #[test]
     fn contract_addresses_parse_from_hex() {
-        let cfg = Config::parse_from([
-            "torii-introspect",
-            "--contracts",
-            "0x1,0x2",
-            "--storage-database-url",
-            "postgres://localhost/torii",
-        ]);
+        let cfg = Config::parse_from(["torii-introspect", "--contracts", "0x1,0x2"]);
 
         let contracts = cfg.contract_addresses().unwrap();
         assert_eq!(contracts.len(), 2);

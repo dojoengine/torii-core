@@ -20,7 +20,7 @@ starknet = "0.17"
 url = "2.5"
 clap = { version = "4.5", features = ["derive", "env"] }
 anyhow = "1.0"
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
+sqlx = { version = "0.8", features = ["postgres", "sqlite", "runtime-tokio-rustls"] }
 
 [lints]
 workspace = true
