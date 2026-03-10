@@ -80,20 +80,31 @@ pub fn create_enum_type_query(type_name: &str, variants: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
 
-    let create = format!(
+    let reconcile = variants
+        .iter()
+        .map(|variant| {
+            format!(
+                r#"
+            BEGIN
+                EXECUTE format('ALTER TYPE %I ADD VALUE %L', '{type_name}', '{variant}');
+            EXCEPTION
+                WHEN duplicate_object THEN
+                    RAISE NOTICE 'enum value already exists, skipping';
+            END;
+"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
         r#"DO $$ 
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '{type_name}') THEN
                 CREATE TYPE "{type_name}" AS ENUM ({variant_defs});
             END IF;
+            {reconcile}
         END $$;"#
-    );
-    let reconcile = variants
-        .iter()
-        .map(|variant| add_enum_variant_query(type_name, variant))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!("{create}\n{reconcile}")
+    )
 }
 
 pub fn create_tuple_type_query(type_name: &str, fields: &[PostgresType]) -> String {
@@ -129,4 +140,19 @@ pub fn write_conflict_res<const DELIMINATOR: bool, W: Write>(
         writer,
         r#""{column}" = COALESCE(EXCLUDED."{column}", "{table}"."{column}"){separator}"#,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_enum_type_query;
+
+    #[test]
+    fn create_enum_type_query_is_single_do_block() {
+        let query =
+            create_enum_type_query("status_enum", &["Open".to_string(), "Closed".to_string()]);
+
+        assert_eq!(query.matches("DO $$").count(), 1);
+        assert!(query.contains(r#"CREATE TYPE "status_enum" AS ENUM ('Open', 'Closed')"#));
+        assert!(query.contains("ALTER TYPE %I ADD VALUE %L"));
+    }
 }

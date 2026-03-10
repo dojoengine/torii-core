@@ -5,13 +5,17 @@ mod config;
 use anyhow::Result;
 use clap::Parser;
 use config::Config;
+use sqlx::postgres::PgPoolOptions;
+use starknet::core::types::Felt;
 use std::sync::Arc;
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{
     ContractEventConfig, EventExtractor, EventExtractorConfig, RetryPolicy,
 };
 use torii_dojo::decoder::DojoDecoder;
-use torii_dojo::manager::{DojoTableStore, PostgresStore};
+use torii_dojo::manager::{DojoTableStore, MergedStore, PostgresStore, SchemaBootstrapPoint};
+use torii_dojo::store::postgres::initialize_dojo_schema;
+use torii_dojo::store::DojoStoreTrait;
 use torii_introspect_postgres_sink::IntrospectPostgresSink;
 
 #[tokio::main]
@@ -83,13 +87,79 @@ async fn run_indexer(config: Config) -> Result<()> {
             chunk_size: config.event_chunk_size,
             block_batch_size: config.event_block_batch_size,
             retry_policy: RetryPolicy::default(),
+            ignore_saved_state: config.ignore_saved_state,
         },
     ));
 
-    let manager = DojoTableStore::new_postgres(&storage_database_url).await?;
-    let bootstrap_tables = manager.create_table_messages()?;
-    let decoder: DojoDecoder<DojoTableStore<PostgresStore>, _> =
-        DojoDecoder::new(manager, provider, &[]).await?;
+    let bootstrap_points = resolve_bootstrap_points(
+        &storage_database_url,
+        &contracts,
+        config.from_block,
+        config.ignore_saved_state,
+    )
+    .await?;
+    for point in &bootstrap_points {
+        tracing::info!(
+            target: "torii::dojo::metadata",
+            owner = %point.owner,
+            block_number = point.block_number,
+            had_saved_state = point.had_saved_state,
+            "Resolved Dojo schema bootstrap point"
+        );
+    }
+
+    let primary_store = PostgresStore::new(&storage_database_url).await?;
+    let historical_bootstrap = primary_store
+        .load_historical_bootstrap(&bootstrap_points)
+        .await?;
+    if !historical_bootstrap.unsafe_owners.is_empty()
+        && !config.allow_unsafe_latest_schema_bootstrap
+    {
+        anyhow::bail!(
+            "historical Dojo schema bootstrap is unavailable for contract(s): {}. \
+             Re-run with --ignore-saved-state, use a fresh database, or pass \
+             --allow-unsafe-latest-schema-bootstrap to keep the previous best-effort behavior",
+            historical_bootstrap
+                .unsafe_owners
+                .iter()
+                .map(|owner| format!("{owner:#x}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    let secondary_store = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&storage_database_url)
+        .await?;
+    initialize_dojo_schema(&secondary_store).await?;
+    let merged_store = MergedStore::new(primary_store, secondary_store);
+    let preloaded_tables = if historical_bootstrap.unsafe_owners.is_empty() {
+        tracing::info!(
+            target: "torii::dojo::metadata",
+            latest_tables = historical_bootstrap.latest_table_count,
+            historical_tables = historical_bootstrap.historical_table_count,
+            "Bootstrapping decoder from historical Dojo schema snapshot"
+        );
+        historical_bootstrap.tables
+    } else {
+        tracing::warn!(
+            target: "torii::dojo::metadata",
+            owners = historical_bootstrap
+                .unsafe_owners
+                .iter()
+                .map(|owner| format!("{owner:#x}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            "Historical Dojo schema bootstrap unavailable; falling back to latest persisted schema"
+        );
+        merged_store.load_tables(&[]).await?
+    };
+
+    let metadata_store = DojoTableStore::from_loaded_tables(merged_store, preloaded_tables.clone());
+    let bootstrap_tables = metadata_store.create_table_messages()?;
+    let decoder: DojoDecoder<DojoTableStore<MergedStore<PostgresStore, _>>, _> =
+        DojoDecoder::with_tables(metadata_store, provider, preloaded_tables);
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
 
     let mut torii_config = torii::ToriiConfig::builder()
@@ -118,4 +188,88 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     tracing::info!("Torii shutdown complete");
     Ok(())
+}
+
+async fn resolve_bootstrap_points(
+    database_url: &str,
+    contracts: &[Felt],
+    from_block: u64,
+    ignore_saved_state: bool,
+) -> Result<Vec<SchemaBootstrapPoint>> {
+    if ignore_saved_state {
+        return Ok(contracts
+            .iter()
+            .copied()
+            .map(|owner| SchemaBootstrapPoint {
+                owner,
+                block_number: from_block,
+                had_saved_state: false,
+            })
+            .collect());
+    }
+
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await?;
+
+    let engine_table_exists: bool = sqlx::query_scalar(
+        r"
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'engine' AND table_name = 'extractor_state'
+        )
+        ",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(false);
+
+    if !engine_table_exists {
+        return Ok(contracts
+            .iter()
+            .copied()
+            .map(|owner| SchemaBootstrapPoint {
+                owner,
+                block_number: from_block,
+                had_saved_state: false,
+            })
+            .collect());
+    }
+
+    let mut points = Vec::with_capacity(contracts.len());
+    for owner in contracts {
+        let state_key = format!("{owner:#x}");
+        let saved_state: Option<String> = sqlx::query_scalar(
+            r"
+            SELECT state_value
+            FROM engine.extractor_state
+            WHERE extractor_type = 'event' AND state_key = $1
+            ",
+        )
+        .bind(&state_key)
+        .fetch_optional(&pool)
+        .await?;
+
+        let block_number = saved_state
+            .as_deref()
+            .and_then(parse_saved_state_block)
+            .unwrap_or(from_block);
+        points.push(SchemaBootstrapPoint {
+            owner: *owner,
+            block_number,
+            had_saved_state: saved_state.is_some(),
+        });
+    }
+
+    Ok(points)
+}
+
+fn parse_saved_state_block(saved_state: &str) -> Option<u64> {
+    saved_state
+        .split('|')
+        .next()
+        .and_then(|part| part.strip_prefix("block:"))
+        .and_then(|block| block.parse::<u64>().ok())
 }

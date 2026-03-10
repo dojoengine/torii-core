@@ -12,13 +12,16 @@ use torii_introspect::postgres::owned::PgTypeDef;
 use torii_introspect::postgres::{PgFelt, SqlxResult};
 use torii_introspect::schema::ColumnKeyTrait;
 
-const DOJO_COLUMN_TABLE: &str = "dojo.column";
+const DOJO_MIGRATION_SQL: &str = include_str!("../migrate.sql");
+const DOJO_COLUMN_TABLE: &str = "dojo.columns";
 const DOJO_TABLE_TABLE: &str = "dojo.table";
 
 #[derive(Debug, thiserror::Error)]
 pub enum DojoPgStoreError {
     #[error(transparent)]
     SqlxError(#[from] sqlx::Error),
+    #[error("historical schema bootstrap is not supported from dojo.table")]
+    UnsupportedHistoricalLoad,
     #[error("Column not found for table {name} with id {table_id} and column {column_id}")]
     ColumnNotFound {
         name: String,
@@ -179,7 +182,7 @@ pub fn make_set_table_query(
         r#"
         INSERT INTO dojo.table (owner, id, name, attributes, keys, "values", legacy)
             VALUES ({owner}, {id}, {name}, ARRAY[{attributes}]::TEXT[], ARRAY[{keys}], ARRAY[{values}], {legacy})
-            ON CONFLICT (id) DO UPDATE SET
+            ON CONFLICT (owner, id) DO UPDATE SET
             name = EXCLUDED.name,
             attributes = EXCLUDED.attributes,
             keys = EXCLUDED.keys,
@@ -195,11 +198,21 @@ pub fn make_set_table_query(
     )
 }
 
+pub async fn initialize_dojo_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(DOJO_MIGRATION_SQL).execute(pool).await?;
+    Ok(())
+}
+
 #[async_trait]
 impl DojoStoreTrait for PgPool {
     type Error = DojoPgStoreError;
 
-    async fn save_table(&self, owner: &Felt, data: &DojoTable) -> Result<(), Self::Error> {
+    async fn save_table_at_block(
+        &self,
+        owner: &Felt,
+        data: &DojoTable,
+        _block_number: Option<u64>,
+    ) -> Result<(), Self::Error> {
         let mut transaction = self.begin().await?;
         let query = make_set_table_query(
             owner,
@@ -236,5 +249,30 @@ impl DojoStoreTrait for PgPool {
             }
         }
         Ok(tables)
+    }
+
+    async fn load_tables_at_blocks(
+        &self,
+        _owner_blocks: &[(Felt, u64)],
+    ) -> Result<Vec<DojoTable>, Self::Error> {
+        Err(DojoPgStoreError::UnsupportedHistoricalLoad)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{make_set_table_query, DOJO_COLUMN_TABLE};
+    use starknet_types_core::felt::Felt;
+
+    #[test]
+    fn dojo_column_table_matches_migration() {
+        assert_eq!(DOJO_COLUMN_TABLE, "dojo.columns");
+    }
+
+    #[test]
+    fn set_table_query_upserts_on_owner_and_id() {
+        let query = make_set_table_query(&Felt::ONE, &Felt::TWO, "duelist", &[], &[], &[], false);
+
+        assert!(query.contains("ON CONFLICT (owner, id) DO UPDATE"));
     }
 }

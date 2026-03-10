@@ -69,7 +69,13 @@ impl JsonStore {
 #[async_trait]
 impl DojoStoreTrait for JsonStore {
     type Error = JsonError;
-    async fn save_table(&self, _owner: &Felt, table: &DojoTable) -> Result<(), Self::Error> {
+
+    async fn save_table_at_block(
+        &self,
+        _owner: &Felt,
+        table: &DojoTable,
+        _block_number: Option<u64>,
+    ) -> Result<(), Self::Error> {
         self.dump_table(table)
     }
 

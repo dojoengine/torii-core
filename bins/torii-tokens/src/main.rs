@@ -263,6 +263,7 @@ async fn run_indexer(config: Config) -> Result<()> {
                 chunk_size: config.event_chunk_size,
                 block_batch_size: config.event_block_batch_size,
                 retry_policy: RetryPolicy::default(),
+                ignore_saved_state: false,
             };
             Box::new(EventExtractor::new(provider.clone(), extractor_config))
         }

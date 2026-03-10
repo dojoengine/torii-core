@@ -98,6 +98,9 @@ pub struct EventExtractorConfig {
 
     /// Retry policy for network failures.
     pub retry_policy: RetryPolicy,
+
+    /// Ignore any persisted per-contract cursor state in EngineDb.
+    pub ignore_saved_state: bool,
 }
 
 impl Default for EventExtractorConfig {
@@ -107,6 +110,7 @@ impl Default for EventExtractorConfig {
             chunk_size: 1000,
             block_batch_size: 10000,
             retry_policy: RetryPolicy::default(),
+            ignore_saved_state: false,
         }
     }
 }
@@ -339,27 +343,39 @@ impl EventExtractor {
             let address = contract_config.address;
             let state_key = format!("{address:#x}");
 
-            // Try to load persisted state
-            let state = if let Some(saved_state) = engine_db
-                .get_extractor_state(EXTRACTOR_TYPE, &state_key)
-                .await?
-            {
-                tracing::info!(
-                    target: "torii::etl::event",
-                    contract = %state_key,
-                    saved_state = %saved_state,
-                    "Resuming contract from saved state"
-                );
-                ContractState::deserialize(address, contract_config.to_block, &saved_state)?
-            } else {
+            let state = if self.config.ignore_saved_state {
                 tracing::info!(
                     target: "torii::etl::event",
                     contract = %state_key,
                     from_block = contract_config.from_block,
                     to_block = contract_config.to_block,
-                    "Starting fresh extraction for contract"
+                    "Ignoring saved state for contract; starting from configured from_block"
                 );
                 ContractState::new(contract_config)
+            } else {
+                // Try to load persisted state
+                if let Some(saved_state) = engine_db
+                    .get_extractor_state(EXTRACTOR_TYPE, &state_key)
+                    .await?
+                {
+                    tracing::info!(
+                        target: "torii::etl::event",
+                        contract = %state_key,
+                        saved_state = %saved_state,
+                        configured_from_block = contract_config.from_block,
+                        "Resuming contract from saved state"
+                    );
+                    ContractState::deserialize(address, contract_config.to_block, &saved_state)?
+                } else {
+                    tracing::info!(
+                        target: "torii::etl::event",
+                        contract = %state_key,
+                        from_block = contract_config.from_block,
+                        to_block = contract_config.to_block,
+                        "Starting fresh extraction for contract"
+                    );
+                    ContractState::new(contract_config)
+                }
             };
 
             self.contract_states.insert(address, state);
@@ -1075,5 +1091,84 @@ mod tests {
         let tx = batch.transactions.get(&tx_hash).unwrap();
         assert_eq!(tx.hash, tx_hash);
         assert_eq!(tx.block_number, 123);
+    }
+
+    #[tokio::test]
+    async fn test_initialize_resumes_from_saved_state_by_default() {
+        let address = Felt::from(0x123_u64);
+        let provider = Arc::new(JsonRpcClient::new(HttpTransport::new(
+            starknet::providers::Url::parse("http://localhost:5050").unwrap(),
+        )));
+        let mut extractor = EventExtractor::new(
+            provider,
+            EventExtractorConfig {
+                contracts: vec![ContractEventConfig {
+                    address,
+                    from_block: 7,
+                    to_block: 100,
+                }],
+                ..EventExtractorConfig::default()
+            },
+        );
+        let engine_db = EngineDb::new(crate::etl::engine_db::EngineDbConfig {
+            path: "sqlite::memory:".to_string(),
+        })
+        .await
+        .unwrap();
+        engine_db
+            .set_extractor_state(EXTRACTOR_TYPE, &format!("{address:#x}"), "block:42")
+            .await
+            .unwrap();
+
+        extractor.initialize(&engine_db).await.unwrap();
+
+        assert_eq!(
+            extractor
+                .contract_states
+                .get(&address)
+                .unwrap()
+                .current_block,
+            42
+        );
+    }
+
+    #[tokio::test]
+    async fn test_initialize_can_ignore_saved_state() {
+        let address = Felt::from(0x456_u64);
+        let provider = Arc::new(JsonRpcClient::new(HttpTransport::new(
+            starknet::providers::Url::parse("http://localhost:5050").unwrap(),
+        )));
+        let mut extractor = EventExtractor::new(
+            provider,
+            EventExtractorConfig {
+                contracts: vec![ContractEventConfig {
+                    address,
+                    from_block: 7,
+                    to_block: 100,
+                }],
+                ignore_saved_state: true,
+                ..EventExtractorConfig::default()
+            },
+        );
+        let engine_db = EngineDb::new(crate::etl::engine_db::EngineDbConfig {
+            path: "sqlite::memory:".to_string(),
+        })
+        .await
+        .unwrap();
+        engine_db
+            .set_extractor_state(EXTRACTOR_TYPE, &format!("{address:#x}"), "block:42")
+            .await
+            .unwrap();
+
+        extractor.initialize(&engine_db).await.unwrap();
+
+        assert_eq!(
+            extractor
+                .contract_states
+                .get(&address)
+                .unwrap()
+                .current_block,
+            7
+        );
     }
 }

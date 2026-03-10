@@ -25,7 +25,7 @@ pub struct Config {
     #[arg(long, value_delimiter = ',', required = true)]
     pub contracts: Vec<String>,
 
-    /// Starting block number.
+    /// Starting block number for fresh extraction, or when `--ignore-saved-state` is set.
     #[arg(long, default_value = "0")]
     pub from_block: u64,
 
@@ -56,6 +56,14 @@ pub struct Config {
     /// Maximum PostgreSQL connections for the sink.
     #[arg(long)]
     pub max_db_connections: Option<u32>,
+
+    /// Ignore persisted extractor state and start extraction from `from_block`.
+    #[arg(long)]
+    pub ignore_saved_state: bool,
+
+    /// Allow falling back to latest schema state when historical bootstrap is unavailable.
+    #[arg(long)]
+    pub allow_unsafe_latest_schema_bootstrap: bool,
 }
 
 impl Config {
