@@ -12,6 +12,7 @@ path = "src/main.rs"
 torii = { path = "../../" }
 torii-config-common.workspace = true
 torii-dojo = { path = "../../crates/dojo" }
+torii-ecs-sink = { path = "../../crates/torii-ecs-sink" }
 torii-introspect-postgres-sink = { path = "../../crates/introspect-postgres-sink" }
 torii-introspect-sqlite-sink = { path = "../../crates/introspect-sqlite-sink" }
 torii-sqlite = { path = "../../crates/sqlite" }

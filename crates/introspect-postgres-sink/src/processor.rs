@@ -243,6 +243,45 @@ impl PostgresTables {
         Ok(())
     }
 
+    pub fn prepared_insert_fields(
+        &self,
+        event: &InsertsFields,
+    ) -> PGSinkResult<Option<(String, String)>> {
+        let table = self.get_living_table(&event.table)?;
+        let schema = table.get_schema(&event.columns)?;
+        let table_name = table.name();
+
+        let mut json_writer = Vec::new();
+        schema.parse_records_with_metadata(
+            &event.records,
+            &(),
+            &mut JsonSerializer::new(&mut json_writer),
+            &PostgresJsonSerializer,
+        )?;
+        let payload = unsafe { String::from_utf8_unchecked(json_writer) };
+
+        let mut sql_writer = Vec::new();
+        write!(
+            sql_writer,
+            r#"INSERT INTO "{table_name}"
+            SELECT * FROM jsonb_populate_recordset(NULL::"{table_name}", $1::jsonb)
+            ON CONFLICT ("{}") DO "#,
+            schema.primary().name
+        )?;
+        if let Some((coln, cols)) = schema.columns().split_last() {
+            write!(&mut sql_writer, "UPDATE SET ")?;
+            for column in cols {
+                write_conflict_res::<true, _>(&mut sql_writer, table_name, &column.name)?;
+            }
+            write_conflict_res::<false, _>(&mut sql_writer, table_name, &coln.name)?;
+        } else {
+            write!(&mut sql_writer, "NOTHING")?;
+        }
+
+        let sql = unsafe { String::from_utf8_unchecked(sql_writer) };
+        Ok(Some((sql, payload)))
+    }
+
     pub fn handle_message(
         &self,
         schema: &PgSchema,
