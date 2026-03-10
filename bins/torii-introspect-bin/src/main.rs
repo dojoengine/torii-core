@@ -21,6 +21,8 @@ use torii_dojo::manager::{
 };
 use torii_dojo::store::postgres::initialize_dojo_schema;
 use torii_dojo::store::DojoStoreTrait;
+use torii_ecs_sink::proto::world::world_server::WorldServer;
+use torii_ecs_sink::{EcsSink, FILE_DESCRIPTOR_SET as ECS_DESCRIPTOR_SET};
 use torii_introspect_postgres_sink::IntrospectPostgresSink;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,15 +272,34 @@ async fn run_indexer(config: Config) -> Result<()> {
         }
     };
 
+    let ecs_sink = EcsSink::new(&storage_database_url, config.max_db_connections).await?;
+    let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
+
+    let reflection = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(torii::TORII_DESCRIPTOR_SET)
+        .register_encoded_file_descriptor_set(ECS_DESCRIPTOR_SET)
+        .build_v1()
+        .expect("failed to build ECS reflection service");
+
+    let grpc_router = tonic::transport::Server::builder()
+        .accept_http1(true)
+        .add_service(tonic_web::enable(WorldServer::new(
+            (*ecs_grpc_service).clone(),
+        )))
+        .add_service(tonic_web::enable(reflection));
+
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
+        .with_grpc_router(grpc_router)
+        .with_custom_reflection(true)
         .engine_database_url(engine_database_url)
         .with_extractor(extractor)
         .add_decoder(decoder)
         .add_sink_boxed(Box::new(
             IntrospectPostgresSink::new(storage_database_url, config.max_db_connections)
                 .with_bootstrap_tables(bootstrap_tables),
-        ));
+        ))
+        .add_sink_boxed(Box::new(ecs_sink));
 
     let decoder_id = DecoderId::new("dojo-introspect");
     for contract in contracts {
@@ -289,6 +310,7 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("Torii configured, starting ETL pipeline...");
     tracing::info!("gRPC service available on port {}", config.port);
     tracing::info!("  - torii.Torii (core subscriptions and metrics endpoint)");
+    tracing::info!("  - world.World (legacy ECS gRPC service)");
 
     torii::run(torii_config.build())
         .await
@@ -383,13 +405,13 @@ async fn resolve_bootstrap_points(
                 .await?;
 
             let engine_table_exists: bool = sqlx::query_scalar(
-                r#"
+                r"
                 SELECT EXISTS (
                     SELECT 1
                     FROM sqlite_master
                     WHERE type = 'table' AND name = 'extractor_state'
                 )
-                "#,
+                ",
             )
             .fetch_one(&pool)
             .await
@@ -411,11 +433,11 @@ async fn resolve_bootstrap_points(
             for owner in contracts {
                 let state_key = format!("{owner:#x}");
                 let saved_state: Option<String> = sqlx::query_scalar(
-                    r#"
+                    r"
                     SELECT state_value
                     FROM extractor_state
                     WHERE extractor_type = 'event' AND state_key = ?1
-                    "#,
+                    ",
                 )
                 .bind(&state_key)
                 .fetch_optional(&pool)

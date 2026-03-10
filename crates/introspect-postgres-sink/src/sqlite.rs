@@ -297,8 +297,11 @@ impl SqliteSimpleDb {
             }
             IntrospectMsg::InsertsFields(event) => {
                 let (table_name, rows) = self.schema.insert_rows(event)?;
+                let insert_sql = rows
+                    .first()
+                    .map(|row| build_insert_row_sql(&table_name, row));
                 for row in rows {
-                    self.insert_row(&table_name, row).await?;
+                    self.insert_row(insert_sql.as_deref(), row).await?;
                 }
             }
             IntrospectMsg::RenameTable(_)
@@ -376,50 +379,55 @@ impl SqliteSimpleDb {
         Ok(())
     }
 
-    async fn insert_row(&self, table_name: &str, row: SqliteRow) -> SqliteResult<()> {
-        let column_names = row
-            .columns
-            .iter()
-            .map(|column| quote_ident(column))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let placeholders = vec!["?"; row.columns.len()].join(", ");
-        let conflict_sql = row
-            .columns
-            .iter()
-            .filter(|column| *column != &row.primary)
-            .map(|column| {
-                format!(
-                    "{column_ident} = COALESCE(excluded.{column_ident}, {table_ident}.{column_ident})",
-                    column_ident = quote_ident(column),
-                    table_ident = quote_ident(table_name),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        let sql = if conflict_sql.is_empty() {
-            format!(
-                "INSERT INTO {table_ident} ({column_names}) VALUES ({placeholders}) \
-                 ON CONFLICT ({primary}) DO NOTHING",
-                table_ident = quote_ident(table_name),
-                primary = quote_ident(&row.primary),
-            )
-        } else {
-            format!(
-                "INSERT INTO {table_ident} ({column_names}) VALUES ({placeholders}) \
-                 ON CONFLICT ({primary}) DO UPDATE SET {updates}",
-                table_ident = quote_ident(table_name),
-                primary = quote_ident(&row.primary),
-                updates = conflict_sql.join(", "),
-            )
+    async fn insert_row(&self, sql: Option<&str>, row: SqliteRow) -> SqliteResult<()> {
+        let Some(sql) = sql else {
+            return Ok(());
         };
-
-        let mut query = sqlx::query(&sql);
+        let mut query = sqlx::query(sql).persistent(true);
         for (affinity, value) in row.values {
             query = bind_value(query, affinity, value);
         }
         query.execute(&self.pool).await?;
         Ok(())
+    }
+}
+
+fn build_insert_row_sql(table_name: &str, row: &SqliteRow) -> String {
+    let column_names = row
+        .columns
+        .iter()
+        .map(|column| quote_ident(column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let placeholders = vec!["?"; row.columns.len()].join(", ");
+    let conflict_sql = row
+        .columns
+        .iter()
+        .filter(|column| *column != &row.primary)
+        .map(|column| {
+            format!(
+                "{column_ident} = COALESCE(excluded.{column_ident}, {table_ident}.{column_ident})",
+                column_ident = quote_ident(column),
+                table_ident = quote_ident(table_name),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if conflict_sql.is_empty() {
+        format!(
+            "INSERT INTO {table_ident} ({column_names}) VALUES ({placeholders}) \
+             ON CONFLICT ({primary}) DO NOTHING",
+            table_ident = quote_ident(table_name),
+            primary = quote_ident(&row.primary),
+        )
+    } else {
+        format!(
+            "INSERT INTO {table_ident} ({column_names}) VALUES ({placeholders}) \
+             ON CONFLICT ({primary}) DO UPDATE SET {updates}",
+            table_ident = quote_ident(table_name),
+            primary = quote_ident(&row.primary),
+            updates = conflict_sql.join(", "),
+        )
     }
 }
 
