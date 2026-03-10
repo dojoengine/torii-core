@@ -302,15 +302,18 @@ impl BlockRangeExtractor {
             all_declared_classes.reserve(block_data.declared_classes.len());
             all_deployed_contracts.reserve(block_data.deployed_contracts.len());
 
-            blocks_map.insert(block_data.block_context.number, block_data.block_context);
+            blocks_map.insert(
+                block_data.block_context.number,
+                block_data.block_context.into(),
+            );
 
             for tx_ctx in block_data.transactions {
-                transactions_map.insert(tx_ctx.hash, tx_ctx);
+                transactions_map.insert(tx_ctx.hash, Arc::new(tx_ctx));
             }
 
             all_events.extend(block_data.events);
-            all_declared_classes.extend(block_data.declared_classes);
-            all_deployed_contracts.extend(block_data.deployed_contracts);
+            all_declared_classes.extend(block_data.declared_classes.into_iter().map(Arc::new));
+            all_deployed_contracts.extend(block_data.deployed_contracts.into_iter().map(Arc::new));
         }
         let transform_ms = transform_start.elapsed().as_millis();
         let total_ms = total_start.elapsed().as_millis();

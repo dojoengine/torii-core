@@ -6,7 +6,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use starknet::core::types::{EmittedEvent, Felt};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::etl::engine_db::EngineDb;
 
@@ -99,15 +99,17 @@ impl Extractor for SampleExtractor {
         let mut blocks = HashMap::new();
         for event in &events {
             if let Some(block_num) = event.block_number {
-                blocks.entry(block_num).or_insert_with(|| BlockContext {
-                    number: block_num,
-                    hash: event.block_hash.unwrap_or(Felt::ZERO),
-                    parent_hash: if block_num > 0 {
-                        Felt::from(block_num - 1)
-                    } else {
-                        Felt::ZERO
-                    },
-                    timestamp: 1700000000 + block_num, // Realistic timestamp
+                blocks.entry(block_num).or_insert_with(|| {
+                    Arc::new(BlockContext {
+                        number: block_num,
+                        hash: event.block_hash.unwrap_or(Felt::ZERO),
+                        parent_hash: if block_num > 0 {
+                            Felt::from(block_num - 1)
+                        } else {
+                            Felt::ZERO
+                        },
+                        timestamp: 1700000000 + block_num, // Realistic timestamp
+                    })
                 });
             }
         }
@@ -117,20 +119,22 @@ impl Extractor for SampleExtractor {
         for event in &events {
             transactions
                 .entry(event.transaction_hash)
-                .or_insert_with(|| TransactionContext {
-                    hash: event.transaction_hash,
-                    block_number: event.block_number.unwrap_or(0),
-                    sender_address: Some(
-                        Felt::from_hex(
-                            "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd",
-                        )
-                        .unwrap(),
-                    ),
-                    calldata: vec![
-                        Felt::from(1),                  // selector
-                        Felt::from(self.current_block), // param1
-                        Felt::from(42),                 // param2
-                    ],
+                .or_insert_with(|| {
+                    Arc::new(TransactionContext {
+                        hash: event.transaction_hash,
+                        block_number: event.block_number.unwrap_or(0),
+                        sender_address: Some(
+                            Felt::from_hex(
+                                "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd",
+                            )
+                            .unwrap(),
+                        ),
+                        calldata: vec![
+                            Felt::from(1),                  // selector
+                            Felt::from(self.current_block), // param1
+                            Felt::from(42),                 // param2
+                        ],
+                    })
                 });
         }
 

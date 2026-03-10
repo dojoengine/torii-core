@@ -7,10 +7,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use starknet::core::types::{EmittedEvent, Felt};
 use starknet::macros::selector;
-use std::collections::HashMap;
-use torii::etl::extractor::{
-    BlockContext, ExtractionBatch, SyntheticExtractor, TransactionContext,
-};
+use torii::etl::extractor::{ExtractionBatch, SyntheticExtractor};
 
 const EXTRACTOR_NAME: &str = "synthetic_erc20";
 
@@ -140,23 +137,19 @@ impl SyntheticErc20Extractor {
         let blocks_in_batch = (end_block - start_block + 1) as usize;
         let total_events = blocks_in_batch * self.config.tx_per_block;
 
-        let mut events = Vec::with_capacity(total_events);
-        let mut blocks = HashMap::with_capacity(blocks_in_batch);
-        let mut transactions = HashMap::with_capacity(total_events);
+        let mut batch =
+            ExtractionBatch::with_capacities(total_events, blocks_in_batch, total_events, 0, 0);
 
         for block_number in start_block..=end_block {
-            blocks.insert(
+            batch.add_block_context(
                 block_number,
-                BlockContext {
-                    number: block_number,
-                    hash: Felt::from(0x0300_0000_u64 + block_number),
-                    parent_hash: if block_number > 0 {
-                        Felt::from(0x0300_0000_u64 + block_number - 1)
-                    } else {
-                        Felt::ZERO
-                    },
-                    timestamp: 1_700_000_000 + (block_number * 12),
+                Felt::from(0x0300_0000_u64 + block_number),
+                if block_number > 0 {
+                    Felt::from(0x0300_0000_u64 + block_number - 1)
+                } else {
+                    Felt::ZERO
                 },
+                1_700_000_000 + (block_number * 12),
             );
 
             for tx_index in 0..self.config.tx_per_block {
@@ -185,30 +178,16 @@ impl SyntheticErc20Extractor {
                         transaction_hash: tx_hash,
                     }
                 };
-
-                transactions.insert(
-                    tx_hash,
-                    TransactionContext {
-                        hash: tx_hash,
-                        block_number,
-                        sender_address: Some(from),
-                        calldata: vec![token, from, to, amount_low],
-                    },
+                batch.add_event_with_tx_context(
+                    event,
+                    Some(from),
+                    vec![token, from, to, amount_low],
                 );
-
-                events.push(event);
             }
         }
-
-        ExtractionBatch {
-            events,
-            blocks,
-            transactions,
-            declared_classes: Vec::new(),
-            deployed_contracts: Vec::new(),
-            cursor: Some(Self::make_cursor(end_block)),
-            chain_head: Some(self.to_block_inclusive()),
-        }
+        batch.set_cursor(Self::make_cursor(end_block));
+        batch.set_chain_head(self.to_block_inclusive());
+        batch
     }
 }
 
@@ -228,6 +207,10 @@ impl SyntheticExtractor for SyntheticErc20Extractor {
     async fn extract(&mut self, cursor: Option<String>) -> Result<ExtractionBatch> {
         if let Some(cursor_str) = cursor {
             self.current_block = Self::parse_cursor(&cursor_str)?.saturating_add(1);
+        }
+
+        if self.current_block > self.to_block_inclusive() {
+            self.finished = true;
         }
 
         if self.finished {
@@ -324,5 +307,25 @@ mod tests {
 
         let final_batch = extractor.extract(None).await.unwrap();
         assert!(final_batch.is_empty());
+    }
+
+    #[tokio::test]
+    async fn synthetic_extractor_returns_empty_after_final_cursor() {
+        let cfg = SyntheticErc20Config {
+            block_count: 1,
+            tx_per_block: 2,
+            blocks_per_batch: 1,
+            from_block: 500,
+            ..Default::default()
+        };
+
+        let mut extractor = SyntheticErc20Extractor::new(cfg).unwrap();
+
+        let batch = extractor.extract(None).await.unwrap();
+        let cursor = batch.cursor.clone().unwrap();
+
+        let resumed = extractor.extract(Some(cursor)).await.unwrap();
+        assert!(resumed.is_empty());
+        assert!(extractor.is_finished());
     }
 }

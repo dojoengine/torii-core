@@ -1,0 +1,52 @@
+use resolve_path::PathResolveExt;
+use std::path::PathBuf;
+use torii::etl::EventContext;
+use torii_dojo::decoder::DojoDecoder;
+use torii_dojo::store::json::JsonStore;
+use torii_dojo::DojoToriiError;
+use torii_introspect_postgres_sink::processor::PostgresSimpleDb;
+use torii_test_utils::{resolve_path_like, EventIterator, FakeProvider};
+
+const DB_URL: &str = "postgres://torii:torii@localhost:5432/torii";
+// const CHAIN_DATA_PATH: &str = "~/tc-tests/pistols";
+const CHAIN_DATA_PATH: &str = "~/tc-tests/blob-arena";
+const MANAGER_PATH: &str = "data/dojo-manager";
+
+#[tokio::main]
+async fn main() {
+    let chain_path = resolve_path_like(CHAIN_DATA_PATH);
+    let events_path = chain_path.join("events");
+    let contracts_path = chain_path.join("model-contracts");
+    let provider = FakeProvider::new(contracts_path);
+    let event_iterator = EventIterator::new(events_path);
+    let manager_path = PathBuf::from(MANAGER_PATH).resolve().into_owned();
+    let decoder = DojoDecoder::<JsonStore, _>::new(manager_path, provider, &[])
+        .await
+        .unwrap();
+    let mut db = PostgresSimpleDb::new(DB_URL, None).await.unwrap();
+    db.initialize().await.unwrap();
+    let context = EventContext::default();
+    let mut success = 0;
+    for (n, event) in event_iterator.enumerate() {
+        match decoder.decode_raw_event(&event).await {
+            Ok(msg) => match db.process_message(&msg, &context).await {
+                Ok(()) => success += 1,
+                Err(err) => {
+                    println!(
+                        "Failed to process message {n} {err:?}:,\nmessage: {msg:?}\n-------------",
+                    );
+                }
+            },
+            Err(DojoToriiError::UnknownDojoEventSelector(_)) => {
+                println!("Unknown event selector, skipping event");
+            }
+            Err(err) => {
+                println!("Failed to decode event: {err:?}");
+            }
+        }
+        if n % 1000 == 0 {
+            println!("Decoded {n} events");
+        }
+    }
+    println!("Processed {success} messages");
+}

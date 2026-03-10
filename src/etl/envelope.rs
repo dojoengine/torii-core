@@ -1,5 +1,6 @@
 //! This module contains the envelope for the ETL pipeline.
 
+use starknet::core::types::{EmittedEvent, Felt};
 use std::any::Any;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -33,6 +34,26 @@ pub trait TypedBody: Send + Sync {
     fn envelope_type_id(&self) -> TypeId;
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+/// Helper macro to implement TypedBody
+#[macro_export]
+macro_rules! typed_body_impl {
+    ($t:ty, $url:expr) => {
+        impl $crate::etl::envelope::TypedBody for $t {
+            fn envelope_type_id(&self) -> $crate::etl::envelope::TypeId {
+                $crate::etl::envelope::TypeId::new($url)
+            }
+
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+                self
+            }
+        }
+    };
 }
 
 /// Envelope wraps transformed data with metadata
@@ -88,5 +109,50 @@ impl std::fmt::Debug for Envelope {
             .field("metadata", &self.metadata)
             .field("timestamp", &self.timestamp)
             .finish()
+    }
+}
+
+pub trait EventMsg {
+    fn event_id(&self) -> String;
+    fn envelope_type_id(&self) -> TypeId;
+}
+
+#[derive(Debug, Clone)]
+pub struct EventBody<T: EventMsg + 'static + Send + Sync> {
+    pub from_address: Felt,
+    pub transaction_hash: Felt,
+    pub msg: T,
+}
+
+impl<T> TypedBody for EventBody<T>
+where
+    T: EventMsg + Send + Sync + 'static,
+{
+    fn envelope_type_id(&self) -> TypeId {
+        self.msg.envelope_type_id()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+impl<T: EventMsg + 'static + Send + Sync> EventBody<T> {
+    pub fn new(msg: T, raw: &EmittedEvent) -> Self {
+        Self {
+            from_address: raw.from_address,
+            transaction_hash: raw.transaction_hash,
+            msg,
+        }
+    }
+
+    pub fn new_envelope(msg: T, raw: &EmittedEvent) -> Envelope {
+        let id = msg.event_id();
+        let event_body = Self::new(msg, raw);
+        Envelope::new(id, Box::new(event_body), HashMap::new())
     }
 }

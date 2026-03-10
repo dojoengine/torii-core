@@ -15,7 +15,8 @@ use starknet::core::types::{Felt, U256};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio_postgres::{types::ToSql as PgToSql, Client, NoTls};
+use tokio_postgres::types::ToSql as PgToSql;
+use tokio_postgres::{Client, NoTls};
 use torii_common::{blob_to_felt, blob_to_u256, felt_to_blob, u256_to_blob};
 
 use crate::balance_fetcher::BalanceFetchRequest;

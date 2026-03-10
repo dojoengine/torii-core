@@ -1,0 +1,13 @@
+name: torii_test
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: torii_test
+    ports:
+      - "5432:5432"
+    volumes:
+      - /var/lib/postgresql
