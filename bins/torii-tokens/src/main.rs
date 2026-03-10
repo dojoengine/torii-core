@@ -418,7 +418,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         let grpc_service = Erc721Service::new(storage.clone());
         let mut sink = Erc721Sink::new(storage).with_grpc_service(grpc_service.clone());
         if effective_metadata_mode == MetadataMode::Inline {
-            let image_cache_dir = db_dir.join("image-cache");
+            let image_cache_dir = Path::new("./data").join("image-cache");
             let (token_uri_sender, _token_uri_service) = TokenUriService::spawn_with_image_cache(
                 Arc::new(MetadataFetcher::new(provider.clone())),
                 sink.storage().clone(),
@@ -470,7 +470,7 @@ async fn run_indexer(config: Config) -> Result<()> {
             .with_balance_tracking(provider.clone());
         if effective_metadata_mode == MetadataMode::Inline {
             let erc1155_fetcher = Arc::new(MetadataFetcher::new(provider.clone()));
-            let image_cache_dir = db_dir.join("image-cache");
+            let image_cache_dir = Path::new("./data").join("image-cache");
             let (erc1155_uri_sender, _erc1155_uri_service) =
                 TokenUriService::spawn_with_image_cache(
                     erc1155_fetcher,

@@ -4,10 +4,12 @@
 //! This will be enhanced with actual Torii features in the future.
 
 use anyhow::{Context, Result};
-use sqlx::{any::AnyPoolOptions, Any, Pool, QueryBuilder, Row};
+use sqlx::{
+    any::AnyPoolOptions, sqlite::SqliteConnectOptions, Any, ConnectOptions, Pool, QueryBuilder, Row,
+};
 use starknet::core::types::Felt;
 use std::collections::HashMap;
-use std::path::Path;
+use std::str::FromStr;
 
 use crate::etl::decoder::DecoderId;
 
@@ -45,31 +47,29 @@ impl EngineDb {
                 DbBackend::Sqlite
             };
 
-        // Ensure parent directory exists for sqlite file databases.
-        if backend == DbBackend::Sqlite {
-            let is_memory = config.path == ":memory:" || config.path == "sqlite::memory:";
-            let is_url = config.path.starts_with("sqlite:");
-            if !is_memory && !is_url {
-                if let Some(parent) = Path::new(&config.path).parent() {
-                    tokio::fs::create_dir_all(parent)
-                        .await
-                        .context(format!("Failed to create directory: {}", parent.display()))?;
-                }
-            }
-        }
-
-        let database_url = match backend {
-            DbBackend::Postgres => config.path.clone(),
+        let (database_url, sqlite_parent_dir) = match backend {
+            DbBackend::Postgres => (config.path.clone(), None),
             DbBackend::Sqlite => {
-                if config.path == ":memory:" || config.path == "sqlite::memory:" {
-                    "sqlite::memory:".to_string()
-                } else if config.path.starts_with("sqlite:") {
-                    config.path.clone()
+                if is_sqlite_memory_path(&config.path) {
+                    ("sqlite::memory:".to_string(), None)
                 } else {
-                    format!("sqlite://{}", config.path)
+                    let sqlite_options = sqlite_connect_options(&config.path)?;
+                    let parent_dir = sqlite_options
+                        .get_filename()
+                        .parent()
+                        .filter(|parent| !parent.as_os_str().is_empty())
+                        .map(std::path::Path::to_path_buf);
+
+                    (sqlite_options.to_url_lossy().to_string(), parent_dir)
                 }
             }
         };
+
+        if let Some(parent) = sqlite_parent_dir {
+            tokio::fs::create_dir_all(&parent)
+                .await
+                .context(format!("Failed to create directory: {}", parent.display()))?;
+        }
 
         tracing::debug!(
             target: "torii::etl::engine_db",
@@ -672,6 +672,33 @@ impl EngineDb {
     }
 }
 
+fn is_sqlite_memory_path(path: &str) -> bool {
+    path == ":memory:"
+        || path == "sqlite::memory:"
+        || path == "sqlite://:memory:"
+        || path.contains("mode=memory")
+}
+
+fn sqlite_connect_options(path: &str) -> Result<SqliteConnectOptions> {
+    if path == ":memory:" || path == "sqlite::memory:" {
+        return SqliteConnectOptions::from_str("sqlite::memory:")
+            .context("Failed to parse in-memory sqlite URL");
+    }
+
+    let options = if path.starts_with("sqlite:") {
+        SqliteConnectOptions::from_str(path)
+            .with_context(|| format!("Failed to parse sqlite URL: {path}"))?
+    } else {
+        SqliteConnectOptions::new().filename(path)
+    };
+
+    if path.starts_with("sqlite:") && path.contains("mode=") {
+        Ok(options)
+    } else {
+        Ok(options.create_if_missing(true))
+    }
+}
+
 /// Engine statistics
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EngineStats {
@@ -683,6 +710,7 @@ pub struct EngineStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[tokio::test]
     async fn test_engine_db_initialization() {
@@ -738,5 +766,21 @@ mod tests {
         // Get missing stat
         let missing = db.get_stat("nonexistent").await.unwrap();
         assert_eq!(missing, None);
+    }
+
+    #[tokio::test]
+    async fn test_engine_db_creates_file_backed_sqlite_database() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("nested").join("engine.db");
+        let config = EngineDbConfig {
+            path: db_path.to_string_lossy().to_string(),
+        };
+
+        let db = EngineDb::new(config).await.unwrap();
+        let (block, events) = db.get_head().await.unwrap();
+
+        assert_eq!(block, 0);
+        assert_eq!(events, 0);
+        assert!(db_path.exists());
     }
 }
