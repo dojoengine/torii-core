@@ -133,31 +133,18 @@ mod tests {
 
     #[test]
     fn observability_defaults_to_disabled() {
-        let cfg = Config::parse_from([
-            "torii-introspect",
-            "--contracts",
-            "0x1",
-            "--storage-database-url",
-            "postgres://localhost/torii",
-        ]);
+        let cfg = Config::parse_from(["torii-introspect", "--contracts", "0x1"]);
         assert!(!cfg.observability);
     }
 
     #[test]
     fn observability_flag_enables_metrics() {
-        let cfg = Config::parse_from([
-            "torii-introspect",
-            "--contracts",
-            "0x1",
-            "--storage-database-url",
-            "postgres://localhost/torii",
-            "--observability",
-        ]);
+        let cfg = Config::parse_from(["torii-introspect", "--contracts", "0x1", "--observability"]);
         assert!(cfg.observability);
     }
 
     #[test]
-    fn storage_database_url_must_be_postgres() {
+    fn storage_database_url_accepts_sqlite() {
         let cfg = Config::parse_from([
             "torii-introspect",
             "--contracts",
@@ -182,13 +169,7 @@ mod tests {
 
     #[test]
     fn contract_addresses_parse_from_hex() {
-        let cfg = Config::parse_from([
-            "torii-introspect",
-            "--contracts",
-            "0x1,0x2",
-            "--storage-database-url",
-            "postgres://localhost/torii",
-        ]);
+        let cfg = Config::parse_from(["torii-introspect", "--contracts", "0x1,0x2"]);
 
         let contracts = cfg.contract_addresses().unwrap();
         assert_eq!(contracts.len(), 2);

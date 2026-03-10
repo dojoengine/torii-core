@@ -23,6 +23,40 @@ use torii_introspect_postgres_sink::processor::IntrospectPgDb;
 use torii_introspect_sqlite_sink::processor::IntrospectSqliteDb;
 use torii_sqlite::{is_sqlite_memory_path, sqlite_connect_options};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DbBackend {
+    Postgres,
+    Sqlite,
+}
+
+fn detect_database_backend(database_url: &str) -> DbBackend {
+    if database_url.starts_with("postgres://") || database_url.starts_with("postgresql://") {
+        DbBackend::Postgres
+    } else {
+        DbBackend::Sqlite
+    }
+}
+
+fn sqlite_connect_options(path: &str) -> Result<SqliteConnectOptions> {
+    if path == ":memory:" || path == "sqlite::memory:" {
+        return SqliteConnectOptions::from_str("sqlite::memory:")
+            .map_err(|err| anyhow::anyhow!("Failed to parse sqlite URL: {err}"));
+    }
+
+    let options = if path.starts_with("sqlite:") {
+        SqliteConnectOptions::from_str(path)
+            .map_err(|err| anyhow::anyhow!("Failed to parse sqlite URL {path}: {err}"))?
+    } else {
+        SqliteConnectOptions::new().filename(path)
+    };
+
+    if path.starts_with("sqlite:") && path.contains("mode=") {
+        Ok(options)
+    } else {
+        Ok(options.create_if_missing(true))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -59,6 +93,7 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("Storage backend: {:?}", backend);
     tracing::info!("Engine database URL: {}", engine_database_url);
     tracing::info!("Storage database URL: {}", storage_database_url);
+    tracing::info!("Database backend: {:?}", backend);
     tracing::info!(
         "Saved state handling: {}",
         if config.ignore_saved_state {
