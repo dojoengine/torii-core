@@ -12,7 +12,7 @@ pub struct JsonStore {
 }
 
 fn felt_to_fixed_hex_string(felt: &Felt) -> String {
-    format!("0x{:0>32x}", felt)
+    format!("0x{felt:0>32x}")
 }
 fn felt_to_json_file_name(felt: &Felt) -> String {
     format!("{}.json", felt_to_fixed_hex_string(felt))
@@ -69,7 +69,13 @@ impl JsonStore {
 #[async_trait]
 impl DojoStoreTrait for JsonStore {
     type Error = JsonError;
-    async fn save_table(&self, _owner: &Felt, table: &DojoTable) -> Result<(), Self::Error> {
+
+    async fn save_table_at_block(
+        &self,
+        _owner: &Felt,
+        table: &DojoTable,
+        _block_number: Option<u64>,
+    ) -> Result<(), Self::Error> {
         self.dump_table(table)
     }
 

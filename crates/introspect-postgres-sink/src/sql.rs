@@ -3,11 +3,15 @@ use std::io::Write;
 use crate::{PostgresField, PostgresType};
 
 pub fn add_column_query(name: &str, pg_type: &PostgresType) -> String {
-    format!(r#"ADD COLUMN "{name}" {}"#, pg_type.to_string())
+    format!("ADD COLUMN \"{name}\" {pg_type}")
+}
+
+pub fn add_column_if_not_exists_query(name: &str, pg_type: &PostgresType) -> String {
+    format!("ADD COLUMN IF NOT EXISTS \"{name}\" {pg_type}")
 }
 
 pub fn modify_column_query(name: &str, pg_type: &PostgresType) -> String {
-    format!(r#"ALTER COLUMN "{name}" TYPE {}"#, pg_type.to_string())
+    format!("ALTER COLUMN \"{name}\" TYPE {pg_type}")
 }
 
 pub fn add_member_query(type_name: &str, member_name: &str, pg_type: &PostgresType) -> String {
@@ -23,15 +27,12 @@ BEGIN
     END;
 END $$;
 "#,
-        pg_type = pg_type.to_string()
+        pg_type = pg_type
     )
 }
 
 pub fn modify_member_query(type_name: &str, member_name: &str, pg_type: &PostgresType) -> String {
-    format!(
-        r#"ALTER TYPE "{type_name}" ALTER ATTRIBUTE "{member_name}" TYPE {};"#,
-        pg_type.to_string()
-    )
+    format!(r#"ALTER TYPE "{type_name}" ALTER ATTRIBUTE "{member_name}" TYPE {pg_type};"#)
 }
 
 pub fn add_enum_variant_query(type_name: &str, variant: &str) -> String {
@@ -58,7 +59,7 @@ pub fn create_table_query(table_name: &str, columns: &[String]) -> String {
 pub fn create_struct_type_query(type_name: &str, fields: &[PostgresField]) -> String {
     let field_defs = fields
         .iter()
-        .map(|f| format!(r#""{}" {}"#, f.name, f.pg_type.to_string()))
+        .map(|f| format!(r#""{}" {}"#, f.name, f.pg_type))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -79,12 +80,29 @@ pub fn create_enum_type_query(type_name: &str, variants: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
 
+    let reconcile = variants
+        .iter()
+        .map(|variant| {
+            format!(
+                r#"
+            BEGIN
+                EXECUTE format('ALTER TYPE %I ADD VALUE %L', '{type_name}', '{variant}');
+            EXCEPTION
+                WHEN duplicate_object THEN
+                    RAISE NOTICE 'enum value already exists, skipping';
+            END;
+"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
         r#"DO $$ 
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '{type_name}') THEN
                 CREATE TYPE "{type_name}" AS ENUM ({variant_defs});
             END IF;
+            {reconcile}
         END $$;"#
     )
 }
@@ -93,7 +111,7 @@ pub fn create_tuple_type_query(type_name: &str, fields: &[PostgresType]) -> Stri
     let field_defs = fields
         .iter()
         .enumerate()
-        .map(|(i, f)| format!(r#""_{i}" {}"#, f.to_string()))
+        .map(|(i, f)| format!("\"_{i}\" {f}"))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -122,4 +140,19 @@ pub fn write_conflict_res<const DELIMINATOR: bool, W: Write>(
         writer,
         r#""{column}" = COALESCE(EXCLUDED."{column}", "{table}"."{column}"){separator}"#,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::create_enum_type_query;
+
+    #[test]
+    fn create_enum_type_query_is_single_do_block() {
+        let query =
+            create_enum_type_query("status_enum", &["Open".to_string(), "Closed".to_string()]);
+
+        assert_eq!(query.matches("DO $$").count(), 1);
+        assert!(query.contains(r#"CREATE TYPE "status_enum" AS ENUM ('Open', 'Closed')"#));
+        assert!(query.contains("ALTER TYPE %I ADD VALUE %L"));
+    }
 }

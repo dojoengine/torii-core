@@ -1,6 +1,4 @@
-//! @ben: in introspect case, we may want to not define everything, since types will be mostly
-//! taken from introspect crate. We may not need it, or only the URL declaration and the ID
-//! and then using the new type pattern, using the `impl_event!` on the struct.
+//! Local event types for the introspect pipeline.
 
 pub use introspect_events::database::{IdName, IdTypeDef};
 use introspect_rust_macros::EnumFrom;
@@ -363,8 +361,8 @@ impl Record {
     #[allow(private_bounds)]
     pub fn new<T: ToKeyBytes>(id: T, values: Vec<u8>) -> Self {
         Self {
-            id: id.to_key_bytes().into(),
-            values: values.into(),
+            id: id.to_key_bytes(),
+            values,
         }
     }
 }
