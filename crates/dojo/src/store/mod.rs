@@ -13,7 +13,6 @@ where
     Self: Send + Sync + 'static + Sized,
 {
     type Error: std::error::Error;
-
     async fn save_table(&self, owner: &Felt, table: &DojoTable) -> Result<(), Self::Error>;
     async fn load_tables(&self, owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error>;
     async fn load_table_map(

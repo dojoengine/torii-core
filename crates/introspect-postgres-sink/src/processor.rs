@@ -1,11 +1,10 @@
 use crate::json::PostgresJsonSerializer;
 use crate::sql::write_conflict_res;
 use crate::table::{PgTable, PgTableError};
-use async_trait::async_trait;
+use crate::INTROSPECT_PG_SINK_MIGRATIONS;
 use introspect_types::ResultInto;
 use serde_json::Serializer as JsonSerializer;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::io::Write;
@@ -13,6 +12,8 @@ use thiserror::Error;
 use torii::etl::EventContext;
 use torii_introspect::events::IntrospectMsg;
 use torii_introspect::{CreateTable, InsertsFields};
+use torii_postgres::PostgresConnection;
+
 #[derive(Debug, Error)]
 pub enum DbError {
     #[error(transparent)]
@@ -150,51 +151,29 @@ impl PostgresSchema {
             IntrospectMsg::DeleteRecords(_) | IntrospectMsg::DeletesFields(_) => Ok(()),
         }
     }
-    // pub fn handle_message(
-    //     &mut self,
-    //     msg: &IntrospectMsg,
-    //     context: &EventContext,
-    //     queries: &mut Vec<String>,
-    // ) -> PGSinkResult<()> {
-    //     match msg {
-    //         IntrospectMsg::CreateTable(event) => self.create_table(event.clone(), context, queries),
-    //         IntrospectMsg::AddColumns(event) => self.set_table_dead(&event.table),
-    //         IntrospectMsg::DropColumns(event) => self.set_table_dead(&event.table),
-    //         IntrospectMsg::RetypeColumns(event) => self.set_table_dead(&event.table),
-    //         IntrospectMsg::RetypePrimary(event) => self.set_table_dead(&event.table),
-    //         IntrospectMsg::UpdateTable(event) => self.set_table_dead(&event.id),
-    //         IntrospectMsg::RenameTable(_)
-    //         | IntrospectMsg::DropTable(_)
-    //         | IntrospectMsg::RenameColumns(_)
-    //         | IntrospectMsg::RenamePrimary(_) => Ok(()),
-    //         IntrospectMsg::InsertsFields(_)
-    //         | IntrospectMsg::DeleteRecords(_)
-    //         | IntrospectMsg::DeletesFields(_) => Ok(()),
-    //         IntrospectMsg::None => Ok(()),
-    //     }
-    // }
 }
 
-pub struct PostgresSimpleDb {
+pub struct PostgresSimpleDb<T> {
     schema: PostgresSchema,
-    pool: PgPool,
+    pool: T,
 }
 
-impl PostgresSimpleDb {
-    pub async fn new(database_url: &str, max_connections: Option<u32>) -> PGSinkResult<Self> {
-        let pool = PgPoolOptions::new()
-            .max_connections(max_connections.unwrap_or(5))
-            .connect(database_url)
-            .await?;
-        Ok(Self {
+impl<T: PostgresConnection> PostgresConnection for PostgresSimpleDb<T> {
+    fn pool(&self) -> &PgPool {
+        self.pool.pool()
+    }
+}
+
+impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
+    pub fn new(pool: T) -> Self {
+        Self {
             schema: PostgresSchema::default(),
             pool,
-        })
+        }
     }
 
     pub async fn initialize(&self) -> PGSinkResult<()> {
-        self.migrate().await?;
-        Ok(())
+        self.migrate(INTROSPECT_PG_SINK_MIGRATIONS).await.err_into()
     }
 
     pub async fn process_message(
@@ -204,41 +183,11 @@ impl PostgresSimpleDb {
     ) -> PGSinkResult<()> {
         let mut queries = Vec::new();
         self.schema.handle_message(msg, context, &mut queries)?;
-        self.execute_queries(&queries).await
+        self.execute_queries(&queries).await.err_into()
     }
 }
 
 pub struct MessageWithContext<'a, M> {
     pub msg: &'a M,
     pub context: &'a EventContext,
-}
-
-#[async_trait]
-pub trait PostgresConnection {
-    fn pool(&self) -> &PgPool;
-
-    async fn new_transaction(&self) -> PGSinkResult<Transaction<'_, Postgres>> {
-        Ok(self.pool().begin().await?)
-    }
-
-    async fn migrate(&self) -> PGSinkResult<()> {
-        sqlx::migrate!("./migrations")
-            .run(self.pool())
-            .await
-            .err_into()
-    }
-    async fn execute_queries(&self, queries: &[String]) -> PGSinkResult<()> {
-        let mut transaction = self.new_transaction().await?;
-        for query in queries {
-            sqlx::query(query).execute(&mut *transaction).await?;
-        }
-        transaction.commit().await?;
-        Ok(())
-    }
-}
-
-impl PostgresConnection for PostgresSimpleDb {
-    fn pool(&self) -> &PgPool {
-        &self.pool
-    }
 }

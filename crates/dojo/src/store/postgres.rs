@@ -5,15 +5,20 @@ use crate::DojoTable;
 use async_trait::async_trait;
 use introspect_types::{ColumnInfo, ResultInto};
 use itertools::Itertools;
+use sqlx::migrate::Migrator;
 use sqlx::{FromRow, PgPool};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
+use std::ops::Deref;
 use torii_introspect::postgres::owned::PgTypeDef;
 use torii_introspect::postgres::{PgFelt, SqlxResult};
 use torii_introspect::schema::ColumnKeyTrait;
+use torii_postgres::db::PostgresConnection;
 
 const DOJO_COLUMN_TABLE: &str = "dojo.column";
 const DOJO_TABLE_TABLE: &str = "dojo.table";
+
+pub const DOJO_STORE_MIGRATIONS: Migrator = sqlx::migrate!("./migrations");
 
 #[derive(Debug, thiserror::Error)]
 pub enum DojoPgStoreError {
@@ -191,12 +196,33 @@ pub fn make_set_table_query(
     )
 }
 
-#[async_trait]
-impl DojoStoreTrait for PgPool {
-    type Error = DojoPgStoreError;
+pub struct PgStore<T>(pub T);
 
+impl<T> Deref for PgStore<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: PostgresConnection + Send + Sync> PgStore<T> {
+    pub async fn initialize(&self) -> SqlxResult<()> {
+        self.migrate(DOJO_STORE_MIGRATIONS).await.err_into()
+    }
+}
+
+impl<T: PostgresConnection> From<T> for PgStore<T> {
+    fn from(pool: T) -> Self {
+        PgStore(pool)
+    }
+}
+
+#[async_trait]
+impl<T: PostgresConnection + Send + Sync + 'static> DojoStoreTrait for PgStore<T> {
+    type Error = DojoPgStoreError;
     async fn save_table(&self, owner: &Felt, data: &DojoTable) -> Result<(), Self::Error> {
-        let mut transaction = self.begin().await?;
+        let mut transaction = self.new_transaction().await?;
         let query = make_set_table_query(
             owner,
             &data.id,
@@ -216,13 +242,13 @@ impl DojoStoreTrait for PgPool {
     }
 
     async fn load_tables(&self, owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
-        let mut tables = DojoTable::get_rows(self, DOJO_TABLE_TABLE, owners)
+        let mut tables = DojoTable::get_rows(self.pool(), DOJO_TABLE_TABLE, owners)
             .await?
             .into_iter()
             .map(|r| r.1)
             .collect_vec();
         let mut columns: HashMap<(Felt, Felt), _> =
-            ColumnInfo::get_hash_map(self, DOJO_COLUMN_TABLE, owners).await?;
+            ColumnInfo::get_hash_map(self.pool(), DOJO_COLUMN_TABLE, owners).await?;
         for table in tables.iter_mut() {
             for key in table.key_fields.iter().chain(table.value_fields.iter()) {
                 let column = columns.remove(&(table.id, *key)).ok_or_else(|| {

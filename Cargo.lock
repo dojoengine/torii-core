@@ -4645,6 +4645,7 @@ dependencies = [
  "torii",
  "torii-common",
  "torii-introspect",
+ "torii-postgres",
  "tracing",
 ]
 
@@ -4800,6 +4801,7 @@ dependencies = [
  "tokio",
  "torii",
  "torii-introspect",
+ "torii-postgres",
  "tracing",
  "xxhash-rust",
 ]
@@ -4822,6 +4824,24 @@ dependencies = [
  "tonic-build",
  "torii",
  "tracing",
+]
+
+[[package]]
+name = "torii-postgres"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hex",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "starknet-types-core",
+ "thiserror 2.0.18",
+ "tokio",
+ "torii",
+ "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]

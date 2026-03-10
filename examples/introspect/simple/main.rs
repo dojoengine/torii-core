@@ -1,6 +1,10 @@
+use std::sync::Arc;
+
+use sqlx::postgres::PgPoolOptions;
 use torii::etl::EventContext;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::json::JsonStore;
+use torii_dojo::store::postgres::PgStore;
 use torii_dojo::DojoToriiError;
 use torii_introspect_postgres_sink::processor::PostgresSimpleDb;
 use torii_test_utils::{resolve_path_like, EventIterator, FakeProvider};
@@ -17,10 +21,12 @@ async fn main() {
     let contracts_path = chain_path.join("model-contracts");
     let provider = FakeProvider::new(contracts_path);
     let event_iterator = EventIterator::new(events_path);
-    let decoder = DojoDecoder::<JsonStore, _>::new(MANAGER_PATH, provider, &vec![])
-        .await
-        .unwrap();
-    let mut db = PostgresSimpleDb::new(DB_URL, None).await.unwrap();
+
+    let pool = PgPoolOptions::new().connect(DB_URL).await.unwrap();
+    let pool = Arc::new(pool);
+    let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), provider);
+    let mut db = PostgresSimpleDb::new(pool.clone());
+    decoder.store.initialize().await.unwrap();
     db.initialize().await.unwrap();
     let context = EventContext::default();
     let mut success = 0;

@@ -11,6 +11,7 @@ members = [
     "crates/dojo",
     "crates/introspect-postgres-sink",
     "crates/testing",
+    "crates/postgres",
     "bins/torii-erc20",
     "bins/torii-erc20-synth",
     "bins/torii-tokens",
@@ -122,6 +123,7 @@ torii-dojo.path = "crates/dojo"
 torii-introspect.path = "crates/introspect"
 torii-introspect-postgres-sink.path = "crates/introspect-postgres-sink"
 torii-test-utils.path = "crates/testing"
+torii-postgres.path = "crates/postgres"
 
 
 [lib]

@@ -121,22 +121,27 @@ where
     Store: DojoStoreTrait + Sync,
     F: DojoSchemaFetcher + Send + Sync + 'static,
 {
-    pub async fn new<S: Into<Store>>(
-        store: S,
-        fetcher: F,
-        owners: &[Felt],
-    ) -> DojoToriiResult<Self> {
+    pub fn new<S: Into<Store>>(store: S, fetcher: F) -> Self {
         let store = store.into();
-        Ok(Self {
-            tables: RwLock::new(
-                store
-                    .load_table_map(owners)
-                    .await
-                    .map_err(DojoToriiError::store_error)?,
-            ),
+        Self {
+            tables: Default::default(),
             store,
             fetcher,
-        })
+        }
+    }
+
+    pub async fn load_tables(&self, owners: &[Felt]) -> DojoToriiResult<()> {
+        let new_tables = self
+            .store
+            .load_tables(owners)
+            .await
+            .map_err(DojoToriiError::store_error)?;
+        let mut tables = self.tables.write()?;
+        for table in new_tables {
+            let (id, info) = table.into();
+            tables.insert(id, info);
+        }
+        Ok(())
     }
     pub async fn register_table(
         &self,
