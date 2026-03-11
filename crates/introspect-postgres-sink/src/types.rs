@@ -8,6 +8,7 @@ use introspect_types::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt::{self, Display};
 use thiserror::Error;
 use torii_introspect::CreateTable;
 use xxhash_rust::xxh3::Xxh3;
@@ -69,44 +70,44 @@ pub enum PostgresType {
     Bytea,
 }
 
-impl ToString for PostgresType {
-    fn to_string(&self) -> String {
+impl Display for PostgresType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PostgresType::None => "VOID".to_string(),
-            PostgresType::Boolean => "BOOLEAN".to_string(),
-            PostgresType::SmallInt => "SMALLINT".to_string(),
-            PostgresType::Int => "INTEGER".to_string(),
-            PostgresType::BigInt => "BIGINT".to_string(),
-            PostgresType::Int128 => "int128".to_string(),
-            PostgresType::Uint8 => "uint8".to_string(),
-            PostgresType::Uint16 => "uint16".to_string(),
-            PostgresType::Uint32 => "uint32".to_string(),
-            PostgresType::Uint64 => "uint64".to_string(),
-            PostgresType::Uint128 => "uint128".to_string(),
-            PostgresType::Uint256 => "uint256".to_string(),
-            PostgresType::Uint512 => "uint512".to_string(),
-            PostgresType::Felt252 => "felt252".to_string(),
-            PostgresType::Char31 => "char31".to_string(),
-            PostgresType::Bytes31 => "byte31".to_string(),
-            PostgresType::StarknetHash => "starknet_hash".to_string(),
-            PostgresType::EthAddress => "eth_address".to_string(),
+            PostgresType::None => f.write_str("VOID"),
+            PostgresType::Boolean => f.write_str("BOOLEAN"),
+            PostgresType::SmallInt => f.write_str("SMALLINT"),
+            PostgresType::Int => f.write_str("INTEGER"),
+            PostgresType::BigInt => f.write_str("BIGINT"),
+            PostgresType::Int128 => f.write_str("int128"),
+            PostgresType::Uint8 => f.write_str("uint8"),
+            PostgresType::Uint16 => f.write_str("uint16"),
+            PostgresType::Uint32 => f.write_str("uint32"),
+            PostgresType::Uint64 => f.write_str("uint64"),
+            PostgresType::Uint128 => f.write_str("uint128"),
+            PostgresType::Uint256 => f.write_str("uint256"),
+            PostgresType::Uint512 => f.write_str("uint512"),
+            PostgresType::Felt252 => f.write_str("felt252"),
+            PostgresType::Char31 => f.write_str("char31"),
+            PostgresType::Bytes31 => f.write_str("byte31"),
+            PostgresType::StarknetHash => f.write_str("starknet_hash"),
+            PostgresType::EthAddress => f.write_str("eth_address"),
             PostgresType::Numeric(precision, scale) => {
-                format!("NUMERIC({}, {})", precision, scale)
+                write!(f, "NUMERIC({precision}, {scale})")
             }
-            PostgresType::Text => "TEXT".to_string(),
-            PostgresType::Char(size) => format!("CHAR({})", size),
-            PostgresType::Varchar(size) => format!("VARCHAR({})", size),
-            PostgresType::Json => "JSON".to_string(),
-            PostgresType::JsonB => "JSONB".to_string(),
+            PostgresType::Text => f.write_str("TEXT"),
+            PostgresType::Char(size) => write!(f, "CHAR({size})"),
+            PostgresType::Varchar(size) => write!(f, "VARCHAR({size})"),
+            PostgresType::Json => f.write_str("JSON"),
+            PostgresType::JsonB => f.write_str("JSONB"),
             PostgresType::Array(element_type, size) => match size {
-                Some(s) => format!("{}[{}]", element_type.to_string(), s),
-                None => format!("{}[]", element_type.to_string()),
+                Some(s) => write!(f, "{element_type}[{s}]"),
+                None => write!(f, "{element_type}[]"),
             },
-            PostgresType::Struct(type_name) => type_name.clone(),
-            PostgresType::Enum(type_name) => type_name.clone(),
-            PostgresType::RustEnum(type_name) => type_name.clone(),
-            PostgresType::Tuple(type_name) => type_name.clone(),
-            PostgresType::Bytea => "BYTEA".to_string(),
+            PostgresType::Struct(type_name)
+            | PostgresType::Enum(type_name)
+            | PostgresType::RustEnum(type_name)
+            | PostgresType::Tuple(type_name) => f.write_str(type_name),
+            PostgresType::Bytea => f.write_str("BYTEA"),
         }
     }
 }
@@ -134,9 +135,9 @@ pub struct PostgresField {
     pub pg_type: PostgresType,
 }
 
-impl Into<(String, PostgresType)> for PostgresField {
-    fn into(self) -> (String, PostgresType) {
-        (self.name, self.pg_type)
+impl From<PostgresField> for (String, PostgresType) {
+    fn from(val: PostgresField) -> Self {
+        (val.name, val.pg_type)
     }
 }
 
@@ -392,7 +393,7 @@ impl PostgresTypeExtractor for FixedArrayDef {
     ) -> PgTypeResult<PostgresType> {
         Ok(PostgresType::Array(
             Box::new(self.type_def.extract_type(schema, branch, queries)?),
-            Some(self.size as u32),
+            Some(self.size),
         ))
     }
 }
@@ -476,23 +477,19 @@ impl PgTableStructure {
         queries: &mut Vec<String>,
     ) -> PgTypeResult<Self> {
         let mut table = PgTableStructure::default();
-        let branch = Xxh3::new_based(&name);
+        let branch = Xxh3::new_based(name);
         let type_def = primary_key
             .type_def
             .extract_type(&mut table, &branch, queries)?;
-        let mut column_queries = vec![format!(
-            r#""{}" {} PRIMARY KEY"#,
-            primary_key.name,
-            type_def.to_string()
-        )];
+        let mut column_queries = vec![format!(r#""{}" {type_def} PRIMARY KEY"#, primary_key.name)];
         table.columns.insert(primary_key.name.clone(), type_def);
 
         for col in columns.iter() {
             let type_def = col.extract_type(&mut table, &branch, queries)?;
-            column_queries.push(format!(r#""{}" {}"#, col.name, type_def.to_string()));
+            column_queries.push(format!("\"{}\" {type_def}", col.name));
             table.columns.insert(col.name.clone(), type_def);
         }
-        queries.push(create_table_query(&name, &column_queries));
+        queries.push(create_table_query(name, &column_queries));
         Ok(table)
     }
 
@@ -512,7 +509,7 @@ impl PgTableStructure {
 
     pub fn add_column(&mut self, name: &str, type_def: PostgresType) -> String {
         self.columns.insert(name.to_string(), type_def.clone());
-        format!(r#"ADD COLUMN "{}" {}"#, name, type_def.to_string())
+        format!("ADD COLUMN \"{name}\" {type_def}")
     }
 
     pub fn add_struct(

@@ -1,11 +1,11 @@
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 # Install runtime dependencies
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    ca-certificates \
-    tini && \
-    rm -rf /var/lib/apt/lists/*
+  apt-get install -y --no-install-recommends \
+  ca-certificates \
+  tini && \
+  rm -rf /var/lib/apt/lists/*
 
 ARG TARGETPLATFORM
 WORKDIR /app
@@ -17,8 +17,8 @@ RUN chmod +x /usr/local/bin/torii-erc20
 
 # Labels
 LABEL org.opencontainers.image.title="torii-erc20" \
-      org.opencontainers.image.description="ERC20 token indexer for Starknet" \
-      org.opencontainers.image.source="https://github.com/dojoengine/torii-core" \
-      org.opencontainers.image.licenses="MIT"
+  org.opencontainers.image.description="ERC20 token indexer for Starknet" \
+  org.opencontainers.image.source="https://github.com/dojoengine/torii-core" \
+  org.opencontainers.image.licenses="MIT"
 
 ENTRYPOINT ["/usr/bin/tini", "--"]

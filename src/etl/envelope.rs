@@ -144,8 +144,8 @@ where
 impl<T: EventMsg + 'static + Send + Sync> EventBody<T> {
     pub fn new(msg: T, raw: &EmittedEvent) -> Self {
         Self {
-            from_address: raw.from_address.clone(),
-            transaction_hash: raw.transaction_hash.clone(),
+            from_address: raw.from_address,
+            transaction_hash: raw.transaction_hash,
             msg,
         }
     }

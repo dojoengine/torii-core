@@ -23,10 +23,17 @@ where
     async fn event_to_msg(
         self,
         owner: &Felt,
+        block_number: Option<u64>,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg> {
         decoder
-            .register_table(owner, &self.namespace, &self.name, self.schema)
+            .register_table(
+                owner,
+                &self.namespace,
+                &self.name,
+                self.schema,
+                block_number,
+            )
             .await
             .map(Into::into)
     }
@@ -42,11 +49,12 @@ where
     async fn event_to_msg(
         self,
         owner: &Felt,
+        block_number: Option<u64>,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg> {
         let schema = decoder.fetcher.schema(self.address).await?;
         decoder
-            .register_table(owner, &self.namespace, &self.name, schema)
+            .register_table(owner, &self.namespace, &self.name, schema, block_number)
             .await
             .map(Into::into)
     }
@@ -62,11 +70,12 @@ where
     async fn event_to_msg(
         self,
         owner: &Felt,
+        block_number: Option<u64>,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg> {
         let schema = decoder.fetcher.schema(self.address).await?;
         decoder
-            .register_table(owner, &self.namespace, &self.name, schema)
+            .register_table(owner, &self.namespace, &self.name, schema, block_number)
             .await
             .map(Into::into)
     }
@@ -82,11 +91,12 @@ where
     async fn event_to_msg(
         self,
         owner: &Felt,
+        block_number: Option<u64>,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg> {
         let schema = decoder.fetcher.schema(self.address).await?;
         decoder
-            .update_table(owner, self.selector, schema)
+            .update_table(owner, self.selector, schema, block_number)
             .await
             .map(Into::into)
     }
@@ -102,11 +112,12 @@ where
     async fn event_to_msg(
         self,
         owner: &Felt,
+        block_number: Option<u64>,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg> {
         let schema = decoder.fetcher.schema(self.address).await?;
         decoder
-            .update_table(owner, self.selector, schema)
+            .update_table(owner, self.selector, schema, block_number)
             .await
             .map(Into::into)
     }

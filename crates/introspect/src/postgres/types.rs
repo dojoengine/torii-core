@@ -68,7 +68,7 @@ pub fn felt252_type(value: &Felt) -> String {
 
 pub fn felt252_array_type(values: &[Felt]) -> String {
     let value_strs = values.iter().map(felt252_type).join(",");
-    format!("ARRAY[{}]::felt252[]", value_strs)
+    format!("ARRAY[{value_strs}]::felt252[]")
 }
 
 pub fn string_type(value: &str) -> String {
@@ -89,7 +89,7 @@ pub fn attribute_type(attr: &Attribute) -> String {
 
 pub fn attributes_array_type(attrs: &[Attribute]) -> String {
     let attr_strs = attrs.iter().map(attribute_type).join(",");
-    format!("ARRAY[{}]::introspect.attribute[]", attr_strs)
+    format!("ARRAY[{attr_strs}]::introspect.attribute[]")
 }
 
 pub fn primary_def_type(primary: &PrimaryDef) -> String {

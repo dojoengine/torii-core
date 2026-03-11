@@ -21,7 +21,7 @@ impl<'a> RecordSchema<'a> {
     }
 
     pub fn primary(&self) -> &PrimaryDef {
-        &self.primary
+        self.primary
     }
 
     pub fn to_frame<C: CairoTypeSerialization, M: SerializeEntries>(
@@ -139,7 +139,7 @@ impl<'a, C: CairoTypeSerialization, M: SerializeEntries> RecordFrame<'a, C, M> {
         cairo_se: &'a C,
     ) -> Self {
         Self {
-            primary: &schema.primary,
+            primary: schema.primary,
             columns: &schema.columns,
             id: &record.id,
             values: &record.values,
@@ -171,9 +171,7 @@ impl<'a, C: CairoTypeSerialization, M: SerializeEntries> RecordFrame<'a, C, M> {
     }
 }
 
-impl<'a, C: CairoTypeSerialization, M: SerializeEntries> SerializeEntries
-    for RecordFrame<'a, C, M>
-{
+impl<C: CairoTypeSerialization, M: SerializeEntries> SerializeEntries for RecordFrame<'_, C, M> {
     fn entry_count(&self) -> usize {
         1 + self.columns.len() + self.metadata.entry_count()
     }
@@ -188,7 +186,7 @@ impl<'a, C: CairoTypeSerialization, M: SerializeEntries> SerializeEntries
     }
 }
 
-impl<'a, C: CairoTypeSerialization, M: SerializeEntries> Serialize for RecordFrame<'a, C, M> {
+impl<C: CairoTypeSerialization, M: SerializeEntries> Serialize for RecordFrame<'_, C, M> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let mut map = serializer.serialize_map(Some(self.entry_count()))?;
         self.serialize_entries::<S>(&mut map)?;

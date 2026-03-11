@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use torii_introspect::schema::TableSchema;
 
 const LEGACY_ATTRIBUTE: &str = "legacy";
+
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct DojoTable {
     pub id: Felt,
@@ -37,9 +38,10 @@ pub fn sort_columns(columns: Vec<ColumnDef>) -> (HashMap<Felt, ColumnInfo>, Vec<
     let mut key_fields = Vec::new();
     for column in columns {
         let (id, info) = column.into();
-        match info.has_attribute("key") {
-            true => key_fields.push(id),
-            false => value_fields.push(id),
+        if info.has_attribute("key") {
+            key_fields.push(id);
+        } else {
+            value_fields.push(id);
         }
         field_map.insert(id, info);
     }
@@ -58,7 +60,7 @@ impl From<TableSchema> for DojoTable {
             columns,
             key_fields,
             value_fields,
-            legacy: legacy,
+            legacy,
         }
     }
 }
@@ -83,12 +85,12 @@ impl From<DojoTable> for TableSchema {
             attributes.push(Attribute::new_empty(LEGACY_ATTRIBUTE.to_string()));
         }
         TableSchema {
-            id: id,
-            name: name,
-            primary: primary,
+            id,
+            name,
+            primary,
             columns: key_fields
                 .into_iter()
-                .chain(value_fields.into_iter())
+                .chain(value_fields)
                 .map(|selector| (selector, columns.remove(&selector).unwrap()).into())
                 .collect(),
             attributes,
@@ -115,7 +117,7 @@ impl From<DojoTable> for (Felt, DojoTableInfo) {
 
 impl From<(Felt, DojoTableInfo)> for DojoTable {
     fn from(value: (Felt, DojoTableInfo)) -> Self {
-        let (id, info) = value.into();
+        let (id, info) = value;
         DojoTable {
             id,
             name: info.name,
@@ -139,7 +141,7 @@ impl DojoTable {
         let (columns, key_fields, value_fields) = sort_columns(schema.columns);
         Self {
             id: compute_selector_from_namespace_and_name(namespace, name),
-            name: format!("{}-{}", namespace, name),
+            name: format!("{namespace}-{name}"),
             attributes: schema.attributes.iter().map(|a| a.name.clone()).collect(),
             primary,
             columns,
@@ -151,7 +153,7 @@ impl DojoTable {
 
     pub fn get_columns(&self, selectors: &[Felt]) -> DojoToriiResult<Vec<&ColumnInfo>> {
         selectors
-            .into_iter()
+            .iter()
             .map(|selector| self.get_column(selector))
             .collect()
     }
@@ -243,7 +245,7 @@ impl DojoTable {
 impl DojoTableInfo {
     pub fn get_columns(&self, selectors: &[Felt]) -> DojoToriiResult<Vec<&ColumnInfo>> {
         selectors
-            .into_iter()
+            .iter()
             .map(|selector| self.get_column(selector))
             .collect()
     }

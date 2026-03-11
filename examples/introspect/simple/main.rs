@@ -1,9 +1,9 @@
-use std::sync::Arc;
-
+use resolve_path::PathResolveExt;
 use sqlx::postgres::PgPoolOptions;
+use std::path::PathBuf;
+use std::sync::Arc;
 use torii::etl::EventContext;
 use torii_dojo::decoder::DojoDecoder;
-use torii_dojo::store::json::JsonStore;
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::DojoToriiError;
 use torii_introspect_postgres_sink::processor::PostgresSimpleDb;
@@ -26,24 +26,24 @@ async fn main() {
     let mut db = PostgresSimpleDb::new(pool.clone());
     decoder.store.initialize().await.unwrap();
     // db.initialize().await.unwrap();
+    db.initialize().await.unwrap();
     let context = EventContext::default();
     let mut success = 0;
     for (n, event) in event_iterator.enumerate() {
         match decoder.decode_raw_event(&event).await {
             Ok(msg) => match db.process_message(&msg, &context).await {
-                Ok(_) => success += 1,
+                Ok(()) => success += 1,
                 Err(err) => {
                     println!(
-                        "Failed to process message {n} {:?}:,\nmessage: {:?}\n-------------",
-                        err, msg
-                    )
+                        "Failed to process message {n} {err:?}:,\nmessage: {msg:?}\n-------------",
+                    );
                 }
             },
             Err(DojoToriiError::UnknownDojoEventSelector(_)) => {
                 println!("Unknown event selector, skipping event");
             }
             Err(err) => {
-                println!("Failed to decode event: {:?}", err);
+                println!("Failed to decode event: {err:?}");
             }
         }
         if n == 100 {
@@ -53,4 +53,5 @@ async fn main() {
             println!("Decoded {n} events");
         }
     }
+    println!("Processed {success} messages");
 }

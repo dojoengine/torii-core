@@ -108,6 +108,7 @@ where
     K: ColumnKeyTrait + Send + Sync,
 {
     type Row = ColumnRow;
+
     fn insert_query(&self, owner: &Felt, key: &K) -> String {
         let (table, id) = key.as_parts();
         column_insert_query(
@@ -133,6 +134,7 @@ where
 #[async_trait]
 impl PgTypeDef<Felt> for ColumnDef {
     type Row = ColumnRow;
+
     fn insert_query(&self, owner: &Felt, key: &Felt) -> String {
         column_insert_query(
             owner,
@@ -143,6 +145,7 @@ impl PgTypeDef<Felt> for ColumnDef {
             &self.type_def,
         )
     }
+
     async fn get_rows(
         pool: &PgPool,
         pg_table: &str,
@@ -157,6 +160,7 @@ impl PgTypeDef<Felt> for ColumnDef {
 #[async_trait]
 impl PgTypeDef<Felt> for TableInfo {
     type Row = ColumnRow;
+
     fn insert_query(&self, owner: &Felt, key: &Felt) -> String {
         table_insert_query(
             owner,
@@ -167,6 +171,7 @@ impl PgTypeDef<Felt> for TableInfo {
             &self.order,
         )
     }
+
     async fn get_rows(
         pool: &PgPool,
         pg_table: &str,
@@ -200,7 +205,7 @@ fn column_insert_query(
         id = felt252_type(id),
         name = string_type(name),
         attributes = attributes_array_type(attributes),
-        type_def = string_type(&serde_json::to_string(&type_def).unwrap()),
+        type_def = string_type(&serde_json::to_string(type_def).unwrap()),
     )
 }
 
@@ -213,7 +218,7 @@ fn table_insert_query(
     columns: &[Felt],
 ) -> String {
     format!(
-        r#"
+        r"
             INSERT INTO dojo.columns (owner, id, name, attributes, primary, columns)
                 VALUES ({owner}, {id}, {name}, {attributes}, {primary}, {columns})
                 ON CONFLICT (owner, id) DO UPDATE SET
@@ -221,7 +226,7 @@ fn table_insert_query(
                 attributes = EXCLUDED.attributes,
                 primary = EXCLUDED.primary,
                 columns = EXCLUDED.columns
-            "#,
+            ",
         owner = felt252_type(owner),
         id = felt252_type(id),
         name = string_type(name),
@@ -260,21 +265,21 @@ fn get_column_rows_query(table: &str, owners: &[Felt]) -> String {
     );
     if !owners.is_empty() {
         let owners_str = owners.iter().map(felt252_type).join(", ");
-        string.push_str(&format!("WHERE owner IN ({})", owners_str));
+        string.push_str(&format!("WHERE owner IN ({owners_str})"));
     }
     string
 }
 
 fn get_table_rows_query(table: &str, owners: &[Felt]) -> String {
     let mut string = format!(
-        r#"
+        r"
             SELECT id, name, attributes, primary, columns, alive
             FROM {table}
-        "#,
+        ",
     );
     if !owners.is_empty() {
         let owners_str = owners.iter().map(felt252_type).join(", ");
-        string.push_str(&format!("WHERE owner IN ({})", owners_str));
+        string.push_str(&format!("WHERE owner IN ({owners_str})"));
     }
     string
 }

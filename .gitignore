@@ -19,5 +19,6 @@ perf/runs/
 **/.DS_Store
 /data/
 /bins/torii-tokens/torii-data/
+/torii-data/image-cache/
 HANDOFF.md
 .cargo/
