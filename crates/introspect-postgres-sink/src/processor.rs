@@ -9,30 +9,26 @@ use crate::HasherExt;
 use crate::INTROSPECT_PG_SINK_MIGRATIONS;
 use async_trait::async_trait;
 use introspect_types::ResultInto;
-use introspect_types::ResultInto;
 use serde_json::Serializer as JsonSerializer;
-use serde_json::Serializer as JsonSerializer;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use sqlx::Row;
-use sqlx::{PgPool, Postgres, Transaction};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::io::Write;
-use thiserror::Error;
+use std::ops::Deref;
+use std::sync::{PoisonError, RwLock};
 use torii::etl::EventContext;
 use torii_introspect::events::IntrospectMsg;
 use torii_introspect::{CreateTable, InsertsFields, UpdateTable};
-use torii_postgres::PostgresConnection;
+use torii_postgres::{PostgresConnection, SqlxError};
 
-#[derive(Debug, Error)]
-pub enum DbError {
+#[derive(Debug, thiserror::Error)]
+pub enum PgDbError {
     #[error(transparent)]
-    DatabaseError(#[from] sqlx::Error),
+    DatabaseError(#[from] SqlxError),
     #[error("Invalid event format: {0}")]
     InvalidEventFormat(String),
-    #[error(transparent)]
-    MigrationError(#[from] sqlx::migrate::MigrateError),
     #[error(transparent)]
     JsonError(#[from] serde_json::Error),
     #[error(transparent)]
@@ -49,62 +45,113 @@ pub enum DbError {
     TableNotAlive(Felt, String),
     #[error("Manager does not support updating")]
     UpdateNotSupported,
+    #[error("Table poison error: {0}")]
+    PoisonError(String),
 }
 
-type PGSinkResult<T> = std::result::Result<T, DbError>;
+type PgDbResult<T> = std::result::Result<T, PgDbError>;
+
+impl<T> From<PoisonError<T>> for PgDbError {
+    fn from(err: PoisonError<T>) -> Self {
+        Self::PoisonError(err.to_string())
+    }
+}
 
 #[derive(Debug, Default)]
-pub struct PostgresSchema {
-    namespace: Option<String>,
-    tables: HashMap<Felt, PgTable>,
+pub struct PostgresTables(pub RwLock<HashMap<Felt, PgTable>>);
+
+impl Deref for PostgresTables {
+    type Target = RwLock<HashMap<Felt, PgTable>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
-impl PostgresSchema {
-    pub fn get_table(&self, id: &Felt) -> PGSinkResult<&PgTable> {
-        match self.tables.get(id) {
-            Some(table) => Ok(table),
-            None => Err(DbError::TableNotFound(*id)),
+#[derive(Debug, Clone)]
+pub enum PgSchema {
+    Public,
+    Custom(String),
+}
+
+impl PgSchema {
+    pub fn qualify(&self, name: &str) -> String {
+        format!("{self}.{name}")
+    }
+}
+
+impl From<Option<String>> for PgSchema {
+    fn from(value: Option<String>) -> Self {
+        match value {
+            Some(s) => Self::Custom(s),
+            None => PgSchema::Public,
         }
     }
+}
 
-    pub fn get_living_table(&self, id: &Felt) -> PGSinkResult<&PgTable> {
-        let table = self.get_table(id)?;
-        if table.alive {
-            Ok(table)
-        } else {
-            Err(DbError::TableNotAlive(*id, table.name.clone()))
+impl From<String> for PgSchema {
+    fn from(value: String) -> Self {
+        Self::Custom(value)
+    }
+}
+
+impl From<&str> for PgSchema {
+    fn from(value: &str) -> Self {
+        Self::Custom(value.to_string())
+    }
+}
+
+impl From<Option<&str>> for PgSchema {
+    fn from(value: Option<&str>) -> Self {
+        match value {
+            Some(s) => Self::Custom(s.to_string()),
+            None => PgSchema::Public,
         }
     }
+}
 
+impl Display for PgSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PgSchema::Custom(namespace) => write!(f, "{namespace}",),
+            PgSchema::Public => write!(f, "public"),
+        }
+    }
+}
+
+impl PostgresTables {
     pub fn create_table(
-        &mut self,
+        &self,
+        schema: &PgSchema,
         event: CreateTable,
         _context: &EventContext,
         queries: &mut Vec<String>,
-    ) -> PGSinkResult<()> {
-        if let Some(table) = self.tables.get(&event.id) {
+    ) -> PgDbResult<()> {
+        if let Some(table) = self.read()?.get(&event.id) {
             if table.name() == event.name {
                 Ok(())
             } else {
-                Err(DbError::TableAlreadyExists(
+                Err(PgDbError::TableAlreadyExists(
                     event.id,
                     event.name,
                     table.name().to_string(),
                 ))
             }
         } else {
-            let (id, table) = PgTable::new_from_event(&self.namespace, event, queries)?;
-            self.tables.insert(id, table);
+            let (id, table) = PgTable::new_from_event(schema, event, queries)?;
+            let mut tables = self.0.write().unwrap();
+            tables.insert(id, table);
             Ok(())
         }
     }
 
     pub fn update_table(
-        &mut self,
+        &self,
+        schema: &PgSchema,
         event: UpdateTable,
         context: &EventContext,
         queries: &mut Vec<String>,
-    ) -> PGSinkResult<()> {
+    ) -> PgDbResult<()> {
         let create_snapshot = CreateTable {
             id: event.id,
             name: event.name,
@@ -112,12 +159,12 @@ impl PostgresSchema {
             primary: event.primary,
             columns: event.columns,
         };
-        let Some(existing) = self.tables.get(&create_snapshot.id) else {
-            return self.create_table(create_snapshot, context, queries);
+        let Some(existing) = self.read()?.get(&create_snapshot.id) else {
+            return self.create_table(schema, create_snapshot, context, queries);
         };
 
         if existing.name() != create_snapshot.name {
-            return Err(DbError::TableAlreadyExists(
+            return Err(PgDbError::TableAlreadyExists(
                 create_snapshot.id,
                 create_snapshot.name,
                 existing.name().to_string(),
@@ -125,7 +172,7 @@ impl PostgresSchema {
         }
 
         let mut type_queries = Vec::new();
-        let mut type_schema = PgTableStructure::default();
+        let mut type_schema = PgTableStructure::new_empty(schema);
         let branch = xxhash_rust::xxh3::Xxh3::new_based(existing.name());
         let mut alterations = Vec::new();
         for column in &create_snapshot.columns {
@@ -140,27 +187,26 @@ impl PostgresSchema {
         }
         queries.extend(type_queries);
         if !alterations.is_empty() {
-            queries.push(alter_table_query(existing.name(), &alterations));
+            queries.push(alter_table_query(schema, existing.name(), &alterations));
         }
 
         let mut ignored_queries = Vec::new();
-        let (_, replacement_table) = PgTable::new_from_event(
-            &self.namespace,
-            create_snapshot.clone(),
-            &mut ignored_queries,
-        )?;
-        self.tables.insert(event.id, replacement_table);
+        let (_, replacement_table) =
+            PgTable::new_from_event(&schema, create_snapshot.clone(), &mut ignored_queries)?;
+        let mut tables = self.write()?;
 
+        tables.insert(event.id, replacement_table);
         Ok(())
     }
 
-    pub fn set_table_dead(&mut self, id: &Felt) -> PGSinkResult<()> {
-        match self.tables.get_mut(id) {
+    pub fn set_table_dead(&self, id: &Felt) -> PgDbResult<()> {
+        let mut tables = self.write()?;
+        match tables.get_mut(id) {
             Some(table) => {
                 table.alive = false;
                 Ok(())
             }
-            None => Err(DbError::TableNotFound(*id)),
+            None => Err(PgDbError::TableNotFound(*id)),
         }
     }
 
@@ -169,18 +215,23 @@ impl PostgresSchema {
         event: &InsertsFields,
         _context: &EventContext,
         queries: &mut Vec<String>,
-    ) -> PGSinkResult<()> {
-        let table = self.get_living_table(&event.table)?;
-        let schema = table.get_schema(&event.columns)?;
+    ) -> PgDbResult<()> {
+        let tables = self.read().unwrap();
+        let table = match tables.get(&event.table) {
+            Some(table) => Ok(table),
+            None => Err(PgDbError::TableNotFound(event.table)),
+        }?;
+        let record = table.get_schema(&event.columns)?;
         let table_name = table.name();
 
         let mut writer = Vec::new();
+        let schema = table.schema();
         write!(
             writer,
-            r#"INSERT INTO "{table_name}"
-            SELECT * FROM jsonb_populate_recordset(NULL::"{table_name}", $$"#
+            r#"INSERT INTO "{schema}"."{table_name}"
+            SELECT * FROM jsonb_populate_recordset(NULL::"{schema}"."{table_name}", $$"#
         )?;
-        schema.parse_records_with_metadata(
+        record.parse_records_with_metadata(
             &event.records,
             &(),
             &mut JsonSerializer::new(&mut writer),
@@ -189,9 +240,9 @@ impl PostgresSchema {
         write!(
             writer,
             r#"$$) ON CONFLICT ("{}") DO UPDATE SET "#,
-            schema.primary().name
+            record.primary().name
         )?;
-        if let Some((coln, cols)) = schema.columns().split_last() {
+        if let Some((coln, cols)) = record.columns().split_last() {
             for column in cols {
                 write_conflict_res::<true, _>(&mut writer, table_name, &column.name)?;
             }
@@ -203,14 +254,19 @@ impl PostgresSchema {
     }
 
     pub fn handle_message(
-        &mut self,
+        &self,
+        schema: &PgSchema,
         msg: &IntrospectMsg,
         context: &EventContext,
         queries: &mut Vec<String>,
-    ) -> PGSinkResult<()> {
+    ) -> PgDbResult<()> {
         match msg {
-            IntrospectMsg::CreateTable(event) => self.create_table(event.clone(), context, queries),
-            IntrospectMsg::UpdateTable(event) => self.update_table(event.clone(), context, queries),
+            IntrospectMsg::CreateTable(event) => {
+                self.create_table(schema, event.clone(), context, queries)
+            }
+            IntrospectMsg::UpdateTable(event) => {
+                self.update_table(schema, event.clone(), context, queries)
+            }
             IntrospectMsg::AddColumns(event) => self.set_table_dead(&event.table),
             IntrospectMsg::DropColumns(event) => self.set_table_dead(&event.table),
             IntrospectMsg::RetypeColumns(event) => self.set_table_dead(&event.table),
@@ -226,7 +282,8 @@ impl PostgresSchema {
 }
 
 pub struct PostgresSimpleDb<T> {
-    schema: PostgresSchema,
+    tables: PostgresTables,
+    schema: PgSchema,
     pool: T,
 }
 
@@ -237,17 +294,17 @@ impl<T: PostgresConnection> PostgresConnection for PostgresSimpleDb<T> {
 }
 
 impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
-    pub fn new(pool: T) -> Self {
+    pub fn new(pool: T, schema: impl Into<PgSchema>) -> Self {
         Self {
-            schema: PostgresSchema::default(),
+            tables: PostgresTables::default(),
+            schema: schema.into(),
             pool,
         }
     }
 
-    pub async fn initialize(&self) -> PGSinkResult<()> {
-        self.migrate(INTROSPECT_PG_SINK_MIGRATIONS)
-            .await
-            .err_into()?;
+    pub async fn initialize(&self) -> PgDbResult<()> {
+        self.migrate(Some("introspect"), INTROSPECT_PG_SINK_MIGRATIONS)
+            .await?;
         let tables = self.load_stored_tables().await?;
         if !tables.is_empty() {
             self.bootstrap_tables(&tables).await?;
@@ -260,7 +317,7 @@ impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
         Ok(())
     }
 
-    pub async fn bootstrap_tables(&mut self, tables: &[CreateTable]) -> PGSinkResult<()> {
+    pub async fn bootstrap_tables(&self, tables: &[CreateTable]) -> PgDbResult<()> {
         let context = EventContext::default();
         for table in tables {
             self.process_message(&IntrospectMsg::CreateTable(table.clone()), &context)
@@ -271,9 +328,9 @@ impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
         Ok(())
     }
 
-    fn bootstrap_reconcile_queries(&self, table: &CreateTable) -> PGSinkResult<Vec<String>> {
+    fn bootstrap_reconcile_queries(&self, table: &CreateTable) -> PgDbResult<Vec<String>> {
         let mut type_queries = Vec::new();
-        let mut type_schema = PgTableStructure::default();
+        let mut type_schema = PgTableStructure::new_empty(&self.schema);
         let branch = xxhash_rust::xxh3::Xxh3::new_based(&table.name);
         let mut alterations = Vec::new();
         for column in &table.columns {
@@ -281,77 +338,24 @@ impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
             alterations.push(add_column_if_not_exists_query(&column.name, &pg_type));
         }
         if !alterations.is_empty() {
-            type_queries.push(alter_table_query(&table.name, &alterations));
+            type_queries.push(alter_table_query(&self.schema, &table.name, &alterations));
         }
         Ok(type_queries)
     }
 
     pub fn has_tables(&self) -> bool {
-        !self.schema.tables.is_empty()
+        !self.tables.read().unwrap().is_empty()
     }
 
     pub async fn process_message(
-        &mut self,
+        &self,
         msg: &IntrospectMsg,
         context: &EventContext,
-    ) -> PGSinkResult<()> {
+    ) -> PgDbResult<()> {
         let mut queries = Vec::new();
-        self.schema.handle_message(msg, context, &mut queries)?;
-        self.execute_queries(&queries).await.err_into()?;
-        match msg {
-            IntrospectMsg::CreateTable(table) => {
-                self.persist_table_state(table).await?;
-            }
-            IntrospectMsg::UpdateTable(table) => {
-                self.persist_table_state(&CreateTable {
-                    id: table.id,
-                    name: table.name.clone(),
-                    attributes: table.attributes.clone(),
-                    primary: table.primary.clone(),
-                    columns: table.columns.clone(),
-                })
-                .await?;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    async fn load_stored_tables(&self) -> PGSinkResult<Vec<CreateTable>> {
-        let rows = sqlx::query(
-            r#"
-            SELECT create_table_json
-            FROM torii_introspect_schema_state
-            ORDER BY updated_at ASC
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await?;
-
-        rows.into_iter()
-            .map(|row| {
-                let json: String = row.try_get("create_table_json")?;
-                Ok(serde_json::from_str(&json)?)
-            })
-            .collect()
-    }
-
-    async fn persist_table_state(&self, table: &CreateTable) -> PGSinkResult<()> {
-        let json = serde_json::to_string(table)?;
-        sqlx::query(
-            r#"
-            INSERT INTO torii_introspect_schema_state (table_id, create_table_json, updated_at)
-            VALUES ($1, $2, NOW())
-            ON CONFLICT (table_id)
-            DO UPDATE SET
-                create_table_json = EXCLUDED.create_table_json,
-                updated_at = NOW()
-            "#,
-        )
-        .bind(table.id.to_bytes_be().to_vec())
-        .bind(json)
-        .execute(&self.pool)
-        .await?;
+        self.tables
+            .handle_message(&self.schema, msg, context, &mut queries)?;
+        self.execute_queries(&queries).await?;
         Ok(())
     }
 }
@@ -405,11 +409,12 @@ mod tests {
 
     #[test]
     fn update_table_creates_unknown_table() {
-        let mut schema = PostgresSchema::default();
+        let mut tables = PostgresTables::default();
         let mut queries = Vec::new();
-
-        schema
+        let schema = PgSchema::Public;
+        tables
             .update_table(
+                &schema,
                 update_table(1, vec![column(10, "duelist_count")]),
                 &EventContext::default(),
                 &mut queries,
@@ -420,15 +425,17 @@ mod tests {
         assert!(queries
             .iter()
             .any(|query| query.contains("CREATE TABLE IF NOT EXISTS")));
-        assert!(schema.tables.contains_key(&Felt::from(1_u64)));
+        assert!(tables.read().unwrap().contains_key(&Felt::from(1_u64)));
     }
 
     #[test]
     fn update_table_emits_alter_queries_for_new_columns() {
-        let mut schema = PostgresSchema::default();
+        let mut tables = PostgresTables::default();
         let mut create_queries = Vec::new();
-        schema
+        let schema = PgSchema::Public;
+        tables
             .create_table(
+                &schema,
                 create_table(1, vec![column(10, "duelist_count")]),
                 &EventContext::default(),
                 &mut create_queries,
@@ -436,8 +443,9 @@ mod tests {
             .unwrap();
 
         let mut update_queries = Vec::new();
-        schema
+        tables
             .update_table(
+                &schema,
                 update_table(
                     1,
                     vec![
@@ -453,7 +461,7 @@ mod tests {
         assert!(update_queries
             .iter()
             .any(|query| query.contains("ALTER TABLE") && query.contains("alive_duelist_count")));
-        assert!(schema.tables[&Felt::from(1_u64)]
+        assert!(tables.read().unwrap()[&Felt::from(1_u64)]
             .columns
             .values()
             .any(|column| column.name == "alive_duelist_count"));

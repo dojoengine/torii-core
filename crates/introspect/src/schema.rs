@@ -31,14 +31,6 @@ pub struct TableSchema {
     pub columns: Vec<ColumnDef>,
 }
 
-pub struct Table {
-    pub id: Felt,
-    pub name: String,
-    pub attributes: Vec<Attribute>,
-    pub primary: PrimaryDef,
-    pub columns: Vec<ColumnDef>,
-}
-
 #[derive(Clone, Debug)]
 pub struct TableInfo {
     pub name: String,

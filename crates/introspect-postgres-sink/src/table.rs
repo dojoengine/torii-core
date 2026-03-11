@@ -1,3 +1,4 @@
+use crate::processor::PgSchema;
 use crate::types::PgTypeError;
 use crate::{PgStructDef, PgTableStructure, PostgresField};
 use introspect_types::{ColumnDef, ColumnDefs, FeltIds, PrimaryDef};
@@ -38,13 +39,13 @@ impl PgStructDef {
 
 impl PgTable {
     pub fn new(
-        namespace: &Option<String>,
+        schema: &PgSchema,
         name: String,
         primary: PrimaryDef,
         columns: Vec<ColumnDef>,
         queries: &mut Vec<String>,
     ) -> TableResult<Self> {
-        let postgres = PgTableStructure::new(namespace, &name, &primary, &columns, queries)?;
+        let postgres = PgTableStructure::new(schema, &name, &primary, &columns, queries)?;
         Ok(Self {
             name,
             postgres,
@@ -59,12 +60,16 @@ impl PgTable {
         &self.name
     }
 
+    pub fn schema(&self) -> &PgSchema {
+        self.postgres.schema()
+    }
+
     pub fn new_from_event(
-        namespace: &Option<String>,
+        schema: &PgSchema,
         event: CreateTable,
         queries: &mut Vec<String>,
     ) -> TableResult<(Felt, Self)> {
-        Self::new(namespace, event.name, event.primary, event.columns, queries)
+        Self::new(schema, event.name, event.primary, event.columns, queries)
             .map(|table| (event.id, table))
     }
 
@@ -81,7 +86,7 @@ impl PgTable {
             .ok_or_else(|| PgTableError::ColumnNotFound(*selector, self.name.clone()))
     }
 
-    pub fn get_schema(&'_ self, column_ids: &[Felt]) -> TableResult<RecordSchema<'_>> {
+    pub fn get_schema(&self, column_ids: &[Felt]) -> TableResult<RecordSchema<'_>> {
         let columns = self.get_columns(column_ids)?;
         Ok(RecordSchema::new(&self.primary, columns))
     }

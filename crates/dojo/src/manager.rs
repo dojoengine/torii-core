@@ -1,6 +1,6 @@
 pub use crate::store::json::JsonStore;
-use crate::store::postgres::initialize_dojo_schema;
 use crate::store::DojoStoreTrait;
+use crate::table::DojoTableInfo;
 use crate::{DojoTable, DojoToriiError, DojoToriiResult};
 use async_trait::async_trait;
 use itertools::Itertools;
@@ -11,9 +11,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use thiserror::Error;
 use torii_introspect::events::CreateTable;
+use torii_introspect::schema::TableSchema;
 
 pub struct DojoTableStore<Store> {
-    pub tables: HashMap<Felt, DojoTable>,
+    pub tables: HashMap<Felt, DojoTableInfo>,
     pub store: Store,
 }
 
@@ -32,7 +33,10 @@ where
 
     pub fn from_loaded_tables(store: Store, tables: Vec<DojoTable>) -> Self {
         Self {
-            tables: tables.into_iter().map(|table| (table.id, table)).collect(),
+            tables: tables
+                .into_iter()
+                .map_into::<(Felt, DojoTableInfo)>()
+                .collect(),
             store,
         }
     }
@@ -40,9 +44,16 @@ where
     pub fn create_table_messages(&self) -> DojoToriiResult<Vec<CreateTable>> {
         Ok(self
             .tables
-            .values()
-            .map(|table| CreateTable::from(table.clone().to_schema()))
+            .iter()
+            .map(|(id, table)| CreateTable::from(table.to_schema(*id)))
             .collect_vec())
+    }
+
+    pub fn table_schemas(&self) -> Vec<TableSchema> {
+        self.tables
+            .iter()
+            .map(|(id, table)| table.to_schema(*id))
+            .collect()
     }
 }
 

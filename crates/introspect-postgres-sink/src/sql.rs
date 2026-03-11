@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use crate::{PostgresField, PostgresType};
+use crate::{processor::PgSchema, PostgresField, PostgresType};
 
 pub fn add_column_query(name: &str, pg_type: &PostgresType) -> String {
     format!("ADD COLUMN \"{name}\" {pg_type}")
@@ -14,13 +14,18 @@ pub fn modify_column_query(name: &str, pg_type: &PostgresType) -> String {
     format!("ALTER COLUMN \"{name}\" TYPE {pg_type}")
 }
 
-pub fn add_member_query(type_name: &str, member_name: &str, pg_type: &PostgresType) -> String {
+pub fn add_member_query(
+    schema: &PgSchema,
+    type_name: &str,
+    member_name: &str,
+    pg_type: &PostgresType,
+) -> String {
     format!(
         r#"
 DO $$
 BEGIN
     BEGIN
-        ALTER TYPE "{type_name}" ADD ATTRIBUTE "{member_name}" {pg_type};
+        ALTER TYPE "{schema}"."{type_name}" ADD ATTRIBUTE "{member_name}" {pg_type};
     EXCEPTION
         WHEN duplicate_object OR duplicate_column THEN
             RAISE NOTICE 'attribute already exists, skipping';
@@ -31,17 +36,24 @@ END $$;
     )
 }
 
-pub fn modify_member_query(type_name: &str, member_name: &str, pg_type: &PostgresType) -> String {
-    format!(r#"ALTER TYPE "{type_name}" ALTER ATTRIBUTE "{member_name}" TYPE {pg_type};"#)
+pub fn modify_member_query(
+    schema: &PgSchema,
+    type_name: &str,
+    member_name: &str,
+    pg_type: &PostgresType,
+) -> String {
+    format!(
+        r#"ALTER TYPE "{schema}"."{type_name}" ALTER ATTRIBUTE "{member_name}" TYPE {pg_type};"#
+    )
 }
 
-pub fn add_enum_variant_query(type_name: &str, variant: &str) -> String {
+pub fn add_enum_variant_query(schema: &PgSchema, type_name: &str, variant: &str) -> String {
     format!(
         r#"
 DO $$ 
 BEGIN
   BEGIN
-    EXECUTE format('ALTER TYPE %I ADD VALUE %L', '{type_name}', '{variant}');
+    EXECUTE format('ALTER TYPE "{schema}"."{type_name}" ADD VALUE %L', '{variant}');
   EXCEPTION
     WHEN duplicate_object THEN
         RAISE NOTICE 'enum value already exists, skipping';
@@ -51,12 +63,16 @@ END $$;
     )
 }
 
-pub fn create_table_query(table_name: &str, columns: &[String]) -> String {
+pub fn create_table_query(schema: &PgSchema, table_name: &str, columns: &[String]) -> String {
     let columns_sql = columns.join(", ");
-    format!(r#"CREATE TABLE IF NOT EXISTS "{table_name}" ({columns_sql});"#)
+    format!(r#"CREATE TABLE IF NOT EXISTS "{schema}"."{table_name}" ({columns_sql});"#)
 }
 
-pub fn create_struct_type_query(type_name: &str, fields: &[PostgresField]) -> String {
+pub fn create_struct_type_query(
+    schema: &PgSchema,
+    type_name: &str,
+    fields: &[PostgresField],
+) -> String {
     let field_defs = fields
         .iter()
         .map(|f| format!(r#""{}" {}"#, f.name, f.pg_type))
@@ -66,17 +82,17 @@ pub fn create_struct_type_query(type_name: &str, fields: &[PostgresField]) -> St
     format!(
         r#"DO $$ 
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '{type_name}') THEN
-                CREATE TYPE "{type_name}" AS ({field_defs});
-            END IF;
+            CREATE TYPE "{schema}"."{type_name}" AS ({field_defs});
+        EXCEPTION
+            WHEN duplicate_object THEN NULL;
         END $$;"#
     )
 }
 
-pub fn create_enum_type_query(type_name: &str, variants: &[String]) -> String {
+pub fn create_enum_type_query(schema: &PgSchema, type_name: &str, variants: &[String]) -> String {
     let variant_defs = variants
         .iter()
-        .map(|v| format!(r#"'{}'"#, v))
+        .map(|v| format!(r#"'{v}'"#))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -86,7 +102,7 @@ pub fn create_enum_type_query(type_name: &str, variants: &[String]) -> String {
             format!(
                 r#"
             BEGIN
-                EXECUTE format('ALTER TYPE %I ADD VALUE %L', '{type_name}', '{variant}');
+                EXECUTE format('ALTER TYPE "{schema}"."{type_name}" ADD VALUE %L', '{variant}');
             EXCEPTION
                 WHEN duplicate_object THEN
                     RAISE NOTICE 'enum value already exists, skipping';
@@ -99,15 +115,21 @@ pub fn create_enum_type_query(type_name: &str, variants: &[String]) -> String {
     format!(
         r#"DO $$ 
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '{type_name}') THEN
-                CREATE TYPE "{type_name}" AS ENUM ({variant_defs});
-            END IF;
+            BEGIN
+                CREATE TYPE "{schema}"."{type_name}" AS ENUM ({variant_defs});
+            EXCEPTION
+                WHEN duplicate_object THEN NULL;
+            END;
             {reconcile}
         END $$;"#
     )
 }
 
-pub fn create_tuple_type_query(type_name: &str, fields: &[PostgresType]) -> String {
+pub fn create_tuple_type_query(
+    schema: &PgSchema,
+    type_name: &str,
+    fields: &[PostgresType],
+) -> String {
     let field_defs = fields
         .iter()
         .enumerate()
@@ -118,16 +140,16 @@ pub fn create_tuple_type_query(type_name: &str, fields: &[PostgresType]) -> Stri
     format!(
         r#"DO $$ 
         BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '{type_name}') THEN
-                CREATE TYPE "{type_name}" AS ({field_defs});
-            END IF;
+            CREATE TYPE "{schema}"."{type_name}" AS ({field_defs});
+        EXCEPTION
+            WHEN duplicate_object THEN NULL;
         END $$;"#
     )
 }
 
-pub fn alter_table_query(table_name: &str, alterations: &[String]) -> String {
+pub fn alter_table_query(schema: &PgSchema, table_name: &str, alterations: &[String]) -> String {
     let alterations_sql = alterations.join(", ");
-    format!(r#"ALTER TABLE "{table_name}" {alterations_sql};"#)
+    format!(r#"ALTER TABLE "{schema}"."{table_name}" {alterations_sql};"#)
 }
 
 pub fn write_conflict_res<const DELIMINATOR: bool, W: Write>(
@@ -145,14 +167,19 @@ pub fn write_conflict_res<const DELIMINATOR: bool, W: Write>(
 #[cfg(test)]
 mod tests {
     use super::create_enum_type_query;
+    use crate::processor::PgSchema;
 
     #[test]
     fn create_enum_type_query_is_single_do_block() {
-        let query =
-            create_enum_type_query("status_enum", &["Open".to_string(), "Closed".to_string()]);
+        let schema = PgSchema::Public;
+        let query = create_enum_type_query(
+            &schema,
+            "status_enum",
+            &["Open".to_string(), "Closed".to_string()],
+        );
 
         assert_eq!(query.matches("DO $$").count(), 1);
-        assert!(query.contains(r#"CREATE TYPE "status_enum" AS ENUM ('Open', 'Closed')"#));
-        assert!(query.contains("ALTER TYPE %I ADD VALUE %L"));
+        assert!(query.contains(r#"CREATE TYPE "public"."status_enum" AS ENUM ('Open', 'Closed')"#));
+        assert!(query.contains("ADD VALUE"));
     }
 }

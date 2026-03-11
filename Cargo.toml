@@ -68,12 +68,13 @@ clap = { version = "4.5", features = ["derive"] }
 starknet = "0.17"
 
 # Database
-sqlx = { version = "0.8", features = [
+sqlx = { version = "0.8.6", features = [
   "runtime-tokio",
   "sqlite",
   "postgres",
   "any",
 ] }
+crc = "3.4.0"
 
 # Hashing
 blake3 = "1.8.3"

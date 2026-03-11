@@ -292,17 +292,17 @@ impl From<TableSchema> for CreateTable {
     }
 }
 
-// impl From<CreateTable> for TableSchema {
-//     fn from(schema: CreateTable) -> Self {
-//         TableSchema {
-//             id: schema.id,
-//             name: schema.name,
-//             attributes: schema.attributes,
-//             primary: schema.primary,
-//             columns: schema.columns,
-//         }
-//     }
-// }
+impl From<CreateTable> for TableSchema {
+    fn from(schema: CreateTable) -> Self {
+        TableSchema {
+            id: schema.id,
+            name: schema.name,
+            attributes: schema.attributes,
+            primary: schema.primary,
+            columns: schema.columns,
+        }
+    }
+}
 
 impl From<TableSchema> for UpdateTable {
     fn from(schema: TableSchema) -> Self {
@@ -316,17 +316,17 @@ impl From<TableSchema> for UpdateTable {
     }
 }
 
-// impl From<UpdateTable> for TableSchema {
-//     fn from(schema: UpdateTable) -> Self {
-//         TableSchema {
-//             id: schema.id,
-//             name: schema.name,
-//             attributes: schema.attributes,
-//             primary: schema.primary,
-//             columns: schema.columns,
-//         }
-//     }
-// }
+impl From<UpdateTable> for TableSchema {
+    fn from(schema: UpdateTable) -> Self {
+        TableSchema {
+            id: schema.id,
+            name: schema.name,
+            attributes: schema.attributes,
+            primary: schema.primary,
+            columns: schema.columns,
+        }
+    }
+}
 
 impl InsertsFields {
     #[allow(private_bounds)]

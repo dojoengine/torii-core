@@ -5,40 +5,30 @@ use sqlx::migrate::Migrator;
 use sqlx::Postgres;
 pub use sqlx::{PgPool, Transaction};
 
-use crate::SqlxResult;
+use crate::{migration::SchemaMigrator, SqlxResult};
 
 #[async_trait]
 pub trait PostgresConnection {
     fn pool(&self) -> &PgPool;
 
-    async fn new_transaction(&self) -> SqlxResult<Transaction<'_, Postgres>> {
+    async fn begin(&self) -> SqlxResult<Transaction<'_, Postgres>> {
         Ok(self.pool().begin().await?)
     }
-    async fn migrate(&self, migrator: Migrator) -> SqlxResult<()> {
-        Ok(migrator.run(self.pool()).await?)
+    async fn migrate(&self, schema: Option<&'static str>, migrator: Migrator) -> SqlxResult<()> {
+        let result = match schema {
+            Some(schema) => SchemaMigrator::new(schema, migrator).run(self.pool()).await,
+            None => migrator.run(self.pool()).await,
+        };
+        Ok(result?)
     }
     async fn execute_queries(&self, queries: &[String]) -> SqlxResult<()> {
-        let mut transaction = self.new_transaction().await?;
+        let mut transaction = self.begin().await?;
         for query in queries {
             sqlx::query(query).execute(&mut *transaction).await?;
         }
         transaction.commit().await
     }
 }
-
-// #[async_trait]
-// impl PostgresConnection for PgPool {
-//     fn pool(&self) -> &PgPool {
-//         self
-//     }
-// }
-
-// #[async_trait]
-// impl PostgresConnection for Arc<PgPool> {
-//     fn pool(&self) -> &PgPool {
-//         &**self
-//     }
-// }
 
 #[async_trait]
 impl<T: Deref<Target = PgPool> + Send + Sync + 'static> PostgresConnection for T {

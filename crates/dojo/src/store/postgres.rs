@@ -15,7 +15,6 @@ use torii_introspect::postgres::{PgFelt, SqlxResult};
 use torii_introspect::schema::ColumnKeyTrait;
 use torii_postgres::db::PostgresConnection;
 
-const DOJO_MIGRATION_SQL: &str = include_str!("../migrate.sql");
 const DOJO_COLUMN_TABLE: &str = "dojo.columns";
 const DOJO_TABLE_TABLE: &str = "dojo.table";
 
@@ -217,7 +216,7 @@ impl<T: PostgresConnection + Send + Sync> PgStore<T> {
     pub async fn initialize(&self) -> SqlxResult<()> {
         println!("Running Dojo migrations...");
         println!("{:?}", DOJO_STORE_MIGRATIONS);
-        self.migrate(DOJO_STORE_MIGRATIONS).await.err_into()
+        self.migrate(Some("dojo"), DOJO_STORE_MIGRATIONS).await
     }
 }
 
