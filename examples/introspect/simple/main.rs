@@ -12,7 +12,6 @@ use torii_test_utils::{resolve_path_like, EventIterator, FakeProvider};
 const DB_URL: &str = "postgres://torii:torii@localhost:5432/torii";
 // const CHAIN_DATA_PATH: &str = "~/tc-tests/pistols";
 const CHAIN_DATA_PATH: &str = "~/tc-tests/blob-arena";
-const MANAGER_PATH: &str = "~/tc-tests/manager/";
 
 #[tokio::main]
 async fn main() {
@@ -22,12 +21,11 @@ async fn main() {
     let provider = FakeProvider::new(contracts_path);
     let event_iterator = EventIterator::new(events_path);
 
-    let pool = PgPoolOptions::new().connect(DB_URL).await.unwrap();
-    let pool = Arc::new(pool);
+    let pool = Arc::new(PgPoolOptions::new().connect(DB_URL).await.unwrap());
     let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), provider);
     let mut db = PostgresSimpleDb::new(pool.clone());
     decoder.store.initialize().await.unwrap();
-    db.initialize().await.unwrap();
+    // db.initialize().await.unwrap();
     let context = EventContext::default();
     let mut success = 0;
     for (n, event) in event_iterator.enumerate() {
@@ -47,6 +45,9 @@ async fn main() {
             Err(err) => {
                 println!("Failed to decode event: {:?}", err);
             }
+        }
+        if n == 100 {
+            break;
         }
         if n % 1000 == 0 {
             println!("Decoded {n} events");

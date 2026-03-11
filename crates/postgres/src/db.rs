@@ -1,5 +1,4 @@
 use std::ops::Deref;
-use std::sync::Arc;
 
 pub use async_trait::async_trait;
 use sqlx::migrate::Migrator;

@@ -1,6 +1,6 @@
 use crate::schema::TableInfo;
 use async_trait::async_trait;
-use introspect_types::{Attribute, ColumnDef, ColumnInfo, PrimaryTypeDef, TypeDef};
+use introspect_types::{Attribute, ColumnDef, PrimaryTypeDef, TypeDef};
 use starknet_types_core::felt::Felt;
 
 #[async_trait]

@@ -18,7 +18,7 @@ use torii_postgres::db::PostgresConnection;
 const DOJO_COLUMN_TABLE: &str = "dojo.column";
 const DOJO_TABLE_TABLE: &str = "dojo.table";
 
-pub const DOJO_STORE_MIGRATIONS: Migrator = sqlx::migrate!("./migrations");
+pub const DOJO_STORE_MIGRATIONS: Migrator = sqlx::migrate!();
 
 #[derive(Debug, thiserror::Error)]
 pub enum DojoPgStoreError {
@@ -180,7 +180,7 @@ pub fn make_set_table_query(
         r#"
         INSERT INTO dojo.table (owner, id, name, attributes, keys, "values", legacy)
             VALUES ({owner}, {id}, {name}, ARRAY[{attributes}]::TEXT[], ARRAY[{keys}], ARRAY[{values}], {legacy})
-            ON CONFLICT (id) DO UPDATE SET
+            ON CONFLICT (owner, id) DO UPDATE SET
             name = EXCLUDED.name,
             attributes = EXCLUDED.attributes,
             keys = EXCLUDED.keys,
@@ -208,6 +208,8 @@ impl<T> Deref for PgStore<T> {
 
 impl<T: PostgresConnection + Send + Sync> PgStore<T> {
     pub async fn initialize(&self) -> SqlxResult<()> {
+        println!("Running Dojo migrations...");
+        println!("{:?}", DOJO_STORE_MIGRATIONS);
         self.migrate(DOJO_STORE_MIGRATIONS).await.err_into()
     }
 }
