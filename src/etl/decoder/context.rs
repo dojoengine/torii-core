@@ -227,8 +227,17 @@ impl DecoderContext {
                         all_envelopes.extend(envelopes);
                     }
                     Err(e) => {
+                        let selector = event
+                            .keys
+                            .first()
+                            .map(|felt| format!("{felt:#x}"))
+                            .unwrap_or_else(|| "<missing>".to_string());
                         tracing::warn!(
                             target: "torii::etl::decoder_context",
+                            contract = %format!("{:#x}", event.from_address),
+                            selector = %selector,
+                            tx_hash = %format!("{:#x}", event.transaction_hash),
+                            block_number = event.block_number,
                             "Decoder '{}' failed: {}",
                             decoder.decoder_name(),
                             e
@@ -270,8 +279,17 @@ impl DecoderContext {
                     all_envelopes.extend(envelopes);
                 }
                 Err(e) => {
+                    let selector = event
+                        .keys
+                        .first()
+                        .map(|felt| format!("{felt:#x}"))
+                        .unwrap_or_else(|| "<missing>".to_string());
                     tracing::warn!(
                         target: "torii::etl::decoder_context",
+                        contract = %format!("{:#x}", event.from_address),
+                        selector = %selector,
+                        tx_hash = %format!("{:#x}", event.transaction_hash),
+                        block_number = event.block_number,
                         "Decoder '{}' failed: {}",
                         decoder.decoder_name(),
                         e
