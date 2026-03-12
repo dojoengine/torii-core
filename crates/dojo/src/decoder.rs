@@ -22,7 +22,7 @@ use std::sync::RwLock;
 use torii::etl::event::EmittedEventExt;
 use torii::etl::{Decoder, Envelope, EventBody};
 use torii_introspect::events::IntrospectMsg;
-use torii_introspect::schema::TableSchema;
+use torii_introspect::schema::{TableMetadata, TableSchema};
 use torii_introspect::EventId;
 
 pub const DOJO_ID_FIELD_NAME: &str = "entity_id";
@@ -50,8 +50,7 @@ pub trait DojoTableEvent<Store, F>: Sized + CairoEventInfo + Debug {
     type Msg: EventId;
     async fn event_to_msg(
         self,
-        owner: &Felt,
-        block_number: Option<u64>,
+        raw: &EmittedEvent,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg>;
 }
@@ -70,14 +69,15 @@ where
 {
     type Error = DojoToriiError;
 
-    async fn save_table_at_block(
+    async fn save_table(
         &self,
         owner: &Felt,
         table: &DojoTable,
-        block_number: Option<u64>,
+        tx_hash: &Felt,
+        block_number: u64,
     ) -> DojoToriiResult<()> {
         self.store
-            .save_table_at_block(owner, table, block_number)
+            .save_table(owner, table, tx_hash, block_number)
             .await
             .map_err(DojoToriiError::store_error)
     }
@@ -85,26 +85,6 @@ where
     async fn load_tables(&self, owners: &[Felt]) -> DojoToriiResult<Vec<DojoTable>> {
         self.store
             .load_tables(owners)
-            .await
-            .map_err(DojoToriiError::store_error)
-    }
-
-    async fn load_table_map(
-        &self,
-        owners: &[Felt],
-    ) -> Result<HashMap<Felt, DojoTableInfo>, Self::Error> {
-        self.store
-            .load_table_map(owners)
-            .await
-            .map_err(DojoToriiError::store_error)
-    }
-
-    async fn load_tables_at_blocks(
-        &self,
-        owner_blocks: &[(Felt, u64)],
-    ) -> Result<Vec<DojoTable>, Self::Error> {
-        self.store
-            .load_tables_at_blocks(owner_blocks)
             .await
             .map_err(DojoToriiError::store_error)
     }
@@ -180,11 +160,16 @@ where
         namespace: &str,
         name: &str,
         schema: DojoSchema,
-        block_number: Option<u64>,
+        metadata: &impl TableMetadata,
     ) -> DojoToriiResult<TableSchema> {
         let full_table = DojoTable::from_schema(schema, namespace, name, dojo_primary_def());
-        self.save_table_at_block(owner, &full_table, block_number)
-            .await?;
+        self.save_table(
+            owner,
+            &full_table,
+            metadata.tx_hash(),
+            metadata.block_number(),
+        )
+        .await?;
         let (id, table) = full_table.clone().into();
         {
             if let Some(existing) = self.tables.read()?.get(&id) {
@@ -204,7 +189,7 @@ where
         owner: &Felt,
         id: Felt,
         schema: DojoSchema,
-        block_number: Option<u64>,
+        meta_data: &impl TableMetadata,
     ) -> DojoToriiResult<TableSchema> {
         let mut info = {
             let mut tables = self.tables.write()?;
@@ -219,7 +204,7 @@ where
         info.value_fields = value_fields;
         let table = (id, info).into();
         self.store
-            .save_table_at_block(owner, &table, block_number)
+            .save_table(owner, &table, meta_data.tx_hash(), meta_data.block_number())
             .await
             .map_err(DojoToriiError::store_error)?;
         let (_, info) = table.clone().into();
@@ -229,17 +214,16 @@ where
 
     async fn process_table_event<'a, E>(
         &self,
-        from_address: &Felt,
+        raw: &EmittedEvent,
         keys: &'a [Felt],
         values: &'a [Felt],
-        block_number: Option<u64>,
     ) -> DojoToriiResult<IntrospectMsg>
     where
         E: DojoTableEvent<Store, F> + CairoEvent<CairoSerde<SliceFeltSource<'a>>> + Send,
         E::Msg: Into<IntrospectMsg>,
     {
         deserialize_data::<E>(keys, values)?
-            .event_to_msg(from_address, block_number, self)
+            .event_to_msg(raw, self)
             .await
             .ok_into()
     }
@@ -260,47 +244,31 @@ where
 
     pub async fn decode_event_data(
         &self,
+        raw: &EmittedEvent,
         selector: &Felt,
         keys: &[Felt],
         values: &[Felt],
-        from_address: &Felt,
-        block_number: Option<u64>,
     ) -> DojoToriiResult<IntrospectMsg> {
         let selector_raw = selector.to_raw();
         match selector_raw {
             ModelRegistered::SELECTOR_RAW => {
-                self.process_table_event::<ModelRegistered>(
-                    from_address,
-                    keys,
-                    values,
-                    block_number,
-                )
-                .await
+                self.process_table_event::<ModelRegistered>(raw, keys, values)
+                    .await
             }
             ModelWithSchemaRegistered::SELECTOR_RAW => {
-                self.process_table_event::<ModelWithSchemaRegistered>(
-                    from_address,
-                    keys,
-                    values,
-                    block_number,
-                )
-                .await
+                self.process_table_event::<ModelWithSchemaRegistered>(raw, keys, values)
+                    .await
             }
             ModelUpgraded::SELECTOR_RAW => {
-                self.process_table_event::<ModelUpgraded>(from_address, keys, values, block_number)
+                self.process_table_event::<ModelUpgraded>(raw, keys, values)
                     .await
             }
             EventRegistered::SELECTOR_RAW => {
-                self.process_table_event::<EventRegistered>(
-                    from_address,
-                    keys,
-                    values,
-                    block_number,
-                )
-                .await
+                self.process_table_event::<EventRegistered>(raw, keys, values)
+                    .await
             }
             EventUpgraded::SELECTOR_RAW => {
-                self.process_table_event::<EventUpgraded>(from_address, keys, values, block_number)
+                self.process_table_event::<EventUpgraded>(raw, keys, values)
                     .await
             }
             StoreSetRecord::SELECTOR_RAW => {
@@ -324,14 +292,7 @@ where
         let (selector, keys) = raw
             .split_keys()
             .ok_or(DojoToriiError::MissingEventSelector)?;
-        self.decode_event_data(
-            selector,
-            keys,
-            &raw.data,
-            &raw.from_address,
-            raw.block_number,
-        )
-        .await
+        self.decode_event_data(raw, selector, keys, &raw.data).await
     }
 }
 
@@ -367,18 +328,19 @@ mod tests {
 
     #[derive(Default)]
     struct FakeStore {
-        saved_blocks: Mutex<Vec<Option<u64>>>,
+        saved_blocks: Mutex<Vec<u64>>,
     }
 
     #[async_trait]
     impl DojoStoreTrait for FakeStore {
         type Error = FakeStoreError;
 
-        async fn save_table_at_block(
+        async fn save_table(
             &self,
             _owner: &Felt,
             _table: &DojoTable,
-            block_number: Option<u64>,
+            _tx_hash: &Felt,
+            block_number: u64,
         ) -> Result<(), Self::Error> {
             self.saved_blocks.lock().unwrap().push(block_number);
             Ok(())
@@ -442,7 +404,7 @@ mod tests {
                     (2, "health", false),
                     (3, "armor", false),
                 ]),
-                Some(42),
+                &(42, Felt::ZERO),
             )
             .await
             .unwrap();
@@ -451,6 +413,6 @@ mod tests {
             .with_table(&table_id, |table| Ok(table.columns.len()))
             .unwrap();
         assert_eq!(parsed, 3);
-        assert_eq!(*decoder.store.saved_blocks.lock().unwrap(), vec![Some(42)]);
+        assert_eq!(*decoder.store.saved_blocks.lock().unwrap(), vec![42]);
     }
 }

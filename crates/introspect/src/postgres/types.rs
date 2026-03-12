@@ -1,18 +1,33 @@
 use introspect_types::{Attribute, PrimaryDef, PrimaryTypeDef};
 use itertools::Itertools;
-use sqlx::types::Json;
+use sqlx::{
+    postgres::{PgHasArrayType, PgTypeInfo},
+    types::Json,
+};
 use starknet_types_core::felt::Felt;
 
 #[derive(sqlx::Type)]
-#[sqlx(type_name = "introspect.attribute")]
+#[sqlx(type_name = "introspect.attribute", no_pg_array)]
 pub struct PgAttribute {
     pub name: String,
     pub data: Option<Vec<u8>>,
 }
 
+impl PgHasArrayType for PgAttribute {
+    fn array_type_info() -> PgTypeInfo {
+        PgTypeInfo::with_name("introspect._attribute")
+    }
+}
+
 #[derive(sqlx::Type)]
-#[sqlx(transparent)]
-pub struct PgFelt(pub Vec<u8>);
+#[sqlx(type_name = "felt252")]
+pub struct PgFelt(pub [u8; 32]);
+
+impl PgHasArrayType for PgFelt {
+    fn array_type_info() -> PgTypeInfo {
+        PgTypeInfo::with_name("_felt252")
+    }
+}
 
 impl From<PgAttribute> for Attribute {
     fn from(value: PgAttribute) -> Self {
@@ -32,15 +47,24 @@ impl From<Attribute> for PgAttribute {
     }
 }
 
+impl From<&Attribute> for PgAttribute {
+    fn from(value: &Attribute) -> Self {
+        PgAttribute {
+            name: value.name.clone(),
+            data: value.data.clone(),
+        }
+    }
+}
+
 impl From<PgFelt> for Felt {
     fn from(value: PgFelt) -> Self {
-        Felt::from_bytes_be_slice(&value.0)
+        Felt::from_bytes_be(&value.0)
     }
 }
 
 impl From<Felt> for PgFelt {
     fn from(value: Felt) -> Self {
-        PgFelt(value.to_bytes_be().to_vec())
+        PgFelt(value.to_bytes_be())
     }
 }
 
@@ -58,6 +82,26 @@ impl From<PgPrimary> for PrimaryDef {
             name: value.name,
             attributes: value.attributes.into_iter().map_into().collect(),
             type_def: value.type_def.0,
+        }
+    }
+}
+
+impl From<PrimaryDef> for PgPrimary {
+    fn from(value: PrimaryDef) -> Self {
+        PgPrimary {
+            name: value.name,
+            attributes: value.attributes.into_iter().map_into().collect(),
+            type_def: Json(value.type_def),
+        }
+    }
+}
+
+impl From<&PrimaryDef> for PgPrimary {
+    fn from(value: &PrimaryDef) -> Self {
+        PgPrimary {
+            name: value.name.clone(),
+            attributes: value.attributes.iter().cloned().map_into().collect(),
+            type_def: Json(value.type_def.clone()),
         }
     }
 }

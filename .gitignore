@@ -18,6 +18,8 @@ perf/runs/
 .DS_Store
 **/.DS_Store
 /data/
+pg-data/
+**/pg-data/
 /bins/torii-tokens/torii-data/
 /torii-data/image-cache/
 HANDOFF.md

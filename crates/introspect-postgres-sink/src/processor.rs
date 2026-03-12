@@ -1,17 +1,11 @@
 use crate::json::PostgresJsonSerializer;
-use crate::sql::{
-    add_column_if_not_exists_query, add_column_query, alter_table_query, modify_column_query,
-    write_conflict_res,
-};
+use crate::sql::write_conflict_res;
 use crate::table::{PgTable, PgTableError};
-use crate::types::{PgTableStructure, PgTypeError, PostgresFieldExtractor};
-use crate::HasherExt;
+use crate::types::PgTypeError;
 use crate::INTROSPECT_PG_SINK_MIGRATIONS;
-use async_trait::async_trait;
 use introspect_types::ResultInto;
 use serde_json::Serializer as JsonSerializer;
 use sqlx::PgPool;
-use sqlx::Row;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -20,7 +14,8 @@ use std::ops::Deref;
 use std::sync::{PoisonError, RwLock};
 use torii::etl::EventContext;
 use torii_introspect::events::IntrospectMsg;
-use torii_introspect::{CreateTable, InsertsFields, UpdateTable};
+use torii_introspect::schema::TableSchema;
+use torii_introspect::InsertsFields;
 use torii_postgres::{PostgresConnection, SqlxError};
 
 #[derive(Debug, thiserror::Error)]
@@ -123,81 +118,67 @@ impl PostgresTables {
     pub fn create_table(
         &self,
         schema: &PgSchema,
-        event: CreateTable,
-        _context: &EventContext,
+        to_table: impl Into<TableSchema>,
         queries: &mut Vec<String>,
     ) -> PgDbResult<()> {
-        if let Some(table) = self.read()?.get(&event.id) {
-            if table.name() == event.name {
+        let table = to_table.into();
+        if let Some(existing) = self.read()?.get(&table.id) {
+            if existing.name() == table.name {
                 Ok(())
             } else {
                 Err(PgDbError::TableAlreadyExists(
-                    event.id,
-                    event.name,
-                    table.name().to_string(),
+                    table.id,
+                    table.name,
+                    existing.name().to_string(),
                 ))
             }
         } else {
-            let (id, table) = PgTable::new_from_event(schema, event, queries)?;
+            let (id, table) = PgTable::new_from_table(schema, table, queries)?;
             let mut tables = self.0.write().unwrap();
             tables.insert(id, table);
             Ok(())
         }
     }
 
-    pub fn update_table(
-        &self,
-        schema: &PgSchema,
-        event: UpdateTable,
-        context: &EventContext,
-        queries: &mut Vec<String>,
-    ) -> PgDbResult<()> {
-        let create_snapshot = CreateTable {
-            id: event.id,
-            name: event.name,
-            attributes: event.attributes,
-            primary: event.primary,
-            columns: event.columns,
-        };
-        let Some(existing) = self.read()?.get(&create_snapshot.id) else {
-            return self.create_table(schema, create_snapshot, context, queries);
-        };
+    // pub fn update_table(
+    //     &self,
+    //     schema: &PgSchema,
+    //     event: UpdateTable,
+    //     context: &EventContext,
+    //     queries: &mut Vec<String>,
+    // ) -> PgDbResult<()> {
+    //     let mut tables = self.write()?;
+    //     let Some(existing) = tables.get_mut(&event.id) else {
+    //         return self.create_table(schema, event, queries);
+    //     };
 
-        if existing.name() != create_snapshot.name {
-            return Err(PgDbError::TableAlreadyExists(
-                create_snapshot.id,
-                create_snapshot.name,
-                existing.name().to_string(),
-            ));
-        }
+    //     let mut type_queries = Vec::new();
+    //     let mut type_schema = PgTableStructure::new_empty(schema);
+    //     let branch = xxhash_rust::xxh3::Xxh3::new_based(existing.name());
+    //     let mut alterations = Vec::new();
+    //     for column in &event.columns {
+    //         let pg_type = column.extract_type(&mut type_schema, &branch, &mut type_queries)?;
+    //         match existing.columns.get(&column.id) {
+    //             None => alterations.push(add_column_query(&column.name, &pg_type)),
+    //             Some(old) if old.type_def != column.type_def => {
+    //                 alterations.push(modify_column_query(&column.name, &pg_type));
+    //             }
+    //             _ => {}
+    //         }
+    //     }
+    //     queries.extend(type_queries);
+    //     if !alterations.is_empty() {
+    //         queries.push(alter_table_query(schema, existing.name(), &alterations));
+    //     }
 
-        let mut type_queries = Vec::new();
-        let mut type_schema = PgTableStructure::new_empty(schema);
-        let branch = xxhash_rust::xxh3::Xxh3::new_based(existing.name());
-        let mut alterations = Vec::new();
-        for column in &create_snapshot.columns {
-            let pg_type = column.extract_type(&mut type_schema, &branch, &mut type_queries)?;
-            match existing.columns.get(&column.id) {
-                None => alterations.push(add_column_query(&column.name, &pg_type)),
-                Some(old) if old.type_def != column.type_def => {
-                    alterations.push(modify_column_query(&column.name, &pg_type));
-                }
-                _ => {}
-            }
-        }
-        queries.extend(type_queries);
-        if !alterations.is_empty() {
-            queries.push(alter_table_query(schema, existing.name(), &alterations));
-        }
+    //     let mut ignored_queries = Vec::new();
+    //     let (_, replacement_table) =
+    //         PgTable::new_from_table(&schema, event.clone(), &mut ignored_queries)?;
+    //     let mut tables = self.write()?;
 
-        let mut ignored_queries = Vec::new();
-        let (_, replacement_table) =
-            PgTable::new_from_event(&schema, create_snapshot.clone(), &mut ignored_queries)?;
-        let mut tables = self.write()?;
-
-        tables.insert(event.id, replacement_table);
-        Ok(())
-    }
+    //     tables.insert(event.id, replacement_table);
+    //     Ok(())
+    // }
 
     pub fn set_table_dead(&self, id: &Felt) -> PgDbResult<()> {
         let mut tables = self.write()?;
@@ -261,12 +242,8 @@ impl PostgresTables {
         queries: &mut Vec<String>,
     ) -> PgDbResult<()> {
         match msg {
-            IntrospectMsg::CreateTable(event) => {
-                self.create_table(schema, event.clone(), context, queries)
-            }
-            IntrospectMsg::UpdateTable(event) => {
-                self.update_table(schema, event.clone(), context, queries)
-            }
+            IntrospectMsg::CreateTable(event) => self.create_table(schema, event.clone(), queries),
+            IntrospectMsg::UpdateTable(_) => Ok(()),
             IntrospectMsg::AddColumns(event) => self.set_table_dead(&event.table),
             IntrospectMsg::DropColumns(event) => self.set_table_dead(&event.table),
             IntrospectMsg::RetypeColumns(event) => self.set_table_dead(&event.table),
@@ -302,49 +279,19 @@ impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
         }
     }
 
-    pub async fn initialize(&self) -> PgDbResult<()> {
+    pub async fn migrate_introspect_sink(&self) -> PgDbResult<()> {
         self.migrate(Some("introspect"), INTROSPECT_PG_SINK_MIGRATIONS)
-            .await?;
-        let tables = self.load_stored_tables().await?;
-        if !tables.is_empty() {
-            self.bootstrap_tables(&tables).await?;
-            tracing::info!(
-                target: "torii::sinks::introspect::postgres",
-                tables = tables.len(),
-                "Loaded sink schema state from PostgreSQL storage"
-            );
+            .await
+            .err_into()
+    }
+    pub fn load_tables_no_commit(&self, table_schemas: Vec<TableSchema>) -> PgDbResult<()> {
+        let mut tables = self.tables.write()?;
+        let mut queries = Vec::new();
+        for table in table_schemas {
+            let (id, table) = PgTable::new_from_table(&self.schema, table, &mut queries)?;
+            tables.insert(id, table);
         }
         Ok(())
-    }
-
-    pub async fn bootstrap_tables(&self, tables: &[CreateTable]) -> PgDbResult<()> {
-        let context = EventContext::default();
-        for table in tables {
-            self.process_message(&IntrospectMsg::CreateTable(table.clone()), &context)
-                .await?;
-            self.execute_queries(&self.bootstrap_reconcile_queries(table)?)
-                .await?;
-        }
-        Ok(())
-    }
-
-    fn bootstrap_reconcile_queries(&self, table: &CreateTable) -> PgDbResult<Vec<String>> {
-        let mut type_queries = Vec::new();
-        let mut type_schema = PgTableStructure::new_empty(&self.schema);
-        let branch = xxhash_rust::xxh3::Xxh3::new_based(&table.name);
-        let mut alterations = Vec::new();
-        for column in &table.columns {
-            let pg_type = column.extract_type(&mut type_schema, &branch, &mut type_queries)?;
-            alterations.push(add_column_if_not_exists_query(&column.name, &pg_type));
-        }
-        if !alterations.is_empty() {
-            type_queries.push(alter_table_query(&self.schema, &table.name, &alterations));
-        }
-        Ok(type_queries)
-    }
-
-    pub fn has_tables(&self) -> bool {
-        !self.tables.read().unwrap().is_empty()
     }
 
     pub async fn process_message(
@@ -369,6 +316,7 @@ pub struct MessageWithContext<'a, M> {
 mod tests {
     use super::*;
     use introspect_types::{ColumnDef, PrimaryDef, PrimaryTypeDef, TypeDef};
+    use torii_introspect::{CreateTable, UpdateTable};
 
     fn primary() -> PrimaryDef {
         PrimaryDef {
@@ -407,63 +355,61 @@ mod tests {
         }
     }
 
-    #[test]
-    fn update_table_creates_unknown_table() {
-        let mut tables = PostgresTables::default();
-        let mut queries = Vec::new();
-        let schema = PgSchema::Public;
-        tables
-            .update_table(
-                &schema,
-                update_table(1, vec![column(10, "duelist_count")]),
-                &EventContext::default(),
-                &mut queries,
-            )
-            .unwrap();
+    // #[test]
+    // fn update_table_creates_unknown_table() {
+    //     let mut tables = PostgresTables::default();
+    //     let mut queries = Vec::new();
+    //     let schema = PgSchema::Public;
+    //     tables
+    //         .update_table(
+    //             &schema,
+    //             update_table(1, vec![column(10, "duelist_count")]),
+    //             &mut queries,
+    //         )
+    //         .unwrap();
 
-        assert!(!queries.is_empty());
-        assert!(queries
-            .iter()
-            .any(|query| query.contains("CREATE TABLE IF NOT EXISTS")));
-        assert!(tables.read().unwrap().contains_key(&Felt::from(1_u64)));
-    }
+    //     assert!(!queries.is_empty());
+    //     assert!(queries
+    //         .iter()
+    //         .any(|query| query.contains("CREATE TABLE IF NOT EXISTS")));
+    //     assert!(tables.read().unwrap().contains_key(&Felt::from(1_u64)));
+    // }
 
-    #[test]
-    fn update_table_emits_alter_queries_for_new_columns() {
-        let mut tables = PostgresTables::default();
-        let mut create_queries = Vec::new();
-        let schema = PgSchema::Public;
-        tables
-            .create_table(
-                &schema,
-                create_table(1, vec![column(10, "duelist_count")]),
-                &EventContext::default(),
-                &mut create_queries,
-            )
-            .unwrap();
+    // #[test]
+    // fn update_table_emits_alter_queries_for_new_columns() {
+    //     let mut tables = PostgresTables::default();
+    //     let mut create_queries = Vec::new();
+    //     let schema = PgSchema::Public;
+    //     tables
+    //         .create_table(
+    //             &schema,
+    //             create_table(1, vec![column(10, "duelist_count")]),
+    //             &mut create_queries,
+    //         )
+    //         .unwrap();
 
-        let mut update_queries = Vec::new();
-        tables
-            .update_table(
-                &schema,
-                update_table(
-                    1,
-                    vec![
-                        column(10, "duelist_count"),
-                        column(11, "alive_duelist_count"),
-                    ],
-                ),
-                &EventContext::default(),
-                &mut update_queries,
-            )
-            .unwrap();
+    //     let mut update_queries = Vec::new();
+    //     tables
+    //         .update_table(
+    //             &schema,
+    //             update_table(
+    //                 1,
+    //                 vec![
+    //                     column(10, "duelist_count"),
+    //                     column(11, "alive_duelist_count"),
+    //                 ],
+    //             ),
+    //             &EventContext::default(),
+    //             &mut update_queries,
+    //         )
+    //         .unwrap();
 
-        assert!(update_queries
-            .iter()
-            .any(|query| query.contains("ALTER TABLE") && query.contains("alive_duelist_count")));
-        assert!(tables.read().unwrap()[&Felt::from(1_u64)]
-            .columns
-            .values()
-            .any(|column| column.name == "alive_duelist_count"));
-    }
+    //     assert!(update_queries
+    //         .iter()
+    //         .any(|query| query.contains("ALTER TABLE") && query.contains("alive_duelist_count")));
+    //     assert!(tables.read().unwrap()[&Felt::from(1_u64)]
+    //         .columns
+    //         .values()
+    //         .any(|column| column.name == "alive_duelist_count"));
+    // }
 }

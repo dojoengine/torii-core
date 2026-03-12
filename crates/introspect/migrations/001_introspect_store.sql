@@ -37,22 +37,29 @@ BEGIN
 END $$;
 
 CREATE TABLE IF NOT EXISTS introspect.table (
-    PRIMARY KEY (owner, id),
     owner felt252,
     id felt252 NOT NULL,
     name TEXT NOT NULL,
     attributes TEXT[] NOT NULL DEFAULT '{}',
-    primary introspect.primary_def NOT NULL,
-    columns felt252[] NOT NULL,
-    alive BOOLEAN NOT NULL DEFAULT TRUE
+    primary_def introspect.primary_def NOT NULL,
+    column_ids felt252[] NOT NULL,
+    alive BOOLEAN NOT NULL DEFAULT TRUE,
+    __created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    __updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    __created_block uint64 NOT NULL,
+    __updated_block uint64 NOT NULL,
+    __created_tx felt252 NOT NULL,
+    __updated_tx felt252 NOT NULL,
+    PRIMARY KEY (owner, id)
+
 );
 
 CREATE TABLE IF NOT EXISTS introspect.columns(
-    PRIMARY KEY (owner, "table", id),
     owner felt252,
     "table" felt252 NOT NULL,
     id felt252 NOT NULL,
     name TEXT NOT NULL,
     attributes introspect.attribute[] NOT NULL DEFAULT '{}',
-    type_def jsonb NOT NULL
+    type_def jsonb NOT NULL,
+    PRIMARY KEY (owner, "table", id)
 );

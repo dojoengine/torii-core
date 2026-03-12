@@ -4779,6 +4779,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "starknet",
  "starknet-types-core",
  "thiserror 2.0.18",
  "tonic-build",

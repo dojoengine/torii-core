@@ -5,8 +5,8 @@ use introspect_types::{ColumnDef, ColumnDefs, FeltIds, PrimaryDef};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use thiserror::Error;
+use torii_introspect::schema::TableSchema;
 use torii_introspect::tables::RecordSchema;
-use torii_introspect::CreateTable;
 
 #[derive(Debug, Error)]
 pub enum PgTableError {
@@ -64,13 +64,14 @@ impl PgTable {
         self.postgres.schema()
     }
 
-    pub fn new_from_event(
+    pub fn new_from_table(
         schema: &PgSchema,
-        event: CreateTable,
+        to_table: impl Into<TableSchema>,
         queries: &mut Vec<String>,
     ) -> TableResult<(Felt, Self)> {
-        Self::new(schema, event.name, event.primary, event.columns, queries)
-            .map(|table| (event.id, table))
+        let table = to_table.into();
+        Self::new(schema, table.name, table.primary, table.columns, queries)
+            .map(|pg_table| (table.id, pg_table))
     }
 
     pub fn get_columns(&self, selectors: &[Felt]) -> TableResult<Vec<&ColumnDef>> {

@@ -10,6 +10,7 @@ use dojo_introspect::events::{
 };
 use dojo_introspect::DojoSchemaFetcher;
 use introspect_types::FeltIds;
+use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
 use torii_introspect::events::{CreateTable, DeleteRecords, InsertsFields, UpdateTable};
 
@@ -22,17 +23,16 @@ where
     type Msg = CreateTable;
     async fn event_to_msg(
         self,
-        owner: &Felt,
-        block_number: Option<u64>,
+        raw: &EmittedEvent,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg> {
         decoder
             .register_table(
-                owner,
+                &raw.from_address,
                 &self.namespace,
                 &self.name,
                 self.schema,
-                block_number,
+                raw,
             )
             .await
             .map(Into::into)
@@ -48,13 +48,12 @@ where
     type Msg = CreateTable;
     async fn event_to_msg(
         self,
-        owner: &Felt,
-        block_number: Option<u64>,
+        raw: &EmittedEvent,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg> {
         let schema = decoder.fetcher.schema(self.address).await?;
         decoder
-            .register_table(owner, &self.namespace, &self.name, schema, block_number)
+            .register_table(&raw.from_address, &self.namespace, &self.name, schema, raw)
             .await
             .map(Into::into)
     }
@@ -69,13 +68,12 @@ where
     type Msg = CreateTable;
     async fn event_to_msg(
         self,
-        owner: &Felt,
-        block_number: Option<u64>,
+        raw: &EmittedEvent,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg> {
         let schema = decoder.fetcher.schema(self.address).await?;
         decoder
-            .register_table(owner, &self.namespace, &self.name, schema, block_number)
+            .register_table(&raw.from_address, &self.namespace, &self.name, schema, raw)
             .await
             .map(Into::into)
     }
@@ -90,13 +88,12 @@ where
     type Msg = UpdateTable;
     async fn event_to_msg(
         self,
-        owner: &Felt,
-        block_number: Option<u64>,
+        raw: &EmittedEvent,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg> {
         let schema = decoder.fetcher.schema(self.address).await?;
         decoder
-            .update_table(owner, self.selector, schema, block_number)
+            .update_table(&raw.from_address, self.selector, schema, raw)
             .await
             .map(Into::into)
     }
@@ -111,13 +108,12 @@ where
     type Msg = UpdateTable;
     async fn event_to_msg(
         self,
-        owner: &Felt,
-        block_number: Option<u64>,
+        raw: &EmittedEvent,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg> {
         let schema = decoder.fetcher.schema(self.address).await?;
         decoder
-            .update_table(owner, self.selector, schema, block_number)
+            .update_table(&raw.from_address, self.selector, schema, raw)
             .await
             .map(Into::into)
     }
