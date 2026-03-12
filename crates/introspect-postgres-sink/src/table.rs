@@ -1,6 +1,6 @@
 use crate::processor::PgSchema;
 use crate::types::PgTypeError;
-use crate::{PgStructDef, PgTableStructure, PostgresField};
+use crate::{PgStructDef, PgTableStructure, PostgresField, PostgresType};
 use introspect_types::{ColumnDef, ColumnDefs, FeltIds, PrimaryDef};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
@@ -14,6 +14,8 @@ pub enum PgTableError {
     ColumnNotFound(Felt, String),
     #[error(transparent)]
     TypeError(#[from] PgTypeError),
+    #[error("Current type mismatch error")]
+    TypeMismatch,
 }
 
 pub type TableResult<T> = std::result::Result<T, PgTableError>;
@@ -35,6 +37,10 @@ impl PgStructDef {
             fields: fields.into_iter().map(|f| (f.name, f.pg_type)).collect(),
         }
     }
+    pub fn add_member(&mut self, name: &str, pg_type: PostgresType) {
+        self.order.push(field.name.clone());
+        self.fields.insert(field.name.clone(), field.pg_type);
+    }
 }
 
 impl PgTable {
@@ -54,6 +60,25 @@ impl PgTable {
             columns: columns.as_hash_map(),
             alive: true,
         })
+    }
+
+    pub fn upgrade(
+        &mut self,
+        new_primary: PrimaryDef,
+        new_columns: Vec<ColumnDef>,
+        queries: &mut Vec<String>,
+    ) -> TableResult<()> {
+        self.postgres.upgrade(
+            &self.primary,
+            &new_primary,
+            &self.columns,
+            &new_columns,
+            queries,
+        )?;
+        self.primary = new_primary;
+        self.order = new_columns.ids();
+        self.columns = new_columns.as_hash_map();
+        Ok(())
     }
 
     pub fn name(&self) -> &str {

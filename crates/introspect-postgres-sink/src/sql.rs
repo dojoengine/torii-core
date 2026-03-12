@@ -2,51 +2,6 @@ use std::io::Write;
 
 use crate::{processor::PgSchema, PostgresField, PostgresType};
 
-pub fn add_column_query(name: &str, pg_type: &PostgresType) -> String {
-    format!("ADD COLUMN \"{name}\" {pg_type}")
-}
-
-pub fn add_column_if_not_exists_query(name: &str, pg_type: &PostgresType) -> String {
-    format!("ADD COLUMN IF NOT EXISTS \"{name}\" {pg_type}")
-}
-
-pub fn modify_column_query(name: &str, pg_type: &PostgresType) -> String {
-    format!("ALTER COLUMN \"{name}\" TYPE {pg_type}")
-}
-
-pub fn add_member_query(
-    schema: &PgSchema,
-    type_name: &str,
-    member_name: &str,
-    pg_type: &PostgresType,
-) -> String {
-    format!(
-        r#"
-DO $$
-BEGIN
-    BEGIN
-        ALTER TYPE "{schema}"."{type_name}" ADD ATTRIBUTE "{member_name}" {pg_type};
-    EXCEPTION
-        WHEN duplicate_object OR duplicate_column THEN
-            RAISE NOTICE 'attribute already exists, skipping';
-    END;
-END $$;
-"#,
-        pg_type = pg_type
-    )
-}
-
-pub fn modify_member_query(
-    schema: &PgSchema,
-    type_name: &str,
-    member_name: &str,
-    pg_type: &PostgresType,
-) -> String {
-    format!(
-        r#"ALTER TYPE "{schema}"."{type_name}" ALTER ATTRIBUTE "{member_name}" TYPE {pg_type};"#
-    )
-}
-
 pub fn add_enum_variant_query(schema: &PgSchema, type_name: &str, variant: &str) -> String {
     format!(
         r#"
@@ -95,23 +50,6 @@ pub fn create_enum_type_query(schema: &PgSchema, type_name: &str, variants: &[St
         .map(|v| format!(r#"'{v}'"#))
         .collect::<Vec<_>>()
         .join(", ");
-
-    let reconcile = variants
-        .iter()
-        .map(|variant| {
-            format!(
-                r#"
-            BEGIN
-                EXECUTE format('ALTER TYPE "{schema}"."{type_name}" ADD VALUE %L', '{variant}');
-            EXCEPTION
-                WHEN duplicate_object THEN
-                    RAISE NOTICE 'enum value already exists, skipping';
-            END;
-"#
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
     format!(
         r#"DO $$ 
         BEGIN
@@ -120,7 +58,6 @@ pub fn create_enum_type_query(schema: &PgSchema, type_name: &str, variants: &[St
             EXCEPTION
                 WHEN duplicate_object THEN NULL;
             END;
-            {reconcile}
         END $$;"#
     )
 }
@@ -147,11 +84,6 @@ pub fn create_tuple_type_query(
     )
 }
 
-pub fn alter_table_query(schema: &PgSchema, table_name: &str, alterations: &[String]) -> String {
-    let alterations_sql = alterations.join(", ");
-    format!(r#"ALTER TABLE "{schema}"."{table_name}" {alterations_sql};"#)
-}
-
 pub fn write_conflict_res<const DELIMINATOR: bool, W: Write>(
     writer: &mut W,
     table: &str,
@@ -161,6 +93,69 @@ pub fn write_conflict_res<const DELIMINATOR: bool, W: Write>(
     write!(
         writer,
         r#""{column}" = COALESCE(EXCLUDED."{column}", "{table}"."{column}"){separator}"#,
+    )
+}
+
+pub fn rename_table_query(schema: &PgSchema, old_name: &str, new_name: &str) -> String {
+    format!(r#"ALTER TABLE "{schema}"."{old_name}" RENAME TO "{new_name}";"#)
+}
+
+pub fn rename_column_query(
+    schema: &PgSchema,
+    table: &str,
+    old_name: &str,
+    new_name: &str,
+) -> String {
+    format!(r#"ALTER TABLE "{schema}"."{table}" RENAME COLUMN "{old_name}" TO "{new_name}";"#)
+}
+
+pub fn modify_column_query(schema: &PgSchema, name: &str, pg_type: &PostgresType) -> String {
+    format!(r#"ALTER COLUMN "{schema}"."{name}" TYPE {pg_type}"#)
+}
+
+pub fn add_column_query(name: &str, pg_type: &PostgresType) -> String {
+    format!("ADD COLUMN \"{name}\" {pg_type}")
+}
+
+pub fn alter_table_query(schema: &PgSchema, table_name: &str, alterations: &[String]) -> String {
+    let alterations_sql = alterations.join(", ");
+    format!(r#"ALTER TABLE "{schema}"."{table_name}" {alterations_sql};"#)
+}
+
+// pub fn add_column_if_not_exists_query(name: &str, pg_type: &PostgresType) -> String {
+//     format!("ADD COLUMN IF NOT EXISTS \"{name}\" {pg_type}")
+// }
+
+pub fn add_member_query(
+    schema: &PgSchema,
+    type_name: &str,
+    member_name: &str,
+    pg_type: &PostgresType,
+) -> String {
+    format!(
+        r#"
+        DO $$
+        BEGIN
+            BEGIN
+                ALTER TYPE "{schema}"."{type_name}" ADD ATTRIBUTE "{member_name}" {pg_type};
+            EXCEPTION
+                WHEN duplicate_object OR duplicate_column THEN
+                    RAISE NOTICE 'attribute already exists, skipping';
+            END;
+        END $$;
+        "#,
+        pg_type = pg_type
+    )
+}
+
+pub fn modify_member_query(
+    schema: &PgSchema,
+    type_name: &str,
+    member_name: &str,
+    pg_type: &PostgresType,
+) -> String {
+    format!(
+        r#"ALTER TYPE "{schema}"."{type_name}" ALTER ATTRIBUTE "{member_name}" TYPE {pg_type};"#
     )
 }
 

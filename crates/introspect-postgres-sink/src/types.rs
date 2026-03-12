@@ -3,6 +3,7 @@ use crate::sql::{
     create_enum_type_query, create_struct_type_query, create_table_query, create_tuple_type_query,
 };
 use crate::utils::HasherExt;
+use introspect_types::type_def::TypeName;
 use introspect_types::{
     ColumnDef, EnumDef, FixedArrayDef, MemberDef, OptionDef, PrimaryDef, PrimaryTypeDef, StructDef,
     TupleDef, TypeDef, VariantDef,
@@ -16,11 +17,11 @@ use xxhash_rust::xxh3::Xxh3;
 
 #[derive(Debug)]
 pub struct PgTableStructure {
-    schema: PgSchema,
-    columns: HashMap<String, PostgresType>,
-    structs: HashMap<String, PgStructDef>,
-    tuples: HashMap<String, Vec<PostgresType>>,
-    enums: HashMap<String, PgRustEnum>,
+    pub schema: PgSchema,
+    pub columns: HashMap<String, PostgresType>,
+    pub structs: HashMap<String, PgStructDef>,
+    pub tuples: HashMap<String, Vec<PostgresType>>,
+    pub enums: HashMap<String, PgRustEnum>,
 }
 
 #[derive(Debug, Error)]
@@ -33,6 +34,14 @@ pub enum PgTypeError {
     NotStructType(String),
     #[error("Unsupported type for {0}")]
     UnsupportedType(String),
+    #[error("Cannot Alter column {0} from {1} to {2}")]
+    TypeUpgradeError(String, String, String),
+}
+
+impl PgTypeError {
+    pub fn type_upgrade_error(column: &str, old: &PostgresType, new: &TypeDef) -> Self {
+        Self::TypeUpgradeError(column.to_string(), old.to_string(), new.type_name())
+    }
 }
 
 pub type PgTypeResult<T> = std::result::Result<T, PgTypeError>;
@@ -168,10 +177,10 @@ impl PgRustEnum {
             .collect()
     }
 
-    pub fn all_fields(&self) -> Vec<PostgresField> {
+    pub fn all_fields(&self, schema: &PgSchema) -> Vec<PostgresField> {
         let mut fields = vec![PostgresField::new_enum(
             "variant".to_string(),
-            &self.variants_type_name,
+            &schema.qualify(&self.variants_type_name),
         )];
         fields.extend(self.variant_fields());
         fields
@@ -539,7 +548,7 @@ impl PgTableStructure {
         queries.push(create_struct_type_query(
             &self.schema,
             &struct_name,
-            &enum_def.all_fields(),
+            &enum_def.all_fields(&self.schema),
         ));
         let qualified_name = self.schema.qualify(&struct_name);
         self.enums.insert(qualified_name.clone(), enum_def);

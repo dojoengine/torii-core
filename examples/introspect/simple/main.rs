@@ -9,8 +9,10 @@ use torii_introspect_postgres_sink::processor::{PgSchema, PostgresSimpleDb};
 use torii_test_utils::{resolve_path_like, EventIterator, FakeProvider};
 
 const DB_URL: &str = "postgres://torii:torii@localhost:5432/torii";
-// const CHAIN_DATA_PATH: &str = "~/tc-tests/pistols";
-const CHAIN_DATA_PATH: &str = "~/tc-tests/blob-arena";
+const CHAIN_DATA_PATH: &str = "~/tc-tests/pistols";
+const SCHEMA_NAME: &str = "pistols";
+// const CHAIN_DATA_PATH: &str = "~/tc-tests/blob-arena";
+// const SCHEMA_NAME: &str = "blob-arena";
 const BATCH_SIZE: usize = 1000;
 
 #[tokio::main]
@@ -23,11 +25,12 @@ async fn main() {
 
     let pool = Arc::new(PgPoolOptions::new().connect(DB_URL).await.unwrap());
     let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), provider);
-    let db = PostgresSimpleDb::new(pool.clone(), PgSchema::Public);
+    let db = PostgresSimpleDb::new(pool.clone(), SCHEMA_NAME);
     decoder.store.initialize().await.unwrap();
-    db.migrate_introspect_sink().await.unwrap();
+    db.initialize_introspect_pg_sink().await.unwrap();
     let context = EventContext::default();
     let mut event_n = 0;
+    let mut success = 0;
     let mut running = true;
     while running {
         let mut msgs = Vec::with_capacity(BATCH_SIZE);
@@ -50,7 +53,14 @@ async fn main() {
             };
         }
         let msgs_with_context = msgs.iter().map(|msg| (msg, &context)).collect_vec();
-        db.process_messages(msgs_with_context).await.unwrap();
-        println!("Processed batch of events, total events processed: {event_n}");
+        for res in db.process_messages(msgs_with_context).await.unwrap() {
+            match res {
+                Err(err) => println!("Failed to process message: {err:?}"),
+                Ok(_) => success += 1,
+            }
+        }
+        println!(
+            "Processed batch of events, total events processed: {event_n}, successful: {success}"
+        );
     }
 }

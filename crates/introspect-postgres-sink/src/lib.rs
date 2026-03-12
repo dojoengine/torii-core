@@ -4,6 +4,7 @@ pub mod sink;
 pub mod sql;
 pub mod table;
 pub mod types;
+pub mod upgrade;
 pub mod utils;
 use sqlx::migrate::Migrator;
 pub use types::{PgRustEnum, PgStructDef, PgTableStructure, PostgresField, PostgresType};
