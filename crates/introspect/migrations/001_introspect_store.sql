@@ -5,51 +5,42 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'felt252') THEN
         CREATE DOMAIN felt252 AS bytea CHECK (octet_length(VALUE) = 32);
     END IF;
-END $$;
 
-DO $$ 
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_type t
-        JOIN pg_namespace n ON t.typnamespace = n.oid
-        WHERE t.typname = 'attribute' AND n.nspname = 'introspect'
-    ) THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'uint64') THEN
+        CREATE DOMAIN uint64 AS NUMERIC(20, 0)
+        CHECK (VALUE >= 0 AND VALUE < power(2::numeric, 64));
+    END IF;
+
+    IF to_regtype('introspect.attribute') IS NULL THEN
         CREATE TYPE introspect.attribute AS (
             name TEXT,
             data bytea
         );
     END IF;
-END $$;
 
-DO $$ 
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_type t
-        JOIN pg_namespace n ON t.typnamespace = n.oid
-        WHERE t.typname = 'primary_def' AND n.nspname = 'introspect'
-    ) THEN
+    IF to_regtype('introspect.primary_def') IS NULL THEN
         CREATE TYPE introspect.primary_def AS (
             name TEXT,
-            attributes TEXT[] NOT NULL DEFAULT '{}',
-            type_def jsonb NOT NULL
+            attributes introspect.attribute[],
+            type_def jsonb
         );
     END IF;
 END $$;
 
-CREATE TABLE IF NOT EXISTS introspect.table (
+CREATE TABLE IF NOT EXISTS introspect.tables (
     owner felt252,
     id felt252 NOT NULL,
     name TEXT NOT NULL,
-    attributes TEXT[] NOT NULL DEFAULT '{}',
+    attributes introspect.attribute[] NOT NULL DEFAULT '{}',
     primary_def introspect.primary_def NOT NULL,
     column_ids felt252[] NOT NULL,
     alive BOOLEAN NOT NULL DEFAULT TRUE,
-    __created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    __updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    __created_block uint64 NOT NULL,
-    __updated_block uint64 NOT NULL,
-    __created_tx felt252 NOT NULL,
-    __updated_tx felt252 NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_block uint64 NOT NULL,
+    updated_block uint64 NOT NULL,
+    created_tx felt252 NOT NULL,
+    updated_tx felt252 NOT NULL,
     PRIMARY KEY (owner, id)
 
 );

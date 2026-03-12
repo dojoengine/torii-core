@@ -4576,6 +4576,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "itertools 0.14.0",
  "metrics",
  "metrics-exporter-prometheus",
  "prost 0.13.5",

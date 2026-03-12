@@ -122,21 +122,23 @@ impl PostgresTables {
         queries: &mut Vec<String>,
     ) -> PgDbResult<()> {
         let table = to_table.into();
-        if let Some(existing) = self.read()?.get(&table.id) {
-            if existing.name() == table.name {
-                Ok(())
-            } else {
-                Err(PgDbError::TableAlreadyExists(
-                    table.id,
-                    table.name,
-                    existing.name().to_string(),
-                ))
-            }
-        } else {
-            let (id, table) = PgTable::new_from_table(schema, table, queries)?;
-            let mut tables = self.0.write().unwrap();
-            tables.insert(id, table);
-            Ok(())
+        self.assert_table_not_exists(&table.id, &table.name)?;
+        let (id, table) = PgTable::new_from_table(schema, table, queries)?;
+        println!("Creating table with id: {id}, name: {}", table.name());
+        let mut tables = self.0.write().unwrap();
+        println!("locked");
+        tables.insert(id, table);
+        Ok(())
+    }
+
+    pub fn assert_table_not_exists(&self, id: &Felt, name: &str) -> PgDbResult<()> {
+        match self.read()?.get(id) {
+            Some(existing) => Err(PgDbError::TableAlreadyExists(
+                *id,
+                name.to_string(),
+                existing.name().to_string(),
+            )),
+            None => Ok(()),
         }
     }
 
@@ -302,6 +304,19 @@ impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
         let mut queries = Vec::new();
         self.tables
             .handle_message(&self.schema, msg, context, &mut queries)?;
+        self.execute_queries(&queries).await?;
+        Ok(())
+    }
+
+    pub async fn process_messages(
+        &self,
+        msgs: Vec<(&IntrospectMsg, &EventContext)>,
+    ) -> PgDbResult<()> {
+        let mut queries = Vec::new();
+        for (msg, context) in msgs {
+            self.tables
+                .handle_message(&self.schema, msg, context, &mut queries)?;
+        }
         self.execute_queries(&queries).await?;
         Ok(())
     }

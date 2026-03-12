@@ -192,7 +192,7 @@ tempfile = "3.13"
 tracing-subscriber.workspace = true
 tower.workspace = true
 resolve-path.workspace = true
-
+itertools.workspace = true
 dojo-introspect.workspace = true
 
 torii-sql-sink.workspace = true

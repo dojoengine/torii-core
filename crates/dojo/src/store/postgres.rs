@@ -12,7 +12,7 @@ use sqlx::{FromRow, PgPool, Postgres};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::ops::Deref;
-use torii_introspect::postgres::owned::{column_info_insert_query, PgTypeDef, TABLE_INSERT_QUERY};
+use torii_introspect::postgres::owned::{column_info_insert_query, PgTypeDef};
 use torii_introspect::postgres::{PgFelt, SqlxResult};
 use torii_introspect::schema::ColumnKeyTrait;
 use torii_postgres::db::PostgresConnection;
@@ -32,7 +32,7 @@ pub const FETCH_COLUMNS_QUERY: &str = r#"
 
 pub const INSERT_TABLE_QUERY: &str = r#"
     INSERT INTO dojo.tables (owner, id, name, attributes, keys, "values", legacy, updated_at, created_block, updated_block, created_tx, updated_tx)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8, $8, $9, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8::uint64, $8::uint64, $9, $9)
         ON CONFLICT (owner, id) DO UPDATE SET
         name = EXCLUDED.name,
         attributes = EXCLUDED.attributes,
@@ -50,14 +50,6 @@ pub const INSERT_COLUMN_QUERY: &str = r#"
         name = EXCLUDED.name,
         attributes = EXCLUDED.attributes,
         type_def = EXCLUDED.type_def"#;
-
-pub const INSERT_META_DATA_QUERY: &str = r#"
-            INSERT INTO dojo.tables (owner, id, name, __created_block, __updated_block, __created_tx, __updated_tx)
-            VALUES ($1, $2, $3, $4, $4, $5, $5) 
-            ON CONFLICT (owner, id, name) DO UPDATE SET
-            __updated_at = NOW(), 
-            __updated_block = EXCLUDED.__updated_block, 
-            __updated_tx = EXCLUDED.__updated_tx"#;
 
 pub const DOJO_STORE_MIGRATIONS: Migrator = sqlx::migrate!();
 
@@ -173,7 +165,7 @@ pub fn table_insert_query(
     created_block: u64,
     created_tx: &Felt,
 ) -> Query<'static, Postgres, PgArguments> {
-    sqlx::query::<Postgres>(TABLE_INSERT_QUERY)
+    sqlx::query::<Postgres>(INSERT_TABLE_QUERY)
         .bind(PgFelt::from(*owner))
         .bind(PgFelt::from(*id))
         .bind(name.to_owned())
@@ -219,7 +211,6 @@ impl<T> Deref for PgStore<T> {
 impl<T: PostgresConnection + Send + Sync> PgStore<T> {
     pub async fn initialize(&self) -> SqlxResult<()> {
         println!("Running Dojo migrations...");
-        println!("{:?}", DOJO_STORE_MIGRATIONS);
         self.migrate(Some("dojo"), DOJO_STORE_MIGRATIONS).await
     }
 }
