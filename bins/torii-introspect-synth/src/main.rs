@@ -519,10 +519,10 @@ async fn reset_schema(pool: &PgPool) -> Result<()> {
     ))
     .execute(pool)
     .await?;
-    sqlx::query(r#"DROP SCHEMA IF EXISTS dojo CASCADE"#)
+    sqlx::query(r"DROP SCHEMA IF EXISTS dojo CASCADE")
         .execute(pool)
         .await?;
-    sqlx::query(r#"DROP SCHEMA IF EXISTS introspect CASCADE"#)
+    sqlx::query(r"DROP SCHEMA IF EXISTS introspect CASCADE")
         .execute(pool)
         .await?;
     sqlx::query(&format!(r#"DROP TABLE IF EXISTS "{TABLE_NAME}""#))
@@ -533,11 +533,11 @@ async fn reset_schema(pool: &PgPool) -> Result<()> {
 
 async fn verify_run(pool: &PgPool, config: &Config) -> Result<Verification> {
     let dojo_table_rows: i64 = sqlx::query_scalar(
-        r#"
+        r"
         SELECT COUNT(*)::BIGINT
         FROM dojo.tables
         WHERE name = $1
-        "#,
+        ",
     )
     .bind(TABLE_NAME)
     .fetch_one(pool)
@@ -567,13 +567,13 @@ async fn verify_run(pool: &PgPool, config: &Config) -> Result<Verification> {
     );
 
     let introspect_migrations_exist: bool = sqlx::query_scalar(
-        r#"
+        r"
         SELECT EXISTS (
             SELECT 1
             FROM information_schema.tables
             WHERE table_schema = 'introspect' AND table_name = '_sqlx_migrations'
         )
-        "#,
+        ",
     )
     .fetch_one(pool)
     .await?;
@@ -583,13 +583,13 @@ async fn verify_run(pool: &PgPool, config: &Config) -> Result<Verification> {
     );
 
     let synthetic_table_exists: bool = sqlx::query_scalar(
-        r#"
+        r"
         SELECT EXISTS (
             SELECT 1
             FROM information_schema.tables
             WHERE table_schema = $1 AND table_name = $2
         )
-        "#,
+        ",
     )
     .bind(TABLE_SCHEMA)
     .bind(TABLE_NAME)

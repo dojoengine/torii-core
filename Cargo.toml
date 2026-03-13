@@ -10,8 +10,10 @@ members = [
   "crates/introspect",
   "crates/dojo",
   "crates/introspect-postgres-sink",
+  "crates/introspect-sqlite-sink",
   "crates/testing",
   "crates/postgres",
+  "crates/sqlite",
   "bins/torii-erc20",
   "bins/torii-erc20-synth",
   "bins/torii-introspect-bin",
@@ -125,8 +127,10 @@ torii-erc1155.path = "crates/torii-erc1155"
 torii-dojo.path = "./crates/dojo"
 torii-introspect.path = "crates/introspect"
 torii-introspect-postgres-sink.path = "./crates/introspect-postgres-sink"
+torii-introspect-sqlite-sink.path = "./crates/introspect-sqlite-sink"
 torii-test-utils.path = "crates/testing"
 torii-postgres.path = "crates/postgres"
+torii-sqlite.path = "crates/sqlite"
 
 
 [lib]

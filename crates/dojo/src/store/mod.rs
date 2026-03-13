@@ -1,5 +1,6 @@
 pub mod json;
 pub mod postgres;
+pub mod sqlite;
 
 use crate::table::DojoTableInfo;
 use crate::DojoTable;

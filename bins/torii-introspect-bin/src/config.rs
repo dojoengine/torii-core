@@ -1,15 +1,22 @@
 use anyhow::{bail, Result};
 use clap::Parser;
 use starknet::core::types::Felt;
+use std::path::Path;
 
-/// Dojo introspect indexer backed by the PostgreSQL sink.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageBackend {
+    Postgres,
+    Sqlite,
+}
+
+/// Dojo introspect indexer backed by PostgreSQL or SQLite.
 ///
 /// This binary targets explicitly configured Dojo contracts and persists the
-/// decoded introspect messages into PostgreSQL tables.
+/// decoded introspect messages into SQL tables.
 #[derive(Parser, Debug)]
 #[command(name = "torii-introspect")]
 #[command(
-    about = "Index Dojo introspect events into PostgreSQL",
+    about = "Index Dojo introspect events into PostgreSQL or SQLite",
     long_about = None
 )]
 pub struct Config {
@@ -33,9 +40,25 @@ pub struct Config {
     #[arg(long)]
     pub to_block: Option<u64>,
 
-    /// PostgreSQL URL used by the introspect sink.
+    /// Directory where local SQLite databases will be stored.
+    ///
+    /// Used only when `--storage-database-url` is omitted.
+    #[arg(long, default_value = "./torii-data")]
+    pub db_dir: String,
+
+    /// Optional engine database URL/path.
+    ///
+    /// Supports PostgreSQL (`postgres://...`) and SQLite (`sqlite:...` or file path).
+    /// When omitted, the engine uses `--storage-database-url` in PostgreSQL mode
+    /// or `<db-dir>/engine.db` in SQLite mode.
+    #[arg(long, env = "DATABASE_URL")]
+    pub database_url: Option<String>,
+
+    /// Optional PostgreSQL storage database URL.
+    ///
+    /// When omitted, the binary uses SQLite storage at `<db-dir>/introspect.db`.
     #[arg(long, env = "STORAGE_DATABASE_URL")]
-    pub storage_database_url: String,
+    pub storage_database_url: Option<String>,
 
     /// Port for the Torii gRPC/HTTP server.
     #[arg(long, default_value = "3000")]
@@ -53,7 +76,7 @@ pub struct Config {
     #[arg(long, default_value = "10000")]
     pub event_block_batch_size: u64,
 
-    /// Maximum PostgreSQL connections for the sink.
+    /// Maximum SQL connections for the storage backend.
     #[arg(long)]
     pub max_db_connections: Option<u32>,
 
@@ -75,17 +98,30 @@ impl Config {
             .collect()
     }
 
-    pub fn engine_database_url(&self) -> String {
-        self.storage_database_url.clone()
+    pub fn storage_backend(&self) -> StorageBackend {
+        if self.storage_database_url.is_some() {
+            StorageBackend::Postgres
+        } else {
+            StorageBackend::Sqlite
+        }
     }
 
-    pub fn storage_database_url(&self) -> Result<&str> {
-        if self.storage_database_url.starts_with("postgres://")
-            || self.storage_database_url.starts_with("postgresql://")
-        {
-            Ok(&self.storage_database_url)
-        } else {
-            bail!("--storage-database-url must be a PostgreSQL URL")
+    pub fn engine_database_url(&self, db_dir: &Path) -> String {
+        self.database_url
+            .clone()
+            .unwrap_or_else(|| match &self.storage_database_url {
+                Some(url) => url.clone(),
+                None => db_dir.join("engine.db").to_string_lossy().to_string(),
+            })
+    }
+
+    pub fn storage_database_url(&self, db_dir: &Path) -> Result<String> {
+        match &self.storage_database_url {
+            Some(url) if url.starts_with("postgres://") || url.starts_with("postgresql://") => {
+                Ok(url.clone())
+            }
+            Some(_) => bail!("--storage-database-url must be a PostgreSQL URL"),
+            None => Ok(db_dir.join("introspect.db").to_string_lossy().to_string()),
         }
     }
 }
@@ -130,7 +166,18 @@ mod tests {
             "sqlite://torii.db",
         ]);
 
-        assert!(cfg.storage_database_url().is_err());
+        assert!(cfg.storage_database_url(Path::new(".")).is_err());
+    }
+
+    #[test]
+    fn sqlite_is_default_when_storage_database_url_is_omitted() {
+        let cfg = Config::parse_from(["torii-introspect", "--contracts", "0x1"]);
+
+        assert_eq!(cfg.storage_backend(), StorageBackend::Sqlite);
+        assert!(cfg
+            .storage_database_url(Path::new("./torii-data"))
+            .unwrap()
+            .ends_with("torii-data/introspect.db"));
     }
 
     #[test]

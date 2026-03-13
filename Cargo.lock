@@ -4652,6 +4652,7 @@ dependencies = [
  "torii-common",
  "torii-introspect",
  "torii-postgres",
+ "torii-sqlite",
  "tracing",
 ]
 
@@ -4803,6 +4804,8 @@ dependencies = [
  "torii",
  "torii-dojo",
  "torii-introspect-postgres-sink",
+ "torii-introspect-sqlite-sink",
+ "torii-sqlite",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -4829,6 +4832,28 @@ dependencies = [
  "torii-postgres",
  "tracing",
  "xxhash-rust",
+]
+
+[[package]]
+name = "torii-introspect-sqlite-sink"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hex",
+ "introspect-types",
+ "metrics",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "starknet",
+ "starknet-types-core",
+ "thiserror 2.0.18",
+ "tokio",
+ "torii",
+ "torii-introspect",
+ "torii-sqlite",
+ "tracing",
 ]
 
 [[package]]
@@ -4916,6 +4941,15 @@ dependencies = [
  "tonic-web",
  "torii",
  "tracing",
+]
+
+[[package]]
+name = "torii-sqlite"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "sqlx",
 ]
 
 [[package]]
