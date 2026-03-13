@@ -2,7 +2,7 @@
 
 mod config;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Parser;
 use config::Config;
 use sqlx::postgres::PgPoolOptions;
@@ -14,7 +14,7 @@ use torii::etl::extractor::{
 };
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::postgres::PgStore;
-use torii_dojo::store::DojoStoreTrait;
+use torii_introspect_postgres_sink::processor::IntrospectPgDb;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -55,6 +55,14 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("Engine database URL: {}", engine_database_url);
     tracing::info!("Storage database URL: {}", storage_database_url);
     tracing::info!(
+        "Saved state handling: {}",
+        if config.ignore_saved_state {
+            "ignoring persisted extractor state"
+        } else {
+            "failing closed if persisted extractor state exists"
+        }
+    );
+    tracing::info!(
         "Observability: {}",
         if config.observability {
             "enabled"
@@ -69,6 +77,13 @@ async fn run_indexer(config: Config) -> Result<()> {
         ),
     );
     let extractor_provider = Arc::new(provider.clone());
+    let max_db_connections = config.max_db_connections.unwrap_or(5);
+    let pool = Arc::new(
+        PgPoolOptions::new()
+            .max_connections(max_db_connections)
+            .connect(&storage_database_url)
+            .await?,
+    );
 
     let extractor = Box::new(EventExtractor::new(
         extractor_provider.clone(),
@@ -89,69 +104,8 @@ async fn run_indexer(config: Config) -> Result<()> {
         },
     ));
 
-    let bootstrap_points = resolve_bootstrap_points(
-        &storage_database_url,
-        &contracts,
-        config.from_block,
-        config.ignore_saved_state,
-    )
-    .await?;
-    for point in &bootstrap_points {
-        tracing::info!(
-            target: "torii::dojo::metadata",
-            owner = %point.owner,
-            block_number = point.block_number,
-            had_saved_state = point.had_saved_state,
-            "Resolved Dojo schema bootstrap point"
-        );
-    }
-    let pool = Arc::new(
-        PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&storage_database_url)
-            .await?,
-    );
+    ensure_no_saved_state(pool.as_ref(), &contracts, config.ignore_saved_state).await?;
 
-    if !historical_bootstrap.unsafe_owners.is_empty()
-        && !config.allow_unsafe_latest_schema_bootstrap
-    {
-        anyhow::bail!(
-            "historical Dojo schema bootstrap is unavailable for contract(s): {}. \
-             Re-run with --ignore-saved-state, use a fresh database, or pass \
-             --allow-unsafe-latest-schema-bootstrap to keep the previous best-effort behavior",
-            historical_bootstrap
-                .unsafe_owners
-                .iter()
-                .map(|owner| format!("{owner:#x}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    initialize_dojo_schema(&secondary_store).await?;
-    let merged_store = MergedStore::new(primary_store, secondary_store);
-    let preloaded_tables = if historical_bootstrap.unsafe_owners.is_empty() {
-        tracing::info!(
-            target: "torii::dojo::metadata",
-            latest_tables = historical_bootstrap.latest_table_count,
-            historical_tables = historical_bootstrap.historical_table_count,
-            "Bootstrapping decoder from historical Dojo schema snapshot"
-        );
-        historical_bootstrap.tables
-    } else {
-        tracing::warn!(
-            target: "torii::dojo::metadata",
-            owners = historical_bootstrap
-                .unsafe_owners
-                .iter()
-                .map(|owner| format!("{owner:#x}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-            "Historical Dojo schema bootstrap unavailable; falling back to latest persisted schema"
-        );
-        merged_store.load_tables(&[]).await?
-    };
-
-    let bootstrap_tables = metadata_store.create_table_messages()?;
     let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), provider);
     decoder.store.initialize().await?;
     decoder.load_tables(&[]).await?;
@@ -163,10 +117,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         .engine_database_url(engine_database_url)
         .with_extractor(extractor)
         .add_decoder(decoder)
-        .add_sink_boxed(Box::new(
-            IntrospectPostgresSink::new(storage_database_url, config.max_db_connections)
-                .with_bootstrap_tables(bootstrap_tables),
-        ));
+        .add_sink_boxed(Box::new(IntrospectPgDb::new(pool.clone(), ())));
 
     let decoder_id = DecoderId::new("dojo-introspect");
     for contract in contracts {
@@ -186,28 +137,14 @@ async fn run_indexer(config: Config) -> Result<()> {
     Ok(())
 }
 
-async fn resolve_bootstrap_points(
-    database_url: &str,
+async fn ensure_no_saved_state(
+    pool: &sqlx::PgPool,
     contracts: &[Felt],
-    from_block: u64,
     ignore_saved_state: bool,
-) -> Result<Vec<SchemaBootstrapPoint>> {
+) -> Result<()> {
     if ignore_saved_state {
-        return Ok(contracts
-            .iter()
-            .copied()
-            .map(|owner| SchemaBootstrapPoint {
-                owner,
-                block_number: from_block,
-                had_saved_state: false,
-            })
-            .collect());
+        return Ok(());
     }
-
-    let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(database_url)
-        .await?;
 
     let engine_table_exists: bool = sqlx::query_scalar(
         r"
@@ -218,23 +155,15 @@ async fn resolve_bootstrap_points(
         )
         ",
     )
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await
     .unwrap_or(false);
 
     if !engine_table_exists {
-        return Ok(contracts
-            .iter()
-            .copied()
-            .map(|owner| SchemaBootstrapPoint {
-                owner,
-                block_number: from_block,
-                had_saved_state: false,
-            })
-            .collect());
+        return Ok(());
     }
 
-    let mut points = Vec::with_capacity(contracts.len());
+    let mut owners_with_saved_state = Vec::new();
     for owner in contracts {
         let state_key = format!("{owner:#x}");
         let saved_state: Option<String> = sqlx::query_scalar(
@@ -245,27 +174,26 @@ async fn resolve_bootstrap_points(
             ",
         )
         .bind(&state_key)
-        .fetch_optional(&pool)
+        .fetch_optional(pool)
         .await?;
 
-        let block_number = saved_state
-            .as_deref()
-            .and_then(parse_saved_state_block)
-            .unwrap_or(from_block);
-        points.push(SchemaBootstrapPoint {
-            owner: *owner,
-            block_number,
-            had_saved_state: saved_state.is_some(),
-        });
+        if saved_state.is_some() {
+            owners_with_saved_state.push(*owner);
+        }
     }
 
-    Ok(points)
-}
+    if owners_with_saved_state.is_empty() {
+        return Ok(());
+    }
 
-fn parse_saved_state_block(saved_state: &str) -> Option<u64> {
-    saved_state
-        .split('|')
-        .next()
-        .and_then(|part| part.strip_prefix("block:"))
-        .and_then(|block| block.parse::<u64>().ok())
+    bail!(
+        "persisted extractor state exists for contract(s): {}. \
+         Historical schema bootstrap is not supported on this branch; \
+         re-run with --ignore-saved-state or use a fresh database",
+        owners_with_saved_state
+            .iter()
+            .map(|owner| format!("{owner:#x}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }

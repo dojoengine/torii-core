@@ -14,11 +14,16 @@ members = [
   "crates/postgres",
   "bins/torii-erc20",
   "bins/torii-erc20-synth",
+  "bins/torii-introspect-bin",
   "bins/torii-introspect-synth",
   "bins/torii-tokens",
   "bins/torii-tokens-synth",
 ]
-default-members = ["bins/torii-erc20", "bins/torii-tokens"]
+default-members = [
+  "bins/torii-erc20",
+  "bins/torii-tokens",
+  "bins/torii-introspect-bin",
+]
 resolver = "2"
 
 
