@@ -30,6 +30,7 @@ pub trait PostgresConnection {
     }
 }
 
+#[allow(clippy::explicit_auto_deref)]
 #[async_trait]
 impl<T: Deref<Target = PgPool> + Send + Sync + 'static> PostgresConnection for T {
     fn pool(&self) -> &PgPool {

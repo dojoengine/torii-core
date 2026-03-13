@@ -466,7 +466,7 @@ impl PgTableStructure {
         columns: &[ColumnDef],
         queries: &mut Vec<String>,
     ) -> PgTypeResult<Self> {
-        let mut table = PgTableStructure::new_empty(&schema);
+        let mut table = PgTableStructure::new_empty(schema);
         let branch = Xxh3::new_based(name);
         let type_def = primary_key
             .type_def

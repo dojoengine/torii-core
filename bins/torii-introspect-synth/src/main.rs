@@ -8,6 +8,7 @@ use dojo_introspect::{DojoIntrospectResult, DojoSchema, DojoSchemaFetcher};
 use introspect_types::utils::{ascii_str_to_felt, string_to_cairo_serialize_byte_array};
 use introspect_types::CairoEventInfo;
 use serde::Serialize;
+use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use starknet::core::types::EmittedEvent;
 use starknet::core::utils::get_selector_from_name;
@@ -24,8 +25,8 @@ use torii::etl::sink::{EventBus, Sink, SinkContext};
 use torii::etl::Decoder;
 use torii::grpc::SubscriptionManager;
 use torii_dojo::decoder::DojoDecoder;
-use torii_dojo::manager::{DojoTableStore, JsonStore};
-use torii_introspect_postgres_sink::IntrospectPostgresSink;
+use torii_dojo::store::json::JsonStore;
+use torii_introspect_postgres_sink::processor::IntrospectPgDb;
 
 const EXTRACTOR_TYPE: &str = "synthetic_introspect";
 const STATE_KEY: &str = "last_block";
@@ -416,8 +417,13 @@ async fn main() -> Result<()> {
     }
 
     let started = Instant::now();
-
-    let mut sink = IntrospectPostgresSink::new(&config.db_url, Some(5));
+    let pool = Arc::new(
+        PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&config.db_url)
+            .await?,
+    );
+    let mut sink = IntrospectPgDb::new(pool, ());
     sink.initialize(
         Arc::new(EventBus::new(Arc::new(SubscriptionManager::new()))),
         &SinkContext {
@@ -433,10 +439,10 @@ async fn main() -> Result<()> {
         .await?,
     );
 
-    let manager = DojoTableStore::new(output_dir.join("dojo-manager")).await?;
-    let decoder: Arc<dyn Decoder> = Arc::new(
-        DojoDecoder::<DojoTableStore<JsonStore>, _>::new(manager, NeverFetchSchema, &[]).await?,
-    );
+    let decoder: Arc<dyn Decoder> = Arc::new(DojoDecoder::<JsonStore, _>::new(
+        output_dir.join("dojo-manager"),
+        NeverFetchSchema,
+    ));
     let decoder_context =
         DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new());
 

@@ -5,7 +5,7 @@ use torii::etl::EventContext;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::DojoToriiError;
-use torii_introspect_postgres_sink::processor::{PgSchema, PostgresSimpleDb};
+use torii_introspect_postgres_sink::processor::IntrospectPgDb;
 use torii_test_utils::{resolve_path_like, EventIterator, FakeProvider};
 
 const DB_URL: &str = "postgres://torii:torii@localhost:5432/torii";
@@ -25,7 +25,7 @@ async fn main() {
 
     let pool = Arc::new(PgPoolOptions::new().connect(DB_URL).await.unwrap());
     let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), provider);
-    let db = PostgresSimpleDb::new(pool.clone(), SCHEMA_NAME);
+    let db = IntrospectPgDb::new(pool.clone(), SCHEMA_NAME);
     decoder.store.initialize().await.unwrap();
     db.initialize_introspect_pg_sink().await.unwrap();
     let context = EventContext::default();

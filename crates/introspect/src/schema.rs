@@ -75,7 +75,7 @@ impl TableMetadata for (u64, Felt) {
     }
 }
 
-impl<'a> TableMetadata for (u64, &'a Felt) {
+impl TableMetadata for (u64, &Felt) {
     fn block_number(&self) -> u64 {
         self.0
     }

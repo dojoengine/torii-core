@@ -13,10 +13,8 @@ use torii::etl::extractor::{
     ContractEventConfig, EventExtractor, EventExtractorConfig, RetryPolicy,
 };
 use torii_dojo::decoder::DojoDecoder;
-use torii_dojo::manager::{DojoTableStore, MergedStore, PostgresStore, SchemaBootstrapPoint};
-use torii_dojo::store::postgres::initialize_dojo_schema;
+use torii_dojo::store::postgres::PgStore;
 use torii_dojo::store::DojoStoreTrait;
-use torii_introspect_postgres_sink::IntrospectPostgresSink;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -107,11 +105,13 @@ async fn run_indexer(config: Config) -> Result<()> {
             "Resolved Dojo schema bootstrap point"
         );
     }
+    let pool = Arc::new(
+        PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&storage_database_url)
+            .await?,
+    );
 
-    let primary_store = PostgresStore::new(&storage_database_url).await?;
-    let historical_bootstrap = primary_store
-        .load_historical_bootstrap(&bootstrap_points)
-        .await?;
     if !historical_bootstrap.unsafe_owners.is_empty()
         && !config.allow_unsafe_latest_schema_bootstrap
     {
@@ -127,11 +127,6 @@ async fn run_indexer(config: Config) -> Result<()> {
                 .join(", ")
         );
     }
-
-    let secondary_store = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&storage_database_url)
-        .await?;
     initialize_dojo_schema(&secondary_store).await?;
     let merged_store = MergedStore::new(primary_store, secondary_store);
     let preloaded_tables = if historical_bootstrap.unsafe_owners.is_empty() {
@@ -156,10 +151,11 @@ async fn run_indexer(config: Config) -> Result<()> {
         merged_store.load_tables(&[]).await?
     };
 
-    let metadata_store = DojoTableStore::from_loaded_tables(merged_store, preloaded_tables.clone());
     let bootstrap_tables = metadata_store.create_table_messages()?;
-    let decoder: DojoDecoder<DojoTableStore<MergedStore<PostgresStore, _>>, _> =
-        DojoDecoder::with_tables(metadata_store, provider, preloaded_tables);
+    let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), provider);
+    decoder.store.initialize().await?;
+    decoder.load_tables(&[]).await?;
+
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
 
     let mut torii_config = torii::ToriiConfig::builder()
