@@ -5,6 +5,8 @@ pub mod sql;
 pub mod table;
 pub mod types;
 pub mod utils;
-pub use sink::IntrospectPostgresSink;
+use sqlx::migrate::Migrator;
 pub use types::{PgRustEnum, PgStructDef, PgTableStructure, PostgresField, PostgresType};
 pub use utils::{truncate, HasherExt};
+
+pub const INTROSPECT_PG_SINK_MIGRATIONS: Migrator = sqlx::migrate!("./migrations");

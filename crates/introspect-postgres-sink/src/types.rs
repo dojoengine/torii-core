@@ -1,3 +1,4 @@
+use crate::processor::PgSchema;
 use crate::sql::{
     create_enum_type_query, create_struct_type_query, create_table_query, create_tuple_type_query,
 };
@@ -13,8 +14,9 @@ use thiserror::Error;
 use torii_introspect::CreateTable;
 use xxhash_rust::xxh3::Xxh3;
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct PgTableStructure {
+    schema: PgSchema,
     columns: HashMap<String, PostgresType>,
     structs: HashMap<String, PgStructDef>,
     tuples: HashMap<String, Vec<PostgresType>>,
@@ -141,25 +143,13 @@ impl From<PostgresField> for (String, PostgresType) {
     }
 }
 
-pub fn parse_variant_name(variant: &str) -> String {
-    if variant == "Some(T)" {
-        "Some".to_string()
-    } else {
-        variant.to_string()
-    }
-}
-
 impl PgRustEnum {
     pub fn new(branch: &Xxh3, name: &str, variants: Vec<PostgresField>) -> (String, Self) {
-        let struct_name = branch.type_name(name);
         let variants_type_name = branch.branch_to_type_name("variants", name);
-        let order = variants
-            .iter()
-            .map(|f| parse_variant_name(&f.name))
-            .collect();
+        let order = variants.iter().map(|f| f.name.clone()).collect();
         let variants_map = variants.into_iter().map(PostgresField::into).collect();
         (
-            struct_name.to_string(),
+            branch.type_name(name),
             Self {
                 order,
                 variants: variants_map,
@@ -178,10 +168,10 @@ impl PgRustEnum {
             .collect()
     }
 
-    pub fn all_fields(&self) -> Vec<PostgresField> {
+    pub fn all_fields(&self, schema: &PgSchema) -> Vec<PostgresField> {
         let mut fields = vec![PostgresField::new_enum(
             "variant".to_string(),
-            &self.variants_type_name,
+            &schema.qualify(&self.variants_type_name),
         )];
         fields.extend(self.variant_fields());
         fields
@@ -419,7 +409,7 @@ impl PostgresTypeExtractor for StructDef {
 impl PostgresTypeExtractor for EnumDef {
     fn extract_type(
         &self,
-        schema: &mut PgTableStructure,
+        structure: &mut PgTableStructure,
         branch: &Xxh3,
         queries: &mut Vec<String>,
     ) -> PgTypeResult<PostgresType> {
@@ -428,10 +418,10 @@ impl PostgresTypeExtractor for EnumDef {
             .iter()
             .map(|selector| {
                 let variant = &self.variants[selector];
-                variant.extract_field(schema, branch, queries)
+                variant.extract_field(structure, branch, queries)
             })
             .collect::<PgTypeResult<Vec<_>>>()?;
-        schema
+        structure
             .add_rust_enum(branch, &self.name, variants, queries)
             .map(PostgresType::RustEnum)
     }
@@ -470,13 +460,13 @@ impl PostgresTypeExtractor for OptionDef {
 
 impl PgTableStructure {
     pub fn new(
-        _schema: &Option<String>,
+        schema: &PgSchema,
         name: &str,
         primary_key: &PrimaryDef,
         columns: &[ColumnDef],
         queries: &mut Vec<String>,
     ) -> PgTypeResult<Self> {
-        let mut table = PgTableStructure::default();
+        let mut table = PgTableStructure::new_empty(schema);
         let branch = Xxh3::new_based(name);
         let type_def = primary_key
             .type_def
@@ -489,22 +479,28 @@ impl PgTableStructure {
             column_queries.push(format!("\"{}\" {type_def}", col.name));
             table.columns.insert(col.name.clone(), type_def);
         }
-        queries.push(create_table_query(name, &column_queries));
+        queries.push(create_table_query(schema, name, &column_queries));
         Ok(table)
     }
 
+    pub fn schema(&self) -> &PgSchema {
+        &self.schema
+    }
+    pub fn new_empty(schema: &PgSchema) -> Self {
+        Self {
+            schema: schema.clone(),
+            columns: HashMap::new(),
+            structs: HashMap::new(),
+            tuples: HashMap::new(),
+            enums: HashMap::new(),
+        }
+    }
     pub fn new_from_event(
-        namespace: &Option<String>,
+        schema: &PgSchema,
         event: &CreateTable,
         queries: &mut Vec<String>,
     ) -> PgTypeResult<Self> {
-        PgTableStructure::new(
-            namespace,
-            &event.name,
-            &event.primary,
-            &event.columns,
-            queries,
-        )
+        PgTableStructure::new(schema, &event.name, &event.primary, &event.columns, queries)
     }
 
     pub fn add_column(&mut self, name: &str, type_def: PostgresType) -> String {
@@ -519,11 +515,12 @@ impl PgTableStructure {
         fields: Vec<PostgresField>,
         queries: &mut Vec<String>,
     ) -> PgTypeResult<String> {
-        let struct_name = branch.type_name(name);
-        queries.push(create_struct_type_query(&struct_name, &fields));
+        let name = branch.type_name(name);
+        queries.push(create_struct_type_query(&self.schema, &name, &fields));
+        let qualified_name = self.schema.qualify(&name);
         self.structs
-            .insert(struct_name.clone(), PgStructDef::new(fields));
-        Ok(struct_name)
+            .insert(qualified_name.clone(), PgStructDef::new(fields));
+        Ok(qualified_name)
     }
 
     pub fn add_rust_enum(
@@ -535,15 +532,18 @@ impl PgTableStructure {
     ) -> PgTypeResult<String> {
         let (struct_name, enum_def) = PgRustEnum::new(branch, name, variants);
         queries.push(create_enum_type_query(
+            &self.schema,
             &enum_def.variants_type_name,
             &enum_def.order,
         ));
         queries.push(create_struct_type_query(
+            &self.schema,
             &struct_name,
-            &enum_def.all_fields(),
+            &enum_def.all_fields(&self.schema),
         ));
-        self.enums.insert(struct_name.clone(), enum_def);
-        Ok(struct_name)
+        let qualified_name = self.schema.qualify(&struct_name);
+        self.enums.insert(qualified_name.clone(), enum_def);
+        Ok(qualified_name)
     }
 
     pub fn add_tuple(
@@ -553,8 +553,9 @@ impl PgTableStructure {
         queries: &mut Vec<String>,
     ) -> PgTypeResult<String> {
         let name = branch.type_name("tuple");
-        queries.push(create_tuple_type_query(&name, &elements));
-        self.tuples.insert(name.clone(), elements);
-        Ok(name)
+        queries.push(create_tuple_type_query(&self.schema, &name, &elements));
+        let qualified_name = self.schema.qualify(&name);
+        self.tuples.insert(qualified_name.clone(), elements);
+        Ok(qualified_name)
     }
 }

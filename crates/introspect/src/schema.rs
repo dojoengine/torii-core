@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use introspect_types::{Attribute, ColumnDef, PrimaryDef};
+use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
+use torii::etl::EventContext;
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy)]
 pub struct ColumnKey {
@@ -31,14 +33,6 @@ pub struct TableSchema {
     pub columns: Vec<ColumnDef>,
 }
 
-pub struct Table {
-    pub id: Felt,
-    pub name: String,
-    pub attributes: Vec<Attribute>,
-    pub primary: PrimaryDef,
-    pub columns: Vec<ColumnDef>,
-}
-
 #[derive(Clone, Debug)]
 pub struct TableInfo {
     pub name: String,
@@ -47,6 +41,47 @@ pub struct TableInfo {
     pub columns: HashMap<Felt, ColumnDef>,
     pub order: Vec<Felt>,
     pub alive: bool,
+}
+
+pub trait TableMetadata {
+    fn block_number(&self) -> u64;
+    fn tx_hash(&self) -> &Felt;
+}
+
+impl TableMetadata for EmittedEvent {
+    fn block_number(&self) -> u64 {
+        self.block_number.unwrap_or_default()
+    }
+    fn tx_hash(&self) -> &Felt {
+        &self.transaction_hash
+    }
+}
+
+impl TableMetadata for EventContext {
+    fn block_number(&self) -> u64 {
+        self.block.number
+    }
+    fn tx_hash(&self) -> &Felt {
+        &self.transaction.hash
+    }
+}
+
+impl TableMetadata for (u64, Felt) {
+    fn block_number(&self) -> u64 {
+        self.0
+    }
+    fn tx_hash(&self) -> &Felt {
+        &self.1
+    }
+}
+
+impl TableMetadata for (u64, &Felt) {
+    fn block_number(&self) -> u64 {
+        self.0
+    }
+    fn tx_hash(&self) -> &Felt {
+        self.1
+    }
 }
 
 // impl From<(Felt, TableInfo)> for TableSchema {

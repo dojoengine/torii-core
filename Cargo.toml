@@ -11,18 +11,14 @@ members = [
   "crates/dojo",
   "crates/introspect-postgres-sink",
   "crates/testing",
+  "crates/postgres",
   "bins/torii-erc20",
   "bins/torii-erc20-synth",
-  "bins/torii-introspect-bin",
   "bins/torii-introspect-synth",
   "bins/torii-tokens",
   "bins/torii-tokens-synth",
 ]
-default-members = [
-  "bins/torii-erc20",
-  "bins/torii-tokens",
-  "bins/torii-introspect-bin",
-]
+default-members = ["bins/torii-erc20", "bins/torii-tokens"]
 resolver = "2"
 
 
@@ -67,12 +63,13 @@ clap = { version = "4.5", features = ["derive"] }
 starknet = "0.17"
 
 # Database
-sqlx = { version = "0.8", features = [
+sqlx = { version = "0.8.6", features = [
   "runtime-tokio",
   "sqlite",
   "postgres",
   "any",
 ] }
+crc = "3.4.0"
 
 # Hashing
 blake3 = "1.8.3"
@@ -124,6 +121,7 @@ torii-dojo.path = "./crates/dojo"
 torii-introspect.path = "crates/introspect"
 torii-introspect-postgres-sink.path = "./crates/introspect-postgres-sink"
 torii-test-utils.path = "crates/testing"
+torii-postgres.path = "crates/postgres"
 
 
 [lib]
@@ -189,7 +187,7 @@ tempfile = "3.13"
 tracing-subscriber.workspace = true
 tower.workspace = true
 resolve-path.workspace = true
-
+itertools.workspace = true
 dojo-introspect.workspace = true
 
 torii-sql-sink.workspace = true

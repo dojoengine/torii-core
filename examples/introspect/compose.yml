@@ -1,13 +1,16 @@
 name: torii_test
 services:
   postgres:
-    image: postgres:18
+    image: postgres:18-alpine
+    entrypoint: >
+      sh -c "rm -rf /var/lib/postgresql/data/* && docker-entrypoint.sh postgres"
     restart: unless-stopped
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: torii_test
+      POSTGRES_USER: torii
+      POSTGRES_PASSWORD: torii
+      POSTGRES_DB: torii
+      PGDATA: /var/lib/postgresql/data
     ports:
       - "5432:5432"
     volumes:
-      - /var/lib/postgresql
+      - ./pg-data:/var/lib/postgresql/data

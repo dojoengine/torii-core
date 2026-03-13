@@ -5,16 +5,53 @@ use crate::DojoTable;
 use async_trait::async_trait;
 use introspect_types::{ColumnInfo, ResultInto};
 use itertools::Itertools;
-use sqlx::{FromRow, PgPool};
+use sqlx::migrate::Migrator;
+use sqlx::postgres::PgArguments;
+use sqlx::query::Query;
+use sqlx::{FromRow, PgPool, Postgres};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
-use torii_introspect::postgres::owned::PgTypeDef;
+use std::ops::Deref;
+use torii_introspect::postgres::owned::{column_info_insert_query, PgTypeDef};
 use torii_introspect::postgres::{PgFelt, SqlxResult};
 use torii_introspect::schema::ColumnKeyTrait;
+use torii_postgres::db::PostgresConnection;
 
-const DOJO_MIGRATION_SQL: &str = include_str!("../migrate.sql");
 const DOJO_COLUMN_TABLE: &str = "dojo.columns";
 const DOJO_TABLE_TABLE: &str = "dojo.table";
+
+pub const FETCH_TABLES_QUERY: &str = r#"
+    SELECT id, name, attributes, keys, "values", legacy
+    FROM dojo.tables
+    WHERE $1::felt252[] = '{}' OR owner = ANY($1)"#;
+
+pub const FETCH_COLUMNS_QUERY: &str = r#"
+    SELECT "table", id, name, attributes, type_def
+    FROM dojo.columns
+    WHERE $1::felt252[] = '{}' OR owner = ANY($1)"#;
+
+pub const INSERT_TABLE_QUERY: &str = r#"
+    INSERT INTO dojo.tables (owner, id, name, attributes, keys, "values", legacy, updated_at, created_block, updated_block, created_tx, updated_tx)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8::uint64, $8::uint64, $9, $9)
+        ON CONFLICT (owner, id) DO UPDATE SET
+        name = EXCLUDED.name,
+        attributes = EXCLUDED.attributes,
+        keys = EXCLUDED.keys,
+        "values" = EXCLUDED."values",
+        legacy = EXCLUDED.legacy,
+        updated_at = NOW(),
+        updated_block = EXCLUDED.updated_block,
+        updated_tx = EXCLUDED.updated_tx"#;
+
+pub const INSERT_COLUMN_QUERY: &str = r#"
+    INSERT INTO dojo.columns (owner, "table", id, name, attributes, type_def)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (owner, "table", id) DO UPDATE SET
+        name = EXCLUDED.name,
+        attributes = EXCLUDED.attributes,
+        type_def = EXCLUDED.type_def"#;
+
+pub const DOJO_STORE_MIGRATIONS: Migrator = sqlx::migrate!();
 
 #[derive(Debug, thiserror::Error)]
 pub enum DojoPgStoreError {
@@ -92,84 +129,32 @@ impl From<TableRow> for (Felt, DojoTableInfo) {
 #[async_trait]
 impl PgTypeDef<Felt> for DojoTableInfo {
     type Row = TableRow;
-
-    fn insert_query(&self, owner: &Felt, key: &Felt) -> String {
-        make_set_table_query(
-            owner,
-            key,
-            &self.name,
-            &self.attributes,
-            &self.key_fields,
-            &self.value_fields,
-            self.legacy,
-        )
-    }
-
     async fn get_rows(
         pool: &PgPool,
-        pg_table: &str,
+        query: &'static str,
         owners: &[Felt],
     ) -> SqlxResult<Vec<(Felt, DojoTableInfo)>> {
-        get_dojo_table_rows(pool, pg_table, owners)
+        Self::get_pg_rows(pool, query, owners)
             .await
-            .map(|rows| rows.into_iter().map_into().collect())
+            .map(|rows| rows.into_iter().map_into().collect_vec())
     }
 }
 
 #[async_trait]
 impl PgTypeDef<()> for DojoTable {
     type Row = TableRow;
-
-    fn insert_query(&self, owner: &Felt, _key: &()) -> String {
-        make_set_table_query(
-            owner,
-            &self.id,
-            &self.name,
-            &self.attributes,
-            &self.key_fields,
-            &self.value_fields,
-            self.legacy,
-        )
-    }
-
     async fn get_rows(
         pool: &PgPool,
-        pg_table: &str,
+        query: &'static str,
         owners: &[Felt],
     ) -> SqlxResult<Vec<((), DojoTable)>> {
-        get_dojo_table_rows(pool, pg_table, owners)
+        Self::get_pg_rows(pool, query, owners)
             .await
             .map(|rows| rows.into_iter().map_into().collect_vec())
     }
 }
 
-async fn get_dojo_table_rows(
-    pool: &PgPool,
-    pg_table: &str,
-    owners: &[Felt],
-) -> SqlxResult<Vec<TableRow>> {
-    let mut query =
-        format!("SELECT owner, id, name, attributes, keys, \"values\", legacy FROM {pg_table}");
-    if !owners.is_empty() {
-        let owner_list = owners.iter().map(felt252_type).join(",");
-        query.push_str(&format!(" WHERE owner IN ({owner_list})"));
-    }
-    sqlx::query_as(&query).fetch_all(pool).await
-}
-
-pub fn felt252_type(value: &Felt) -> String {
-    format!("'\\x{}'::felt252", hex::encode(value.to_bytes_be()))
-}
-
-pub fn string_type(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-pub fn parse_column_ids(ids: Vec<Vec<u8>>) -> Vec<Felt> {
-    ids.iter().map(|b| Felt::from_bytes_be_slice(b)).collect()
-}
-
-pub fn make_set_table_query(
+pub fn table_insert_query(
     owner: &Felt,
     id: &Felt,
     name: &str,
@@ -177,69 +162,98 @@ pub fn make_set_table_query(
     keys: &[Felt],
     values: &[Felt],
     legacy: bool,
-) -> String {
-    format!(
-        r#"
-        INSERT INTO dojo.table (owner, id, name, attributes, keys, "values", legacy)
-            VALUES ({owner}, {id}, {name}, ARRAY[{attributes}]::TEXT[], ARRAY[{keys}], ARRAY[{values}], {legacy})
-            ON CONFLICT (owner, id) DO UPDATE SET
-            name = EXCLUDED.name,
-            attributes = EXCLUDED.attributes,
-            keys = EXCLUDED.keys,
-            "values" = EXCLUDED."values",
-            legacy = EXCLUDED.legacy
-        "#,
-        owner = felt252_type(owner),
-        id = felt252_type(id),
-        name = string_type(name),
-        attributes = attributes.iter().map(|s| string_type(s)).join(","),
-        keys = keys.iter().map(felt252_type).join(","),
-        values = values.iter().map(felt252_type).join(","),
-    )
+    created_block: u64,
+    created_tx: &Felt,
+) -> Query<'static, Postgres, PgArguments> {
+    sqlx::query::<Postgres>(INSERT_TABLE_QUERY)
+        .bind(PgFelt::from(*owner))
+        .bind(PgFelt::from(*id))
+        .bind(name.to_owned())
+        .bind(attributes.to_owned())
+        .bind(keys.iter().copied().map(PgFelt::from).collect_vec())
+        .bind(values.iter().copied().map(PgFelt::from).collect_vec())
+        .bind(legacy)
+        .bind(created_block.to_string())
+        .bind(PgFelt::from(*created_tx))
 }
 
-pub async fn initialize_dojo_schema(pool: &PgPool) -> Result<(), sqlx::Error> {
-    sqlx::raw_sql(DOJO_MIGRATION_SQL).execute(pool).await?;
-    Ok(())
+impl DojoTable {
+    pub fn insert_query(
+        &self,
+        owner: &Felt,
+        tx_hash: &Felt,
+        block_number: u64,
+    ) -> Query<'static, Postgres, PgArguments> {
+        table_insert_query(
+            owner,
+            &self.id,
+            &self.name,
+            &self.attributes,
+            &self.key_fields.iter().copied().collect_vec(),
+            &self.value_fields.iter().copied().collect_vec(),
+            self.legacy,
+            block_number,
+            tx_hash,
+        )
+    }
+}
+
+pub struct PgStore<T>(pub T);
+
+impl<T> Deref for PgStore<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T: PostgresConnection + Send + Sync> PgStore<T> {
+    pub async fn initialize(&self) -> SqlxResult<()> {
+        println!("Running Dojo migrations...");
+        self.migrate(Some("dojo"), DOJO_STORE_MIGRATIONS).await
+    }
+}
+
+impl<T: PostgresConnection> From<T> for PgStore<T> {
+    fn from(pool: T) -> Self {
+        PgStore(pool)
+    }
 }
 
 #[async_trait]
-impl DojoStoreTrait for PgPool {
+impl<T: PostgresConnection + Send + Sync + 'static> DojoStoreTrait for PgStore<T> {
     type Error = DojoPgStoreError;
 
-    async fn save_table_at_block(
+    async fn save_table(
         &self,
         owner: &Felt,
-        data: &DojoTable,
-        _block_number: Option<u64>,
+        table: &DojoTable,
+        tx_hash: &Felt,
+        block_number: u64,
     ) -> Result<(), Self::Error> {
         let mut transaction = self.begin().await?;
-        let query = make_set_table_query(
-            owner,
-            &data.id,
-            &data.name,
-            &data.attributes,
-            &data.key_fields,
-            &data.value_fields,
-            data.legacy,
-        );
-        sqlx::query(&query).execute(&mut *transaction).await?;
-        for (id, column) in &data.columns {
-            sqlx::query(&column.insert_query(owner, &(data.id, *id)))
+        table
+            .insert_query(owner, tx_hash, block_number)
+            .execute(&mut *transaction)
+            .await?;
+        for (id, info) in &table.columns {
+            column_info_insert_query(INSERT_COLUMN_QUERY, owner, &table.id, id, info)
                 .execute(&mut *transaction)
                 .await?;
         }
+
         transaction.commit().await.err_into()
     }
 
     async fn load_tables(&self, owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
-        let mut tables = DojoTable::get_rows(self, DOJO_TABLE_TABLE, owners)
+        let mut tables = DojoTable::get_rows(self.pool(), DOJO_TABLE_TABLE, owners)
             .await?
             .into_iter()
             .map(|row| row.1)
             .collect_vec();
         let mut columns: HashMap<(Felt, Felt), _> =
-            ColumnInfo::get_hash_map(self, DOJO_COLUMN_TABLE, owners).await?;
+            ColumnInfo::get_hash_map(self.pool(), DOJO_COLUMN_TABLE, owners).await?;
         for table in &mut tables {
             for key in table.key_fields.iter().chain(table.value_fields.iter()) {
                 let column = columns.remove(&(table.id, *key)).ok_or_else(|| {
@@ -249,30 +263,5 @@ impl DojoStoreTrait for PgPool {
             }
         }
         Ok(tables)
-    }
-
-    async fn load_tables_at_blocks(
-        &self,
-        _owner_blocks: &[(Felt, u64)],
-    ) -> Result<Vec<DojoTable>, Self::Error> {
-        Err(DojoPgStoreError::UnsupportedHistoricalLoad)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{make_set_table_query, DOJO_COLUMN_TABLE};
-    use starknet_types_core::felt::Felt;
-
-    #[test]
-    fn dojo_column_table_matches_migration() {
-        assert_eq!(DOJO_COLUMN_TABLE, "dojo.columns");
-    }
-
-    #[test]
-    fn set_table_query_upserts_on_owner_and_id() {
-        let query = make_set_table_query(&Felt::ONE, &Felt::TWO, "duelist", &[], &[], &[], false);
-
-        assert!(query.contains("ON CONFLICT (owner, id) DO UPDATE"));
     }
 }

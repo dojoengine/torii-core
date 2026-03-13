@@ -1,8 +1,7 @@
-use crate::processor::PostgresSimpleDb;
-use anyhow::{anyhow, Context, Result};
+use crate::processor::IntrospectPgDb;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use torii::axum::Router;
 use torii::etl::{
     envelope::{Envelope, TypeId},
@@ -10,41 +9,12 @@ use torii::etl::{
     sink::{EventBus, Sink, SinkContext, TopicInfo},
 };
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
-use torii_introspect::CreateTable;
+use torii_postgres::PostgresConnection;
 
 pub const LOGGING_TARGET: &str = "torii::sinks::introspect::postgres";
 
-pub struct IntrospectPostgresSink {
-    database_url: String,
-    max_connections: Option<u32>,
-    bootstrap_tables: Vec<CreateTable>,
-    db: Option<Arc<Mutex<PostgresSimpleDb>>>,
-}
-
-impl IntrospectPostgresSink {
-    pub fn new(database_url: impl Into<String>, max_connections: Option<u32>) -> Self {
-        Self {
-            database_url: database_url.into(),
-            max_connections,
-            bootstrap_tables: Vec::new(),
-            db: None,
-        }
-    }
-
-    pub fn with_bootstrap_tables(mut self, bootstrap_tables: Vec<CreateTable>) -> Self {
-        self.bootstrap_tables = bootstrap_tables;
-        self
-    }
-
-    fn db(&self) -> Result<&Arc<Mutex<PostgresSimpleDb>>> {
-        self.db
-            .as_ref()
-            .ok_or_else(|| anyhow!("introspect-postgres sink used before initialize"))
-    }
-}
-
 #[async_trait]
-impl Sink for IntrospectPostgresSink {
+impl<T: Send + Sync + PostgresConnection> Sink for IntrospectPgDb<T> {
     fn name(&self) -> &'static str {
         "introspect-postgres"
     }
@@ -60,8 +30,6 @@ impl Sink for IntrospectPostgresSink {
         let mut inserts_fields = 0usize;
         let mut inserted_records = 0usize;
         let mut delete_records = 0usize;
-        let db = self.db()?.clone();
-        let mut db = db.lock().await;
 
         for envelope in envelopes {
             if envelope.type_id != TypeId::new("introspect") {
@@ -81,7 +49,7 @@ impl Sink for IntrospectPostgresSink {
                     )
                 })?;
 
-            db.process_message(&body.msg, &context).await?;
+            self.process_message(&body.msg, &context).await?;
             processed += 1;
             match &body.msg {
                 IntrospectMsg::CreateTable(_) => create_tables += 1,
@@ -136,25 +104,11 @@ impl Sink for IntrospectPostgresSink {
         _event_bus: Arc<EventBus>,
         _context: &SinkContext,
     ) -> Result<()> {
-        let mut db = PostgresSimpleDb::new(&self.database_url, self.max_connections).await?;
-        db.initialize().await?;
-        if !self.bootstrap_tables.is_empty() {
-            let had_schema_state = db.has_tables();
-            db.bootstrap_tables(&self.bootstrap_tables).await?;
-            tracing::info!(
-                target: LOGGING_TARGET,
-                tables = self.bootstrap_tables.len(),
-                had_schema_state,
-                "Reconciled sink schema from persisted manager state"
-            );
-        }
-
+        self.initialize_introspect_pg_sink().await?;
         tracing::info!(
             target: LOGGING_TARGET,
             "Initialized introspect Postgres sink"
         );
-
-        self.db = Some(Arc::new(Mutex::new(db)));
         Ok(())
     }
 }
