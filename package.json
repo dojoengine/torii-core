@@ -1,6 +1,15 @@
 {
   "name": "torii-core",
   "private": true,
+  "scripts": {
+    "prepare": "node .husky/install.mjs",
+    "lint:check": "./scripts/lint.sh",
+    "lint:fix": "./scripts/lint.sh --fix",
+    "test:rust": "./scripts/test.sh"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7"
+  },
   "workspaces": [
     "torii.js",
     "client",
