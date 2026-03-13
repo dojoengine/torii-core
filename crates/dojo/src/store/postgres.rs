@@ -17,16 +17,24 @@ use torii_introspect::postgres::{PgFelt, SqlxResult};
 use torii_introspect::schema::ColumnKeyTrait;
 use torii_postgres::db::PostgresConnection;
 
-const DOJO_COLUMN_TABLE: &str = "dojo.columns";
-const DOJO_TABLE_TABLE: &str = "dojo.table";
-
 pub const FETCH_TABLES_QUERY: &str = r#"
-    SELECT id, name, attributes, keys, "values", legacy
+    SELECT
+        id::felt252 AS id,
+        name,
+        attributes,
+        keys::felt252[] AS keys,
+        "values"::felt252[] AS "values",
+        legacy
     FROM dojo.tables
     WHERE $1::felt252[] = '{}' OR owner = ANY($1)"#;
 
 pub const FETCH_COLUMNS_QUERY: &str = r#"
-    SELECT "table", id, name, attributes, type_def
+    SELECT
+        "table"::felt252 AS "table",
+        id::felt252 AS id,
+        name,
+        attributes,
+        type_def
     FROM dojo.columns
     WHERE $1::felt252[] = '{}' OR owner = ANY($1)"#;
 
@@ -247,13 +255,13 @@ impl<T: PostgresConnection + Send + Sync + 'static> DojoStoreTrait for PgStore<T
     }
 
     async fn load_tables(&self, owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
-        let mut tables = DojoTable::get_rows(self.pool(), DOJO_TABLE_TABLE, owners)
+        let mut tables = DojoTable::get_rows(self.pool(), FETCH_TABLES_QUERY, owners)
             .await?
             .into_iter()
             .map(|row| row.1)
             .collect_vec();
         let mut columns: HashMap<(Felt, Felt), _> =
-            ColumnInfo::get_hash_map(self.pool(), DOJO_COLUMN_TABLE, owners).await?;
+            ColumnInfo::get_hash_map(self.pool(), FETCH_COLUMNS_QUERY, owners).await?;
         for table in &mut tables {
             for key in table.key_fields.iter().chain(table.value_fields.iter()) {
                 let column = columns.remove(&(table.id, *key)).ok_or_else(|| {

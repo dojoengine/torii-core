@@ -34,13 +34,24 @@ pub const COLUMN_INSERT_QUERY: &str = r#"
 "#;
 
 pub const FETCH_TABLES_QUERY: &str = "
-    SELECT id, name, attributes, primary_def, column_ids, alive
+    SELECT
+        id::felt252 AS id,
+        name,
+        attributes,
+        primary_def,
+        column_ids::felt252[] AS column_ids,
+        alive
     FROM introspect.tables
     WHERE $1::felt252[] = '{}' OR owner = ANY($1)
 ";
 
 pub const FETCH_COLUMNS_QUERY: &str = r#"
-    SELECT "table", id, name, attributes, type_def
+    SELECT
+        "table"::felt252 AS "table",
+        id::felt252 AS id,
+        name,
+        attributes,
+        type_def
     FROM introspect.columns
     WHERE $1::felt252[] = '{}' OR owner = ANY($1)
 "#;

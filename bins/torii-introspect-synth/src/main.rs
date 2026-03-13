@@ -25,13 +25,14 @@ use torii::etl::sink::{EventBus, Sink, SinkContext};
 use torii::etl::Decoder;
 use torii::grpc::SubscriptionManager;
 use torii_dojo::decoder::DojoDecoder;
-use torii_dojo::store::json::JsonStore;
+use torii_dojo::store::postgres::PgStore;
 use torii_introspect_postgres_sink::processor::IntrospectPgDb;
 
 const EXTRACTOR_TYPE: &str = "synthetic_introspect";
 const STATE_KEY: &str = "last_block";
 const NAMESPACE: &str = "synthetic";
 const MODEL_NAME: &str = "position";
+const TABLE_SCHEMA: &str = "synthetic";
 const TABLE_NAME: &str = "synthetic-position";
 const FROM_ADDRESS: Felt = Felt::from_hex_unchecked("0x100");
 
@@ -412,18 +413,18 @@ async fn main() -> Result<()> {
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create output dir {}", output_dir.display()))?;
 
-    if config.reset_schema {
-        reset_schema(&config.db_url).await?;
-    }
-
-    let started = Instant::now();
     let pool = Arc::new(
         PgPoolOptions::new()
             .max_connections(5)
             .connect(&config.db_url)
             .await?,
     );
-    let mut sink = IntrospectPgDb::new(pool, ());
+    if config.reset_schema {
+        reset_schema(pool.as_ref()).await?;
+    }
+
+    let started = Instant::now();
+    let mut sink = IntrospectPgDb::new(pool.clone(), TABLE_SCHEMA);
     sink.initialize(
         Arc::new(EventBus::new(Arc::new(SubscriptionManager::new()))),
         &SinkContext {
@@ -439,10 +440,10 @@ async fn main() -> Result<()> {
         .await?,
     );
 
-    let decoder: Arc<dyn Decoder> = Arc::new(DojoDecoder::<JsonStore, _>::new(
-        output_dir.join("dojo-manager"),
-        NeverFetchSchema,
-    ));
+    let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), NeverFetchSchema);
+    decoder.store.initialize().await?;
+    decoder.load_tables(&[]).await?;
+    let decoder: Arc<dyn Decoder> = Arc::new(decoder);
     let decoder_context =
         DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new());
 
@@ -478,7 +479,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let verification = verify_run(&config.db_url, &config).await?;
+    let verification = verify_run(pool.as_ref(), &config).await?;
     let summary = Summary {
         run_id: run_id.clone(),
         duration_ms: started.elapsed().as_millis(),
@@ -512,37 +513,102 @@ struct Verification {
     verified_score: i64,
 }
 
-async fn reset_schema(db_url: &str) -> Result<()> {
-    let pool = PgPool::connect(db_url).await?;
-    sqlx::query(&format!(r#"DROP TABLE IF EXISTS "{TABLE_NAME}""#))
-        .execute(&pool)
+async fn reset_schema(pool: &PgPool) -> Result<()> {
+    sqlx::query(&format!(
+        r#"DROP SCHEMA IF EXISTS "{TABLE_SCHEMA}" CASCADE"#
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::query(r"DROP SCHEMA IF EXISTS dojo CASCADE")
+        .execute(pool)
         .await?;
-    sqlx::query(r"DROP TABLE IF EXISTS torii_introspect_schema_state")
-        .execute(&pool)
+    sqlx::query(r"DROP SCHEMA IF EXISTS introspect CASCADE")
+        .execute(pool)
+        .await?;
+    sqlx::query(&format!(r#"DROP TABLE IF EXISTS "{TABLE_NAME}""#))
+        .execute(pool)
         .await?;
     Ok(())
 }
 
-async fn verify_run(db_url: &str, config: &Config) -> Result<Verification> {
-    let pool = PgPool::connect(db_url).await?;
-
-    let schema_rows: i64 =
-        sqlx::query_scalar(r"SELECT COUNT(*)::BIGINT FROM torii_introspect_schema_state")
-            .fetch_one(&pool)
-            .await?;
+async fn verify_run(pool: &PgPool, config: &Config) -> Result<Verification> {
+    let dojo_table_rows: i64 = sqlx::query_scalar(
+        r"
+        SELECT COUNT(*)::BIGINT
+        FROM dojo.tables
+        WHERE name = $1
+        ",
+    )
+    .bind(TABLE_NAME)
+    .fetch_one(pool)
+    .await?;
     ensure!(
-        schema_rows == 1,
-        "expected exactly one schema state row, got {schema_rows}"
+        dojo_table_rows == 1,
+        "expected exactly one Dojo table row for {TABLE_NAME}, got {dojo_table_rows}"
     );
 
-    let total_rows: i64 =
-        sqlx::query_scalar(&format!(r#"SELECT COUNT(*)::BIGINT FROM "{TABLE_NAME}""#))
-            .fetch_one(&pool)
-            .await?;
+    let dojo_column_rows: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::BIGINT
+        FROM dojo.columns
+        WHERE "table" = $1
+        "#,
+    )
+    .bind(
+        compute_selector_from_namespace_and_name(NAMESPACE, MODEL_NAME)
+            .to_bytes_be()
+            .to_vec(),
+    )
+    .fetch_one(pool)
+    .await?;
+    ensure!(
+        dojo_column_rows == 2,
+        "expected 2 Dojo columns for {TABLE_NAME}, got {dojo_column_rows}"
+    );
+
+    let introspect_migrations_exist: bool = sqlx::query_scalar(
+        r"
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'introspect' AND table_name = '_sqlx_migrations'
+        )
+        ",
+    )
+    .fetch_one(pool)
+    .await?;
+    ensure!(
+        introspect_migrations_exist,
+        "expected introspect._sqlx_migrations to exist"
+    );
+
+    let synthetic_table_exists: bool = sqlx::query_scalar(
+        r"
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = $1 AND table_name = $2
+        )
+        ",
+    )
+    .bind(TABLE_SCHEMA)
+    .bind(TABLE_NAME)
+    .fetch_one(pool)
+    .await?;
+    ensure!(
+        synthetic_table_exists,
+        "expected {TABLE_SCHEMA}.{TABLE_NAME} to exist"
+    );
+
+    let total_rows: i64 = sqlx::query_scalar(&format!(
+        r#"SELECT COUNT(*)::BIGINT FROM "{TABLE_SCHEMA}"."{TABLE_NAME}""#
+    ))
+    .fetch_one(pool)
+    .await?;
     let expected_rows = (config.block_count as usize * config.records_per_block) as i64;
     ensure!(
         total_rows == expected_rows,
-        "expected {expected_rows} rows in {TABLE_NAME}, got {total_rows}"
+        "expected {expected_rows} rows in {TABLE_SCHEMA}.{TABLE_NAME}, got {total_rows}"
     );
 
     let last_block = config.from_block + config.block_count - 1;
@@ -561,12 +627,12 @@ async fn verify_run(db_url: &str, config: &Config) -> Result<Verification> {
     let row = sqlx::query(&format!(
         r#"
         SELECT encode("entity_id", 'hex') AS entity_id_hex, "score"::bigint AS score
-        FROM "{TABLE_NAME}"
+        FROM "{TABLE_SCHEMA}"."{TABLE_NAME}"
         WHERE "entity_id" = $1
         "#
     ))
     .bind(verified_entity_id.to_bytes_be().to_vec())
-    .fetch_one(&pool)
+    .fetch_one(pool)
     .await?;
 
     let verified_entity_id_hex: String = row.try_get("entity_id_hex")?;
