@@ -4792,23 +4792,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "torii-introspect-bin"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "sqlx",
- "starknet",
- "tokio",
- "torii",
- "torii-dojo",
- "torii-introspect-postgres-sink",
- "tracing",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
 name = "torii-introspect-postgres-sink"
 version = "0.1.0"
 dependencies = [
