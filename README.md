@@ -37,6 +37,26 @@ This work is still in progress, refer to the modules documentation for more deta
 
 ## 🚀 Quick Start
 
+### Local Hooks
+
+Install the workspace dependencies once to wire Husky hooks:
+
+```bash
+pnpm install
+```
+
+Run the Rust quality gates manually with:
+
+```bash
+pnpm run lint:fix
+pnpm run lint:check
+pnpm run test:rust
+```
+
+The `pre-commit` hook auto-fixes Rust formatting and fixable clippy issues. If those fixes touch files outside the original staged set, the commit stops so you can review and stage them explicitly.
+
+To bypass the hooks temporarily, use `git commit --no-verify` or `git push --no-verify`.
+
 ### Start PostgreSQL (Docker Compose)
 
 ```bash
