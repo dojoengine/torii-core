@@ -160,6 +160,7 @@ async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
+futures.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 prost-types.workspace = true

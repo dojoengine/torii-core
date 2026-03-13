@@ -53,6 +53,7 @@ use torii::etl::extractor::{
     EventExtractorConfig, Extractor, RetryPolicy,
 };
 use torii::etl::identification::ContractRegistry;
+use torii::EtlConcurrencyConfig;
 
 // Import from ERC20 library crate
 use torii_erc20::proto::erc20_server::Erc20Server;
@@ -215,6 +216,7 @@ async fn run_indexer(config: Config) -> Result<()> {
                 to_block: config.to_block,
                 batch_size: config.batch_size,
                 retry_policy: RetryPolicy::default(),
+                rpc_parallelism: config.rpc_parallelism,
             };
             Box::new(BlockRangeExtractor::new(provider.clone(), extractor_config))
         }
@@ -264,6 +266,7 @@ async fn run_indexer(config: Config) -> Result<()> {
                 block_batch_size: config.event_block_batch_size,
                 retry_policy: RetryPolicy::default(),
                 ignore_saved_state: false,
+                rpc_parallelism: config.rpc_parallelism,
             };
             Box::new(EventExtractor::new(provider.clone(), extractor_config))
         }
@@ -334,6 +337,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     let registry = Arc::new(
         ContractRegistry::new(provider.clone(), engine_db.clone())
+            .with_rpc_parallelism(config.rpc_parallelism)
             .with_rule(Box::new(Erc20Rule::new()))
             .with_rule(Box::new(Erc721Rule::new()))
             .with_rule(Box::new(Erc1155Rule::new())),
@@ -351,6 +355,10 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
         .database_root(&config.db_dir)
+        .etl_concurrency(EtlConcurrencyConfig {
+            max_prefetch_batches: config.max_prefetch_batches,
+            decode_parallelism: config.decode_parallelism,
+        })
         .engine_database_url(
             config
                 .database_url
@@ -556,6 +564,12 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     tracing::info!("Torii configured, starting ETL pipeline...");
     tracing::info!("Enabled token types: {}", enabled_types.join(", "));
+    tracing::info!(
+        "ETL concurrency: prefetch_batches={} decode_parallelism={} rpc_parallelism={}",
+        config.max_prefetch_batches,
+        config.decode_parallelism,
+        config.rpc_parallelism
+    );
     tracing::info!("gRPC service available at localhost:{}", config.port);
     tracing::info!("  - torii.Torii (EventBus subscriptions)");
 

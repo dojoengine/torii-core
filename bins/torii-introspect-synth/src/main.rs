@@ -438,7 +438,7 @@ async fn main() -> Result<()> {
         DojoDecoder::<DojoTableStore<JsonStore>, _>::new(manager, NeverFetchSchema, &[]).await?,
     );
     let decoder_context =
-        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new());
+        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new(), 1);
 
     let mut extractor = SyntheticIntrospectExtractor::new(SyntheticIntrospectConfig {
         from_block: config.from_block,

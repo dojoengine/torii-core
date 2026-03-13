@@ -42,6 +42,7 @@ async fn main() -> Result<()> {
         to_block: Some(to_block),
         batch_size: 5,
         retry_policy: RetryPolicy::default(),
+        rpc_parallelism: 0,
     };
 
     let provider = JsonRpcClient::new(HttpTransport::new(Url::parse(&config.rpc_url)?));

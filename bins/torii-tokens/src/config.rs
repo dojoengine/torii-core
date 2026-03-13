@@ -153,6 +153,18 @@ pub struct Config {
     #[arg(long, default_value = "10000")]
     pub event_block_batch_size: u64,
 
+    /// Number of extracted batches to prefetch ahead of decode/store.
+    #[arg(long, default_value = "2")]
+    pub max_prefetch_batches: usize,
+
+    /// Chunk-level decode parallelism (`0` = auto).
+    #[arg(long, default_value = "0")]
+    pub decode_parallelism: usize,
+
+    /// Maximum chunked RPC requests to run concurrently (`0` = auto).
+    #[arg(long, default_value = "0")]
+    pub rpc_parallelism: usize,
+
     /// Metadata fetching mode.
     ///
     /// If omitted: defaults to `inline`.
@@ -214,5 +226,21 @@ mod tests {
     fn observability_flag_enables_features() {
         let cfg = Config::parse_from(["torii-tokens", "--observability"]);
         assert!(cfg.observability);
+    }
+
+    #[test]
+    fn concurrency_flags_parse() {
+        let cfg = Config::parse_from([
+            "torii-tokens",
+            "--max-prefetch-batches",
+            "4",
+            "--decode-parallelism",
+            "8",
+            "--rpc-parallelism",
+            "6",
+        ]);
+        assert_eq!(cfg.max_prefetch_batches, 4);
+        assert_eq!(cfg.decode_parallelism, 8);
+        assert_eq!(cfg.rpc_parallelism, 6);
     }
 }

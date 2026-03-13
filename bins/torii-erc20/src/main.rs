@@ -98,6 +98,7 @@ async fn main() -> Result<()> {
         to_block: config.to_block,
         batch_size: 50,
         retry_policy: torii::etl::extractor::RetryPolicy::default(),
+        rpc_parallelism: 0,
     };
 
     let extractor = Box::new(BlockRangeExtractor::new(provider.clone(), extractor_config));

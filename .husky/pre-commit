@@ -4,81 +4,39 @@ set -eu
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-staged_before="$(mktemp)"
-tracked_before="$(mktemp)"
-tracked_after="$(mktemp)"
-untracked_before="$(mktemp)"
-untracked_after="$(mktemp)"
-out_of_scope="$(mktemp)"
-new_untracked="$(mktemp)"
-stash_name="husky-pre-commit-$(date +%s)-$$"
-stash_created=0
-restored_stash=0
-
-cleanup() {
-  if [ "$stash_created" -eq 1 ] && [ "$restored_stash" -eq 0 ]; then
-    if git stash pop --quiet --index; then
-      restored_stash=1
-    else
-      echo "Failed to restore stashed working tree changes. Resolve the stash manually." >&2
-      echo "Latest stash entry: $stash_name" >&2
-      exit 1
-    fi
+resolve_pnpm() {
+  if command -v pnpm >/dev/null 2>&1; then
+    command -v pnpm
+    return 0
   fi
 
-  rm -f \
-    "$staged_before" \
-    "$tracked_before" \
-    "$tracked_after" \
-    "$untracked_before" \
-    "$untracked_after" \
-    "$out_of_scope" \
-    "$new_untracked"
+  if command -v corepack >/dev/null 2>&1; then
+    echo "corepack pnpm"
+    return 0
+  fi
+
+  if [ -x "$HOME/.local/share/pnpm/pnpm" ]; then
+    echo "$HOME/.local/share/pnpm/pnpm"
+    return 0
+  fi
+
+  return 1
 }
 
-trap cleanup EXIT INT TERM HUP
+PNPM_CMD="$(resolve_pnpm)" || {
+  echo "pnpm is required for the pre-commit hook but was not found." >&2
+  echo "Install pnpm or ensure corepack is available on PATH." >&2
+  exit 1
+}
 
-git diff --cached --name-only > "$staged_before"
-git diff --name-only > "$tracked_before"
-git ls-files --others --exclude-standard > "$untracked_before"
-
-if [ ! -s "$staged_before" ]; then
+if [ -z "$(git diff --cached --name-only)" ]; then
   exit 0
 fi
 
-if [ -s "$tracked_before" ] || [ -s "$untracked_before" ]; then
-  git stash push --quiet --keep-index --include-untracked --message "$stash_name"
-  stash_created=1
-fi
-
-pnpm run lint:fix
-
-git update-index --again
-git diff --name-only > "$tracked_after"
-git ls-files --others --exclude-standard > "$untracked_after"
-
-if [ -s "$tracked_after" ]; then
-  grep -Fxv -f "$staged_before" "$tracked_after" > "$out_of_scope" || true
-fi
-
-if [ -s "$untracked_after" ]; then
-  grep -Fxv -f "$untracked_before" "$untracked_after" > "$new_untracked" || true
-fi
-
-if [ -s "$out_of_scope" ] || [ -s "$new_untracked" ]; then
-  echo "Auto-fix touched files outside the original staged set. Review and stage them explicitly." >&2
-
-  if [ -s "$out_of_scope" ]; then
-    echo "Tracked files:" >&2
-    cat "$out_of_scope" >&2
-  fi
-
-  if [ -s "$new_untracked" ]; then
-    echo "Untracked files:" >&2
-    cat "$new_untracked" >&2
-  fi
-
+if [ -n "$(git diff --name-only)" ] || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+  echo "pre-commit requires a clean working tree." >&2
+  echo "Stage or stash tracked changes and remove untracked files before committing." >&2
   exit 1
 fi
 
-pnpm run lint:check
+$PNPM_CMD run lint:check

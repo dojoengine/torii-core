@@ -27,6 +27,7 @@ pub use grpc::UpdateType;
 use axum::Router as AxumRouter;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -66,6 +67,37 @@ const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("../target/descriptor.bin");
 pub const TORII_DESCRIPTOR_SET: &[u8] = FILE_DESCRIPTOR_SET;
 
 /// Configuration for Torii server with pluggable sinks and decoders.
+#[derive(Debug, Clone)]
+pub struct EtlConcurrencyConfig {
+    pub max_prefetch_batches: usize,
+    pub decode_parallelism: usize,
+}
+
+impl Default for EtlConcurrencyConfig {
+    fn default() -> Self {
+        Self {
+            max_prefetch_batches: 2,
+            decode_parallelism: 0,
+        }
+    }
+}
+
+impl EtlConcurrencyConfig {
+    pub fn resolved_decode_parallelism(&self) -> usize {
+        if self.decode_parallelism == 0 {
+            std::thread::available_parallelism()
+                .map(|parallelism| parallelism.get().clamp(2, 16))
+                .unwrap_or(4)
+        } else {
+            self.decode_parallelism.max(1)
+        }
+    }
+
+    pub fn resolved_prefetch_batches(&self) -> usize {
+        self.max_prefetch_batches.max(1)
+    }
+}
+
 pub struct ToriiConfig {
     /// Port to listen on.
     pub port: u16,
@@ -157,6 +189,9 @@ pub struct ToriiConfig {
     /// When a shutdown signal is received, the system will wait up to this
     /// duration for the current ETL batch to complete before forcing shutdown.
     pub shutdown_timeout: u64,
+
+    /// ETL concurrency controls.
+    pub etl_concurrency: EtlConcurrencyConfig,
 }
 
 impl ToriiConfig {
@@ -191,6 +226,7 @@ pub struct ToriiConfigBuilder {
     >,
     contract_identifier: Option<Arc<dyn ContractIdentifier>>,
     shutdown_timeout: Option<u64>,
+    etl_concurrency: Option<EtlConcurrencyConfig>,
 }
 
 impl ToriiConfigBuilder {
@@ -484,6 +520,12 @@ impl ToriiConfigBuilder {
         self
     }
 
+    /// Sets ETL prefetch and decode concurrency.
+    pub fn etl_concurrency(mut self, config: EtlConcurrencyConfig) -> Self {
+        self.etl_concurrency = Some(config);
+        self
+    }
+
     /// Builds the Torii configuration.
     ///
     /// # Panics
@@ -516,6 +558,7 @@ impl ToriiConfigBuilder {
             registry_cache: self.registry_cache,
             contract_identifier: self.contract_identifier,
             shutdown_timeout: self.shutdown_timeout.unwrap_or(30),
+            etl_concurrency: self.etl_concurrency.unwrap_or_default(),
         }
     }
 }
@@ -608,13 +651,19 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
             engine_db.clone(),
             config.contract_filter,
             registry_cache,
+            config.etl_concurrency.resolved_decode_parallelism(),
         )
     } else {
         tracing::info!(
             target: "torii::etl",
             "Creating DecoderContext without registry (all decoders for unmapped contracts)"
         );
-        DecoderContext::new(config.decoders, engine_db.clone(), config.contract_filter)
+        DecoderContext::new(
+            config.decoders,
+            engine_db.clone(),
+            config.contract_filter,
+            config.etl_concurrency.resolved_decode_parallelism(),
+        )
     };
 
     let topics = multi_sink.topics();
@@ -691,6 +740,7 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
     let etl_engine_db = engine_db.clone();
     let cycle_interval = config.cycle_interval;
     let etl_shutdown_token = shutdown_token.clone();
+    let etl_concurrency = config.etl_concurrency.clone();
 
     // Move multi_decoder into the task (can't clone since it owns the registry)
     let etl_decoder_context = decoder_context;
@@ -699,7 +749,7 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
     let contract_identifier = config.contract_identifier;
 
     // Extractor was already created earlier (to get provider), make it mutable for the ETL loop
-    let mut extractor = extractor;
+    let extractor = Arc::new(tokio::sync::Mutex::new(extractor));
 
     let etl_handle = tokio::spawn(async move {
         tracing::info!(target: "torii::etl", "Starting ETL pipeline...");
@@ -707,46 +757,172 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
         // Wait a bit for the server to be ready.
         tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
-        let mut cursor: Option<String> = None;
+        #[derive(Debug)]
+        struct PrefetchedBatch {
+            batch: etl::extractor::ExtractionBatch,
+            cursor: Option<String>,
+            extractor_finished: bool,
+        }
+
+        let prefetch_capacity = etl_concurrency.resolved_prefetch_batches();
+        let (prefetch_tx, mut prefetch_rx) =
+            tokio::sync::mpsc::channel::<PrefetchedBatch>(prefetch_capacity);
+        let queue_depth = Arc::new(AtomicUsize::new(0));
+
+        let producer_extractor = extractor.clone();
+        let producer_engine_db = etl_engine_db.clone();
+        let producer_shutdown = etl_shutdown_token.clone();
+        let producer_identifier = contract_identifier.clone();
+        let producer_queue_depth = queue_depth.clone();
+
+        let producer_handle = tokio::spawn(async move {
+            let mut cursor: Option<String> = None;
+
+            loop {
+                if producer_shutdown.is_cancelled() {
+                    tracing::info!(target: "torii::etl", "Shutdown requested, stopping prefetch producer");
+                    break;
+                }
+
+                let batch = {
+                    let mut extractor = producer_extractor.lock().await;
+                    extractor.extract(cursor.clone(), &producer_engine_db).await
+                };
+
+                let batch = match batch {
+                    Ok(batch) => batch,
+                    Err(e) => {
+                        tracing::error!(target: "torii::etl", "Extract failed: {}", e);
+                        ::metrics::counter!("torii_etl_cycle_total", "status" => "extract_error")
+                            .increment(1);
+                        if producer_shutdown.is_cancelled() {
+                            break;
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_secs(cycle_interval)).await;
+                        continue;
+                    }
+                };
+
+                let should_pause = batch.is_empty();
+                let new_cursor = batch.cursor.clone();
+
+                if let Some(ref identifier) = producer_identifier {
+                    let identify_start = std::time::Instant::now();
+                    let contract_addresses: Vec<starknet::core::types::Felt> = batch
+                        .events
+                        .iter()
+                        .map(|event| event.from_address)
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect();
+
+                    if let Err(e) = identifier.identify_contracts(&contract_addresses).await {
+                        tracing::warn!(
+                            target: "torii::etl",
+                            error = %e,
+                            "Contract identification failed"
+                        );
+                    }
+                    ::metrics::histogram!("torii_registry_identify_duration_seconds")
+                        .record(identify_start.elapsed().as_secs_f64());
+                }
+
+                let extractor_finished = {
+                    let extractor = producer_extractor.lock().await;
+                    extractor.is_finished()
+                };
+
+                let stall_start = std::time::Instant::now();
+                if prefetch_tx
+                    .send(PrefetchedBatch {
+                        batch,
+                        cursor: new_cursor.clone(),
+                        extractor_finished,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                ::metrics::histogram!("torii_etl_prefetch_stall_seconds")
+                    .record(stall_start.elapsed().as_secs_f64());
+                producer_queue_depth.fetch_add(1, Ordering::Relaxed);
+                ::metrics::gauge!("torii_etl_prefetch_queue_depth")
+                    .set(producer_queue_depth.load(Ordering::Relaxed) as f64);
+
+                cursor = new_cursor;
+
+                if extractor_finished {
+                    break;
+                }
+
+                if let Some(prefetched_cursor) = &cursor {
+                    tracing::trace!(
+                        target: "torii::etl",
+                        cursor = prefetched_cursor,
+                        "Prefetched ETL batch"
+                    );
+                }
+
+                if prefetch_tx.is_closed() || producer_shutdown.is_cancelled() {
+                    break;
+                }
+
+                if let Some(ref prefetched_cursor) = cursor {
+                    tracing::trace!(
+                        target: "torii::etl",
+                        cursor = prefetched_cursor,
+                        "Advanced producer cursor"
+                    );
+                }
+
+                if should_pause {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(cycle_interval)).await;
+                }
+            }
+        });
+
+        let mut committed_cursor: Option<String> = None;
+        let mut shutdown_requested = false;
 
         loop {
-            let cycle_start = std::time::Instant::now();
             ::metrics::gauge!("torii_etl_inflight_cycles").set(1.0);
 
-            // Check for shutdown signal BEFORE starting extraction
-            if etl_shutdown_token.is_cancelled() {
-                tracing::info!(target: "torii::etl", "Shutdown requested, stopping ETL loop");
-                ::metrics::gauge!("torii_etl_inflight_cycles").set(0.0);
-                break;
-            }
-
-            // Extract the events from the source.
-            let batch = match extractor.extract(cursor.clone(), &etl_engine_db).await {
-                Ok(batch) => batch,
-                Err(e) => {
-                    tracing::error!(target: "torii::etl", "Extract failed: {}", e);
-                    ::metrics::counter!("torii_etl_cycle_total", "status" => "extract_error")
-                        .increment(1);
-                    ::metrics::histogram!("torii_etl_cycle_duration_seconds")
-                        .record(cycle_start.elapsed().as_secs_f64());
-                    ::metrics::gauge!("torii_etl_inflight_cycles").set(0.0);
-                    // Check shutdown before sleeping
-                    if etl_shutdown_token.is_cancelled() {
-                        tracing::info!(target: "torii::etl", "Shutdown requested during error recovery");
-                        break;
+            let wait_start = std::time::Instant::now();
+            let next_batch = if shutdown_requested {
+                prefetch_rx.recv().await
+            } else {
+                tokio::select! {
+                    maybe_batch = prefetch_rx.recv() => maybe_batch,
+                    () = etl_shutdown_token.cancelled() => {
+                        shutdown_requested = true;
+                        continue;
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(cycle_interval)).await;
-                    continue;
                 }
             };
+            ::metrics::histogram!("torii_etl_prefetch_stall_seconds")
+                .record(wait_start.elapsed().as_secs_f64());
 
-            // Save cursor for later commit (AFTER successful sink processing)
-            let new_cursor = batch.cursor.clone();
+            let Some(prefetched) = next_batch else {
+                ::metrics::gauge!("torii_etl_inflight_cycles").set(0.0);
+                break;
+            };
+            queue_depth.fetch_sub(1, Ordering::Relaxed);
+            ::metrics::gauge!("torii_etl_prefetch_queue_depth")
+                .set(queue_depth.load(Ordering::Relaxed) as f64);
+
+            let cycle_start = std::time::Instant::now();
+            let batch = prefetched.batch;
+            let new_cursor = prefetched.cursor;
 
             if batch.is_empty() {
                 if let Some(ref cursor_str) = new_cursor {
-                    if cursor.as_ref() != Some(cursor_str) {
-                        if let Err(e) = extractor.commit_cursor(cursor_str, &etl_engine_db).await {
+                    if committed_cursor.as_ref() != Some(cursor_str) {
+                        let commit_result = {
+                            let mut extractor = extractor.lock().await;
+                            extractor.commit_cursor(cursor_str, &etl_engine_db).await
+                        };
+                        if let Err(e) = commit_result {
                             tracing::error!(
                                 target: "torii::etl",
                                 "Failed to commit cursor for empty batch: {}",
@@ -754,23 +930,13 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
                             );
                             ::metrics::counter!("torii_cursor_commit_failures_total").increment(1);
                         } else {
-                            cursor.clone_from(&new_cursor);
+                            committed_cursor.clone_from(&new_cursor);
                         }
                     }
                 }
 
-                if extractor.is_finished() {
+                if prefetched.extractor_finished {
                     tracing::info!(target: "torii::etl", "Extractor finished, stopping ETL loop");
-                    ::metrics::counter!("torii_etl_cycle_total", "status" => "empty").increment(1);
-                    ::metrics::histogram!("torii_etl_cycle_duration_seconds")
-                        .record(cycle_start.elapsed().as_secs_f64());
-                    ::metrics::gauge!("torii_etl_inflight_cycles").set(0.0);
-                    break;
-                }
-
-                // Check shutdown before sleeping
-                if etl_shutdown_token.is_cancelled() {
-                    tracing::info!(target: "torii::etl", "Shutdown requested while waiting for blocks");
                     ::metrics::counter!("torii_etl_cycle_total", "status" => "empty").increment(1);
                     ::metrics::histogram!("torii_etl_cycle_duration_seconds")
                         .record(cycle_start.elapsed().as_secs_f64());
@@ -782,8 +948,10 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
                 ::metrics::histogram!("torii_etl_cycle_duration_seconds")
                     .record(cycle_start.elapsed().as_secs_f64());
                 ::metrics::gauge!("torii_etl_inflight_cycles").set(0.0);
-                // Wait before polling again
-                tokio::time::sleep(tokio::time::Duration::from_secs(cycle_interval)).await;
+
+                if shutdown_requested {
+                    continue;
+                }
                 continue;
             }
 
@@ -809,26 +977,6 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
                 .await
             {
                 tracing::warn!(target: "torii::etl", "Failed to update engine DB: {}", e);
-            }
-
-            // Identify unknown contracts (if identifier is configured)
-            if let Some(ref identifier) = contract_identifier {
-                // Extract unique contract addresses from batch
-                let contract_addresses: Vec<starknet::core::types::Felt> = batch
-                    .events
-                    .iter()
-                    .map(|e| e.from_address)
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect();
-
-                if let Err(e) = identifier.identify_contracts(&contract_addresses).await {
-                    tracing::warn!(
-                        target: "torii::etl",
-                        error = %e,
-                        "Contract identification failed"
-                    );
-                }
             }
 
             // Transform the events into envelopes.
@@ -868,14 +1016,19 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
             // CRITICAL: Commit cursor ONLY AFTER successful sink processing.
             // This ensures no data loss if the process is killed during extraction or sink processing.
             if let Some(ref cursor_str) = new_cursor {
-                if let Err(e) = extractor.commit_cursor(cursor_str, &etl_engine_db).await {
+                let commit_result = {
+                    let mut extractor = extractor.lock().await;
+                    extractor.commit_cursor(cursor_str, &etl_engine_db).await
+                };
+                if let Err(e) = commit_result {
                     tracing::error!(target: "torii::etl", "Failed to commit cursor: {}", e);
                     ::metrics::counter!("torii_cursor_commit_failures_total").increment(1);
                     // Continue anyway - cursor will be re-processed on restart (safe, just duplicate work)
+                } else {
+                    committed_cursor.clone_from(&new_cursor);
                 }
             }
 
-            cursor = new_cursor;
             if let Some(chain_head) = batch.chain_head {
                 let gap = chain_head.saturating_sub(latest_block);
                 ::metrics::gauge!("torii_etl_cycle_gap_blocks").set(gap as f64);
@@ -890,6 +1043,9 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
             tracing::info!(target: "torii::etl", "ETL cycle complete");
         }
 
+        if let Err(e) = producer_handle.await {
+            tracing::warn!(target: "torii::etl", error = %e, "Prefetch producer join failed");
+        }
         tracing::info!(target: "torii::etl", "ETL loop completed gracefully");
     });
 
