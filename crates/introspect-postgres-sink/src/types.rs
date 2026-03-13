@@ -168,10 +168,10 @@ impl PgRustEnum {
             .collect()
     }
 
-    pub fn all_fields(&self) -> Vec<PostgresField> {
+    pub fn all_fields(&self, schema: &PgSchema) -> Vec<PostgresField> {
         let mut fields = vec![PostgresField::new_enum(
             "variant".to_string(),
-            &self.variants_type_name,
+            &schema.qualify(&self.variants_type_name),
         )];
         fields.extend(self.variant_fields());
         fields
@@ -539,7 +539,7 @@ impl PgTableStructure {
         queries.push(create_struct_type_query(
             &self.schema,
             &struct_name,
-            &enum_def.all_fields(),
+            &enum_def.all_fields(&self.schema),
         ));
         let qualified_name = self.schema.qualify(&struct_name);
         self.enums.insert(qualified_name.clone(), enum_def);

@@ -124,9 +124,7 @@ impl PostgresTables {
         let table = to_table.into();
         self.assert_table_not_exists(&table.id, &table.name)?;
         let (id, table) = PgTable::new_from_table(schema, table, queries)?;
-        println!("Creating table with id: {id}, name: {}", table.name());
         let mut tables = self.0.write().unwrap();
-        println!("locked");
         tables.insert(id, table);
         Ok(())
     }
@@ -204,6 +202,9 @@ impl PostgresTables {
             Some(table) => Ok(table),
             None => Err(PgDbError::TableNotFound(event.table)),
         }?;
+        if !table.alive {
+            return Ok(());
+        }
         let record = table.get_schema(&event.columns)?;
         let table_name = table.name();
 
@@ -245,7 +246,7 @@ impl PostgresTables {
     ) -> PgDbResult<()> {
         match msg {
             IntrospectMsg::CreateTable(event) => self.create_table(schema, event.clone(), queries),
-            IntrospectMsg::UpdateTable(_) => Ok(()),
+            IntrospectMsg::UpdateTable(event) => self.set_table_dead(&event.id),
             IntrospectMsg::AddColumns(event) => self.set_table_dead(&event.table),
             IntrospectMsg::DropColumns(event) => self.set_table_dead(&event.table),
             IntrospectMsg::RetypeColumns(event) => self.set_table_dead(&event.table),
@@ -281,10 +282,14 @@ impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
         }
     }
 
-    pub async fn migrate_introspect_sink(&self) -> PgDbResult<()> {
+    pub async fn initialize_introspect_pg_sink(&self) -> PgDbResult<()> {
         self.migrate(Some("introspect"), INTROSPECT_PG_SINK_MIGRATIONS)
-            .await
-            .err_into()
+            .await?;
+        let mut tx = self.begin().await?;
+        sqlx::query(format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", self.schema).as_str())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await.err_into()
     }
     pub fn load_tables_no_commit(&self, table_schemas: Vec<TableSchema>) -> PgDbResult<()> {
         let mut tables = self.tables.write()?;
@@ -311,14 +316,17 @@ impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
     pub async fn process_messages(
         &self,
         msgs: Vec<(&IntrospectMsg, &EventContext)>,
-    ) -> PgDbResult<()> {
+    ) -> PgDbResult<Vec<PgDbResult<()>>> {
         let mut queries = Vec::new();
+        let mut results = Vec::with_capacity(msgs.len());
         for (msg, context) in msgs {
-            self.tables
-                .handle_message(&self.schema, msg, context, &mut queries)?;
+            results.push(
+                self.tables
+                    .handle_message(&self.schema, msg, context, &mut queries),
+            );
         }
         self.execute_queries(&queries).await?;
-        Ok(())
+        Ok(results)
     }
 }
 

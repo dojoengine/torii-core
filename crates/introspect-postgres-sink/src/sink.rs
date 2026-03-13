@@ -104,7 +104,7 @@ impl<T: Send + Sync + PostgresConnection> Sink for PostgresSimpleDb<T> {
         _event_bus: Arc<EventBus>,
         _context: &SinkContext,
     ) -> Result<()> {
-        self.migrate_introspect_sink().await?;
+        self.initialize_introspect_pg_sink().await?;
         tracing::info!(
             target: LOGGING_TARGET,
             "Initialized introspect Postgres sink"
