@@ -1,7 +1,7 @@
 use crate::processor::PgSchema;
 use crate::types::PgTypeError;
 use crate::{PgStructDef, PgTableStructure, PostgresField, PostgresType};
-use introspect_types::{ColumnDef, ColumnDefs, FeltIds, PrimaryDef};
+use introspect_types::{ColumnDef, ColumnDefs, FeltIds, MemberDef, PrimaryDef, VariantDef};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -23,11 +23,13 @@ pub type TableResult<T> = std::result::Result<T, PgTableError>;
 #[derive(Debug)]
 pub struct PgTable {
     pub name: String,
-    pub postgres: PgTableStructure,
+    pub schema: PgSchema,
     pub primary: PrimaryDef,
     pub columns: HashMap<Felt, ColumnDef>,
     pub order: Vec<Felt>,
     pub alive: bool,
+    pub dead_members: HashMap<String, MemberDef>,
+    pub dead_variants: HashMap<String, Vec<VariantDef>>,
 }
 
 impl PgStructDef {
@@ -54,7 +56,7 @@ impl PgTable {
         let postgres = PgTableStructure::new(schema, &name, &primary, &columns, queries)?;
         Ok(Self {
             name,
-            postgres,
+            schema: schema.clone(),
             primary,
             order: columns.ids(),
             columns: columns.as_hash_map(),

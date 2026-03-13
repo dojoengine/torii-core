@@ -125,7 +125,8 @@ impl PostgresTables {
         self.assert_table_not_exists(&table.id, &table.name)?;
         let (id, table) = PgTable::new_from_table(schema, table, queries)?;
         println!("Creating table with id: {id}, name: {}", table.name());
-        let mut tables = self.0.write().unwrap();
+        let mut tables: std::sync::RwLockWriteGuard<'_, HashMap<Felt, PgTable>> =
+            self.0.write().unwrap();
         println!("locked");
         tables.insert(id, table);
         Ok(())
