@@ -33,8 +33,42 @@ pub struct TableSchema {
     pub columns: Vec<ColumnDef>,
 }
 
-#[derive(Clone, Debug)]
+impl From<TableSchema> for (Felt, TableInfo) {
+    fn from(value: TableSchema) -> Self {
+        (
+            value.id,
+            TableInfo {
+                name: value.name,
+                attributes: value.attributes,
+                primary: value.primary,
+                columns: value.columns,
+            },
+        )
+    }
+}
+
+impl From<(Felt, TableInfo)> for TableSchema {
+    fn from(value: (Felt, TableInfo)) -> Self {
+        let (id, info) = value;
+        TableSchema {
+            id,
+            name: info.name,
+            attributes: info.attributes,
+            primary: info.primary,
+            columns: info.columns,
+        }
+    }
+}
+
 pub struct TableInfo {
+    pub name: String,
+    pub attributes: Vec<Attribute>,
+    pub primary: PrimaryDef,
+    pub columns: Vec<ColumnDef>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Table {
     pub name: String,
     pub attributes: Vec<Attribute>,
     pub primary: PrimaryDef,

@@ -1,3 +1,4 @@
+use starknet_types_core::felt::Felt;
 use xxhash_rust::xxh3::Xxh3;
 
 pub fn truncate(s: &str, max_chars: usize) -> &str {
@@ -27,16 +28,18 @@ fn parse_type_name(type_name: &str) -> String {
 }
 
 pub trait HasherExt {
-    fn new_based(base: &str) -> Self;
+    fn new_based<T: AsBytes + ?Sized>(base: &T) -> Self;
     fn type_name(&self, name: &str) -> String;
-    fn branch(&self, name: &str) -> Self;
-    fn branch_to_type_name(&self, leaf: &str, name: &str) -> String;
+    fn branch<T: AsBytes + ?Sized>(&self, name: &T) -> Self;
+    fn branch_to_type_name<T: AsBytes + ?Sized>(&self, leaf: &T, name: &str) -> String;
 }
 
 impl HasherExt for Xxh3 {
-    fn new_based(base: &str) -> Self {
+    fn new_based<T: AsBytes + ?Sized>(base: &T) -> Self {
         let mut hash = Xxh3::new();
-        hash.update(base.as_bytes());
+        let bytes = base.as_bytes();
+        hash.update(&(bytes.len() as u32).to_le_bytes());
+        hash.update(&bytes);
         hash
     }
 
@@ -45,14 +48,42 @@ impl HasherExt for Xxh3 {
         format!("{}_{}", parse_type_name(name), hash)
     }
 
-    fn branch(&self, name: &str) -> Xxh3 {
+    fn branch<T: AsBytes + ?Sized>(&self, name: &T) -> Xxh3 {
         let mut hasher = self.clone();
-        hasher.update(&(name.len() as u32).to_le_bytes());
-        hasher.update(name.as_bytes());
+        let bytes = name.as_bytes();
+        hasher.update(&(bytes.len() as u32).to_le_bytes());
+        hasher.update(&bytes);
         hasher
     }
 
-    fn branch_to_type_name(&self, leaf: &str, name: &str) -> String {
+    fn branch_to_type_name<T: AsBytes + ?Sized>(&self, leaf: &T, name: &str) -> String {
         self.branch(leaf).type_name(name)
+    }
+
+    fn digest128(&self) -> u128 {
+        let (low, high) = self.digest128_raw();
+        ((high as u128) << 64) | (low as u128)
+    }
+}
+
+pub trait AsBytes {
+    fn as_bytes(&self) -> Vec<u8>;
+}
+
+impl AsBytes for Felt {
+    fn as_bytes(&self) -> Vec<u8> {
+        self.to_bytes_be().to_vec()
+    }
+}
+
+impl AsBytes for str {
+    fn as_bytes(&self) -> Vec<u8> {
+        str::as_bytes(self).to_vec()
+    }
+}
+
+impl AsBytes for String {
+    fn as_bytes(&self) -> Vec<u8> {
+        self.as_bytes().to_vec()
     }
 }

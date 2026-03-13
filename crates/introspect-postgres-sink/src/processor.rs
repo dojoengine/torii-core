@@ -1,7 +1,7 @@
 use crate::json::PostgresJsonSerializer;
 use crate::sql::write_conflict_res;
 use crate::table::{PgTable, PgTableError};
-use crate::types::PgTypeError;
+use crate::types::{CreatePgTable, PgTypeError};
 use crate::INTROSPECT_PG_SINK_MIGRATIONS;
 use introspect_types::ResultInto;
 use serde_json::Serializer as JsonSerializer;
@@ -121,14 +121,11 @@ impl PostgresTables {
         to_table: impl Into<TableSchema>,
         queries: &mut Vec<String>,
     ) -> PgDbResult<()> {
-        let table = to_table.into();
-        self.assert_table_not_exists(&table.id, &table.name)?;
-        let (id, table) = PgTable::new_from_table(schema, table, queries)?;
-        println!("Creating table with id: {id}, name: {}", table.name());
-        let mut tables: std::sync::RwLockWriteGuard<'_, HashMap<Felt, PgTable>> =
-            self.0.write().unwrap();
-        println!("locked");
-        tables.insert(id, table);
+        let (id, table) = Into::<TableSchema>::into(to_table).into();
+        self.assert_table_not_exists(&id, &table.name)?;
+        CreatePgTable::new(&id, &table)?.make_queries(schema, queries)?;
+        let mut tables: std::sync::RwLockWriteGuard<'_, HashMap<Felt, PgTable>> = self.write()?;
+        tables.insert(id, table.into());
         Ok(())
     }
 
@@ -137,7 +134,7 @@ impl PostgresTables {
             Some(existing) => Err(PgDbError::TableAlreadyExists(
                 *id,
                 name.to_string(),
-                existing.name().to_string(),
+                existing.name.to_string(),
             )),
             None => Ok(()),
         }
