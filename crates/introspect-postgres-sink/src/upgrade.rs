@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::Ok;
-use introspect_types::{ColumnDef, MemberDef, PrimaryDef, StructDef, TypeDef};
+use introspect_types::{type_def::TypeName, ColumnDef, MemberDef, PrimaryDef, StructDef, TypeDef};
 use starknet_types_core::felt::Felt;
 use xxhash_rust::xxh3::Xxh3;
 
@@ -35,6 +34,11 @@ pub enum UpgradeError {
         expected: &'static str,
         found: &'static str,
     },
+    ColumnNotFound {
+        table_id: Felt,
+        name: String,
+        column_id: Felt,
+    },
 }
 
 pub type UpgradeResult<T> = Result<T, UpgradeError>;
@@ -62,6 +66,13 @@ impl UpgradeError {
     fn def_missing<T>(item: &'static str, name: String) -> UpgradeResult<T> {
         Err(Self::DefMissing { item, name })
     }
+    fn column_not_found<T>(table_id: Felt, name: String, column_id: Felt) -> UpgradeResult<T> {
+        Err(Self::ColumnNotFound {
+            table_id,
+            name,
+            column_id,
+        })
+    }
 }
 
 impl PgTable {
@@ -87,7 +98,7 @@ impl PgTable {
         id: &Felt,
         name: &str,
         queries: &mut Vec<String>,
-    ) -> TableResult<()> {
+    ) -> UpgradeResult<()> {
         match self.columns.get_mut(id) {
             Some(column) => {
                 queries.push(rename_column_query(
@@ -99,7 +110,7 @@ impl PgTable {
                 column.name = name.to_string();
                 Ok(())
             }
-            None => Err(PgTableError::ColumnNotFound(id.clone(), self.name.clone())),
+            None => UpgradeError::column_not_found(self.id, self.name.clone(), id.clone()),
         }
     }
     fn retype_column(
@@ -108,7 +119,7 @@ impl PgTable {
         id: &Felt,
         type_def: &TypeDef,
         queries: &mut Vec<String>,
-    ) -> TableResult<()> {
+    ) -> UpgradeResult<()> {
         match self.columns.get_mut(id) {
             Some(column) => {
                 let new_pg_type = self
@@ -126,7 +137,7 @@ impl PgTable {
                 }
                 Ok(())
             }
-            None => Err(PgTableError::ColumnNotFound(id.clone(), self.name.clone())),
+            None => Err(UpgradeError::def_missing("Column", id.to_string())),
         }
     }
 }
@@ -134,22 +145,30 @@ impl PgTable {
 trait CurrentTypeDef {
     fn update_fixed_array(&mut self, len: u32) -> UpgradeResult<&mut Self>;
     fn get_struct_def(&mut self) -> UpgradeResult<&mut StructDef>;
+    fn get_array_type_def(&mut self) -> UpgradeResult<&mut TypeDef>;
+    fn update_to(&mut self, new: PostgresType) -> Option<PostgresType>;
 }
 
 impl CurrentTypeDef for TypeDef {
+    fn get_array_type_def(&mut self) -> UpgradeResult<&mut TypeDef> {
+        match self {
+            TypeDef::Array(elem_type) => Ok(elem_type),
+            item => UpgradeError::item_mismatch("Array", item.item_name()),
+        }
+    }
     fn update_fixed_array(&mut self, len: u32) -> UpgradeResult<&mut Self> {
         match self {
             TypeDef::FixedArray(def) => {
                 def.size = len;
                 Ok(&mut def.type_def)
             }
-            item => UpgradeError::item_mismatch("FixedArray", item.type_name()),
+            item => UpgradeError::item_mismatch("FixedArray", item.item_name()),
         }
     }
     fn get_struct_def(&mut self) -> UpgradeResult<&mut StructDef> {
         match self {
             TypeDef::Struct(def) => Ok(def),
-            item => UpgradeError::item_mismatch("Struct", item.type_name()),
+            item => UpgradeError::item_mismatch("Struct", item.item_name()),
         }
     }
 }
@@ -178,59 +197,75 @@ impl PgTableStructure {
             StorageAddress, StorageBaseAddress, Struct, Tuple, Utf8String, I128, I16, I32, I64, I8,
             U128, U16, U32, U64, U8,
         };
-        let (new_pg, update) = match (old, new) {
-            (PgNone, TDNone)
-            | (Text, Utf8String)
-            | (Char31, ShortUtf8)
-            | (Boolean, Bool)
-            | (Int, I32)
-            | (BigInt, I64)
-            | (Uint8, U8)
-            | (Uint16, U16)
-            | (Uint32, U32)
-            | (Uint64, U64)
-            | (Uint128, U128)
-            | (Int128, I128)
-            | (PgFelt252, Felt252)
-            | (PgEthAddress, EthAddress) => (None, false),
-            (SmallInt, I8 | I16)
-            | (PgBytes31, Bytes31 | Bytes31Encoded(_))
-            | (Bytea, ByteArray | ByteArrayEncoded(_))
-            | (StarknetHash, ClassHash | ContractAddress | StorageAddress | StorageBaseAddress) => {
-                (None, true)
-            }
-            (Boolean | Uint8, I8 | I16) => (Some(SmallInt), true),
-            (Boolean | Uint8 | Uint16 | SmallInt, I32) => (Some(Int), true),
-            (Boolean | Uint8 | Uint16 | SmallInt | Uint32 | Int, I64) => (Some(BigInt), true),
-            (Boolean | Uint8 | Uint16 | SmallInt | Uint32 | Int | Uint64 | BigInt, I128) => {
-                (Some(Int128), true)
-            }
-            (Boolean, U8) => (Some(Uint8), true),
-            (Boolean | Uint8, U16) => (Some(Uint16), true),
-            (Boolean | Uint8 | Uint16, U32) => (Some(Uint32), true),
-            (Boolean | Uint8 | Uint16 | Uint32, U64) => (Some(Uint64), true),
-            (Boolean | Uint8 | Uint16 | Uint32 | Uint64, U128) => (Some(Uint128), true),
-            (
-                Boolean | Uint8 | Uint16 | Uint32 | Uint64 | Uint128 | StarknetHash | PgEthAddress,
-                Felt252,
-            ) => (Some(PgFelt252), true),
-            (
-                Boolean | Uint8 | Uint16 | Uint32 | Uint64 | Uint128 | PgFelt252,
-                ClassHash | ContractAddress,
-            ) => (Some(StarknetHash), true),
-            // (PgStruct(struct_name), Struct(new_def)) => {
-            //     self.upgrade_struct(branch, struct_name, new_def, queries)?;
-            //     (None, false)
+        let new_pg = match (current, new) {
+            (TDNone, TDNone)
+            | (Utf8String, Utf8String)
+            | (ShortUtf8, ShortUtf8)
+            | (Bool, Bool)
+            | (I8, I8)
+            | (I16, I16)
+            | (I32, I32)
+            | (I64, I64)
+            | (U8, U8)
+            | (U16, U16)
+            | (U32, U32)
+            | (U64, U64)
+            | (U128, U128)
+            | (I128, I128)
+            | (Felt252, Felt252)
+            | (EthAddress, EthAddress)
+            | (ClassHash,ClassHash)
+            | (ContractAddress,ContractAddress)
+            | (StorageAddress,StorageAddress)
+            | (StorageBaseAddress,StorageBaseAddress)
+            | (Bytes31,Bytes31)
+            | (ByteArray,ByteArray) => None,
+            (I8,  I16)
+            | (Bytes31, Bytes31Encoded(_))
+            | (ByteArray, ByteArrayEncoded(_))
+            | (
+                ClassHash | ContractAddress | StorageAddress | StorageBaseAddress,
+                ClassHash | ContractAddress | StorageAddress | StorageBaseAddress,
+            ) => {
+                *current = new.clone();
+                None
+            },
+            (Bool | Uint8, I8 | I16) => (Some(SmallInt)),
+            // (Boolean | Uint8 | Uint16 | SmallInt, I32) => (Some(Int), true),
+            // (Boolean | Uint8 | Uint16 | SmallInt | Uint32 | Int, I64) => (Some(BigInt), true),
+            // (Boolean | Uint8 | Uint16 | SmallInt | Uint32 | Int | Uint64 | BigInt, I128) => {
+            //     (Some(Int128), true)
             // }
-            // (PgRustEnum(enum_name), Enum(new_def)) => {
-            //     self.upgrade_enum(branch, enum_name, new_def, queries)?;
-            //     (None, false)
-            // }
-            // (PgTuple(tuple_name), Tuple(new_def)) => {
-            //     self.upgrade_tuple(branch, tuple_name, new_def, queries)?;
-            //     (None, false)
-            // }
+            // (Boolean, U8) => (Some(Uint8), true),
+            // (Boolean | Uint8, U16) => (Some(Uint16), true),
+            // (Boolean | Uint8 | Uint16, U32) => (Some(Uint32), true),
+            // (Boolean | Uint8 | Uint16 | Uint32, U64) => (Some(Uint64), true),
+            // (Boolean | Uint8 | Uint16 | Uint32 | Uint64, U128) => (Some(Uint128), true),
+            // (
+            //     Boolean | Uint8 | Uint16 | Uint32 | Uint64 | Uint128 | StarknetHash | PgEthAddress,
+            //     Felt252,
+            // ) => (Some(PgFelt252), true),
+            // (
+            //     Boolean | Uint8 | Uint16 | Uint32 | Uint64 | Uint128 | PgFelt252,
+            //     ClassHash | ContractAddress,
+            // ) => (Some(StarknetHash), true),
+            // // (PgStruct(struct_name), Struct(new_def)) => {
+            // //     self.upgrade_struct(branch, struct_name, new_def, queries)?;
+            // //     (None, false)
+            // // }
+            // // (PgRustEnum(enum_name), Enum(new_def)) => {
+            // //     self.upgrade_enum(branch, enum_name, new_def, queries)?;
+            // //     (None, false)
+            // // }
+            // // (PgTuple(tuple_name), Tuple(new_def)) => {
+            // //     self.upgrade_tuple(branch, tuple_name, new_def, queries)?;
+            // //     (None, false)
+            // // }
             // (PgArray(elem_type, None), Array(new_elem_type)) => with_false(
+            //     self.compare_type(branch, name, elem_type, new_elem_type, queries)?
+            //         .map(|t| PgArray(Box::new(t), None)),
+            // ),
+            // (PgArray(elem_type, Some(_)), Array(new_elem_type)) => with_false(
             //     self.compare_type(branch, name, elem_type, new_elem_type, queries)?
             //         .map(|t| PgArray(Box::new(t), None)),
             // ),
@@ -244,12 +279,28 @@ impl PgTableStructure {
             //             .map(|t| PgArray(Box::new(t), Some(new_def.size))),
             //     )
             // }
-            _ => return UpgradeError::type_upgrade_err(old, new),
-        };
-        if update {
-            *current = new.clone();
+            // _ => return UpgradeError::type_upgrade_err(old, new),
         }
         Ok(new_pg)
+    }
+
+    fn upgrade_to_variable_array(
+        &mut self,
+        branch: &Xxh3,
+        current: &mut TypeDef,
+        old: &PostgresType,
+        new: &TypeDef,
+        queries: &mut Vec<String>,
+    ) -> UpgradeResult<()> {
+        match (old, new) {
+            (PgArray(elem_type, Some(size)), Array(new_elem_type)) => {
+                let inner = current.update_fixed_array(*size)?;
+                self.compare_type(branch, inner, elem_type, new_elem_type, queries)?
+                    .map(|t| PgArray(Box::new(t), None));
+                Ok(())
+            }
+            _ => UpgradeError::type_upgrade_err(old, new),
+        }
     }
 
     fn upgrade_struct(
@@ -262,8 +313,8 @@ impl PgTableStructure {
     ) -> UpgradeResult<()> {
         let pg_current = self
             .structs
-            .get_mut(old_name)
-            .ok_or_else(|| UpgradeError::struct_not_found(old_name))?;
+            .get_mut(type_name)
+            .ok_or_else(|| UpgradeError::struct_not_found(type_name))?;
         let mut current_map: HashMap<String, MemberDef> = std::mem::take(&mut current.members)
             .into_iter()
             .map(|m| (m.name.clone(), m))
@@ -282,7 +333,7 @@ impl PgTableStructure {
                         queries.push(modify_member_query(
                             self.schema(),
                             type_name,
-                            &name,
+                            &member_def.name,
                             &pg_type,
                         ));
                         pg_current.fields.insert(name.clone(), pg_type);
