@@ -769,10 +769,37 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
             tokio::sync::mpsc::channel::<PrefetchedBatch>(prefetch_capacity);
         let queue_depth = Arc::new(AtomicUsize::new(0));
 
+        let (identify_tx, identify_handle) = if let Some(identifier) = contract_identifier.clone() {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<starknet::core::types::Felt>>(
+                prefetch_capacity.saturating_mul(2).max(8),
+            );
+            let handle = tokio::spawn(async move {
+                while let Some(contract_addresses) = rx.recv().await {
+                    if contract_addresses.is_empty() {
+                        continue;
+                    }
+
+                    let identify_start = std::time::Instant::now();
+                    if let Err(e) = identifier.identify_contracts(&contract_addresses).await {
+                        tracing::warn!(
+                            target: "torii::etl",
+                            error = %e,
+                            "Contract identification failed"
+                        );
+                    }
+                    ::metrics::histogram!("torii_registry_identify_duration_seconds")
+                        .record(identify_start.elapsed().as_secs_f64());
+                }
+            });
+            (Some(tx), Some(handle))
+        } else {
+            (None, None)
+        };
+
         let producer_extractor = extractor.clone();
         let producer_engine_db = etl_engine_db.clone();
         let producer_shutdown = etl_shutdown_token.clone();
-        let producer_identifier = contract_identifier.clone();
+        let producer_identify_tx = identify_tx.clone();
         let producer_queue_depth = queue_depth.clone();
 
         let producer_handle = tokio::spawn(async move {
@@ -806,8 +833,7 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
                 let should_pause = batch.is_empty();
                 let new_cursor = batch.cursor.clone();
 
-                if let Some(ref identifier) = producer_identifier {
-                    let identify_start = std::time::Instant::now();
+                if let Some(ref identify_tx) = producer_identify_tx {
                     let contract_addresses: Vec<starknet::core::types::Felt> = batch
                         .events
                         .iter()
@@ -816,15 +842,35 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
                         .into_iter()
                         .collect();
 
-                    if let Err(e) = identifier.identify_contracts(&contract_addresses).await {
-                        tracing::warn!(
-                            target: "torii::etl",
-                            error = %e,
-                            "Contract identification failed"
-                        );
+                    if !contract_addresses.is_empty() {
+                        match identify_tx.try_send(contract_addresses) {
+                            Ok(()) => {
+                                ::metrics::counter!(
+                                    "torii_registry_identify_jobs_total",
+                                    "status" => "enqueued"
+                                )
+                                .increment(1);
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                ::metrics::counter!(
+                                    "torii_registry_identify_jobs_total",
+                                    "status" => "dropped"
+                                )
+                                .increment(1);
+                                tracing::debug!(
+                                    target: "torii::etl",
+                                    "Contract identify queue full, skipping identify for this batch"
+                                );
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                ::metrics::counter!(
+                                    "torii_registry_identify_jobs_total",
+                                    "status" => "closed"
+                                )
+                                .increment(1);
+                            }
+                        }
                     }
-                    ::metrics::histogram!("torii_registry_identify_duration_seconds")
-                        .record(identify_start.elapsed().as_secs_f64());
                 }
 
                 let extractor_finished = {
@@ -1045,6 +1091,12 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
 
         if let Err(e) = producer_handle.await {
             tracing::warn!(target: "torii::etl", error = %e, "Prefetch producer join failed");
+        }
+        drop(identify_tx);
+        if let Some(handle) = identify_handle {
+            if let Err(e) = handle.await {
+                tracing::warn!(target: "torii::etl", error = %e, "Identifier worker join failed");
+            }
         }
         tracing::info!(target: "torii::etl", "ETL loop completed gracefully");
     });

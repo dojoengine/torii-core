@@ -392,7 +392,12 @@ async fn run_indexer(config: Config) -> Result<()> {
         let sink = Box::new(
             Erc20Sink::new(storage)
                 .with_grpc_service(grpc_service.clone())
-                .with_balance_tracking(provider.clone()),
+                .with_balance_tracking(provider.clone())
+                .with_metadata_pipeline(
+                    config.metadata_parallelism,
+                    config.metadata_queue_capacity,
+                    config.metadata_max_retries,
+                ),
         );
         torii_config = torii_config.add_sink_boxed(sink);
 
@@ -565,10 +570,13 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("Torii configured, starting ETL pipeline...");
     tracing::info!("Enabled token types: {}", enabled_types.join(", "));
     tracing::info!(
-        "ETL concurrency: prefetch_batches={} decode_parallelism={} rpc_parallelism={}",
+        "ETL concurrency: prefetch_batches={} decode_parallelism={} rpc_parallelism={} metadata_parallelism={} metadata_queue_capacity={} metadata_max_retries={}",
         config.max_prefetch_batches,
         config.decode_parallelism,
-        config.rpc_parallelism
+        config.rpc_parallelism,
+        config.metadata_parallelism,
+        config.metadata_queue_capacity,
+        config.metadata_max_retries,
     );
     tracing::info!("gRPC service available at localhost:{}", config.port);
     tracing::info!("  - torii.Torii (EventBus subscriptions)");

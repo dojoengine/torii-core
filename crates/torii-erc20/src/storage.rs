@@ -10,7 +10,7 @@
 //! - Records all adjustments in an audit table for debugging
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, Connection, ToSql};
 use starknet::core::types::{Felt, U256};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -23,6 +23,36 @@ use crate::balance_fetcher::BalanceFetchRequest;
 
 /// Maximum value for U256 (2^256 - 1)
 const U256_MAX: U256 = U256::from_words(u128::MAX, u128::MAX);
+const SQLITE_MAX_BIND_VARS: usize = 900;
+const SQLITE_PAIR_QUERY_CHUNK: usize = SQLITE_MAX_BIND_VARS / 2;
+const SQLITE_ACTIVITY_INSERT_CHUNK: usize = SQLITE_MAX_BIND_VARS / 5;
+const SQLITE_BALANCE_UPSERT_CHUNK: usize = SQLITE_MAX_BIND_VARS / 5;
+const SQLITE_ADJUSTMENT_INSERT_CHUNK: usize = SQLITE_MAX_BIND_VARS / 6;
+
+struct ActivityInsertRow {
+    account: Vec<u8>,
+    token: Vec<u8>,
+    ref_id: i64,
+    role: &'static str,
+    block_number: i64,
+}
+
+struct BalanceUpsertRow {
+    token: Vec<u8>,
+    wallet: Vec<u8>,
+    balance: Vec<u8>,
+    last_block: i64,
+    last_tx_hash: Vec<u8>,
+}
+
+struct AdjustmentInsertRow {
+    token: Vec<u8>,
+    wallet: Vec<u8>,
+    computed_balance: Vec<u8>,
+    actual_balance: Vec<u8>,
+    adjusted_at_block: i64,
+    tx_hash: Vec<u8>,
+}
 
 /// Safely adds two U256 values, capping at U256::MAX on overflow.
 ///
@@ -139,6 +169,13 @@ pub struct BalanceAdjustment {
     /// Block at which adjustment was made
     pub adjusted_at_block: u64,
     pub tx_hash: Felt,
+}
+
+/// Result of a batch balance consistency check.
+#[derive(Debug, Clone)]
+pub struct BalanceCheckBatch {
+    pub adjustment_requests: Vec<BalanceFetchRequest>,
+    pub balance_snapshot: HashMap<(Felt, Felt), U256>,
 }
 
 impl Erc20Storage {
@@ -278,25 +315,55 @@ impl Erc20Storage {
 
         let conn = Connection::open(db_path)?;
 
-        // Enable WAL mode + Performance PRAGMAs (critical for production scale)
-        // - WAL mode: Readers don't block writers (~2-3x write throughput)
-        // - synchronous=NORMAL: Relaxed fsync (safe with WAL, ~10x faster writes)
-        // - cache_size=-64000: 64MB cache (negative value = KB)
-        // - mmap_size: 256MB memory-mapped I/O for zero-copy reads
-        // - busy_timeout: 5s wait for lock (handles concurrent access)
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
-             PRAGMA foreign_keys=ON;
-             PRAGMA cache_size=-64000;
-             PRAGMA temp_store=MEMORY;
-             PRAGMA mmap_size=268435456;
-             PRAGMA wal_autocheckpoint=10000;
-             PRAGMA page_size=4096;
-             PRAGMA busy_timeout=5000;",
-        )?;
+        let cache_size_kb = std::env::var("TORII_ERC20_SQLITE_CACHE_SIZE_KB")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(64_000);
+        let mmap_size = std::env::var("TORII_ERC20_SQLITE_MMAP_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|v| *v >= 0)
+            .unwrap_or(268_435_456);
+        let wal_autocheckpoint = std::env::var("TORII_ERC20_SQLITE_WAL_AUTOCHECKPOINT")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(10_000);
+        let busy_timeout_ms = std::env::var("TORII_ERC20_SQLITE_BUSY_TIMEOUT_MS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(5_000);
+        let synchronous = std::env::var("TORII_ERC20_SQLITE_SYNCHRONOUS")
+            .ok()
+            .map(|v| v.to_ascii_uppercase())
+            .filter(|v| matches!(v.as_str(), "OFF" | "NORMAL" | "FULL" | "EXTRA"))
+            .unwrap_or_else(|| "NORMAL".to_string());
 
-        tracing::info!(target: "torii_erc20::storage", "SQLite configured: WAL mode, 64MB cache, 256MB mmap, NORMAL sync");
+        // Enable WAL mode + Performance PRAGMAs (critical for production scale)
+        conn.execute_batch(&format!(
+            "PRAGMA journal_mode=WAL;
+                 PRAGMA synchronous={synchronous};
+                 PRAGMA foreign_keys=ON;
+                 PRAGMA cache_size={};
+                 PRAGMA temp_store=MEMORY;
+                 PRAGMA mmap_size={mmap_size};
+                 PRAGMA wal_autocheckpoint={wal_autocheckpoint};
+                 PRAGMA page_size=4096;
+                 PRAGMA busy_timeout={busy_timeout_ms};",
+            -cache_size_kb
+        ))?;
+
+        tracing::info!(
+            target: "torii_erc20::storage",
+            cache_size_kb,
+            mmap_size,
+            wal_autocheckpoint,
+            busy_timeout_ms,
+            synchronous = %synchronous,
+            "SQLite configured"
+        );
 
         // Create transfers table with BLOB columns for efficient storage
         conn.execute(
@@ -533,6 +600,167 @@ impl Erc20Storage {
         })
     }
 
+    fn sqlite_select_balances_for_pairs(
+        conn: &Connection,
+        pairs: &[(Felt, Felt)],
+    ) -> Result<HashMap<(Felt, Felt), U256>> {
+        let mut out = HashMap::new();
+        if pairs.is_empty() {
+            return Ok(out);
+        }
+
+        for chunk in pairs.chunks(SQLITE_PAIR_QUERY_CHUNK) {
+            let placeholders = std::iter::repeat("(?, ?)")
+                .take(chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "WITH requested(token, wallet) AS (VALUES {placeholders}) \
+                 SELECT b.token, b.wallet, b.balance \
+                 FROM balances b \
+                 JOIN requested r \
+                   ON b.token = r.token AND b.wallet = r.wallet"
+            );
+
+            let mut values = Vec::with_capacity(chunk.len() * 2);
+            for (token, wallet) in chunk {
+                values.push(felt_to_blob(*token));
+                values.push(felt_to_blob(*wallet));
+            }
+            let params: Vec<&dyn ToSql> = values.iter().map(|v| v as &dyn ToSql).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(params), |row| {
+                let token: Vec<u8> = row.get(0)?;
+                let wallet: Vec<u8> = row.get(1)?;
+                let balance: Vec<u8> = row.get(2)?;
+                Ok((
+                    (blob_to_felt(&token), blob_to_felt(&wallet)),
+                    blob_to_u256(&balance),
+                ))
+            })?;
+
+            for row in rows {
+                let (key, balance) = row?;
+                out.insert(key, balance);
+            }
+        }
+
+        Ok(out)
+    }
+
+    fn sqlite_insert_activity_rows(
+        tx: &rusqlite::Transaction<'_>,
+        table: &str,
+        account_column: &str,
+        id_column: &str,
+        role_column: &str,
+        rows: &[ActivityInsertRow],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        for chunk in rows.chunks(SQLITE_ACTIVITY_INSERT_CHUNK) {
+            let placeholders = std::iter::repeat("(?, ?, ?, ?, ?)")
+                .take(chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "INSERT INTO {table} ({account_column}, token, {id_column}, {role_column}, block_number) \
+                 VALUES {placeholders}"
+            );
+
+            let mut params: Vec<&dyn ToSql> = Vec::with_capacity(chunk.len() * 5);
+            for row in chunk {
+                params.push(&row.account);
+                params.push(&row.token);
+                params.push(&row.ref_id);
+                params.push(&row.role);
+                params.push(&row.block_number);
+            }
+
+            tx.execute(&sql, params_from_iter(params))?;
+        }
+
+        Ok(())
+    }
+
+    fn sqlite_upsert_balances_rows(
+        tx: &rusqlite::Transaction<'_>,
+        rows: &[BalanceUpsertRow],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        for chunk in rows.chunks(SQLITE_BALANCE_UPSERT_CHUNK) {
+            let placeholders = std::iter::repeat("(?, ?, ?, ?, ?)")
+                .take(chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "INSERT INTO balances (token, wallet, balance, last_block, last_tx_hash) \
+                 VALUES {placeholders} \
+                 ON CONFLICT(token, wallet) DO UPDATE SET \
+                    balance = excluded.balance, \
+                    last_block = excluded.last_block, \
+                    last_tx_hash = excluded.last_tx_hash, \
+                    updated_at = strftime('%s', 'now') \
+                 WHERE balances.balance != excluded.balance \
+                    OR balances.last_block != excluded.last_block \
+                    OR balances.last_tx_hash != excluded.last_tx_hash"
+            );
+
+            let mut params: Vec<&dyn ToSql> = Vec::with_capacity(chunk.len() * 5);
+            for row in chunk {
+                params.push(&row.token);
+                params.push(&row.wallet);
+                params.push(&row.balance);
+                params.push(&row.last_block);
+                params.push(&row.last_tx_hash);
+            }
+
+            tx.execute(&sql, params_from_iter(params))?;
+        }
+
+        Ok(())
+    }
+
+    fn sqlite_insert_adjustment_rows(
+        tx: &rusqlite::Transaction<'_>,
+        rows: &[AdjustmentInsertRow],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        for chunk in rows.chunks(SQLITE_ADJUSTMENT_INSERT_CHUNK) {
+            let placeholders = std::iter::repeat("(?, ?, ?, ?, ?, ?)")
+                .take(chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "INSERT INTO balance_adjustments \
+                 (token, wallet, computed_balance, actual_balance, adjusted_at_block, tx_hash) \
+                 VALUES {placeholders}"
+            );
+
+            let mut params: Vec<&dyn ToSql> = Vec::with_capacity(chunk.len() * 6);
+            for row in chunk {
+                params.push(&row.token);
+                params.push(&row.wallet);
+                params.push(&row.computed_balance);
+                params.push(&row.actual_balance);
+                params.push(&row.adjusted_at_block);
+                params.push(&row.tx_hash);
+            }
+
+            tx.execute(&sql, params_from_iter(params))?;
+        }
+
+        Ok(())
+    }
+
     /// Insert multiple transfers in a single transaction
     ///
     /// This is significantly faster than inserting one by one because:
@@ -557,18 +785,7 @@ impl Erc20Storage {
                 "INSERT OR IGNORE INTO transfers (token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, strftime('%s', 'now')))",
             )?;
-            let mut wallet_both_stmt = tx.prepare_cached(
-                "INSERT INTO wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                 VALUES (?1, ?2, ?3, 'both', ?4)",
-            )?;
-            let mut wallet_sent_stmt = tx.prepare_cached(
-                "INSERT INTO wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                 VALUES (?1, ?2, ?3, 'sent', ?4)",
-            )?;
-            let mut wallet_received_stmt = tx.prepare_cached(
-                "INSERT INTO wallet_activity (wallet_address, token, transfer_id, direction, block_number)
-                 VALUES (?1, ?2, ?3, 'received', ?4)",
-            )?;
+            let mut wallet_activity_rows = Vec::with_capacity(transfers.len() * 2);
 
             for transfer in transfers {
                 let token_blob = felt_to_blob(transfer.token);
@@ -591,6 +808,7 @@ impl Erc20Storage {
                 if rows > 0 {
                     inserted += 1;
                     let transfer_id = tx.last_insert_rowid();
+                    let block_number = transfer.block_number as i64;
 
                     // Insert wallet activity records
                     // This enables O(log n) wallet queries instead of O(n) OR scans
@@ -598,35 +816,46 @@ impl Erc20Storage {
                         && transfer.to != Felt::ZERO
                         && transfer.from == transfer.to
                     {
-                        // Self-transfer (one record with 'both' direction)
-                        wallet_both_stmt.execute(params![
-                            &from_blob,
-                            &token_blob,
-                            transfer_id,
-                            transfer.block_number
-                        ])?;
+                        wallet_activity_rows.push(ActivityInsertRow {
+                            account: from_blob,
+                            token: token_blob,
+                            ref_id: transfer_id,
+                            role: "both",
+                            block_number,
+                        });
                     } else {
                         // Sender record
                         if transfer.from != Felt::ZERO {
-                            wallet_sent_stmt.execute(params![
-                                &from_blob,
-                                &token_blob,
-                                transfer_id,
-                                transfer.block_number
-                            ])?;
+                            wallet_activity_rows.push(ActivityInsertRow {
+                                account: from_blob,
+                                token: token_blob.clone(),
+                                ref_id: transfer_id,
+                                role: "sent",
+                                block_number,
+                            });
                         }
                         // Receiver record
                         if transfer.to != Felt::ZERO {
-                            wallet_received_stmt.execute(params![
-                                &to_blob,
-                                &token_blob,
-                                transfer_id,
-                                transfer.block_number
-                            ])?;
+                            wallet_activity_rows.push(ActivityInsertRow {
+                                account: to_blob,
+                                token: token_blob,
+                                ref_id: transfer_id,
+                                role: "received",
+                                block_number,
+                            });
                         }
                     }
                 }
             }
+
+            Self::sqlite_insert_activity_rows(
+                &tx,
+                "wallet_activity",
+                "wallet_address",
+                "transfer_id",
+                "direction",
+                &wallet_activity_rows,
+            )?;
         }
 
         tx.commit()?;
@@ -653,18 +882,7 @@ impl Erc20Storage {
                 "INSERT OR IGNORE INTO approvals (token, owner, spender, amount, block_number, tx_hash, timestamp)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, strftime('%s', 'now')))",
             )?;
-            let mut approval_both_stmt = tx.prepare_cached(
-                "INSERT INTO approval_activity (account_address, token, approval_id, role, block_number)
-                 VALUES (?1, ?2, ?3, 'both', ?4)",
-            )?;
-            let mut approval_owner_stmt = tx.prepare_cached(
-                "INSERT INTO approval_activity (account_address, token, approval_id, role, block_number)
-                 VALUES (?1, ?2, ?3, 'owner', ?4)",
-            )?;
-            let mut approval_spender_stmt = tx.prepare_cached(
-                "INSERT INTO approval_activity (account_address, token, approval_id, role, block_number)
-                 VALUES (?1, ?2, ?3, 'spender', ?4)",
-            )?;
+            let mut approval_activity_rows = Vec::with_capacity(approvals.len() * 2);
 
             for approval in approvals {
                 let token_blob = felt_to_blob(approval.token);
@@ -687,41 +905,53 @@ impl Erc20Storage {
                 if rows > 0 {
                     inserted += 1;
                     let approval_id = tx.last_insert_rowid();
+                    let block_number = approval.block_number as i64;
 
                     // Insert approval activity records
                     if approval.owner != Felt::ZERO
                         && approval.spender != Felt::ZERO
                         && approval.owner == approval.spender
                     {
-                        // Self-approval (one record with 'both' role)
-                        approval_both_stmt.execute(params![
-                            &owner_blob,
-                            &token_blob,
-                            approval_id,
-                            approval.block_number
-                        ])?;
+                        approval_activity_rows.push(ActivityInsertRow {
+                            account: owner_blob,
+                            token: token_blob,
+                            ref_id: approval_id,
+                            role: "both",
+                            block_number,
+                        });
                     } else {
                         // Owner record
                         if approval.owner != Felt::ZERO {
-                            approval_owner_stmt.execute(params![
-                                &owner_blob,
-                                &token_blob,
-                                approval_id,
-                                approval.block_number
-                            ])?;
+                            approval_activity_rows.push(ActivityInsertRow {
+                                account: owner_blob,
+                                token: token_blob.clone(),
+                                ref_id: approval_id,
+                                role: "owner",
+                                block_number,
+                            });
                         }
                         // Spender record
                         if approval.spender != Felt::ZERO {
-                            approval_spender_stmt.execute(params![
-                                &spender_blob,
-                                &token_blob,
-                                approval_id,
-                                approval.block_number
-                            ])?;
+                            approval_activity_rows.push(ActivityInsertRow {
+                                account: spender_blob,
+                                token: token_blob,
+                                ref_id: approval_id,
+                                role: "spender",
+                                block_number,
+                            });
                         }
                     }
                 }
             }
+
+            Self::sqlite_insert_activity_rows(
+                &tx,
+                "approval_activity",
+                "account_address",
+                "approval_id",
+                "role",
+                &approval_activity_rows,
+            )?;
         }
 
         tx.commit()?;
@@ -1216,26 +1446,120 @@ impl Erc20Storage {
             return Ok(HashMap::new());
         }
 
+        let unique_pairs = pairs
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let conn = self.conn.lock().unwrap();
-        let mut result = HashMap::new();
+        Self::sqlite_select_balances_for_pairs(&conn, &unique_pairs)
+    }
 
-        // SQLite doesn't support batch IN with tuples well, so we query one by one
-        // but we keep the connection lock to avoid repeated locking
-        let mut stmt =
-            conn.prepare_cached("SELECT balance FROM balances WHERE token = ? AND wallet = ?")?;
+    fn collect_affected_pairs(transfers: &[TransferData]) -> Vec<(Felt, Felt)> {
+        transfers
+            .iter()
+            .flat_map(|transfer| {
+                let mut pairs = Vec::with_capacity(2);
+                if transfer.from != Felt::ZERO {
+                    pairs.push((transfer.token, transfer.from));
+                }
+                if transfer.to != Felt::ZERO {
+                    pairs.push((transfer.token, transfer.to));
+                }
+                pairs
+            })
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    }
 
-        for (token, wallet) in pairs {
-            let token_blob = felt_to_blob(*token);
-            let wallet_blob = felt_to_blob(*wallet);
+    fn collect_sender_pairs(transfers: &[TransferData]) -> Vec<(Felt, Felt)> {
+        transfers
+            .iter()
+            .filter(|transfer| transfer.from != Felt::ZERO)
+            .map(|transfer| (transfer.token, transfer.from))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    }
 
-            if let Ok(balance_bytes) = stmt.query_row(params![&token_blob, &wallet_blob], |row| {
-                row.get::<_, Vec<u8>>(0)
-            }) {
-                result.insert((*token, *wallet), blob_to_u256(&balance_bytes));
+    fn build_adjustment_requests(
+        transfers: &[TransferData],
+        current_balances: &HashMap<(Felt, Felt), U256>,
+    ) -> Vec<BalanceFetchRequest> {
+        let mut pending_debits: HashMap<(Felt, Felt), U256> = HashMap::new();
+        let mut adjustment_requests = Vec::new();
+        let mut requested_keys: HashSet<(Felt, Felt, u64)> = HashSet::new();
+
+        for transfer in transfers {
+            if transfer.from == Felt::ZERO {
+                continue;
+            }
+
+            let key = (transfer.token, transfer.from);
+            let stored_balance = current_balances
+                .get(&key)
+                .copied()
+                .unwrap_or(U256::from(0u64));
+            let total_pending = pending_debits
+                .get(&key)
+                .copied()
+                .unwrap_or(U256::from(0u64));
+            let total_needed = total_pending + transfer.amount;
+
+            if stored_balance >= total_needed {
+                pending_debits.insert(key, total_needed);
+            } else {
+                let block_before = transfer.block_number.saturating_sub(1);
+                let req_key = (transfer.token, transfer.from, block_before);
+                if requested_keys.insert(req_key) {
+                    adjustment_requests.push(BalanceFetchRequest {
+                        token: transfer.token,
+                        wallet: transfer.from,
+                        block_number: block_before,
+                    });
+                }
             }
         }
 
-        Ok(result)
+        adjustment_requests
+    }
+
+    pub async fn check_balances_batch_with_snapshot(
+        &self,
+        transfers: &[TransferData],
+    ) -> Result<BalanceCheckBatch> {
+        if transfers.is_empty() {
+            return Ok(BalanceCheckBatch {
+                adjustment_requests: Vec::new(),
+                balance_snapshot: HashMap::new(),
+            });
+        }
+
+        // For consistency checks we only need sender balances.
+        // Receiver balances are loaded lazily in apply() if missing.
+        let sender_pairs = Self::collect_sender_pairs(transfers);
+        let balance_snapshot = if self.backend == StorageBackend::Postgres {
+            self.pg_get_balances_batch(&sender_pairs).await?
+        } else {
+            let conn = self.conn.lock().unwrap();
+            Self::sqlite_select_balances_for_pairs(&conn, &sender_pairs)?
+        };
+        let adjustment_requests = Self::build_adjustment_requests(transfers, &balance_snapshot);
+
+        if !adjustment_requests.is_empty() {
+            tracing::info!(
+                target: "torii_erc20::storage",
+                count = adjustment_requests.len(),
+                "Detected balance inconsistencies, will fetch from RPC"
+            );
+        }
+
+        Ok(BalanceCheckBatch {
+            adjustment_requests,
+            balance_snapshot,
+        })
     }
 
     /// Check which transfers need balance adjustments
@@ -1249,90 +1573,10 @@ impl Erc20Storage {
         &self,
         transfers: &[TransferData],
     ) -> Result<Vec<BalanceFetchRequest>> {
-        if self.backend == StorageBackend::Postgres {
-            return self.pg_check_balances_batch(transfers).await;
-        }
-        if transfers.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Collect unique sender pairs (token, wallet) that need checking
-        // Skip zero addresses (mints)
-        let sender_pairs: Vec<(Felt, Felt)> = transfers
-            .iter()
-            .filter(|t| t.from != Felt::ZERO)
-            .map(|t| (t.token, t.from))
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-
-        // Get current balances for all senders
-        let current_balances = self.get_balances_batch(&sender_pairs).await?;
-
-        // Track running balance changes within this batch
-        // (multiple transfers from same wallet in same batch)
-        let mut pending_debits: HashMap<(Felt, Felt), U256> = HashMap::new();
-
-        let mut adjustment_requests = Vec::new();
-
-        for transfer in transfers {
-            if transfer.from == Felt::ZERO {
-                continue; // Skip mints
-            }
-
-            let key = (transfer.token, transfer.from);
-
-            // Get current stored balance (default to 0)
-            let stored_balance = current_balances
-                .get(&key)
-                .copied()
-                .unwrap_or(U256::from(0u64));
-
-            // Add any pending debits from earlier in this batch
-            let total_pending = pending_debits
-                .get(&key)
-                .copied()
-                .unwrap_or(U256::from(0u64));
-
-            // Check if balance would go negative
-            // Since U256 doesn't have checked_add, we add and check for overflow via comparison
-            let total_needed = total_pending + transfer.amount;
-
-            if stored_balance >= total_needed {
-                // Balance is sufficient, track the debit
-                pending_debits.insert(key, total_needed);
-            } else {
-                // Balance would go negative - need to fetch actual balance
-                // Only add one request per unique (token, wallet, block)
-                let block_before = transfer.block_number.saturating_sub(1);
-                // Check if we already have a request for this (token, from_wallet, block)
-                #[allow(clippy::suspicious_operation_groupings)]
-                let already_requested =
-                    adjustment_requests.iter().any(|r: &BalanceFetchRequest| {
-                        r.token == transfer.token
-                            && r.wallet == transfer.from
-                            && r.block_number == block_before
-                    });
-
-                if !already_requested {
-                    adjustment_requests.push(BalanceFetchRequest {
-                        token: transfer.token,
-                        wallet: transfer.from,
-                        block_number: block_before,
-                    });
-                }
-            }
-        }
-
-        if !adjustment_requests.is_empty() {
-            tracing::info!(
-                target: "torii_erc20::storage",
-                count = adjustment_requests.len(),
-                "Detected balance inconsistencies, will fetch from RPC"
-            );
-        }
-
-        Ok(adjustment_requests)
+        Ok(self
+            .check_balances_batch_with_snapshot(transfers)
+            .await?
+            .adjustment_requests)
     }
 
     /// Apply transfers with adjustments and update balances
@@ -1350,9 +1594,19 @@ impl Erc20Storage {
         transfers: &[TransferData],
         adjustments: &HashMap<(Felt, Felt), U256>,
     ) -> Result<()> {
+        self.apply_transfers_with_adjustments_with_snapshot(transfers, adjustments, None)
+            .await
+    }
+
+    pub async fn apply_transfers_with_adjustments_with_snapshot(
+        &self,
+        transfers: &[TransferData],
+        adjustments: &HashMap<(Felt, Felt), U256>,
+        balance_snapshot: Option<HashMap<(Felt, Felt), U256>>,
+    ) -> Result<()> {
         if self.backend == StorageBackend::Postgres {
             return self
-                .pg_apply_transfers_with_adjustments(transfers, adjustments)
+                .pg_apply_transfers_with_adjustments(transfers, adjustments, balance_snapshot)
                 .await;
         }
         if transfers.is_empty() {
@@ -1360,51 +1614,34 @@ impl Erc20Storage {
         }
 
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
-
-        // Track balance changes in memory first
-        // Key: (token, wallet), Value: current balance
-        let mut balance_cache: HashMap<(Felt, Felt), U256> = HashMap::new();
-
-        // Load existing balances for all affected wallets
-        {
-            let mut stmt =
-                tx.prepare_cached("SELECT balance FROM balances WHERE token = ? AND wallet = ?")?;
-
-            for transfer in transfers {
-                // Load sender balance (if not zero address)
-                if transfer.from != Felt::ZERO {
-                    let key = (transfer.token, transfer.from);
-                    if let std::collections::hash_map::Entry::Vacant(e) = balance_cache.entry(key) {
-                        let token_blob = felt_to_blob(transfer.token);
-                        let wallet_blob = felt_to_blob(transfer.from);
-                        let balance: U256 = stmt
-                            .query_row(params![&token_blob, &wallet_blob], |row| {
-                                let bytes: Vec<u8> = row.get(0)?;
-                                Ok(blob_to_u256(&bytes))
-                            })
-                            .unwrap_or(U256::from(0u64));
-                        e.insert(balance);
-                    }
-                }
-
-                // Load receiver balance (if not zero address)
-                if transfer.to != Felt::ZERO {
-                    let key = (transfer.token, transfer.to);
-                    if let std::collections::hash_map::Entry::Vacant(e) = balance_cache.entry(key) {
-                        let token_blob = felt_to_blob(transfer.token);
-                        let wallet_blob = felt_to_blob(transfer.to);
-                        let balance: U256 = stmt
-                            .query_row(params![&token_blob, &wallet_blob], |row| {
-                                let bytes: Vec<u8> = row.get(0)?;
-                                Ok(blob_to_u256(&bytes))
-                            })
-                            .unwrap_or(U256::from(0u64));
-                        e.insert(balance);
-                    }
-                }
+        let affected_pairs = Self::collect_affected_pairs(transfers);
+        let mut balance_cache = balance_snapshot.unwrap_or_default();
+        if balance_cache.is_empty() {
+            balance_cache = Self::sqlite_select_balances_for_pairs(&conn, &affected_pairs)?;
+        } else {
+            let missing_pairs = affected_pairs
+                .iter()
+                .copied()
+                .filter(|pair| !balance_cache.contains_key(pair))
+                .collect::<Vec<_>>();
+            if !missing_pairs.is_empty() {
+                let missing_balances =
+                    Self::sqlite_select_balances_for_pairs(&conn, &missing_pairs)?;
+                balance_cache.extend(missing_balances);
             }
         }
+        let tx = conn.transaction()?;
+
+        let adjustment_context: HashMap<(Felt, Felt), (u64, Felt)> = transfers
+            .iter()
+            .filter(|transfer| transfer.from != Felt::ZERO)
+            .map(|transfer| {
+                (
+                    (transfer.token, transfer.from),
+                    (transfer.block_number, transfer.tx_hash),
+                )
+            })
+            .collect();
 
         // Apply adjustments - these are the "corrected" starting balances
         let mut adjustments_to_record: Vec<BalanceAdjustment> = Vec::new();
@@ -1415,19 +1652,14 @@ impl Erc20Storage {
 
             // Only record if there's actually a difference
             if computed != *actual_balance {
-                // Find the transfer that triggered this adjustment
-                let triggering_transfer = transfers
-                    .iter()
-                    .find(|t| t.token == *token && t.from == *wallet);
-
-                if let Some(transfer) = triggering_transfer {
+                if let Some((adjusted_at_block, tx_hash)) = adjustment_context.get(&key) {
                     adjustments_to_record.push(BalanceAdjustment {
                         token: *token,
                         wallet: *wallet,
                         computed_balance: computed,
                         actual_balance: *actual_balance,
-                        adjusted_at_block: transfer.block_number,
-                        tx_hash: transfer.tx_hash,
+                        adjusted_at_block: *adjusted_at_block,
+                        tx_hash: *tx_hash,
                     });
                 }
             }
@@ -1465,63 +1697,36 @@ impl Erc20Storage {
             }
         }
 
-        // Write balances to database
-        {
-            let mut upsert_stmt = tx.prepare_cached(
-                "INSERT INTO balances (token, wallet, balance, last_block, last_tx_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(token, wallet) DO UPDATE SET
-                     balance = excluded.balance,
-                     last_block = excluded.last_block,
-                     last_tx_hash = excluded.last_tx_hash,
-                     updated_at = strftime('%s', 'now')",
-            )?;
-
-            for ((token, wallet), balance) in &balance_cache {
-                let (last_block, last_tx_hash) = last_block_per_wallet
-                    .get(&(*token, *wallet))
-                    .copied()
-                    .unwrap_or((0, Felt::ZERO));
-
-                let token_blob = felt_to_blob(*token);
-                let wallet_blob = felt_to_blob(*wallet);
-                let balance_blob = u256_to_blob(*balance);
-                let tx_hash_blob = felt_to_blob(last_tx_hash);
-
-                upsert_stmt.execute(params![
-                    &token_blob,
-                    &wallet_blob,
-                    &balance_blob,
-                    last_block as i64,
-                    &tx_hash_blob,
-                ])?;
-            }
+        let mut balance_rows = Vec::with_capacity(last_block_per_wallet.len());
+        for ((token, wallet), (last_block, last_tx_hash)) in &last_block_per_wallet {
+            let balance = balance_cache
+                .get(&(*token, *wallet))
+                .copied()
+                .unwrap_or(U256::from(0u64));
+            balance_rows.push(BalanceUpsertRow {
+                token: felt_to_blob(*token),
+                wallet: felt_to_blob(*wallet),
+                balance: u256_to_blob(balance),
+                last_block: *last_block as i64,
+                last_tx_hash: felt_to_blob(*last_tx_hash),
+            });
         }
+        Self::sqlite_upsert_balances_rows(&tx, &balance_rows)?;
 
         // Record adjustments for audit
         if !adjustments_to_record.is_empty() {
-            let mut adj_stmt = tx.prepare_cached(
-                "INSERT INTO balance_adjustments
-                 (token, wallet, computed_balance, actual_balance, adjusted_at_block, tx_hash)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )?;
-
-            for adj in &adjustments_to_record {
-                let token_blob = felt_to_blob(adj.token);
-                let wallet_blob = felt_to_blob(adj.wallet);
-                let computed_blob = u256_to_blob(adj.computed_balance);
-                let actual_blob = u256_to_blob(adj.actual_balance);
-                let tx_hash_blob = felt_to_blob(adj.tx_hash);
-
-                adj_stmt.execute(params![
-                    &token_blob,
-                    &wallet_blob,
-                    &computed_blob,
-                    &actual_blob,
-                    adj.adjusted_at_block as i64,
-                    &tx_hash_blob,
-                ])?;
-            }
+            let adjustment_rows = adjustments_to_record
+                .iter()
+                .map(|adj| AdjustmentInsertRow {
+                    token: felt_to_blob(adj.token),
+                    wallet: felt_to_blob(adj.wallet),
+                    computed_balance: u256_to_blob(adj.computed_balance),
+                    actual_balance: u256_to_blob(adj.actual_balance),
+                    adjusted_at_block: adj.adjusted_at_block as i64,
+                    tx_hash: felt_to_blob(adj.tx_hash),
+                })
+                .collect::<Vec<_>>();
+            Self::sqlite_insert_adjustment_rows(&tx, &adjustment_rows)?;
 
             tracing::info!(
                 target: "torii_erc20::storage",
@@ -2281,162 +2486,101 @@ impl Erc20Storage {
         &self,
         pairs: &[(Felt, Felt)],
     ) -> Result<HashMap<(Felt, Felt), U256>> {
+        if pairs.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let unique_pairs = pairs
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let client = self.pg_client().await?;
         let mut result = HashMap::new();
-        for (token, wallet) in pairs {
-            if let Some(row) = client
-                .query_opt(
-                    "SELECT balance FROM erc20.balances WHERE token = $1 AND wallet = $2",
-                    &[&felt_to_blob(*token), &felt_to_blob(*wallet)],
+        for chunk in unique_pairs.chunks(2000) {
+            let mut token_vec = Vec::with_capacity(chunk.len());
+            let mut wallet_vec = Vec::with_capacity(chunk.len());
+            for (token, wallet) in chunk {
+                token_vec.push(felt_to_blob(*token));
+                wallet_vec.push(felt_to_blob(*wallet));
+            }
+
+            let rows = client
+                .query(
+                    "SELECT b.token, b.wallet, b.balance
+                     FROM erc20.balances b
+                     JOIN unnest($1::bytea[], $2::bytea[]) AS req(token, wallet)
+                       ON b.token = req.token AND b.wallet = req.wallet",
+                    &[&token_vec, &wallet_vec],
                 )
-                .await?
-            {
+                .await?;
+
+            for row in rows {
                 result.insert(
-                    (*token, *wallet),
-                    blob_to_u256(&row.get::<usize, Vec<u8>>(0)),
+                    (
+                        blob_to_felt(&row.get::<usize, Vec<u8>>(0)),
+                        blob_to_felt(&row.get::<usize, Vec<u8>>(1)),
+                    ),
+                    blob_to_u256(&row.get::<usize, Vec<u8>>(2)),
                 );
             }
         }
         Ok(result)
     }
 
-    async fn pg_check_balances_batch(
-        &self,
-        transfers: &[TransferData],
-    ) -> Result<Vec<BalanceFetchRequest>> {
-        if transfers.is_empty() {
-            return Ok(Vec::new());
-        }
-        let sender_pairs: Vec<(Felt, Felt)> = transfers
-            .iter()
-            .filter(|t| t.from != Felt::ZERO)
-            .map(|t| (t.token, t.from))
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-        let current_balances = self.pg_get_balances_batch(&sender_pairs).await?;
-        let mut pending_debits: HashMap<(Felt, Felt), U256> = HashMap::new();
-        let mut adjustment_requests = Vec::new();
-        for transfer in transfers {
-            if transfer.from == Felt::ZERO {
-                continue;
-            }
-            let key = (transfer.token, transfer.from);
-            let stored_balance = current_balances
-                .get(&key)
-                .copied()
-                .unwrap_or(U256::from(0u64));
-            let total_pending = pending_debits
-                .get(&key)
-                .copied()
-                .unwrap_or(U256::from(0u64));
-            let total_needed = total_pending + transfer.amount;
-            if stored_balance >= total_needed {
-                pending_debits.insert(key, total_needed);
-            } else {
-                let block_before = transfer.block_number.saturating_sub(1);
-                #[allow(clippy::suspicious_operation_groupings)]
-                let already_requested =
-                    adjustment_requests.iter().any(|r: &BalanceFetchRequest| {
-                        r.token == transfer.token
-                            && r.wallet == transfer.from
-                            && r.block_number == block_before
-                    });
-                if !already_requested {
-                    adjustment_requests.push(BalanceFetchRequest {
-                        token: transfer.token,
-                        wallet: transfer.from,
-                        block_number: block_before,
-                    });
-                }
-            }
-        }
-        Ok(adjustment_requests)
-    }
-
     async fn pg_apply_transfers_with_adjustments(
         &self,
         transfers: &[TransferData],
         adjustments: &HashMap<(Felt, Felt), U256>,
+        balance_snapshot: Option<HashMap<(Felt, Felt), U256>>,
     ) -> Result<()> {
         if transfers.is_empty() {
             return Ok(());
         }
 
-        let mut client = self.pg_client().await?;
-        let tx = client.transaction().await?;
-        let mut balance_cache: HashMap<(Felt, Felt), U256> = HashMap::new();
-        let select_balance_stmt = tx
-            .prepare("SELECT balance FROM erc20.balances WHERE token = $1 AND wallet = $2")
-            .await?;
-        let upsert_balance_stmt = tx
-            .prepare(
-                "INSERT INTO erc20.balances (token, wallet, balance, last_block, last_tx_hash, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, EXTRACT(EPOCH FROM NOW())::BIGINT)
-                 ON CONFLICT (token, wallet) DO UPDATE SET
-                     balance = EXCLUDED.balance,
-                     last_block = EXCLUDED.last_block,
-                     last_tx_hash = EXCLUDED.last_tx_hash,
-                     updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT",
-            )
-            .await?;
-        let insert_adjustment_stmt = tx
-            .prepare(
-                "INSERT INTO erc20.balance_adjustments
-                 (token, wallet, computed_balance, actual_balance, adjusted_at_block, tx_hash)
-                 VALUES ($1, $2, $3, $4, $5, $6)",
-            )
-            .await?;
-
-        for transfer in transfers {
-            if transfer.from != Felt::ZERO {
-                let key = (transfer.token, transfer.from);
-                if let std::collections::hash_map::Entry::Vacant(e) = balance_cache.entry(key) {
-                    let row = tx
-                        .query_opt(
-                            &select_balance_stmt,
-                            &[&felt_to_blob(transfer.token), &felt_to_blob(transfer.from)],
-                        )
-                        .await?;
-                    let bal = row.map_or(U256::from(0u64), |r| {
-                        blob_to_u256(&r.get::<usize, Vec<u8>>(0))
-                    });
-                    e.insert(bal);
-                }
-            }
-            if transfer.to != Felt::ZERO {
-                let key = (transfer.token, transfer.to);
-                if let std::collections::hash_map::Entry::Vacant(e) = balance_cache.entry(key) {
-                    let row = tx
-                        .query_opt(
-                            &select_balance_stmt,
-                            &[&felt_to_blob(transfer.token), &felt_to_blob(transfer.to)],
-                        )
-                        .await?;
-                    let bal = row.map_or(U256::from(0u64), |r| {
-                        blob_to_u256(&r.get::<usize, Vec<u8>>(0))
-                    });
-                    e.insert(bal);
-                }
+        let affected_pairs = Self::collect_affected_pairs(transfers);
+        let mut balance_cache = balance_snapshot.unwrap_or_default();
+        if balance_cache.is_empty() {
+            balance_cache = self.pg_get_balances_batch(&affected_pairs).await?;
+        } else {
+            let missing_pairs = affected_pairs
+                .iter()
+                .copied()
+                .filter(|pair| !balance_cache.contains_key(pair))
+                .collect::<Vec<_>>();
+            if !missing_pairs.is_empty() {
+                let missing_balances = self.pg_get_balances_batch(&missing_pairs).await?;
+                balance_cache.extend(missing_balances);
             }
         }
+        let adjustment_context: HashMap<(Felt, Felt), (u64, Felt)> = transfers
+            .iter()
+            .filter(|transfer| transfer.from != Felt::ZERO)
+            .map(|transfer| {
+                (
+                    (transfer.token, transfer.from),
+                    (transfer.block_number, transfer.tx_hash),
+                )
+            })
+            .collect();
+
+        let mut client = self.pg_client().await?;
+        let tx = client.transaction().await?;
 
         let mut adjustments_to_record: Vec<BalanceAdjustment> = Vec::new();
         for ((token, wallet), actual_balance) in adjustments {
             let key = (*token, *wallet);
             let computed = balance_cache.get(&key).copied().unwrap_or(U256::from(0u64));
             if computed != *actual_balance {
-                if let Some(transfer) = transfers
-                    .iter()
-                    .find(|t| t.token == *token && t.from == *wallet)
-                {
+                if let Some((adjusted_at_block, tx_hash)) = adjustment_context.get(&key) {
                     adjustments_to_record.push(BalanceAdjustment {
                         token: *token,
                         wallet: *wallet,
                         computed_balance: computed,
                         actual_balance: *actual_balance,
-                        adjusted_at_block: transfer.block_number,
-                        tx_hash: transfer.tx_hash,
+                        adjusted_at_block: *adjusted_at_block,
+                        tx_hash: *tx_hash,
                     });
                 }
             }
@@ -2465,35 +2609,78 @@ impl Erc20Storage {
             }
         }
 
-        for ((token, wallet), balance) in &balance_cache {
-            let (last_block, last_tx_hash) = last_block_per_wallet
+        let mut balance_rows = Vec::with_capacity(last_block_per_wallet.len());
+        for ((token, wallet), (last_block, last_tx_hash)) in &last_block_per_wallet {
+            let balance = balance_cache
                 .get(&(*token, *wallet))
                 .copied()
-                .unwrap_or((0, Felt::ZERO));
+                .unwrap_or(U256::from(0u64));
+            balance_rows.push((
+                felt_to_blob(*token),
+                felt_to_blob(*wallet),
+                u256_to_blob(balance),
+                *last_block as i64,
+                felt_to_blob(*last_tx_hash),
+            ));
+        }
+
+        for chunk in balance_rows.chunks(2000) {
+            let mut tokens = Vec::with_capacity(chunk.len());
+            let mut wallets = Vec::with_capacity(chunk.len());
+            let mut balances = Vec::with_capacity(chunk.len());
+            let mut last_blocks = Vec::with_capacity(chunk.len());
+            let mut tx_hashes = Vec::with_capacity(chunk.len());
+
+            for (token, wallet, balance, last_block, tx_hash) in chunk {
+                tokens.push(token.clone());
+                wallets.push(wallet.clone());
+                balances.push(balance.clone());
+                last_blocks.push(*last_block);
+                tx_hashes.push(tx_hash.clone());
+            }
+
             tx.execute(
-                &upsert_balance_stmt,
-                &[
-                    &felt_to_blob(*token),
-                    &felt_to_blob(*wallet),
-                    &u256_to_blob(*balance),
-                    &(last_block as i64),
-                    &felt_to_blob(last_tx_hash),
-                ],
+                "INSERT INTO erc20.balances (token, wallet, balance, last_block, last_tx_hash, updated_at)
+                 SELECT token, wallet, balance, last_block, last_tx_hash, EXTRACT(EPOCH FROM NOW())::BIGINT
+                 FROM unnest($1::bytea[], $2::bytea[], $3::bytea[], $4::bigint[], $5::bytea[])
+                      AS b(token, wallet, balance, last_block, last_tx_hash)
+                 ON CONFLICT (token, wallet) DO UPDATE SET
+                     balance = EXCLUDED.balance,
+                     last_block = EXCLUDED.last_block,
+                     last_tx_hash = EXCLUDED.last_tx_hash,
+                     updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT
+                 WHERE erc20.balances.balance IS DISTINCT FROM EXCLUDED.balance
+                    OR erc20.balances.last_block IS DISTINCT FROM EXCLUDED.last_block
+                    OR erc20.balances.last_tx_hash IS DISTINCT FROM EXCLUDED.last_tx_hash",
+                &[&tokens, &wallets, &balances, &last_blocks, &tx_hashes],
             )
             .await?;
         }
 
-        for adj in &adjustments_to_record {
+        for chunk in adjustments_to_record.chunks(2000) {
+            let mut tokens = Vec::with_capacity(chunk.len());
+            let mut wallets = Vec::with_capacity(chunk.len());
+            let mut computed = Vec::with_capacity(chunk.len());
+            let mut actual = Vec::with_capacity(chunk.len());
+            let mut blocks = Vec::with_capacity(chunk.len());
+            let mut tx_hashes = Vec::with_capacity(chunk.len());
+
+            for adj in chunk {
+                tokens.push(felt_to_blob(adj.token));
+                wallets.push(felt_to_blob(adj.wallet));
+                computed.push(u256_to_blob(adj.computed_balance));
+                actual.push(u256_to_blob(adj.actual_balance));
+                blocks.push(adj.adjusted_at_block as i64);
+                tx_hashes.push(felt_to_blob(adj.tx_hash));
+            }
+
             tx.execute(
-                &insert_adjustment_stmt,
-                &[
-                    &felt_to_blob(adj.token),
-                    &felt_to_blob(adj.wallet),
-                    &u256_to_blob(adj.computed_balance),
-                    &u256_to_blob(adj.actual_balance),
-                    &(adj.adjusted_at_block as i64),
-                    &felt_to_blob(adj.tx_hash),
-                ],
+                "INSERT INTO erc20.balance_adjustments
+                 (token, wallet, computed_balance, actual_balance, adjusted_at_block, tx_hash)
+                 SELECT token, wallet, computed_balance, actual_balance, adjusted_at_block, tx_hash
+                 FROM unnest($1::bytea[], $2::bytea[], $3::bytea[], $4::bytea[], $5::bigint[], $6::bytea[])
+                      AS a(token, wallet, computed_balance, actual_balance, adjusted_at_block, tx_hash)",
+                &[&tokens, &wallets, &computed, &actual, &blocks, &tx_hashes],
             )
             .await?;
         }
