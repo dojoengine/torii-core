@@ -12,7 +12,7 @@
 use anyhow::Result;
 use rusqlite::{params, params_from_iter, Connection, ToSql};
 use starknet::core::types::{Felt, U256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_postgres::types::ToSql as PgToSql;
@@ -24,10 +24,89 @@ use crate::balance_fetcher::BalanceFetchRequest;
 /// Maximum value for U256 (2^256 - 1)
 const U256_MAX: U256 = U256::from_words(u128::MAX, u128::MAX);
 const SQLITE_MAX_BIND_VARS: usize = 900;
-const SQLITE_PAIR_QUERY_CHUNK: usize = SQLITE_MAX_BIND_VARS / 2;
+const SQLITE_TOKEN_WALLET_QUERY_CHUNK: usize = SQLITE_MAX_BIND_VARS - 1;
 const SQLITE_ACTIVITY_INSERT_CHUNK: usize = SQLITE_MAX_BIND_VARS / 5;
 const SQLITE_BALANCE_UPSERT_CHUNK: usize = SQLITE_MAX_BIND_VARS / 5;
 const SQLITE_ADJUSTMENT_INSERT_CHUNK: usize = SQLITE_MAX_BIND_VARS / 6;
+const DEFAULT_BALANCE_CACHE_CAPACITY: usize = 300_000;
+
+#[derive(Debug)]
+struct BalanceCacheState {
+    enabled: bool,
+    capacity: usize,
+    generation: u64,
+    values: HashMap<(Felt, Felt), U256>,
+    generations: HashMap<(Felt, Felt), u64>,
+    order: VecDeque<((Felt, Felt), u64)>,
+}
+
+impl BalanceCacheState {
+    fn new(enabled: bool, capacity: usize) -> Self {
+        Self {
+            enabled,
+            capacity,
+            generation: 0,
+            values: HashMap::new(),
+            generations: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn get(&mut self, key: &(Felt, Felt)) -> Option<U256> {
+        if !self.enabled {
+            return None;
+        }
+
+        let value = self.values.get(key).copied()?;
+        self.generation = self.generation.wrapping_add(1);
+        self.generations.insert(*key, self.generation);
+        self.order.push_back((*key, self.generation));
+        Some(value)
+    }
+
+    fn put(&mut self, key: (Felt, Felt), value: U256) {
+        if !self.enabled {
+            return;
+        }
+
+        self.generation = self.generation.wrapping_add(1);
+        self.values.insert(key, value);
+        self.generations.insert(key, self.generation);
+        self.order.push_back((key, self.generation));
+        self.evict_if_needed();
+    }
+
+    fn put_many(&mut self, rows: &HashMap<(Felt, Felt), U256>) {
+        if !self.enabled || rows.is_empty() {
+            return;
+        }
+
+        for (key, value) in rows {
+            self.put(*key, *value);
+        }
+    }
+
+    fn evict_if_needed(&mut self) {
+        if !self.enabled {
+            return;
+        }
+
+        while self.values.len() > self.capacity {
+            let Some((key, generation)) = self.order.pop_front() else {
+                break;
+            };
+            let latest = self.generations.get(&key).copied();
+            if latest == Some(generation) {
+                self.values.remove(&key);
+                self.generations.remove(&key);
+            }
+        }
+    }
+
+    fn size(&self) -> usize {
+        self.values.len()
+    }
+}
 
 struct ActivityInsertRow {
     account: Vec<u8>,
@@ -97,6 +176,7 @@ pub enum TransferDirection {
 pub struct Erc20Storage {
     backend: StorageBackend,
     conn: Arc<Mutex<Connection>>,
+    balance_cache: Arc<Mutex<BalanceCacheState>>,
     pg_conns: Option<Vec<Arc<tokio::sync::Mutex<Client>>>>,
     pg_rr: AtomicUsize,
 }
@@ -179,8 +259,70 @@ pub struct BalanceCheckBatch {
 }
 
 impl Erc20Storage {
+    fn build_balance_cache() -> Arc<Mutex<BalanceCacheState>> {
+        let enabled = std::env::var("TORII_ERC20_BALANCE_CACHE_ENABLED")
+            .ok()
+            .map(|v| {
+                let normalized = v.trim().to_ascii_lowercase();
+                !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
+            })
+            .unwrap_or(true);
+        let capacity = std::env::var("TORII_ERC20_BALANCE_CACHE_CAPACITY")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_BALANCE_CACHE_CAPACITY);
+
+        tracing::info!(
+            target: "torii_erc20::storage",
+            enabled,
+            capacity,
+            "ERC20 balance cache configured"
+        );
+
+        Arc::new(Mutex::new(BalanceCacheState::new(enabled, capacity)))
+    }
+
+    fn get_cached_balances(
+        &self,
+        pairs: &[(Felt, Felt)],
+    ) -> (HashMap<(Felt, Felt), U256>, Vec<(Felt, Felt)>) {
+        let mut cache = self.balance_cache.lock().unwrap();
+        let mut hits = HashMap::new();
+        let mut misses = Vec::new();
+
+        for pair in pairs {
+            if let Some(balance) = cache.get(pair) {
+                hits.insert(*pair, balance);
+            } else {
+                misses.push(*pair);
+            }
+        }
+
+        if !pairs.is_empty() {
+            ::metrics::counter!("torii_erc20_balance_cache_hits_total")
+                .increment(hits.len() as u64);
+            ::metrics::counter!("torii_erc20_balance_cache_misses_total")
+                .increment(misses.len() as u64);
+            ::metrics::gauge!("torii_erc20_balance_cache_size").set(cache.size() as f64);
+        }
+
+        (hits, misses)
+    }
+
+    fn store_cached_balances(&self, rows: &HashMap<(Felt, Felt), U256>) {
+        if rows.is_empty() {
+            return;
+        }
+
+        let mut cache = self.balance_cache.lock().unwrap();
+        cache.put_many(rows);
+        ::metrics::gauge!("torii_erc20_balance_cache_size").set(cache.size() as f64);
+    }
+
     /// Create or open the database
     pub async fn new(db_path: &str) -> Result<Self> {
+        let balance_cache = Self::build_balance_cache();
         if db_path.starts_with("postgres://") || db_path.starts_with("postgresql://") {
             let pool_size = std::env::var("TORII_ERC20_PG_POOL_SIZE")
                 .ok()
@@ -308,6 +450,7 @@ impl Erc20Storage {
             return Ok(Self {
                 backend: StorageBackend::Postgres,
                 conn: Arc::new(Mutex::new(Connection::open_in_memory()?)),
+                balance_cache,
                 pg_conns: Some(pg_conns),
                 pg_rr: AtomicUsize::new(0),
             });
@@ -595,6 +738,7 @@ impl Erc20Storage {
         Ok(Self {
             backend: StorageBackend::Sqlite,
             conn: Arc::new(Mutex::new(conn)),
+            balance_cache,
             pg_conns: None,
             pg_rr: AtomicUsize::new(0),
         })
@@ -609,43 +753,60 @@ impl Erc20Storage {
             return Ok(out);
         }
 
-        for chunk in pairs.chunks(SQLITE_PAIR_QUERY_CHUNK) {
-            let placeholders = std::iter::repeat("(?, ?)")
-                .take(chunk.len())
-                .collect::<Vec<_>>()
-                .join(",");
-            let sql = format!(
-                "WITH requested(token, wallet) AS (VALUES {placeholders}) \
-                 SELECT b.token, b.wallet, b.balance \
-                 FROM balances b \
-                 JOIN requested r \
-                   ON b.token = r.token AND b.wallet = r.wallet"
-            );
+        let mut wallets_by_token: HashMap<Felt, Vec<Felt>> = HashMap::new();
+        for (token, wallet) in pairs {
+            wallets_by_token.entry(*token).or_default().push(*wallet);
+        }
 
-            let mut values = Vec::with_capacity(chunk.len() * 2);
-            for (token, wallet) in chunk {
-                values.push(felt_to_blob(*token));
-                values.push(felt_to_blob(*wallet));
-            }
-            let params: Vec<&dyn ToSql> = values.iter().map(|v| v as &dyn ToSql).collect();
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(params_from_iter(params), |row| {
-                let token: Vec<u8> = row.get(0)?;
-                let wallet: Vec<u8> = row.get(1)?;
-                let balance: Vec<u8> = row.get(2)?;
-                Ok((
-                    (blob_to_felt(&token), blob_to_felt(&wallet)),
-                    blob_to_u256(&balance),
-                ))
-            })?;
+        for (token, wallets) in wallets_by_token {
+            let token_blob = felt_to_blob(token);
+            for chunk in wallets.chunks(SQLITE_TOKEN_WALLET_QUERY_CHUNK) {
+                let placeholders = std::iter::repeat("?")
+                    .take(chunk.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "SELECT wallet, balance FROM balances WHERE token = ? AND wallet IN ({placeholders})"
+                );
 
-            for row in rows {
-                let (key, balance) = row?;
-                out.insert(key, balance);
+                let mut wallet_blobs = Vec::with_capacity(chunk.len());
+                for wallet in chunk {
+                    wallet_blobs.push(felt_to_blob(*wallet));
+                }
+
+                let mut params: Vec<&dyn ToSql> = Vec::with_capacity(1 + wallet_blobs.len());
+                params.push(&token_blob);
+                for wallet in &wallet_blobs {
+                    params.push(wallet as &dyn ToSql);
+                }
+
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map(params_from_iter(params), |row| {
+                    let wallet: Vec<u8> = row.get(0)?;
+                    let balance: Vec<u8> = row.get(1)?;
+                    Ok(((token, blob_to_felt(&wallet)), blob_to_u256(&balance)))
+                })?;
+
+                for row in rows {
+                    let (key, balance) = row?;
+                    out.insert(key, balance);
+                }
             }
         }
 
         Ok(out)
+    }
+
+    fn sqlite_load_balances_for_pairs(
+        &self,
+        pairs: &[(Felt, Felt)],
+    ) -> Result<HashMap<(Felt, Felt), U256>> {
+        if pairs.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let conn = self.conn.lock().unwrap();
+        Self::sqlite_select_balances_for_pairs(&conn, pairs)
     }
 
     fn sqlite_insert_activity_rows(
@@ -1439,9 +1600,6 @@ impl Erc20Storage {
         &self,
         pairs: &[(Felt, Felt)],
     ) -> Result<HashMap<(Felt, Felt), U256>> {
-        if self.backend == StorageBackend::Postgres {
-            return self.pg_get_balances_batch(pairs).await;
-        }
         if pairs.is_empty() {
             return Ok(HashMap::new());
         }
@@ -1452,8 +1610,35 @@ impl Erc20Storage {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
-        let conn = self.conn.lock().unwrap();
-        Self::sqlite_select_balances_for_pairs(&conn, &unique_pairs)
+        self.load_balances_for_pairs(&unique_pairs).await
+    }
+
+    async fn load_balances_for_pairs(
+        &self,
+        pairs: &[(Felt, Felt)],
+    ) -> Result<HashMap<(Felt, Felt), U256>> {
+        let lookup_start = std::time::Instant::now();
+        let (mut result, missing) = self.get_cached_balances(pairs);
+        ::metrics::counter!("torii_erc20_balance_lookup_pairs_total", "source" => "cache")
+            .increment(pairs.len() as u64);
+
+        if !missing.is_empty() {
+            let db_load_start = std::time::Instant::now();
+            let from_db = if self.backend == StorageBackend::Postgres {
+                self.pg_get_balances_batch(&missing).await?
+            } else {
+                self.sqlite_load_balances_for_pairs(&missing)?
+            };
+            ::metrics::histogram!("torii_erc20_balance_db_load_seconds")
+                .record(db_load_start.elapsed().as_secs_f64());
+
+            self.store_cached_balances(&from_db);
+            result.extend(from_db);
+        }
+
+        ::metrics::histogram!("torii_erc20_balance_lookup_seconds")
+            .record(lookup_start.elapsed().as_secs_f64());
+        Ok(result)
     }
 
     fn collect_affected_pairs(transfers: &[TransferData]) -> Vec<(Felt, Felt)> {
@@ -1540,12 +1725,7 @@ impl Erc20Storage {
         // For consistency checks we only need sender balances.
         // Receiver balances are loaded lazily in apply() if missing.
         let sender_pairs = Self::collect_sender_pairs(transfers);
-        let balance_snapshot = if self.backend == StorageBackend::Postgres {
-            self.pg_get_balances_batch(&sender_pairs).await?
-        } else {
-            let conn = self.conn.lock().unwrap();
-            Self::sqlite_select_balances_for_pairs(&conn, &sender_pairs)?
-        };
+        let balance_snapshot = self.load_balances_for_pairs(&sender_pairs).await?;
         let adjustment_requests = Self::build_adjustment_requests(transfers, &balance_snapshot);
 
         if !adjustment_requests.is_empty() {
@@ -1613,11 +1793,10 @@ impl Erc20Storage {
             return Ok(());
         }
 
-        let mut conn = self.conn.lock().unwrap();
         let affected_pairs = Self::collect_affected_pairs(transfers);
         let mut balance_cache = balance_snapshot.unwrap_or_default();
         if balance_cache.is_empty() {
-            balance_cache = Self::sqlite_select_balances_for_pairs(&conn, &affected_pairs)?;
+            balance_cache = self.load_balances_for_pairs(&affected_pairs).await?;
         } else {
             let missing_pairs = affected_pairs
                 .iter()
@@ -1625,11 +1804,12 @@ impl Erc20Storage {
                 .filter(|pair| !balance_cache.contains_key(pair))
                 .collect::<Vec<_>>();
             if !missing_pairs.is_empty() {
-                let missing_balances =
-                    Self::sqlite_select_balances_for_pairs(&conn, &missing_pairs)?;
+                let missing_balances = self.load_balances_for_pairs(&missing_pairs).await?;
                 balance_cache.extend(missing_balances);
             }
         }
+
+        let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
 
         let adjustment_context: HashMap<(Felt, Felt), (u64, Felt)> = transfers
@@ -1736,6 +1916,17 @@ impl Erc20Storage {
         }
 
         tx.commit()?;
+
+        let updated_balances = last_block_per_wallet
+            .keys()
+            .filter_map(|key| {
+                balance_cache
+                    .get(key)
+                    .copied()
+                    .map(|balance| (*key, balance))
+            })
+            .collect::<HashMap<_, _>>();
+        self.store_cached_balances(&updated_balances);
 
         Ok(())
     }
@@ -2542,7 +2733,7 @@ impl Erc20Storage {
         let affected_pairs = Self::collect_affected_pairs(transfers);
         let mut balance_cache = balance_snapshot.unwrap_or_default();
         if balance_cache.is_empty() {
-            balance_cache = self.pg_get_balances_batch(&affected_pairs).await?;
+            balance_cache = self.load_balances_for_pairs(&affected_pairs).await?;
         } else {
             let missing_pairs = affected_pairs
                 .iter()
@@ -2550,7 +2741,7 @@ impl Erc20Storage {
                 .filter(|pair| !balance_cache.contains_key(pair))
                 .collect::<Vec<_>>();
             if !missing_pairs.is_empty() {
-                let missing_balances = self.pg_get_balances_batch(&missing_pairs).await?;
+                let missing_balances = self.load_balances_for_pairs(&missing_pairs).await?;
                 balance_cache.extend(missing_balances);
             }
         }
@@ -2686,6 +2877,18 @@ impl Erc20Storage {
         }
 
         tx.commit().await?;
+
+        let updated_balances = last_block_per_wallet
+            .keys()
+            .filter_map(|key| {
+                balance_cache
+                    .get(key)
+                    .copied()
+                    .map(|balance| (*key, balance))
+            })
+            .collect::<HashMap<_, _>>();
+        self.store_cached_balances(&updated_balances);
+
         Ok(())
     }
 
