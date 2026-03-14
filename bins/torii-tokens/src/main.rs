@@ -612,8 +612,8 @@ async fn run_indexer(config: Config) -> Result<()> {
             let (token_uri_sender, _token_uri_service) = TokenUriService::spawn_with_image_cache(
                 Arc::new(MetadataFetcher::new(provider.clone())),
                 sink.storage().clone(),
-                1024, // buffer size
-                8,    // max concurrent metadata fetches
+                config.metadata_queue_capacity,
+                8, // max concurrent metadata fetches
                 Some(image_cache_dir),
                 8, // max concurrent image downloads
             );
@@ -665,7 +665,7 @@ async fn run_indexer(config: Config) -> Result<()> {
                 TokenUriService::spawn_with_image_cache(
                     erc1155_fetcher,
                     sink.storage().clone(),
-                    1024,
+                    config.metadata_queue_capacity,
                     8,
                     Some(image_cache_dir),
                     8,

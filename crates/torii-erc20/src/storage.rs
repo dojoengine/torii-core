@@ -262,11 +262,10 @@ impl Erc20Storage {
     fn build_balance_cache() -> Arc<Mutex<BalanceCacheState>> {
         let enabled = std::env::var("TORII_ERC20_BALANCE_CACHE_ENABLED")
             .ok()
-            .map(|v| {
+            .is_none_or(|v| {
                 let normalized = v.trim().to_ascii_lowercase();
                 !matches!(normalized.as_str(), "0" | "false" | "no" | "off")
-            })
-            .unwrap_or(true);
+            });
         let capacity = std::env::var("TORII_ERC20_BALANCE_CACHE_CAPACITY")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -761,8 +760,7 @@ impl Erc20Storage {
         for (token, wallets) in wallets_by_token {
             let token_blob = felt_to_blob(token);
             for chunk in wallets.chunks(SQLITE_TOKEN_WALLET_QUERY_CHUNK) {
-                let placeholders = std::iter::repeat("?")
-                    .take(chunk.len())
+                let placeholders = std::iter::repeat_n("?", chunk.len())
                     .collect::<Vec<_>>()
                     .join(",");
                 let sql = format!(
@@ -822,8 +820,7 @@ impl Erc20Storage {
         }
 
         for chunk in rows.chunks(SQLITE_ACTIVITY_INSERT_CHUNK) {
-            let placeholders = std::iter::repeat("(?, ?, ?, ?, ?)")
-                .take(chunk.len())
+            let placeholders = std::iter::repeat_n("(?, ?, ?, ?, ?)", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
@@ -855,8 +852,7 @@ impl Erc20Storage {
         }
 
         for chunk in rows.chunks(SQLITE_BALANCE_UPSERT_CHUNK) {
-            let placeholders = std::iter::repeat("(?, ?, ?, ?, ?)")
-                .take(chunk.len())
+            let placeholders = std::iter::repeat_n("(?, ?, ?, ?, ?)", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
@@ -896,8 +892,7 @@ impl Erc20Storage {
         }
 
         for chunk in rows.chunks(SQLITE_ADJUSTMENT_INSERT_CHUNK) {
-            let placeholders = std::iter::repeat("(?, ?, ?, ?, ?, ?)")
-                .take(chunk.len())
+            let placeholders = std::iter::repeat_n("(?, ?, ?, ?, ?, ?)", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(

@@ -822,6 +822,13 @@ impl Extractor for EventExtractor {
             })
             .await?;
 
+        anyhow::ensure!(
+            responses.len() == addresses.len(),
+            "Event batch response length mismatch: expected {} responses, got {}",
+            addresses.len(),
+            responses.len()
+        );
+
         // Process responses and update state
         let mut all_events = Vec::new();
         let mut any_advanced = false;

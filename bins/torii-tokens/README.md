@@ -112,6 +112,7 @@ Notes:
 - `--max-prefetch-batches`: extracted batches buffered ahead of decode/store.
 - `--metadata-mode deferred`: reduce metadata-side RPC/load during backfill.
 - `--metadata-parallelism`, `--metadata-queue-capacity`, `--metadata-max-retries` control async metadata workers (ERC20), queue depth, and capped retry attempts.
+- `--metadata-queue-capacity` also controls the token-URI request queue for ERC721/ERC1155 in `inline` mode (increase this if you see `Dropping token URI requests: queue is full`).
 
 ### CLI Options
 
@@ -136,7 +137,7 @@ Notes:
 | `--rpc-parallelism` | `0` | Concurrent chunked RPC requests (`0` = auto) |
 | `--metadata-mode` | `inline` | Metadata behavior (`inline` or `deferred`) |
 | `--metadata-parallelism` | `8` | Async metadata workers (ERC20 metadata pipeline) |
-| `--metadata-queue-capacity` | `2048` | Async metadata job queue size |
+| `--metadata-queue-capacity` | `2048` | Metadata queue size (ERC20 metadata jobs + ERC721/ERC1155 token-URI request queue in `inline` mode) |
 | `--metadata-max-retries` | `5` | Max metadata retry attempts (capped backoff) |
 
 ### Metadata Mode
@@ -147,6 +148,7 @@ Notes:
 Current behavior details:
 
 - ERC20 metadata is fetched asynchronously in background workers and is configured by metadata pipeline flags.
+- ERC721/ERC1155 token-URI fetch requests use `--metadata-queue-capacity` for queue depth in inline mode.
 - ERC1155 token-URI service is disabled in deferred mode; contract metadata fetch can still occur via sink metadata fetcher.
 
 ## Extraction Modes
