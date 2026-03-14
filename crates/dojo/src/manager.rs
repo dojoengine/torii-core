@@ -5,10 +5,12 @@ use crate::{DojoTable, DojoToriiError, DojoToriiResult};
 use async_trait::async_trait;
 use itertools::Itertools;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Postgres, QueryBuilder, Row};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{PgPool, Postgres, QueryBuilder, Row, Sqlite, SqlitePool};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 use thiserror::Error;
 use torii_introspect::events::CreateTable;
 
@@ -86,6 +88,10 @@ where
 
 pub struct PostgresStore {
     pool: PgPool,
+}
+
+pub struct SqliteStore {
+    pool: SqlitePool,
 }
 
 #[derive(Debug, Clone)]
@@ -264,6 +270,156 @@ impl PostgresStore {
     }
 }
 
+impl SqliteStore {
+    pub async fn new(database_url: &str) -> DojoToriiResult<Self> {
+        let options = sqlite_connect_options(database_url).map_err(DojoToriiError::store_error)?;
+        if let Some(parent) = sqlite_parent_dir(&options) {
+            std::fs::create_dir_all(parent).map_err(DojoToriiError::store_error)?;
+        }
+
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .map_err(DojoToriiError::store_error)?;
+
+        let store = Self { pool };
+        store
+            .initialize()
+            .await
+            .map_err(DojoToriiError::store_error)?;
+
+        Ok(store)
+    }
+
+    async fn initialize(&self) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r"
+            CREATE TABLE IF NOT EXISTS torii_dojo_manager_state (
+                owner BLOB NOT NULL,
+                table_id BLOB NOT NULL,
+                table_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY (owner, table_id)
+            )
+            ",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            r"
+            CREATE TABLE IF NOT EXISTS torii_dojo_manager_state_history (
+                owner BLOB NOT NULL,
+                table_id BLOB NOT NULL,
+                applied_at_block INTEGER NOT NULL,
+                table_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                PRIMARY KEY (owner, table_id, applied_at_block)
+            )
+            ",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn load_historical_bootstrap(
+        &self,
+        bootstrap_points: &[SchemaBootstrapPoint],
+    ) -> Result<HistoricalBootstrapDiagnostics, sqlx::Error> {
+        let owners = bootstrap_points
+            .iter()
+            .map(|point| point.owner)
+            .collect::<Vec<_>>();
+
+        let latest_tables = self.load_tables(&owners).await?;
+        let historical_tables = self
+            .load_tables_at_blocks(
+                &bootstrap_points
+                    .iter()
+                    .map(|point| (point.owner, point.block_number))
+                    .collect::<Vec<_>>(),
+            )
+            .await?;
+
+        let latest_counts = self.latest_table_counts(&owners).await?;
+        let history_presence = self.history_presence(&owners).await?;
+
+        let unsafe_owners = bootstrap_points
+            .iter()
+            .filter(|point| point.block_number > 0)
+            .filter(|point| latest_counts.get(&point.owner).copied().unwrap_or_default() > 0)
+            .filter(|point| !history_presence.get(&point.owner).copied().unwrap_or(false))
+            .map(|point| point.owner)
+            .collect_vec();
+
+        Ok(HistoricalBootstrapDiagnostics {
+            latest_table_count: latest_tables.len(),
+            historical_table_count: historical_tables.len(),
+            tables: historical_tables,
+            unsafe_owners,
+        })
+    }
+
+    async fn latest_table_counts(
+        &self,
+        owners: &[Felt],
+    ) -> Result<HashMap<Felt, usize>, sqlx::Error> {
+        if owners.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT owner, COUNT(*) AS table_count FROM torii_dojo_manager_state WHERE owner IN (",
+        );
+        {
+            let mut separated = query.separated(", ");
+            for owner in owners {
+                separated.push_bind(owner.to_bytes_be().to_vec());
+            }
+        }
+        query.push(") GROUP BY owner");
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let owner: Vec<u8> = row.get("owner");
+                let table_count: i64 = row.get("table_count");
+                (Felt::from_bytes_be_slice(&owner), table_count as usize)
+            })
+            .collect())
+    }
+
+    async fn history_presence(&self, owners: &[Felt]) -> Result<HashMap<Felt, bool>, sqlx::Error> {
+        if owners.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT owner, 1 AS has_history FROM torii_dojo_manager_state_history WHERE owner IN (",
+        );
+        {
+            let mut separated = query.separated(", ");
+            for owner in owners {
+                separated.push_bind(owner.to_bytes_be().to_vec());
+            }
+        }
+        query.push(") GROUP BY owner");
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let owner: Vec<u8> = row.get("owner");
+                (Felt::from_bytes_be_slice(&owner), true)
+            })
+            .collect())
+    }
+}
+
 #[async_trait]
 impl DojoStoreTrait for PostgresStore {
     type Error = sqlx::Error;
@@ -390,6 +546,136 @@ impl DojoStoreTrait for PostgresStore {
     }
 }
 
+#[async_trait]
+impl DojoStoreTrait for SqliteStore {
+    type Error = sqlx::Error;
+
+    async fn save_table_at_block(
+        &self,
+        owner: &Felt,
+        table: &DojoTable,
+        block_number: Option<u64>,
+    ) -> Result<(), Self::Error> {
+        let json =
+            serde_json::to_string(table).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            r"
+            INSERT INTO torii_dojo_manager_state (owner, table_id, table_json, updated_at)
+            VALUES (?1, ?2, ?3, unixepoch())
+            ON CONFLICT (owner, table_id)
+            DO UPDATE SET
+                table_json = excluded.table_json,
+                updated_at = unixepoch()
+            ",
+        )
+        .bind(owner.to_bytes_be().to_vec())
+        .bind(table.id.to_bytes_be().to_vec())
+        .bind(json)
+        .execute(&mut *tx)
+        .await?;
+
+        if let Some(block_number) = block_number {
+            let history_json =
+                serde_json::to_string(table).map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
+            sqlx::query(
+                r"
+                INSERT INTO torii_dojo_manager_state_history
+                    (owner, table_id, applied_at_block, table_json, updated_at)
+                VALUES (?1, ?2, ?3, ?4, unixepoch())
+                ON CONFLICT (owner, table_id, applied_at_block)
+                DO UPDATE SET
+                    table_json = excluded.table_json,
+                    updated_at = unixepoch()
+                ",
+            )
+            .bind(owner.to_bytes_be().to_vec())
+            .bind(table.id.to_bytes_be().to_vec())
+            .bind(block_number as i64)
+            .bind(history_json)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn load_tables(&self, owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
+        let rows = if owners.is_empty() {
+            sqlx::query(
+                r"
+                SELECT table_json
+                FROM torii_dojo_manager_state
+                ORDER BY updated_at ASC
+                ",
+            )
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            let placeholders = std::iter::repeat_n("?", owners.len()).join(", ");
+            let query = format!(
+                "
+                SELECT table_json
+                FROM torii_dojo_manager_state
+                WHERE owner IN ({placeholders})
+                ORDER BY updated_at ASC
+                "
+            );
+            let mut query = sqlx::query(&query);
+            for owner in owners {
+                query = query.bind(owner.to_bytes_be().to_vec());
+            }
+            query.fetch_all(&self.pool).await?
+        };
+
+        rows.into_iter()
+            .map(|row| {
+                let json: String = row.try_get("table_json")?;
+                serde_json::from_str(&json).map_err(|e| sqlx::Error::Protocol(e.to_string()))
+            })
+            .collect()
+    }
+
+    async fn load_tables_at_blocks(
+        &self,
+        owner_blocks: &[(Felt, u64)],
+    ) -> Result<Vec<DojoTable>, Self::Error> {
+        if owner_blocks.is_empty() {
+            return self.load_tables(&[]).await;
+        }
+
+        let mut query = QueryBuilder::<Sqlite>::new("WITH requested(owner, resume_block) AS (");
+        query.push_values(owner_blocks, |mut builder, (owner, block_number)| {
+            builder
+                .push_bind(owner.to_bytes_be().to_vec())
+                .push_bind(*block_number as i64);
+        });
+        query.push(
+            ") SELECT history.table_json \
+             FROM torii_dojo_manager_state_history AS history \
+             JOIN requested \
+               ON history.owner = requested.owner \
+              AND history.applied_at_block = ( \
+                    SELECT MAX(h2.applied_at_block) \
+                    FROM torii_dojo_manager_state_history AS h2 \
+                    WHERE h2.owner = requested.owner \
+                      AND h2.table_id = history.table_id \
+                      AND h2.applied_at_block <= requested.resume_block \
+                ) \
+             ORDER BY history.updated_at ASC",
+        );
+
+        let rows = query.build().fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|row| {
+                let json: String = row.try_get("table_json")?;
+                serde_json::from_str(&json).map_err(|e| sqlx::Error::Protocol(e.to_string()))
+            })
+            .collect()
+    }
+}
+
 impl DojoTableStore<JsonStore> {
     pub async fn new<P: Into<PathBuf>>(path: P) -> DojoToriiResult<Self> {
         Self::with_store(JsonStore::from(path.into())).await
@@ -400,6 +686,50 @@ impl DojoTableStore<PostgresStore> {
     pub async fn new_postgres(database_url: &str) -> DojoToriiResult<Self> {
         Self::with_store(PostgresStore::new(database_url).await?).await
     }
+}
+
+impl DojoTableStore<SqliteStore> {
+    pub async fn new_sqlite(database_url: &str) -> DojoToriiResult<Self> {
+        Self::with_store(SqliteStore::new(database_url).await?).await
+    }
+}
+
+fn is_sqlite_memory_path(path: &str) -> bool {
+    path == ":memory:"
+        || path == "sqlite::memory:"
+        || path == "sqlite://:memory:"
+        || path.contains("mode=memory")
+}
+
+fn sqlite_connect_options(path: &str) -> Result<SqliteConnectOptions, sqlx::Error> {
+    if path == ":memory:" || path == "sqlite::memory:" {
+        return SqliteConnectOptions::from_str("sqlite::memory:")
+            .map_err(|err| sqlx::Error::Configuration(Box::new(err)));
+    }
+
+    let options = if path.starts_with("sqlite:") {
+        SqliteConnectOptions::from_str(path)
+            .map_err(|err| sqlx::Error::Configuration(Box::new(err)))?
+    } else {
+        SqliteConnectOptions::new().filename(path)
+    };
+
+    if path.starts_with("sqlite:") && path.contains("mode=") {
+        Ok(options)
+    } else {
+        Ok(options.create_if_missing(true))
+    }
+}
+
+fn sqlite_parent_dir(options: &SqliteConnectOptions) -> Option<PathBuf> {
+    let filename = options.get_filename();
+    if is_sqlite_memory_path(filename.to_string_lossy().as_ref()) {
+        return None;
+    }
+    filename
+        .parent()
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
 }
 
 #[derive(Debug, Error)]

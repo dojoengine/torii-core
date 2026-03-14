@@ -1,4 +1,5 @@
 use crate::processor::PostgresSimpleDb;
+use crate::sqlite::SqliteSimpleDb;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -12,13 +13,58 @@ use torii::etl::{
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_introspect::CreateTable;
 
-pub const LOGGING_TARGET: &str = "torii::sinks::introspect::postgres";
+pub const LOGGING_TARGET: &str = "torii::sinks::introspect";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DbBackend {
+    Postgres,
+    Sqlite,
+}
+
+enum IntrospectDb {
+    Postgres(PostgresSimpleDb),
+    Sqlite(SqliteSimpleDb),
+}
+
+impl IntrospectDb {
+    async fn initialize(&mut self) -> Result<()> {
+        match self {
+            Self::Postgres(db) => db.initialize().await.map_err(Into::into),
+            Self::Sqlite(db) => db.initialize().await.map_err(Into::into),
+        }
+    }
+
+    fn has_tables(&self) -> bool {
+        match self {
+            Self::Postgres(db) => db.has_tables(),
+            Self::Sqlite(db) => db.has_tables(),
+        }
+    }
+
+    async fn bootstrap_tables(&mut self, tables: &[CreateTable]) -> Result<()> {
+        match self {
+            Self::Postgres(db) => db.bootstrap_tables(tables).await.map_err(Into::into),
+            Self::Sqlite(db) => db.bootstrap_tables(tables).await.map_err(Into::into),
+        }
+    }
+
+    async fn process_message(
+        &mut self,
+        msg: &IntrospectMsg,
+        context: &torii::etl::EventContext,
+    ) -> Result<()> {
+        match self {
+            Self::Postgres(db) => db.process_message(msg, context).await.map_err(Into::into),
+            Self::Sqlite(db) => db.process_message(msg, context).await.map_err(Into::into),
+        }
+    }
+}
 
 pub struct IntrospectPostgresSink {
     database_url: String,
     max_connections: Option<u32>,
     bootstrap_tables: Vec<CreateTable>,
-    db: Option<Arc<Mutex<PostgresSimpleDb>>>,
+    db: Option<Arc<Mutex<IntrospectDb>>>,
 }
 
 impl IntrospectPostgresSink {
@@ -36,17 +82,27 @@ impl IntrospectPostgresSink {
         self
     }
 
-    fn db(&self) -> Result<&Arc<Mutex<PostgresSimpleDb>>> {
+    fn db(&self) -> Result<&Arc<Mutex<IntrospectDb>>> {
         self.db
             .as_ref()
-            .ok_or_else(|| anyhow!("introspect-postgres sink used before initialize"))
+            .ok_or_else(|| anyhow!("introspect sink used before initialize"))
+    }
+
+    fn backend(&self) -> DbBackend {
+        if self.database_url.starts_with("postgres://")
+            || self.database_url.starts_with("postgresql://")
+        {
+            DbBackend::Postgres
+        } else {
+            DbBackend::Sqlite
+        }
     }
 }
 
 #[async_trait]
 impl Sink for IntrospectPostgresSink {
     fn name(&self) -> &'static str {
-        "introspect-postgres"
+        "introspect-sql"
     }
 
     fn interested_types(&self) -> Vec<TypeId> {
@@ -136,7 +192,15 @@ impl Sink for IntrospectPostgresSink {
         _event_bus: Arc<EventBus>,
         _context: &SinkContext,
     ) -> Result<()> {
-        let mut db = PostgresSimpleDb::new(&self.database_url, self.max_connections).await?;
+        let backend = self.backend();
+        let mut db = match backend {
+            DbBackend::Postgres => IntrospectDb::Postgres(
+                PostgresSimpleDb::new(&self.database_url, self.max_connections).await?,
+            ),
+            DbBackend::Sqlite => IntrospectDb::Sqlite(
+                SqliteSimpleDb::new(&self.database_url, self.max_connections).await?,
+            ),
+        };
         db.initialize().await?;
         if !self.bootstrap_tables.is_empty() {
             let had_schema_state = db.has_tables();
@@ -151,10 +215,13 @@ impl Sink for IntrospectPostgresSink {
 
         tracing::info!(
             target: LOGGING_TARGET,
-            "Initialized introspect Postgres sink"
+            backend = ?backend,
+            "Initialized introspect sink"
         );
 
         self.db = Some(Arc::new(Mutex::new(db)));
         Ok(())
     }
 }
+
+pub type IntrospectSqlSink = IntrospectPostgresSink;
