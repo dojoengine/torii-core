@@ -153,6 +153,10 @@ pub struct Config {
     #[arg(long, default_value = "10000")]
     pub event_block_batch_size: u64,
 
+    /// Number of blocks to scan for automatic event-mode bootstrap discovery.
+    #[arg(long, default_value = "20000")]
+    pub event_bootstrap_blocks: u64,
+
     /// Number of extracted batches to prefetch ahead of decode/store.
     #[arg(long, default_value = "2")]
     pub max_prefetch_batches: usize,
