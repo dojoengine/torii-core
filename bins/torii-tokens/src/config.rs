@@ -153,6 +153,34 @@ pub struct Config {
     #[arg(long, default_value = "10000")]
     pub event_block_batch_size: u64,
 
+    /// Number of blocks to scan for automatic event-mode bootstrap discovery.
+    #[arg(long, default_value = "20000")]
+    pub event_bootstrap_blocks: u64,
+
+    /// Number of extracted batches to prefetch ahead of decode/store.
+    #[arg(long, default_value = "2")]
+    pub max_prefetch_batches: usize,
+
+    /// Chunk-level decode parallelism (`0` = auto).
+    #[arg(long, default_value = "0")]
+    pub decode_parallelism: usize,
+
+    /// Maximum chunked RPC requests to run concurrently (`0` = auto).
+    #[arg(long, default_value = "0")]
+    pub rpc_parallelism: usize,
+
+    /// Concurrent workers for async token metadata fetching.
+    #[arg(long, default_value = "8")]
+    pub metadata_parallelism: usize,
+
+    /// Queue capacity for async metadata jobs.
+    #[arg(long, default_value = "2048")]
+    pub metadata_queue_capacity: usize,
+
+    /// Max retries for metadata fetch/store with capped backoff.
+    #[arg(long, default_value = "5")]
+    pub metadata_max_retries: u8,
+
     /// Metadata fetching mode.
     ///
     /// If omitted: defaults to `inline`.
@@ -214,5 +242,30 @@ mod tests {
     fn observability_flag_enables_features() {
         let cfg = Config::parse_from(["torii-tokens", "--observability"]);
         assert!(cfg.observability);
+    }
+
+    #[test]
+    fn concurrency_flags_parse() {
+        let cfg = Config::parse_from([
+            "torii-tokens",
+            "--max-prefetch-batches",
+            "4",
+            "--decode-parallelism",
+            "8",
+            "--rpc-parallelism",
+            "6",
+            "--metadata-parallelism",
+            "12",
+            "--metadata-queue-capacity",
+            "4096",
+            "--metadata-max-retries",
+            "5",
+        ]);
+        assert_eq!(cfg.max_prefetch_batches, 4);
+        assert_eq!(cfg.decode_parallelism, 8);
+        assert_eq!(cfg.rpc_parallelism, 6);
+        assert_eq!(cfg.metadata_parallelism, 12);
+        assert_eq!(cfg.metadata_queue_capacity, 4096);
+        assert_eq!(cfg.metadata_max_retries, 5);
     }
 }

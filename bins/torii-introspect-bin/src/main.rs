@@ -88,6 +88,7 @@ async fn run_indexer(config: Config) -> Result<()> {
             block_batch_size: config.event_block_batch_size,
             retry_policy: RetryPolicy::default(),
             ignore_saved_state: config.ignore_saved_state,
+            rpc_parallelism: 0,
         },
     ));
 

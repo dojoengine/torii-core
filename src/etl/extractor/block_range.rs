@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures::stream::{self, StreamExt};
 use starknet::core::types::MaybePreConfirmedBlockWithReceipts;
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use starknet::providers::{Provider, ProviderResponseData};
@@ -39,6 +40,10 @@ pub struct BlockRangeConfig {
 
     /// Retry policy for network failures
     pub retry_policy: RetryPolicy,
+
+    /// Number of subrange RPC requests to execute concurrently.
+    /// `0` means auto-tune from available CPU.
+    pub rpc_parallelism: usize,
 }
 
 impl Default for BlockRangeConfig {
@@ -49,6 +54,7 @@ impl Default for BlockRangeConfig {
             to_block: None,
             batch_size: 100,
             retry_policy: RetryPolicy::default(),
+            rpc_parallelism: 0,
         }
     }
 }
@@ -92,6 +98,16 @@ pub struct BlockRangeExtractor {
 }
 
 impl BlockRangeExtractor {
+    fn resolved_rpc_parallelism(config: &BlockRangeConfig) -> usize {
+        if config.rpc_parallelism == 0 {
+            std::thread::available_parallelism()
+                .map(|parallelism| parallelism.get().clamp(2, 8))
+                .unwrap_or(4)
+        } else {
+            config.rpc_parallelism.max(1)
+        }
+    }
+
     /// Creates a new block range extractor with the given provider.
     ///
     /// # Example
@@ -278,13 +294,44 @@ impl BlockRangeExtractor {
         );
 
         let fetch_start = Instant::now();
-        let blocks = Self::fetch_blocks_batch_with(
-            provider.clone(),
-            config.retry_policy.clone(),
-            current_block,
-            batch_end,
+        let rpc_parallelism = Self::resolved_rpc_parallelism(&config);
+        ::metrics::gauge!("torii_rpc_parallelism").set(rpc_parallelism as f64);
+
+        let total_blocks = (batch_end - current_block + 1) as usize;
+        let chunk_size = total_blocks.div_ceil(rpc_parallelism).max(1) as u64;
+        let mut fetched_ranges = stream::iter(
+            (current_block..=batch_end)
+                .step_by(chunk_size as usize)
+                .map(|start| (start, (start + chunk_size - 1).min(batch_end)))
+                .enumerate(),
         )
-        .await?;
+        .map(|(range_index, (range_start, range_end))| {
+            let provider = provider.clone();
+            let retry_policy = config.retry_policy.clone();
+            async move {
+                let chunk_fetch_start = Instant::now();
+                let blocks =
+                    Self::fetch_blocks_batch_with(provider, retry_policy, range_start, range_end)
+                        .await?;
+                ::metrics::histogram!(
+                    "torii_rpc_chunk_duration_seconds",
+                    "extractor" => "block_range",
+                    "method" => "get_block_with_receipts_batch"
+                )
+                .record(chunk_fetch_start.elapsed().as_secs_f64());
+                Ok::<_, anyhow::Error>((range_index, blocks))
+            }
+        })
+        .buffer_unordered(rpc_parallelism)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<anyhow::Result<Vec<_>>>()?;
+        fetched_ranges.sort_by_key(|(range_index, _)| *range_index);
+        let blocks = fetched_ranges
+            .into_iter()
+            .flat_map(|(_, blocks)| blocks)
+            .collect::<Vec<_>>();
         let fetch_ms = fetch_start.elapsed().as_millis();
 
         let transform_start = Instant::now();

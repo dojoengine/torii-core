@@ -43,6 +43,8 @@ use anyhow::Result;
 use clap::Parser;
 use config::{Config, ExtractionMode, MetadataMode};
 use starknet::core::types::Felt;
+use starknet::providers::Provider;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 #[cfg(feature = "profiling")]
@@ -53,6 +55,7 @@ use torii::etl::extractor::{
     EventExtractorConfig, Extractor, RetryPolicy,
 };
 use torii::etl::identification::ContractRegistry;
+use torii::EtlConcurrencyConfig;
 
 // Import from ERC20 library crate
 use torii_erc20::proto::erc20_server::Erc20Server;
@@ -97,6 +100,138 @@ fn resolve_storage_url(config: &Config, db_dir: &Path, fallback_file: &str) -> S
         .clone()
         .or_else(|| config.database_url.clone())
         .unwrap_or_else(|| db_dir.join(fallback_file).to_string_lossy().to_string())
+}
+
+async fn contracts_from_registry(
+    engine_db: &torii::etl::EngineDb,
+) -> Result<(Vec<Felt>, Vec<Felt>, Vec<Felt>)> {
+    let mappings = engine_db.get_all_contract_decoders().await?;
+    let erc20_id = DecoderId::new("erc20");
+    let erc721_id = DecoderId::new("erc721");
+    let erc1155_id = DecoderId::new("erc1155");
+
+    let mut erc20 = Vec::new();
+    let mut erc721 = Vec::new();
+    let mut erc1155 = Vec::new();
+
+    for (contract, decoder_ids, _) in mappings {
+        if decoder_ids.contains(&erc20_id) {
+            erc20.push(contract);
+        }
+        if decoder_ids.contains(&erc721_id) {
+            erc721.push(contract);
+        }
+        if decoder_ids.contains(&erc1155_id) {
+            erc1155.push(contract);
+        }
+    }
+
+    Ok((erc20, erc721, erc1155))
+}
+
+fn extend_unique(target: &mut Vec<Felt>, additions: Vec<Felt>) {
+    let mut seen: HashSet<Felt> = target.iter().copied().collect();
+    for addr in additions {
+        if seen.insert(addr) {
+            target.push(addr);
+        }
+    }
+}
+
+async fn bootstrap_registry_for_event_mode(
+    provider: Arc<
+        starknet::providers::jsonrpc::JsonRpcClient<starknet::providers::jsonrpc::HttpTransport>,
+    >,
+    engine_db: &torii::etl::EngineDb,
+    registry: &ContractRegistry,
+    config: &Config,
+) -> Result<usize> {
+    let chain_head = provider
+        .block_number()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to fetch chain head for bootstrap: {e}"))?;
+
+    let max_to = config
+        .from_block
+        .saturating_add(config.event_bootstrap_blocks.saturating_sub(1));
+    let configured_to = config.to_block.unwrap_or(u64::MAX);
+    let bootstrap_to = chain_head.min(max_to).min(configured_to);
+
+    if config.from_block > bootstrap_to {
+        tracing::warn!(
+            target: "torii_tokens",
+            from_block = config.from_block,
+            bootstrap_to,
+            chain_head,
+            "Skipping bootstrap discovery: from_block is above available bootstrap range"
+        );
+        return Ok(0);
+    }
+
+    tracing::info!(
+        target: "torii_tokens",
+        from_block = config.from_block,
+        to_block = bootstrap_to,
+        batch_size = config.batch_size,
+        "Starting automatic event-mode bootstrap discovery"
+    );
+
+    let mut extractor = BlockRangeExtractor::new(
+        provider,
+        BlockRangeConfig {
+            rpc_url: config.rpc_url.clone(),
+            from_block: config.from_block,
+            to_block: Some(bootstrap_to),
+            batch_size: config.batch_size,
+            retry_policy: RetryPolicy::default(),
+            rpc_parallelism: config.rpc_parallelism,
+        },
+    );
+
+    let mut first_extract = true;
+    let mut identified_total = 0usize;
+
+    loop {
+        let cursor = if first_extract {
+            first_extract = false;
+            Some(format!("block:{}", config.from_block.saturating_sub(1)))
+        } else {
+            None
+        };
+
+        let batch = extractor.extract(cursor, engine_db).await?;
+        if batch.is_empty() {
+            if extractor.is_finished() {
+                break;
+            }
+            continue;
+        }
+
+        let contract_addresses: Vec<Felt> = batch
+            .events
+            .iter()
+            .map(|event| event.from_address)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        if !contract_addresses.is_empty() {
+            let identified = registry.identify_contracts(&contract_addresses).await?;
+            identified_total += identified.len();
+        }
+
+        if extractor.is_finished() {
+            break;
+        }
+    }
+
+    tracing::info!(
+        target: "torii_tokens",
+        identified_total,
+        "Completed automatic event-mode bootstrap discovery"
+    );
+
+    Ok(identified_total)
 }
 
 #[tokio::main]
@@ -151,16 +286,6 @@ async fn run_indexer(config: Config) -> Result<()> {
         tracing::info!("Storage database URL: {}", url);
     }
 
-    if config.mode == ExtractionMode::Event && !config.has_tokens() {
-        tracing::error!(
-            "Event mode requires explicit contracts. Use --erc20, --erc721, --erc1155, or --include-well-known"
-        );
-        tracing::error!(
-            "Example: torii-tokens --mode event --include-well-known --from-block 100000"
-        );
-        return Ok(());
-    }
-
     if config.mode == ExtractionMode::BlockRange {
         if config.has_tokens() {
             tracing::info!("Block-range mode with explicit contracts (will also auto-discover)");
@@ -203,73 +328,6 @@ async fn run_indexer(config: Config) -> Result<()> {
         tracing::info!("Adding ERC1155 contract: {:#x}", address);
         all_erc1155_addresses.push(address);
     }
-
-    let extractor: Box<dyn Extractor> = match config.mode {
-        ExtractionMode::BlockRange => {
-            tracing::info!("Using Block Range mode (single global cursor)");
-            tracing::info!("  Batch size: {} blocks", config.batch_size);
-
-            let extractor_config = BlockRangeConfig {
-                rpc_url: config.rpc_url.clone(),
-                from_block: config.from_block,
-                to_block: config.to_block,
-                batch_size: config.batch_size,
-                retry_policy: RetryPolicy::default(),
-            };
-            Box::new(BlockRangeExtractor::new(provider.clone(), extractor_config))
-        }
-        ExtractionMode::Event => {
-            tracing::info!("Using Event mode (per-contract cursors)");
-            tracing::info!("  Chunk size: {} events", config.event_chunk_size);
-            tracing::info!(
-                "  Block batch size: {} blocks",
-                config.event_block_batch_size
-            );
-
-            let mut event_configs = Vec::new();
-            let to_block = config.to_block.unwrap_or(u64::MAX);
-
-            for addr in &all_erc20_addresses {
-                event_configs.push(ContractEventConfig {
-                    address: *addr,
-                    from_block: config.from_block,
-                    to_block,
-                });
-            }
-
-            for addr in &all_erc721_addresses {
-                event_configs.push(ContractEventConfig {
-                    address: *addr,
-                    from_block: config.from_block,
-                    to_block,
-                });
-            }
-
-            for addr in &all_erc1155_addresses {
-                event_configs.push(ContractEventConfig {
-                    address: *addr,
-                    from_block: config.from_block,
-                    to_block,
-                });
-            }
-
-            tracing::info!(
-                "  Configured {} contracts for event extraction",
-                event_configs.len()
-            );
-
-            let extractor_config = EventExtractorConfig {
-                contracts: event_configs,
-                chunk_size: config.event_chunk_size,
-                block_batch_size: config.event_block_batch_size,
-                retry_policy: RetryPolicy::default(),
-                ignore_saved_state: false,
-            };
-            Box::new(EventExtractor::new(provider.clone(), extractor_config))
-        }
-    };
-
-    tracing::info!("Extractor configured");
 
     let db_dir = Path::new(&config.db_dir);
     std::fs::create_dir_all(db_dir)?;
@@ -334,6 +392,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     let registry = Arc::new(
         ContractRegistry::new(provider.clone(), engine_db.clone())
+            .with_rpc_parallelism(config.rpc_parallelism)
             .with_rule(Box::new(Erc20Rule::new()))
             .with_rule(Box::new(Erc721Rule::new()))
             .with_rule(Box::new(Erc1155Rule::new())),
@@ -345,12 +404,137 @@ async fn run_indexer(config: Config) -> Result<()> {
         tracing::info!("Loaded {} contract mappings from database", loaded_count);
     }
 
+    if config.mode == ExtractionMode::Event {
+        let (reg_erc20, reg_erc721, reg_erc1155) = contracts_from_registry(&engine_db).await?;
+        let before = (
+            all_erc20_addresses.len(),
+            all_erc721_addresses.len(),
+            all_erc1155_addresses.len(),
+        );
+        extend_unique(&mut all_erc20_addresses, reg_erc20);
+        extend_unique(&mut all_erc721_addresses, reg_erc721);
+        extend_unique(&mut all_erc1155_addresses, reg_erc1155);
+
+        let added_from_registry = (
+            all_erc20_addresses.len().saturating_sub(before.0),
+            all_erc721_addresses.len().saturating_sub(before.1),
+            all_erc1155_addresses.len().saturating_sub(before.2),
+        );
+        if added_from_registry.0 + added_from_registry.1 + added_from_registry.2 > 0 {
+            tracing::info!(
+                target: "torii_tokens",
+                erc20 = added_from_registry.0,
+                erc721 = added_from_registry.1,
+                erc1155 = added_from_registry.2,
+                "Loaded event-mode contracts from registry"
+            );
+        }
+
+        if all_erc20_addresses.is_empty()
+            && all_erc721_addresses.is_empty()
+            && all_erc1155_addresses.is_empty()
+        {
+            let identified =
+                bootstrap_registry_for_event_mode(provider.clone(), &engine_db, &registry, &config)
+                    .await?;
+            if identified > 0 {
+                let (boot_erc20, boot_erc721, boot_erc1155) =
+                    contracts_from_registry(&engine_db).await?;
+                extend_unique(&mut all_erc20_addresses, boot_erc20);
+                extend_unique(&mut all_erc721_addresses, boot_erc721);
+                extend_unique(&mut all_erc1155_addresses, boot_erc1155);
+            }
+        }
+
+        if all_erc20_addresses.is_empty()
+            && all_erc721_addresses.is_empty()
+            && all_erc1155_addresses.is_empty()
+        {
+            anyhow::bail!(
+                "Event mode could not resolve any contracts after registry lookup/bootstrap. Provide explicit --erc20/--erc721/--erc1155 or widen bootstrap with --event-bootstrap-blocks."
+            );
+        }
+    }
+
+    let extractor: Box<dyn Extractor> = match config.mode {
+        ExtractionMode::BlockRange => {
+            tracing::info!("Using Block Range mode (single global cursor)");
+            tracing::info!("  Batch size: {} blocks", config.batch_size);
+
+            let extractor_config = BlockRangeConfig {
+                rpc_url: config.rpc_url.clone(),
+                from_block: config.from_block,
+                to_block: config.to_block,
+                batch_size: config.batch_size,
+                retry_policy: RetryPolicy::default(),
+                rpc_parallelism: config.rpc_parallelism,
+            };
+            Box::new(BlockRangeExtractor::new(provider.clone(), extractor_config))
+        }
+        ExtractionMode::Event => {
+            tracing::info!("Using Event mode (per-contract cursors)");
+            tracing::info!("  Chunk size: {} events", config.event_chunk_size);
+            tracing::info!(
+                "  Block batch size: {} blocks",
+                config.event_block_batch_size
+            );
+
+            let mut event_configs = Vec::new();
+            let to_block = config.to_block.unwrap_or(u64::MAX);
+
+            for addr in &all_erc20_addresses {
+                event_configs.push(ContractEventConfig {
+                    address: *addr,
+                    from_block: config.from_block,
+                    to_block,
+                });
+            }
+
+            for addr in &all_erc721_addresses {
+                event_configs.push(ContractEventConfig {
+                    address: *addr,
+                    from_block: config.from_block,
+                    to_block,
+                });
+            }
+
+            for addr in &all_erc1155_addresses {
+                event_configs.push(ContractEventConfig {
+                    address: *addr,
+                    from_block: config.from_block,
+                    to_block,
+                });
+            }
+
+            tracing::info!(
+                "  Configured {} contracts for event extraction",
+                event_configs.len()
+            );
+
+            let extractor_config = EventExtractorConfig {
+                contracts: event_configs,
+                chunk_size: config.event_chunk_size,
+                block_batch_size: config.event_block_batch_size,
+                retry_policy: RetryPolicy::default(),
+                ignore_saved_state: false,
+                rpc_parallelism: config.rpc_parallelism,
+            };
+            Box::new(EventExtractor::new(provider.clone(), extractor_config))
+        }
+    };
+
+    tracing::info!("Extractor configured");
+
     let mut reflection_builder = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(torii::TORII_DESCRIPTOR_SET);
 
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
         .database_root(&config.db_dir)
+        .etl_concurrency(EtlConcurrencyConfig {
+            max_prefetch_batches: config.max_prefetch_batches,
+            decode_parallelism: config.decode_parallelism,
+        })
         .engine_database_url(
             config
                 .database_url
@@ -384,7 +568,12 @@ async fn run_indexer(config: Config) -> Result<()> {
         let sink = Box::new(
             Erc20Sink::new(storage)
                 .with_grpc_service(grpc_service.clone())
-                .with_balance_tracking(provider.clone()),
+                .with_balance_tracking(provider.clone())
+                .with_metadata_pipeline(
+                    config.metadata_parallelism,
+                    config.metadata_queue_capacity,
+                    config.metadata_max_retries,
+                ),
         );
         torii_config = torii_config.add_sink_boxed(sink);
 
@@ -423,8 +612,8 @@ async fn run_indexer(config: Config) -> Result<()> {
             let (token_uri_sender, _token_uri_service) = TokenUriService::spawn_with_image_cache(
                 Arc::new(MetadataFetcher::new(provider.clone())),
                 sink.storage().clone(),
-                1024, // buffer size
-                8,    // max concurrent metadata fetches
+                config.metadata_queue_capacity,
+                8, // max concurrent metadata fetches
                 Some(image_cache_dir),
                 8, // max concurrent image downloads
             );
@@ -476,7 +665,7 @@ async fn run_indexer(config: Config) -> Result<()> {
                 TokenUriService::spawn_with_image_cache(
                     erc1155_fetcher,
                     sink.storage().clone(),
-                    1024,
+                    config.metadata_queue_capacity,
                     8,
                     Some(image_cache_dir),
                     8,
@@ -556,6 +745,15 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     tracing::info!("Torii configured, starting ETL pipeline...");
     tracing::info!("Enabled token types: {}", enabled_types.join(", "));
+    tracing::info!(
+        "ETL concurrency: prefetch_batches={} decode_parallelism={} rpc_parallelism={} metadata_parallelism={} metadata_queue_capacity={} metadata_max_retries={}",
+        config.max_prefetch_batches,
+        config.decode_parallelism,
+        config.rpc_parallelism,
+        config.metadata_parallelism,
+        config.metadata_queue_capacity,
+        config.metadata_max_retries,
+    );
     tracing::info!("gRPC service available at localhost:{}", config.port);
     tracing::info!("  - torii.Torii (EventBus subscriptions)");
 

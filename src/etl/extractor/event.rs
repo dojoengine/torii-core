@@ -48,6 +48,7 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures::stream::{self, StreamExt};
 use starknet::core::types::{
     requests::{GetBlockWithTxHashesRequest, GetEventsRequest, GetTransactionReceiptRequest},
     BlockId, EmittedEvent, EventFilter, EventFilterWithPage, ExecutionResult, Felt,
@@ -101,6 +102,10 @@ pub struct EventExtractorConfig {
 
     /// Ignore any persisted per-contract cursor state in EngineDb.
     pub ignore_saved_state: bool,
+
+    /// Maximum number of independent RPC request chunks to execute concurrently.
+    /// `0` means auto-tune from available CPU.
+    pub rpc_parallelism: usize,
 }
 
 impl Default for EventExtractorConfig {
@@ -111,6 +116,7 @@ impl Default for EventExtractorConfig {
             block_batch_size: 10000,
             retry_policy: RetryPolicy::default(),
             ignore_saved_state: false,
+            rpc_parallelism: 0,
         }
     }
 }
@@ -279,6 +285,16 @@ pub struct EventExtractor {
 }
 
 impl EventExtractor {
+    fn resolved_rpc_parallelism(&self) -> usize {
+        if self.config.rpc_parallelism == 0 {
+            std::thread::available_parallelism()
+                .map(|parallelism| parallelism.get().clamp(2, 8))
+                .unwrap_or(4)
+        } else {
+            self.config.rpc_parallelism.max(1)
+        }
+    }
+
     /// Create a new event extractor.
     pub fn new(provider: Arc<JsonRpcClient<HttpTransport>>, config: EventExtractorConfig) -> Self {
         let has_following_contracts = config.contracts.iter().any(|c| c.to_block == u64::MAX);
@@ -462,56 +478,87 @@ impl EventExtractor {
         );
 
         // Batch fetch uncached block headers
-        let requests: Vec<ProviderRequestData> = uncached
-            .iter()
-            .map(|&n| {
-                ProviderRequestData::GetBlockWithTxHashes(GetBlockWithTxHashesRequest {
-                    block_id: BlockId::Number(n),
-                })
-            })
-            .collect();
+        let rpc_parallelism = self.resolved_rpc_parallelism();
+        ::metrics::gauge!("torii_rpc_parallelism").set(rpc_parallelism as f64);
 
-        let responses = self
-            .config
-            .retry_policy
-            .execute(|| {
-                let provider = self.provider.clone();
-                let requests_ref = &requests;
+        let timestamp_tasks = uncached
+            .chunks(RECEIPT_LOOKUP_BATCH_SIZE)
+            .enumerate()
+            .map(|(chunk_index, chunk)| {
+                let requests: Vec<ProviderRequestData> = chunk
+                    .iter()
+                    .map(|&n| {
+                        ProviderRequestData::GetBlockWithTxHashes(GetBlockWithTxHashesRequest {
+                            block_id: BlockId::Number(n),
+                        })
+                    })
+                    .collect();
+                let chunk_blocks = chunk.to_vec();
                 async move {
-                    provider
-                        .batch_requests(requests_ref)
-                        .await
-                        .context("Failed to fetch block headers")
+                    let chunk_start = std::time::Instant::now();
+                    let responses = self
+                        .config
+                        .retry_policy
+                        .execute(|| {
+                            let provider = self.provider.clone();
+                            let requests_ref = &requests;
+                            async move {
+                                provider
+                                    .batch_requests(requests_ref)
+                                    .await
+                                    .context("Failed to fetch block headers")
+                            }
+                        })
+                        .await?;
+                    ::metrics::histogram!(
+                        "torii_rpc_chunk_duration_seconds",
+                        "extractor" => "event",
+                        "method" => "get_block_with_tx_hashes_batch"
+                    )
+                    .record(chunk_start.elapsed().as_secs_f64());
+                    Ok::<_, anyhow::Error>((chunk_index, chunk_blocks, responses))
                 }
             })
-            .await?;
+            .collect::<Vec<_>>();
 
-        let mut new_timestamps = HashMap::new();
-        for (block_num, response) in uncached.iter().zip(responses) {
-            if let ProviderResponseData::GetBlockWithTxHashes(block) = response {
-                match block {
-                    MaybePreConfirmedBlockWithTxHashes::Block(b) => {
-                        new_timestamps.insert(*block_num, b.timestamp);
-                    }
-                    MaybePreConfirmedBlockWithTxHashes::PreConfirmedBlock(_) => {
-                        tracing::warn!(
-                            target: "torii::etl::event",
-                            block_num = block_num,
-                            "Skipping pre-confirmed block"
-                        );
+        let mut new_timestamps = stream::iter(timestamp_tasks)
+            .buffer_unordered(rpc_parallelism)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        new_timestamps.sort_by_key(|(chunk_index, _, _)| *chunk_index);
+
+        let mut merged_timestamps = HashMap::new();
+        for (_, chunk_blocks, responses) in new_timestamps {
+            for (block_num, response) in chunk_blocks.iter().zip(responses) {
+                if let ProviderResponseData::GetBlockWithTxHashes(block) = response {
+                    match block {
+                        MaybePreConfirmedBlockWithTxHashes::Block(b) => {
+                            merged_timestamps.insert(*block_num, b.timestamp);
+                        }
+                        MaybePreConfirmedBlockWithTxHashes::PreConfirmedBlock(_) => {
+                            tracing::warn!(
+                                target: "torii::etl::event",
+                                block_num = block_num,
+                                "Skipping pre-confirmed block"
+                            );
+                        }
                     }
                 }
             }
         }
 
         // Save new timestamps to cache
-        if !new_timestamps.is_empty() {
-            engine_db.insert_block_timestamps(&new_timestamps).await?;
+        if !merged_timestamps.is_empty() {
+            engine_db
+                .insert_block_timestamps(&merged_timestamps)
+                .await?;
         }
 
         // Merge cached and new
         let mut result = cached;
-        result.extend(new_timestamps);
+        result.extend(merged_timestamps);
         Ok(result)
     }
 
@@ -521,52 +568,79 @@ impl EventExtractor {
     ) -> Result<HashSet<Felt>> {
         let mut successful = HashSet::with_capacity(tx_hashes.len());
 
-        for chunk in tx_hashes.chunks(RECEIPT_LOOKUP_BATCH_SIZE) {
-            let requests: Vec<ProviderRequestData> = chunk
-                .iter()
-                .map(|tx_hash| {
-                    ProviderRequestData::GetTransactionReceipt(GetTransactionReceiptRequest {
-                        transaction_hash: *tx_hash,
+        let rpc_parallelism = self.resolved_rpc_parallelism();
+        ::metrics::gauge!("torii_rpc_parallelism").set(rpc_parallelism as f64);
+
+        let receipt_tasks = tx_hashes
+            .chunks(RECEIPT_LOOKUP_BATCH_SIZE)
+            .enumerate()
+            .map(|(chunk_index, chunk)| {
+                let requests: Vec<ProviderRequestData> = chunk
+                    .iter()
+                    .map(|tx_hash| {
+                        ProviderRequestData::GetTransactionReceipt(GetTransactionReceiptRequest {
+                            transaction_hash: *tx_hash,
+                        })
                     })
-                })
-                .collect();
-
-            let responses = self
-                .config
-                .retry_policy
-                .execute(|| {
-                    let provider = self.provider.clone();
-                    let requests_ref = &requests;
-                    async move {
-                        provider
-                            .batch_requests(requests_ref)
-                            .await
-                            .context("Failed to fetch transaction receipts in batch")
-                    }
-                })
-                .await;
-            let responses = match responses {
-                Ok(responses) => {
-                    ::metrics::counter!(
-                        "torii_rpc_requests_total",
-                        "method" => "get_transaction_receipt_batch",
-                        "status" => "ok"
+                    .collect();
+                let requested_hashes = chunk.to_vec();
+                async move {
+                    let chunk_start = std::time::Instant::now();
+                    let responses = self
+                        .config
+                        .retry_policy
+                        .execute(|| {
+                            let provider = self.provider.clone();
+                            let requests_ref = &requests;
+                            async move {
+                                provider
+                                    .batch_requests(requests_ref)
+                                    .await
+                                    .context("Failed to fetch transaction receipts in batch")
+                            }
+                        })
+                        .await;
+                    let responses = match responses {
+                        Ok(responses) => {
+                            ::metrics::counter!(
+                                "torii_rpc_requests_total",
+                                "method" => "get_transaction_receipt_batch",
+                                "status" => "ok"
+                            )
+                            .increment(1);
+                            responses
+                        }
+                        Err(err) => {
+                            ::metrics::counter!(
+                                "torii_rpc_requests_total",
+                                "method" => "get_transaction_receipt_batch",
+                                "status" => "error"
+                            )
+                            .increment(1);
+                            return Err(err);
+                        }
+                    };
+                    ::metrics::histogram!(
+                        "torii_rpc_chunk_duration_seconds",
+                        "extractor" => "event",
+                        "method" => "get_transaction_receipt_batch"
                     )
-                    .increment(1);
-                    responses
+                    .record(chunk_start.elapsed().as_secs_f64());
+                    Ok::<_, anyhow::Error>((chunk_index, requested_hashes, responses))
                 }
-                Err(err) => {
-                    ::metrics::counter!(
-                        "torii_rpc_requests_total",
-                        "method" => "get_transaction_receipt_batch",
-                        "status" => "error"
-                    )
-                    .increment(1);
-                    return Err(err);
-                }
-            };
+            })
+            .collect::<Vec<_>>();
 
-            for (requested_tx_hash, response) in chunk.iter().zip(responses) {
+        let mut chunk_results = stream::iter(receipt_tasks)
+            .buffer_unordered(rpc_parallelism)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        chunk_results.sort_by_key(|(chunk_index, _, _)| *chunk_index);
+
+        for (_, requested_hashes, responses) in chunk_results {
+            for (requested_tx_hash, response) in requested_hashes.iter().zip(responses) {
                 match response {
                     ProviderResponseData::GetTransactionReceipt(receipt_with_block_info) => {
                         if matches!(
@@ -747,6 +821,13 @@ impl Extractor for EventExtractor {
                 }
             })
             .await?;
+
+        anyhow::ensure!(
+            responses.len() == addresses.len(),
+            "Event batch response length mismatch: expected {} responses, got {}",
+            addresses.len(),
+            responses.len()
+        );
 
         // Process responses and update state
         let mut all_events = Vec::new();

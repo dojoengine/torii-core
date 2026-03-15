@@ -366,9 +366,14 @@ fn benchmark_decoder_context(c: &mut Criterion) {
     let explicit_filter = ContractFilter::new()
         .map_contract(explicit_contract, vec![DecoderId::new("bench-decoder-3")]);
 
-    let context_mapped = DecoderContext::new(decoders.clone(), engine_db.clone(), explicit_filter);
-    let context_fallback =
-        DecoderContext::new(decoders.clone(), engine_db.clone(), ContractFilter::new());
+    let context_mapped =
+        DecoderContext::new(decoders.clone(), engine_db.clone(), explicit_filter, 1);
+    let context_fallback = DecoderContext::new(
+        decoders.clone(),
+        engine_db.clone(),
+        ContractFilter::new(),
+        1,
+    );
 
     let registry_cache = Arc::new(RwLock::new(HashMap::new()));
     rt.block_on(async {
@@ -377,8 +382,13 @@ fn benchmark_decoder_context(c: &mut Criterion) {
             vec![DecoderId::new("bench-decoder-6")],
         );
     });
-    let context_registry =
-        DecoderContext::with_registry(decoders, engine_db, ContractFilter::new(), registry_cache);
+    let context_registry = DecoderContext::with_registry(
+        decoders,
+        engine_db,
+        ContractFilter::new(),
+        registry_cache,
+        1,
+    );
 
     let explicit_event = make_context_event(explicit_contract, 1);
     let fallback_event = make_context_event(Felt::from(0x9007_u64), 2);

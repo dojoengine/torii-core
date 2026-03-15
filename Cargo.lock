@@ -4576,6 +4576,7 @@ dependencies = [
  "chrono",
  "criterion",
  "dojo-introspect",
+ "futures",
  "futures-util",
  "http-body-util",
  "hyper",
