@@ -52,7 +52,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{
     BlockRangeConfig, BlockRangeExtractor, ContractEventConfig, EventExtractor,
-    EventExtractorConfig, Extractor, RetryPolicy,
+    EventExtractorConfig, Extractor, GlobalEventExtractor, GlobalEventExtractorConfig, RetryPolicy,
 };
 use torii::etl::identification::ContractRegistry;
 use torii::EtlConcurrencyConfig;
@@ -286,11 +286,13 @@ async fn run_indexer(config: Config) -> Result<()> {
         tracing::info!("Storage database URL: {}", url);
     }
 
-    if config.mode == ExtractionMode::BlockRange {
+    if config.mode == ExtractionMode::BlockRange || config.mode == ExtractionMode::GlobalEvent {
         if config.has_tokens() {
-            tracing::info!("Block-range mode with explicit contracts (will also auto-discover)");
+            tracing::info!(
+                "Global extraction mode with explicit contracts (will also auto-discover)"
+            );
         } else {
-            tracing::info!("Block-range mode with full auto-discovery enabled");
+            tracing::info!("Global extraction mode with full auto-discovery enabled");
         }
     }
 
@@ -521,6 +523,28 @@ async fn run_indexer(config: Config) -> Result<()> {
             };
             Box::new(EventExtractor::new(provider.clone(), extractor_config))
         }
+        ExtractionMode::GlobalEvent => {
+            tracing::info!("Using Global Event mode (single getEvents cursor)");
+            tracing::info!("  Chunk size: {} events", config.event_chunk_size);
+            tracing::info!(
+                "  Block batch size: {} blocks",
+                config.event_block_batch_size
+            );
+
+            let extractor_config = GlobalEventExtractorConfig {
+                from_block: config.from_block,
+                to_block: config.to_block.unwrap_or(u64::MAX),
+                chunk_size: config.event_chunk_size,
+                block_batch_size: config.event_block_batch_size,
+                retry_policy: RetryPolicy::default(),
+                ignore_saved_state: false,
+                rpc_parallelism: config.rpc_parallelism,
+            };
+            Box::new(GlobalEventExtractor::new(
+                provider.clone(),
+                extractor_config,
+            ))
+        }
     };
 
     tracing::info!("Extractor configured");
@@ -549,11 +573,12 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut erc721_grpc_service: Option<Erc721Service> = None;
     let mut erc1155_grpc_service: Option<Erc1155Service> = None;
 
-    // Block-range mode: create all token infra (auto-discovery). Event mode: only explicit types.
-    let is_block_range = config.mode == ExtractionMode::BlockRange;
-    let create_erc20 = is_block_range || !all_erc20_addresses.is_empty();
-    let create_erc721 = is_block_range || !all_erc721_addresses.is_empty();
-    let create_erc1155 = is_block_range || !all_erc1155_addresses.is_empty();
+    // Global extraction modes create all token infra for runtime auto-discovery.
+    let is_global_mode =
+        config.mode == ExtractionMode::BlockRange || config.mode == ExtractionMode::GlobalEvent;
+    let create_erc20 = is_global_mode || !all_erc20_addresses.is_empty();
+    let create_erc721 = is_global_mode || !all_erc721_addresses.is_empty();
+    let create_erc1155 = is_global_mode || !all_erc1155_addresses.is_empty();
 
     if create_erc20 {
         enabled_types.push("ERC20");
@@ -788,6 +813,7 @@ async fn run_indexer(config: Config) -> Result<()> {
             let mode = match config.mode {
                 ExtractionMode::BlockRange => "block-range",
                 ExtractionMode::Event => "event",
+                ExtractionMode::GlobalEvent => "global-event",
             };
             let filename = format!("flamegraph-torii-tokens-{mode}-{db_backend}-{ts}.svg");
             let file = std::fs::File::create(&filename).unwrap();

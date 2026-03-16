@@ -48,11 +48,9 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use futures::stream::{self, StreamExt};
 use starknet::core::types::{
-    requests::{GetBlockWithTxHashesRequest, GetEventsRequest, GetTransactionReceiptRequest},
-    BlockId, EmittedEvent, EventFilter, EventFilterWithPage, ExecutionResult, Felt,
-    MaybePreConfirmedBlockWithTxHashes, ResultPageRequest,
+    requests::GetEventsRequest, BlockId, EmittedEvent, EventFilter, EventFilterWithPage, Felt,
+    ResultPageRequest,
 };
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use starknet::providers::{Provider, ProviderRequestData, ProviderResponseData};
@@ -60,16 +58,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::etl::engine_db::EngineDb;
-use crate::etl::extractor::{
-    BlockContext, ExtractionBatch, Extractor, RetryPolicy, TransactionContext,
-};
+use crate::etl::extractor::event_common;
+use crate::etl::extractor::{ExtractionBatch, Extractor, RetryPolicy};
 
 const EXTRACTOR_TYPE: &str = "event";
 
 /// Delay between polls when following chain head and caught up.
 const CHAIN_HEAD_POLL_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
-/// Max number of tx receipt lookups per JSON-RPC batch.
-const RECEIPT_LOOKUP_BATCH_SIZE: usize = 200;
 
 /// Configuration for a single contract's event extraction.
 #[derive(Debug, Clone)]
@@ -286,13 +281,7 @@ pub struct EventExtractor {
 
 impl EventExtractor {
     fn resolved_rpc_parallelism(&self) -> usize {
-        if self.config.rpc_parallelism == 0 {
-            std::thread::available_parallelism()
-                .map(|parallelism| parallelism.get().clamp(2, 8))
-                .unwrap_or(4)
-        } else {
-            self.config.rpc_parallelism.max(1)
-        }
+        event_common::resolved_rpc_parallelism(self.config.rpc_parallelism)
     }
 
     /// Create a new event extractor.
@@ -446,230 +435,25 @@ impl EventExtractor {
             .collect()
     }
 
-    /// Fetch block timestamps for blocks not in cache.
-    async fn fetch_block_timestamps(
-        &self,
-        block_numbers: &[u64],
-        engine_db: &EngineDb,
-    ) -> Result<HashMap<u64, u64>> {
-        if block_numbers.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        // Check cache first
-        let cached = engine_db.get_block_timestamps(block_numbers).await?;
-
-        // Find uncached blocks
-        let uncached: Vec<u64> = block_numbers
-            .iter()
-            .filter(|n| !cached.contains_key(n))
-            .copied()
-            .collect();
-
-        if uncached.is_empty() {
-            return Ok(cached);
-        }
-
-        tracing::debug!(
-            target: "torii::etl::event",
-            cached = cached.len(),
-            uncached = uncached.len(),
-            "Fetching block timestamps"
-        );
-
-        // Batch fetch uncached block headers
-        let rpc_parallelism = self.resolved_rpc_parallelism();
-        ::metrics::gauge!("torii_rpc_parallelism").set(rpc_parallelism as f64);
-
-        let timestamp_tasks = uncached
-            .chunks(RECEIPT_LOOKUP_BATCH_SIZE)
-            .enumerate()
-            .map(|(chunk_index, chunk)| {
-                let requests: Vec<ProviderRequestData> = chunk
-                    .iter()
-                    .map(|&n| {
-                        ProviderRequestData::GetBlockWithTxHashes(GetBlockWithTxHashesRequest {
-                            block_id: BlockId::Number(n),
-                        })
-                    })
-                    .collect();
-                let chunk_blocks = chunk.to_vec();
-                async move {
-                    let chunk_start = std::time::Instant::now();
-                    let responses = self
-                        .config
-                        .retry_policy
-                        .execute(|| {
-                            let provider = self.provider.clone();
-                            let requests_ref = &requests;
-                            async move {
-                                provider
-                                    .batch_requests(requests_ref)
-                                    .await
-                                    .context("Failed to fetch block headers")
-                            }
-                        })
-                        .await?;
-                    ::metrics::histogram!(
-                        "torii_rpc_chunk_duration_seconds",
-                        "extractor" => "event",
-                        "method" => "get_block_with_tx_hashes_batch"
-                    )
-                    .record(chunk_start.elapsed().as_secs_f64());
-                    Ok::<_, anyhow::Error>((chunk_index, chunk_blocks, responses))
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let mut new_timestamps = stream::iter(timestamp_tasks)
-            .buffer_unordered(rpc_parallelism)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        new_timestamps.sort_by_key(|(chunk_index, _, _)| *chunk_index);
-
-        let mut merged_timestamps = HashMap::new();
-        for (_, chunk_blocks, responses) in new_timestamps {
-            for (block_num, response) in chunk_blocks.iter().zip(responses) {
-                if let ProviderResponseData::GetBlockWithTxHashes(block) = response {
-                    match block {
-                        MaybePreConfirmedBlockWithTxHashes::Block(b) => {
-                            merged_timestamps.insert(*block_num, b.timestamp);
-                        }
-                        MaybePreConfirmedBlockWithTxHashes::PreConfirmedBlock(_) => {
-                            tracing::warn!(
-                                target: "torii::etl::event",
-                                block_num = block_num,
-                                "Skipping pre-confirmed block"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        // Save new timestamps to cache
-        if !merged_timestamps.is_empty() {
-            engine_db
-                .insert_block_timestamps(&merged_timestamps)
-                .await?;
-        }
-
-        // Merge cached and new
-        let mut result = cached;
-        result.extend(merged_timestamps);
-        Ok(result)
-    }
-
     async fn fetch_successful_transaction_hashes(
         &self,
         tx_hashes: &[Felt],
     ) -> Result<HashSet<Felt>> {
-        let mut successful = HashSet::with_capacity(tx_hashes.len());
-
-        let rpc_parallelism = self.resolved_rpc_parallelism();
-        ::metrics::gauge!("torii_rpc_parallelism").set(rpc_parallelism as f64);
-
-        let receipt_tasks = tx_hashes
-            .chunks(RECEIPT_LOOKUP_BATCH_SIZE)
-            .enumerate()
-            .map(|(chunk_index, chunk)| {
-                let requests: Vec<ProviderRequestData> = chunk
-                    .iter()
-                    .map(|tx_hash| {
-                        ProviderRequestData::GetTransactionReceipt(GetTransactionReceiptRequest {
-                            transaction_hash: *tx_hash,
-                        })
-                    })
-                    .collect();
-                let requested_hashes = chunk.to_vec();
-                async move {
-                    let chunk_start = std::time::Instant::now();
-                    let responses = self
-                        .config
-                        .retry_policy
-                        .execute(|| {
-                            let provider = self.provider.clone();
-                            let requests_ref = &requests;
-                            async move {
-                                provider
-                                    .batch_requests(requests_ref)
-                                    .await
-                                    .context("Failed to fetch transaction receipts in batch")
-                            }
-                        })
-                        .await;
-                    let responses = match responses {
-                        Ok(responses) => {
-                            ::metrics::counter!(
-                                "torii_rpc_requests_total",
-                                "method" => "get_transaction_receipt_batch",
-                                "status" => "ok"
-                            )
-                            .increment(1);
-                            responses
-                        }
-                        Err(err) => {
-                            ::metrics::counter!(
-                                "torii_rpc_requests_total",
-                                "method" => "get_transaction_receipt_batch",
-                                "status" => "error"
-                            )
-                            .increment(1);
-                            return Err(err);
-                        }
-                    };
-                    ::metrics::histogram!(
-                        "torii_rpc_chunk_duration_seconds",
-                        "extractor" => "event",
-                        "method" => "get_transaction_receipt_batch"
-                    )
-                    .record(chunk_start.elapsed().as_secs_f64());
-                    Ok::<_, anyhow::Error>((chunk_index, requested_hashes, responses))
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let mut chunk_results = stream::iter(receipt_tasks)
-            .buffer_unordered(rpc_parallelism)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        chunk_results.sort_by_key(|(chunk_index, _, _)| *chunk_index);
-
-        for (_, requested_hashes, responses) in chunk_results {
-            for (requested_tx_hash, response) in requested_hashes.iter().zip(responses) {
-                match response {
-                    ProviderResponseData::GetTransactionReceipt(receipt_with_block_info) => {
-                        if matches!(
-                            receipt_with_block_info.receipt.execution_result(),
-                            ExecutionResult::Succeeded
-                        ) {
-                            successful.insert(*requested_tx_hash);
-                        }
-                    }
-                    _ => {
-                        anyhow::bail!(
-                            "Unexpected response type for tx receipt {requested_tx_hash:#x}"
-                        );
-                    }
-                }
-            }
-        }
-
-        Ok(successful)
+        event_common::fetch_successful_transaction_hashes(
+            self.provider.clone(),
+            &self.config.retry_policy,
+            self.resolved_rpc_parallelism(),
+            tx_hashes,
+            "event",
+        )
+        .await
     }
 
     fn filter_events_by_tx_hashes(
         events: Vec<EmittedEvent>,
         successful_transaction_hashes: &HashSet<Felt>,
     ) -> Vec<EmittedEvent> {
-        events
-            .into_iter()
-            .filter(|event| successful_transaction_hashes.contains(&event.transaction_hash))
-            .collect()
+        event_common::filter_events_by_tx_hashes(events, successful_transaction_hashes)
     }
 
     /// Build ExtractionBatch from events with block context.
@@ -678,60 +462,14 @@ impl EventExtractor {
         events: Vec<EmittedEvent>,
         engine_db: &EngineDb,
     ) -> Result<ExtractionBatch> {
-        // Collect unique block numbers
-        let block_numbers: Vec<u64> = events
-            .iter()
-            .filter_map(|e| e.block_number)
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-
-        // Fetch timestamps
-        let timestamps = self
-            .fetch_block_timestamps(&block_numbers, engine_db)
-            .await?;
-
-        // Build block context map
-        let mut blocks = HashMap::new();
-        for block_num in block_numbers {
-            let timestamp = timestamps.get(&block_num).copied().unwrap_or(0);
-            blocks.insert(
-                block_num,
-                Arc::new(BlockContext {
-                    number: block_num,
-                    timestamp,
-                    hash: Felt::ZERO, // Not critical for event-based extraction
-                    parent_hash: Felt::ZERO,
-                }),
-            );
-        }
-
-        // Build minimal transaction context from event receipts.
-        let mut transactions = HashMap::new();
-        for event in &events {
-            if let Some(block_number) = event.block_number {
-                transactions
-                    .entry(event.transaction_hash)
-                    .or_insert_with(|| {
-                        Arc::new(TransactionContext {
-                            hash: event.transaction_hash,
-                            block_number,
-                            sender_address: None,
-                            calldata: Vec::new(),
-                        })
-                    });
-            }
-        }
-
-        Ok(ExtractionBatch {
+        event_common::build_batch(
+            self.provider.clone(),
+            &self.config.retry_policy,
+            self.resolved_rpc_parallelism(),
             events,
-            blocks,
-            transactions,
-            declared_classes: Vec::new(),
-            deployed_contracts: Vec::new(),
-            cursor: None,     // Will be set by extract()
-            chain_head: None, // Will be set by extract()
-        })
+            engine_db,
+        )
+        .await
     }
 
     /// Build composite cursor from all contract states.
