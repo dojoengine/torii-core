@@ -2,7 +2,7 @@
 name = "torii-introspect-bin"
 version = "0.1.0"
 edition = "2021"
-description = "Dojo introspect indexer for PostgreSQL"
+description = "Dojo introspect indexer for PostgreSQL or SQLite"
 
 [[bin]]
 name = "torii-introspect-bin"
@@ -12,6 +12,8 @@ path = "src/main.rs"
 torii = { path = "../../" }
 torii-dojo = { path = "../../crates/dojo" }
 torii-introspect-postgres-sink = { path = "../../crates/introspect-postgres-sink" }
+torii-introspect-sqlite-sink = { path = "../../crates/introspect-sqlite-sink" }
+torii-sqlite = { path = "../../crates/sqlite" }
 
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
@@ -20,7 +22,7 @@ starknet = "0.17"
 url = "2.5"
 clap = { version = "4.5", features = ["derive", "env"] }
 anyhow = "1.0"
-sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls"] }
+sqlx = { version = "0.8", features = ["postgres", "sqlite", "runtime-tokio-rustls", "any"] }
 
 [lints]
 workspace = true
