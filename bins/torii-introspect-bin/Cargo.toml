@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 torii = { path = "../../" }
+torii-config-common.workspace = true
 torii-dojo = { path = "../../crates/dojo" }
 torii-introspect-postgres-sink = { path = "../../crates/introspect-postgres-sink" }
 torii-introspect-sqlite-sink = { path = "../../crates/introspect-sqlite-sink" }

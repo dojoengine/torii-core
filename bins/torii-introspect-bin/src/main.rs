@@ -15,6 +15,7 @@ use torii::etl::engine_db::{EngineDb, EngineDbConfig};
 use torii::etl::extractor::{
     ContractEventConfig, EventExtractor, EventExtractorConfig, RetryPolicy,
 };
+use torii_config_common::apply_observability_env;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::store::sqlite::SqliteStore;
@@ -39,12 +40,7 @@ async fn main() -> Result<()> {
 async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("Starting Torii Introspect Indexer");
 
-    let metrics_enabled = if config.observability {
-        "true"
-    } else {
-        "false"
-    };
-    std::env::set_var("TORII_METRICS_ENABLED", metrics_enabled);
+    apply_observability_env(config.observability);
 
     let db_dir = Path::new(&config.db_dir);
     let storage_database_url = config.storage_database_url(db_dir)?;
@@ -102,6 +98,7 @@ async fn run_indexer(config: Config) -> Result<()> {
             block_batch_size: config.event_block_batch_size,
             retry_policy: RetryPolicy::default(),
             ignore_saved_state: config.ignore_saved_state,
+            rpc_parallelism: 0,
         },
     ));
 

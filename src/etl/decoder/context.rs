@@ -12,6 +12,7 @@
 //! - Deterministic ordering: decoders are always called in sorted DecoderId order
 
 use async_trait::async_trait;
+use futures::stream::{self, StreamExt};
 use starknet::core::types::{EmittedEvent, Felt};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,6 +46,9 @@ pub struct DecoderContext {
 
     /// Whether a registry is configured (affects fallback behavior)
     has_registry: bool,
+
+    /// Chunk-level decode parallelism (`0` is not allowed here; use resolved value).
+    decode_parallelism: usize,
 }
 
 impl DecoderContext {
@@ -59,6 +63,7 @@ impl DecoderContext {
         decoders: Vec<Arc<dyn Decoder>>,
         engine_db: Arc<EngineDb>,
         contract_filter: ContractFilter,
+        decode_parallelism: usize,
     ) -> Self {
         let decoder_map = Self::build_decoder_map(&decoders);
 
@@ -92,6 +97,7 @@ impl DecoderContext {
             contract_filter,
             registry_cache: Arc::new(RwLock::new(HashMap::new())),
             has_registry: false,
+            decode_parallelism: decode_parallelism.max(1),
         }
     }
 
@@ -113,6 +119,7 @@ impl DecoderContext {
         engine_db: Arc<EngineDb>,
         contract_filter: ContractFilter,
         registry_cache: Arc<RwLock<HashMap<Felt, Vec<DecoderId>>>>,
+        decode_parallelism: usize,
     ) -> Self {
         let decoder_map = Self::build_decoder_map(&decoders);
 
@@ -147,6 +154,7 @@ impl DecoderContext {
             contract_filter,
             registry_cache,
             has_registry: true,
+            decode_parallelism: decode_parallelism.max(1),
         }
     }
 
@@ -353,12 +361,42 @@ impl Decoder for DecoderContext {
     }
 
     async fn decode(&self, events: &[EmittedEvent]) -> anyhow::Result<Vec<Envelope>> {
-        let mut all_envelopes = Vec::new();
+        const DECODE_CHUNK_SIZE: usize = 256;
 
-        for event in events {
-            let envelopes = self.decode_event(event).await?;
+        let chunk_count = events.len().div_ceil(DECODE_CHUNK_SIZE);
+        ::metrics::gauge!("torii_decode_parallelism").set(self.decode_parallelism as f64);
+
+        let decode_start = std::time::Instant::now();
+        let decode_tasks = events
+            .chunks(DECODE_CHUNK_SIZE)
+            .enumerate()
+            .map(|(chunk_index, chunk)| async move {
+                let mut chunk_envelopes = Vec::new();
+                for event in chunk {
+                    let envelopes = self.decode_event(event).await?;
+                    chunk_envelopes.extend(envelopes);
+                }
+
+                Ok::<_, anyhow::Error>((chunk_index, chunk_envelopes))
+            })
+            .collect::<Vec<_>>();
+
+        let mut decoded_chunks = stream::iter(decode_tasks)
+            .buffer_unordered(self.decode_parallelism)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        decoded_chunks.sort_by_key(|(chunk_index, _)| *chunk_index);
+
+        let mut all_envelopes = Vec::new();
+        for (_, envelopes) in decoded_chunks {
             all_envelopes.extend(envelopes);
         }
+
+        ::metrics::histogram!("torii_decode_chunk_duration_seconds")
+            .record(decode_start.elapsed().as_secs_f64() / chunk_count.max(1) as f64);
 
         tracing::debug!(
             target: "torii::etl::decoder_context",
@@ -369,5 +407,96 @@ impl Decoder for DecoderContext {
         );
 
         Ok(all_envelopes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::etl::engine_db::{EngineDb, EngineDbConfig};
+    use crate::etl::envelope::{Envelope, TypeId, TypedBody};
+    use async_trait::async_trait;
+    use std::any::Any;
+
+    #[derive(Debug)]
+    struct TestBody {
+        seq: u64,
+    }
+
+    impl TypedBody for TestBody {
+        fn envelope_type_id(&self) -> TypeId {
+            TypeId::new("test.body")
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    struct OrderedDecoder {
+        contract: Felt,
+    }
+
+    #[async_trait]
+    impl Decoder for OrderedDecoder {
+        fn decoder_name(&self) -> &'static str {
+            "ordered_decoder"
+        }
+
+        async fn decode_event(&self, event: &EmittedEvent) -> anyhow::Result<Vec<Envelope>> {
+            if event.from_address != self.contract {
+                return Ok(Vec::new());
+            }
+
+            Ok(vec![Envelope::new(
+                format!("evt-{}", event.block_number.unwrap_or_default()),
+                Box::new(TestBody {
+                    seq: event.block_number.unwrap_or_default(),
+                }),
+                HashMap::new(),
+            )])
+        }
+    }
+
+    async fn make_engine_db() -> Arc<EngineDb> {
+        Arc::new(
+            EngineDb::new(EngineDbConfig {
+                path: "sqlite::memory:".to_string(),
+            })
+            .await
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn decode_preserves_order_with_parallel_chunks() {
+        let contract = Felt::from(0x1234_u64);
+        let decoder: Arc<dyn Decoder> = Arc::new(OrderedDecoder { contract });
+        let engine_db = make_engine_db().await;
+        let context = DecoderContext::new(vec![decoder], engine_db, ContractFilter::new(), 4);
+
+        let events = (0..600_u64)
+            .map(|seq| EmittedEvent {
+                from_address: contract,
+                keys: Vec::new(),
+                data: Vec::new(),
+                block_hash: None,
+                block_number: Some(seq),
+                transaction_hash: Felt::from(seq + 1),
+            })
+            .collect::<Vec<_>>();
+
+        let envelopes = Decoder::decode(&context, &events).await.unwrap();
+        let actual = envelopes
+            .iter()
+            .map(|envelope| envelope.downcast_ref::<TestBody>().unwrap().seq)
+            .collect::<Vec<_>>();
+        let expected = (0..600_u64).collect::<Vec<_>>();
+
+        assert_eq!(actual, expected);
     }
 }

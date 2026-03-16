@@ -11,6 +11,7 @@ path = "src/main.rs"
 # Core dependencies
 torii = { path = "../../" }
 torii-erc20 = { path = "../../crates/torii-erc20" }
+torii-runtime-common.workspace = true
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

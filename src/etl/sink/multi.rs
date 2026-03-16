@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use axum::Router;
+use futures::future::join_all;
 use std::sync::Arc;
 
 use super::{EventBus, Sink, SinkContext};
@@ -40,14 +41,15 @@ impl Sink for MultiSink {
     }
 
     async fn process(&self, envelopes: &[Envelope], batch: &ExtractionBatch) -> anyhow::Result<()> {
-        // TODO: to optimize the performance, we can easily parallelize the processing of the envelopes by the sinks
-        // since they are totally independent of each other.
-        // Run each sink in sequence
-        for sink in &self.sinks {
+        let sink_results = join_all(self.sinks.iter().map(|sink| async move {
             let sink_start = std::time::Instant::now();
-            // Each sink processes the same envelopes
-            // Sinks filter by TypeId internally
-            if let Err(e) = sink.process(envelopes, batch).await {
+            let result = sink.process(envelopes, batch).await;
+            (sink, sink_start.elapsed(), result)
+        }))
+        .await;
+
+        for (sink, elapsed, result) in sink_results {
+            if let Err(e) = result {
                 tracing::error!(
                     target: "torii::etl::multi_sink",
                     "Sink '{}' failed: {}",
@@ -60,7 +62,7 @@ impl Sink for MultiSink {
                 // We should see a better mechanism here, is it better to retry and stop the whole process if it fails again?
             }
             ::metrics::histogram!("torii_sink_process_duration_seconds", "sink" => sink.name().to_string())
-                .record(sink_start.elapsed().as_secs_f64());
+                .record(elapsed.as_secs_f64());
         }
 
         tracing::debug!(
@@ -116,6 +118,9 @@ mod tests {
     use crate::etl::extractor::ExtractionBatch;
     use crate::grpc::SubscriptionManager;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Barrier;
+    use tokio::time::{sleep, timeout, Duration};
 
     // Mock sink for testing
     struct MockSink {
@@ -189,5 +194,84 @@ mod tests {
 
         // Should have 2 sinks
         assert_eq!(multi_sink.sinks().len(), 2);
+    }
+
+    struct ConcurrentSink {
+        name: String,
+        barrier: Arc<Barrier>,
+        active: Arc<AtomicUsize>,
+        max_active: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Sink for ConcurrentSink {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn interested_types(&self) -> Vec<TypeId> {
+            vec![TypeId::new("test.event")]
+        }
+
+        async fn process(
+            &self,
+            _envelopes: &[Envelope],
+            _batch: &ExtractionBatch,
+        ) -> anyhow::Result<()> {
+            let current = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(current, Ordering::SeqCst);
+            self.barrier.wait().await;
+            sleep(Duration::from_millis(20)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn topics(&self) -> Vec<super::super::TopicInfo> {
+            vec![]
+        }
+
+        fn build_routes(&self) -> Router {
+            Router::new()
+        }
+
+        async fn initialize(
+            &mut self,
+            _event_bus: Arc<EventBus>,
+            _context: &SinkContext,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multi_sink_processes_sinks_concurrently() {
+        let barrier = Arc::new(Barrier::new(2));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+
+        let sinks: Vec<Arc<dyn Sink>> = vec![
+            Arc::new(ConcurrentSink {
+                name: "sink1".to_string(),
+                barrier: barrier.clone(),
+                active: active.clone(),
+                max_active: max_active.clone(),
+            }),
+            Arc::new(ConcurrentSink {
+                name: "sink2".to_string(),
+                barrier,
+                active,
+                max_active: max_active.clone(),
+            }),
+        ];
+
+        let multi_sink = MultiSink::new(sinks);
+        let batch = ExtractionBatch::empty();
+
+        timeout(Duration::from_secs(1), multi_sink.process(&[], &batch))
+            .await
+            .expect("parallel sink processing should not deadlock")
+            .unwrap();
+
+        assert!(max_active.load(Ordering::SeqCst) >= 2);
     }
 }

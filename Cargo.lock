@@ -4576,6 +4576,7 @@ dependencies = [
  "chrono",
  "criterion",
  "dojo-introspect",
+ "futures",
  "futures-util",
  "http-body-util",
  "hyper",
@@ -4628,6 +4629,13 @@ dependencies = [
  "tokio",
  "tracing",
  "urlencoding",
+]
+
+[[package]]
+name = "torii-config-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]
@@ -4722,6 +4730,7 @@ dependencies = [
  "tonic-reflection",
  "torii",
  "torii-erc20",
+ "torii-runtime-common",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -4741,6 +4750,7 @@ dependencies = [
  "tokio-postgres",
  "torii",
  "torii-erc20",
+ "torii-runtime-common",
  "tracing",
  "tracing-subscriber",
 ]
@@ -4802,6 +4812,7 @@ dependencies = [
  "starknet",
  "tokio",
  "torii",
+ "torii-config-common",
  "torii-dojo",
  "torii-introspect-postgres-sink",
  "torii-introspect-sqlite-sink",
@@ -4875,6 +4886,7 @@ dependencies = [
  "torii",
  "torii-dojo",
  "torii-introspect-postgres-sink",
+ "torii-runtime-common",
  "tracing",
  "tracing-subscriber",
 ]
@@ -4917,6 +4929,17 @@ dependencies = [
  "torii",
  "tracing",
  "xxhash-rust",
+]
+
+[[package]]
+name = "torii-runtime-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "tokio-postgres",
+ "torii",
+ "tracing",
 ]
 
 [[package]]
@@ -4981,9 +5004,11 @@ dependencies = [
  "tonic-web",
  "torii",
  "torii-common",
+ "torii-config-common",
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",
+ "torii-runtime-common",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -5005,6 +5030,7 @@ dependencies = [
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",
+ "torii-runtime-common",
  "tracing",
  "tracing-subscriber",
 ]

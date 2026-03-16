@@ -30,12 +30,14 @@ use anyhow::Result;
 use clap::Parser;
 use config::Config;
 use starknet::core::types::Felt;
-use std::path::Path;
 use std::sync::Arc;
 #[cfg(feature = "profiling")]
 use std::time::{SystemTime, UNIX_EPOCH};
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{BlockRangeConfig, BlockRangeExtractor};
+use torii_runtime_common::database::resolve_single_db_setup;
+#[cfg(feature = "profiling")]
+use torii_runtime_common::database::{backend_from_url_or_path, DatabaseBackend};
 
 // Import from the library crate
 use torii_erc20::proto::erc20_server::Erc20Server;
@@ -77,11 +79,8 @@ async fn main() -> Result<()> {
     );
 
     // Create storage
-    let storage_path = config
-        .database_url
-        .as_deref()
-        .unwrap_or(config.db_path.as_str());
-    let storage = Arc::new(Erc20Storage::new(storage_path).await?);
+    let db_setup = resolve_single_db_setup(&config.db_path, config.database_url.as_deref());
+    let storage = Arc::new(Erc20Storage::new(&db_setup.storage_url).await?);
     tracing::info!("Database initialized");
 
     // Create Starknet provider
@@ -98,6 +97,7 @@ async fn main() -> Result<()> {
         to_block: config.to_block,
         batch_size: 50,
         retry_policy: torii::etl::extractor::RetryPolicy::default(),
+        rpc_parallelism: 0,
     };
 
     let extractor = Box::new(BlockRangeExtractor::new(provider.clone(), extractor_config));
@@ -123,24 +123,10 @@ async fn main() -> Result<()> {
         .add_service(Erc20Server::new(grpc_service))
         .add_service(reflection);
 
-    // Build Torii configuration
-    // Get database root from db_path's parent directory
-    let db_path = Path::new(&config.db_path);
-    let database_root = db_path.parent().unwrap_or(Path::new(".")).to_string_lossy();
-
-    let engine_db_url = config.database_url.clone().unwrap_or_else(|| {
-        Path::new(&config.db_path)
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("engine.db")
-            .to_string_lossy()
-            .to_string()
-    });
-
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
-        .database_root(database_root.as_ref())
-        .engine_database_url(engine_db_url)
+        .database_root(&db_setup.database_root)
+        .engine_database_url(db_setup.engine_url.clone())
         .with_extractor(extractor)
         .add_decoder(decoder)
         .add_sink_boxed(sink)
@@ -206,12 +192,9 @@ async fn main() -> Result<()> {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let db_backend = if storage_path.starts_with("postgres://")
-                || storage_path.starts_with("postgresql://")
-            {
-                "postgres"
-            } else {
-                "sqlite"
+            let db_backend = match backend_from_url_or_path(&db_setup.storage_url) {
+                DatabaseBackend::Postgres => "postgres",
+                DatabaseBackend::Sqlite => "sqlite",
             };
             let filename = format!("flamegraph-torii-erc20-block-range-{db_backend}-{ts}.svg");
             let file = std::fs::File::create(&filename).unwrap();

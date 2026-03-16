@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use futures::stream::{self, StreamExt};
 use starknet::core::types::requests::{GetClassHashAtRequest, GetClassRequest};
 use starknet::core::types::{BlockId, BlockTag, Felt};
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
@@ -79,6 +80,9 @@ pub struct ContractRegistry {
     /// This avoids repeated identification work for unknown contracts while
     /// preventing unbounded memory growth.
     negative_cache: Arc<RwLock<NegativeCache>>,
+
+    /// Maximum number of chunked RPC requests to execute concurrently.
+    rpc_parallelism: usize,
 }
 
 /// Bounded in-memory negative cache (FIFO/LRU-like).
@@ -153,6 +157,7 @@ impl ContractRegistry {
             negative_cache: Arc::new(RwLock::new(NegativeCache::new(
                 Self::NEGATIVE_CACHE_CAPACITY,
             ))),
+            rpc_parallelism: 0,
         }
     }
 
@@ -168,6 +173,21 @@ impl ContractRegistry {
         );
         self.rules.push(rule);
         self
+    }
+
+    pub fn with_rpc_parallelism(mut self, rpc_parallelism: usize) -> Self {
+        self.rpc_parallelism = rpc_parallelism;
+        self
+    }
+
+    fn resolved_rpc_parallelism(&self) -> usize {
+        if self.rpc_parallelism == 0 {
+            std::thread::available_parallelism()
+                .map(|parallelism| parallelism.get().clamp(2, 8))
+                .unwrap_or(4)
+        } else {
+            self.rpc_parallelism.max(1)
+        }
     }
 
     /// Load cached mappings from database on startup.
@@ -265,25 +285,52 @@ impl ContractRegistry {
         // BATCH 1: Fetch all class hashes (chunked to respect RPC limits)
         let mut contract_to_class: HashMap<Felt, Felt> = HashMap::new();
 
-        for chunk in unknown.chunks(MAX_BATCH_SIZE) {
-            let class_hash_requests: Vec<ProviderRequestData> = chunk
-                .iter()
-                .map(|&addr| {
-                    ProviderRequestData::GetClassHashAt(GetClassHashAtRequest {
-                        block_id: BlockId::Tag(BlockTag::Latest),
-                        contract_address: addr,
+        let rpc_parallelism = self.resolved_rpc_parallelism();
+        ::metrics::gauge!("torii_rpc_parallelism").set(rpc_parallelism as f64);
+
+        let class_hash_tasks = unknown
+            .chunks(MAX_BATCH_SIZE)
+            .enumerate()
+            .map(|(chunk_index, chunk)| {
+                let class_hash_requests: Vec<ProviderRequestData> = chunk
+                    .iter()
+                    .map(|&addr| {
+                        ProviderRequestData::GetClassHashAt(GetClassHashAtRequest {
+                            block_id: BlockId::Tag(BlockTag::Latest),
+                            contract_address: addr,
+                        })
                     })
-                })
-                .collect();
+                    .collect();
+                let chunk_addresses = chunk.to_vec();
+                async move {
+                    let chunk_start = std::time::Instant::now();
+                    let class_hash_responses = self
+                        .provider
+                        .batch_requests(&class_hash_requests)
+                        .await
+                        .context("Failed to batch fetch class hashes")?;
+                    ::metrics::histogram!(
+                        "torii_rpc_chunk_duration_seconds",
+                        "extractor" => "registry",
+                        "method" => "get_class_hash_at_batch"
+                    )
+                    .record(chunk_start.elapsed().as_secs_f64());
+                    Ok::<_, anyhow::Error>((chunk_index, chunk_addresses, class_hash_responses))
+                }
+            })
+            .collect::<Vec<_>>();
 
-            let class_hash_responses = self
-                .provider
-                .batch_requests(&class_hash_requests)
-                .await
-                .context("Failed to batch fetch class hashes")?;
+        let mut class_hash_chunks = stream::iter(class_hash_tasks)
+            .buffer_unordered(rpc_parallelism)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        class_hash_chunks.sort_by_key(|(chunk_index, _, _)| *chunk_index);
 
+        for (_, chunk_addresses, class_hash_responses) in class_hash_chunks {
             // Map contract → class_hash, track failures
-            for (addr, response) in chunk.iter().zip(class_hash_responses) {
+            for (addr, response) in chunk_addresses.iter().zip(class_hash_responses) {
                 if let ProviderResponseData::GetClassHashAt(class_hash) = response {
                     contract_to_class.insert(*addr, class_hash);
                 } else {
@@ -319,24 +366,48 @@ impl ContractRegistry {
         // Map class_hash → ContractAbi
         let mut class_to_abi: HashMap<Felt, ContractAbi> = HashMap::new();
 
-        for chunk in unique_class_hashes.chunks(MAX_BATCH_SIZE) {
-            let class_requests: Vec<ProviderRequestData> = chunk
-                .iter()
-                .map(|&class_hash| {
-                    ProviderRequestData::GetClass(GetClassRequest {
-                        block_id: BlockId::Tag(BlockTag::Latest),
-                        class_hash,
+        let class_tasks = unique_class_hashes
+            .chunks(MAX_BATCH_SIZE)
+            .enumerate()
+            .map(|(chunk_index, chunk)| {
+                let class_requests: Vec<ProviderRequestData> = chunk
+                    .iter()
+                    .map(|&class_hash| {
+                        ProviderRequestData::GetClass(GetClassRequest {
+                            block_id: BlockId::Tag(BlockTag::Latest),
+                            class_hash,
+                        })
                     })
-                })
-                .collect();
+                    .collect();
+                let chunk_hashes = chunk.to_vec();
+                async move {
+                    let chunk_start = std::time::Instant::now();
+                    let class_responses = self
+                        .provider
+                        .batch_requests(&class_requests)
+                        .await
+                        .context("Failed to batch fetch classes")?;
+                    ::metrics::histogram!(
+                        "torii_rpc_chunk_duration_seconds",
+                        "extractor" => "registry",
+                        "method" => "get_class_batch"
+                    )
+                    .record(chunk_start.elapsed().as_secs_f64());
+                    Ok::<_, anyhow::Error>((chunk_index, chunk_hashes, class_responses))
+                }
+            })
+            .collect::<Vec<_>>();
 
-            let class_responses = self
-                .provider
-                .batch_requests(&class_requests)
-                .await
-                .context("Failed to batch fetch classes")?;
+        let mut class_chunks = stream::iter(class_tasks)
+            .buffer_unordered(rpc_parallelism)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        class_chunks.sort_by_key(|(chunk_index, _, _)| *chunk_index);
 
-            for (class_hash, response) in chunk.iter().zip(class_responses) {
+        for (_, chunk_hashes, class_responses) in class_chunks {
+            for (class_hash, response) in chunk_hashes.iter().zip(class_responses) {
                 match response {
                     ProviderResponseData::GetClass(contract_class) => {
                         match ContractAbi::from_contract_class(contract_class) {
