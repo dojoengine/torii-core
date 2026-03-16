@@ -199,6 +199,8 @@ Set `--database-url` (or `DATABASE_URL`) to run engine + token storages on Postg
   erc1155.db    # ERC1155 transfers, balances
 ```
 
+Database resolution logic here is shared via `torii-runtime-common` (`resolve_token_db_setup`) to keep SQLite/PostgreSQL behavior consistent across binaries.
+
 Each database uses WAL mode for performance and crash safety.
 
 ## gRPC API Reference

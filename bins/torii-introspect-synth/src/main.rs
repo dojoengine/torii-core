@@ -20,12 +20,12 @@ use std::time::Instant;
 use torii::etl::decoder::{ContractFilter, DecoderContext};
 use torii::etl::engine_db::{EngineDb, EngineDbConfig};
 use torii::etl::extractor::{BlockContext, ExtractionBatch, Extractor, TransactionContext};
-use torii::etl::sink::{EventBus, Sink, SinkContext};
+use torii::etl::sink::Sink;
 use torii::etl::Decoder;
-use torii::grpc::SubscriptionManager;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::manager::{DojoTableStore, JsonStore};
 use torii_introspect_postgres_sink::IntrospectPostgresSink;
+use torii_runtime_common::sink::initialize_sink;
 
 const EXTRACTOR_TYPE: &str = "synthetic_introspect";
 const STATE_KEY: &str = "last_block";
@@ -418,13 +418,7 @@ async fn main() -> Result<()> {
     let started = Instant::now();
 
     let mut sink = IntrospectPostgresSink::new(&config.db_url, Some(5));
-    sink.initialize(
-        Arc::new(EventBus::new(Arc::new(SubscriptionManager::new()))),
-        &SinkContext {
-            database_root: output_dir.clone(),
-        },
-    )
-    .await?;
+    initialize_sink(&mut sink, output_dir.clone()).await?;
 
     let engine_db = Arc::new(
         EngineDb::new(EngineDbConfig {

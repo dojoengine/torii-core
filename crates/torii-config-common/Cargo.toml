@@ -1,0 +1,11 @@
+[package]
+name = "torii-config-common"
+version = "0.1.0"
+edition = "2021"
+description = "Shared CLI configuration helpers for Torii binaries"
+
+[dependencies]
+anyhow.workspace = true
+
+[lints]
+workspace = true

@@ -6,14 +6,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio_postgres::NoTls;
 use torii::etl::decoder::ContractFilter;
 use torii::etl::engine_db::{EngineDb, EngineDbConfig};
 use torii::etl::extractor::{Extractor, SyntheticErc20Config, SyntheticErc20Extractor};
-use torii::etl::sink::{EventBus, Sink, SinkContext};
+use torii::etl::sink::Sink;
 use torii::etl::{Decoder, DecoderContext};
-use torii::grpc::SubscriptionManager;
 use torii_erc20::{Erc20Decoder, Erc20Sink, Erc20Storage};
+use torii_runtime_common::sink::{drop_postgres_schemas, initialize_sink};
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "torii-erc20-synth")]
@@ -204,14 +203,7 @@ async fn main() -> Result<()> {
     let storage = Arc::new(Erc20Storage::new(&cfg.db_url).await?);
 
     let mut sink = Erc20Sink::new(storage.clone());
-    let event_bus = Arc::new(EventBus::new(Arc::new(SubscriptionManager::new())));
-    sink.initialize(
-        event_bus,
-        &SinkContext {
-            database_root: output_dir.clone(),
-        },
-    )
-    .await?;
+    initialize_sink(&mut sink, output_dir.clone()).await?;
 
     let synthetic_cfg = SyntheticErc20Config {
         from_block: cfg.from_block,
@@ -316,22 +308,7 @@ async fn main() -> Result<()> {
 }
 
 async fn reset_erc20_schema(db_url: &str) -> Result<()> {
-    let (client, connection) = tokio_postgres::connect(db_url, NoTls)
-        .await
-        .context("failed to connect for schema reset")?;
-
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            tracing::error!(target: "torii_erc20_synth", error = %e, "postgres reset connection failed");
-        }
-    });
-
-    client
-        .batch_execute("DROP SCHEMA IF EXISTS erc20 CASCADE")
-        .await
-        .context("failed to drop erc20 schema")?;
-
-    Ok(())
+    drop_postgres_schemas(db_url, &["erc20"], "torii_erc20_synth").await
 }
 
 async fn build_report(

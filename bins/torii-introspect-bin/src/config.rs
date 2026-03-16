@@ -1,6 +1,7 @@
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::Parser;
 use starknet::core::types::Felt;
+use torii_config_common::require_postgres_url;
 
 /// Dojo introspect indexer backed by the PostgreSQL sink.
 ///
@@ -81,13 +82,7 @@ impl Config {
     }
 
     pub fn storage_database_url(&self) -> Result<&str> {
-        if self.storage_database_url.starts_with("postgres://")
-            || self.storage_database_url.starts_with("postgresql://")
-        {
-            Ok(&self.storage_database_url)
-        } else {
-            bail!("--storage-database-url must be a PostgreSQL URL")
-        }
+        require_postgres_url(&self.storage_database_url, "--storage-database-url")
     }
 }
 

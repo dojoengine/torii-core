@@ -12,6 +12,7 @@ use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{
     ContractEventConfig, EventExtractor, EventExtractorConfig, RetryPolicy,
 };
+use torii_config_common::apply_observability_env;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::manager::{DojoTableStore, MergedStore, PostgresStore, SchemaBootstrapPoint};
 use torii_dojo::store::postgres::initialize_dojo_schema;
@@ -35,12 +36,7 @@ async fn main() -> Result<()> {
 async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("Starting Torii Introspect Indexer");
 
-    let metrics_enabled = if config.observability {
-        "true"
-    } else {
-        "false"
-    };
-    std::env::set_var("TORII_METRICS_ENABLED", metrics_enabled);
+    apply_observability_env(config.observability);
 
     let storage_database_url = config.storage_database_url()?.to_string();
     let engine_database_url = config.engine_database_url();

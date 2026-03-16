@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 torii = { path = "../../" }
+torii-runtime-common.workspace = true
 torii-erc20 = { path = "../../crates/torii-erc20" }
 torii-erc721 = { path = "../../crates/torii-erc721" }
 torii-erc1155 = { path = "../../crates/torii-erc1155" }

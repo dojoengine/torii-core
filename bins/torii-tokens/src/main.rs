@@ -56,6 +56,10 @@ use torii::etl::extractor::{
 };
 use torii::etl::identification::ContractRegistry;
 use torii::EtlConcurrencyConfig;
+use torii_config_common::apply_observability_env;
+use torii_runtime_common::database::resolve_token_db_setup;
+#[cfg(feature = "profiling")]
+use torii_runtime_common::database::DatabaseBackend;
 
 // Import from ERC20 library crate
 use torii_erc20::proto::erc20_server::Erc20Server;
@@ -79,28 +83,6 @@ use torii_erc1155::{
     Erc1155Decoder, Erc1155Rule, Erc1155Service, Erc1155Sink, Erc1155Storage,
     FILE_DESCRIPTOR_SET as ERC1155_DESCRIPTOR_SET,
 };
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DbBackend {
-    Postgres,
-    Sqlite,
-}
-
-fn backend_from_path(path: &str) -> DbBackend {
-    if path.starts_with("postgres://") || path.starts_with("postgresql://") {
-        DbBackend::Postgres
-    } else {
-        DbBackend::Sqlite
-    }
-}
-
-fn resolve_storage_url(config: &Config, db_dir: &Path, fallback_file: &str) -> String {
-    config
-        .storage_database_url
-        .clone()
-        .or_else(|| config.database_url.clone())
-        .unwrap_or_else(|| db_dir.join(fallback_file).to_string_lossy().to_string())
-}
 
 async fn contracts_from_registry(
     engine_db: &torii::etl::EngineDb,
@@ -258,13 +240,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         .unwrap();
 
     tracing::info!("Starting Torii Unified Token Indexer");
-    let metrics_enabled = if config.observability {
-        "true"
-    } else {
-        "false"
-    };
-    // CLI is authoritative for torii-tokens observability behavior.
-    std::env::set_var("TORII_METRICS_ENABLED", metrics_enabled);
+    apply_observability_env(config.observability);
     if config.observability {
         tracing::info!("Observability: enabled via --observability");
     } else {
@@ -344,51 +320,35 @@ async fn run_indexer(config: Config) -> Result<()> {
         return Ok(());
     }
 
-    let engine_db_path = config
-        .database_url
-        .clone()
-        .unwrap_or_else(|| db_dir.join("engine.db").to_string_lossy().to_string());
-    let erc20_db_path = resolve_storage_url(&config, db_dir, "erc20.db");
-    let erc721_db_path = resolve_storage_url(&config, db_dir, "erc721.db");
-    let erc1155_db_path = resolve_storage_url(&config, db_dir, "erc1155.db");
+    let db_setup = resolve_token_db_setup(
+        db_dir,
+        config.database_url.as_deref(),
+        config.storage_database_url.as_deref(),
+    )?;
 
-    let engine_backend = backend_from_path(&engine_db_path);
-    let erc20_backend = backend_from_path(&erc20_db_path);
-    let erc721_backend = backend_from_path(&erc721_db_path);
-    let erc1155_backend = backend_from_path(&erc1155_db_path);
-
-    tracing::info!("Engine backend: {:?} ({})", engine_backend, engine_db_path);
+    tracing::info!(
+        "Engine backend: {:?} ({})",
+        db_setup.engine_backend,
+        db_setup.engine_url
+    );
     tracing::info!(
         "ERC20 storage backend: {:?} ({})",
-        erc20_backend,
-        erc20_db_path
+        db_setup.erc20_backend,
+        db_setup.erc20_url
     );
     tracing::info!(
         "ERC721 storage backend: {:?} ({})",
-        erc721_backend,
-        erc721_db_path
+        db_setup.erc721_backend,
+        db_setup.erc721_url
     );
     tracing::info!(
         "ERC1155 storage backend: {:?} ({})",
-        erc1155_backend,
-        erc1155_db_path
+        db_setup.erc1155_backend,
+        db_setup.erc1155_url
     );
 
-    if config
-        .database_url
-        .as_deref()
-        .is_some_and(|u| backend_from_path(u) == DbBackend::Postgres)
-        && (erc20_backend != DbBackend::Postgres
-            || erc721_backend != DbBackend::Postgres
-            || erc1155_backend != DbBackend::Postgres)
-    {
-        anyhow::bail!(
-            "Engine is configured for Postgres but one or more token storages resolved to SQLite. Set --storage-database-url to the same Postgres URL."
-        );
-    }
-
     let engine_db_config = torii::etl::engine_db::EngineDbConfig {
-        path: engine_db_path,
+        path: db_setup.engine_url.clone(),
     };
     let engine_db = Arc::new(torii::etl::EngineDb::new(engine_db_config).await?);
 
@@ -559,12 +519,7 @@ async fn run_indexer(config: Config) -> Result<()> {
             max_prefetch_batches: config.max_prefetch_batches,
             decode_parallelism: config.decode_parallelism,
         })
-        .engine_database_url(
-            config
-                .database_url
-                .clone()
-                .unwrap_or_else(|| db_dir.join("engine.db").to_string_lossy().to_string()),
-        )
+        .engine_database_url(db_setup.engine_url.clone())
         .with_extractor(extractor)
         .with_contract_identifier(registry);
 
@@ -583,8 +538,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     if create_erc20 {
         enabled_types.push("ERC20");
 
-        let storage = Arc::new(Erc20Storage::new(&erc20_db_path).await?);
-        tracing::info!("ERC20 database initialized: {}", erc20_db_path);
+        let storage = Arc::new(Erc20Storage::new(&db_setup.erc20_url).await?);
+        tracing::info!("ERC20 database initialized: {}", db_setup.erc20_url);
 
         let decoder = Arc::new(Erc20Decoder::new());
         torii_config = torii_config.add_decoder(decoder);
@@ -624,8 +579,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     if create_erc721 {
         enabled_types.push("ERC721");
 
-        let storage = Arc::new(Erc721Storage::new(&erc721_db_path).await?);
-        tracing::info!("ERC721 database initialized: {}", erc721_db_path);
+        let storage = Arc::new(Erc721Storage::new(&db_setup.erc721_url).await?);
+        tracing::info!("ERC721 database initialized: {}", db_setup.erc721_url);
 
         let decoder = Arc::new(Erc721Decoder::new());
         torii_config = torii_config.add_decoder(decoder);
@@ -673,8 +628,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     if create_erc1155 {
         enabled_types.push("ERC1155");
 
-        let storage = Arc::new(Erc1155Storage::new(&erc1155_db_path).await?);
-        tracing::info!("ERC1155 database initialized: {}", erc1155_db_path);
+        let storage = Arc::new(Erc1155Storage::new(&db_setup.erc1155_url).await?);
+        tracing::info!("ERC1155 database initialized: {}", db_setup.erc1155_url);
 
         let decoder = Arc::new(Erc1155Decoder::new());
         torii_config = torii_config.add_decoder(decoder);
@@ -805,7 +760,7 @@ async fn run_indexer(config: Config) -> Result<()> {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let db_backend = if erc20_backend == DbBackend::Postgres {
+            let db_backend = if db_setup.erc20_backend == DatabaseBackend::Postgres {
                 "postgres"
             } else {
                 "sqlite"
