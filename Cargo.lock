@@ -4631,6 +4631,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "torii-config-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "torii-dojo"
 version = "0.1.0"
 dependencies = [
@@ -4720,6 +4727,7 @@ dependencies = [
  "tonic-reflection",
  "torii",
  "torii-erc20",
+ "torii-runtime-common",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -4739,6 +4747,7 @@ dependencies = [
  "tokio-postgres",
  "torii",
  "torii-erc20",
+ "torii-runtime-common",
  "tracing",
  "tracing-subscriber",
 ]
@@ -4799,6 +4808,7 @@ dependencies = [
  "starknet",
  "tokio",
  "torii",
+ "torii-config-common",
  "torii-dojo",
  "torii-introspect-postgres-sink",
  "tracing",
@@ -4847,6 +4857,7 @@ dependencies = [
  "torii",
  "torii-dojo",
  "torii-introspect-postgres-sink",
+ "torii-runtime-common",
  "tracing",
  "tracing-subscriber",
 ]
@@ -4867,6 +4878,17 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-build",
+ "torii",
+ "tracing",
+]
+
+[[package]]
+name = "torii-runtime-common"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "tokio-postgres",
  "torii",
  "tracing",
 ]
@@ -4924,9 +4946,11 @@ dependencies = [
  "tonic-web",
  "torii",
  "torii-common",
+ "torii-config-common",
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",
+ "torii-runtime-common",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -4948,6 +4972,7 @@ dependencies = [
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",
+ "torii-runtime-common",
  "tracing",
  "tracing-subscriber",
 ]

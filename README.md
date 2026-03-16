@@ -167,6 +167,17 @@ Features:
 
 ## 🔧 Advanced Topics
 
+### Shared Binary Bootstrap Layer
+
+Torii binaries now share common startup helpers to avoid duplicated wiring code.
+
+- `crates/torii-config-common`
+  - CLI/env setup helpers (observability toggle, PostgreSQL URL validation).
+- `crates/torii-runtime-common`
+  - Database target resolution (SQLite/PostgreSQL) and shared sink setup utilities.
+
+When adding a new binary, prefer these helpers over inline setup code.
+
 ### Adding Custom gRPC Services
 
 To expose a custom gRPC service for your sink:
