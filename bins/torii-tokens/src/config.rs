@@ -12,6 +12,9 @@ use starknet::core::types::Felt;
 /// - **Event**: Uses `starknet_getEvents` with per-contract cursors.
 ///   Best for indexing specific contracts - easy to add new ones without re-indexing.
 ///
+/// - **GlobalEvent**: Uses `starknet_getEvents` with a single global cursor.
+///   Best for event-mode auto-discovery across all contracts.
+///
 #[derive(Clone, Debug, Default, ValueEnum, PartialEq, Eq)]
 pub enum ExtractionMode {
     /// Fetch all events from blocks (single global cursor)
@@ -19,6 +22,8 @@ pub enum ExtractionMode {
     BlockRange,
     /// Fetch events per contract (per-contract cursors)
     Event,
+    /// Fetch all events with one global cursor
+    GlobalEvent,
 }
 
 /// Metadata fetching behavior.
@@ -41,6 +46,9 @@ pub enum MetadataMode {
 ///
 /// - **event**: Uses `starknet_getEvents` with per-contract cursors.
 ///   Easy to add new contracts without re-indexing existing ones.
+///
+/// - **global-event**: Uses `starknet_getEvents` with one global cursor.
+///   Supports runtime auto-discovery without preconfigured contracts.
 ///
 /// # Examples
 ///
@@ -67,6 +75,7 @@ pub struct Config {
     ///
     /// - block-range: Fetch all events from blocks (single global cursor)
     /// - event: Fetch events per contract (per-contract cursors, easy to add new contracts)
+    /// - global-event: Fetch all events via getEvents (single global cursor)
     #[arg(long, value_enum, default_value = "block-range")]
     pub mode: ExtractionMode,
 
@@ -267,5 +276,11 @@ mod tests {
         assert_eq!(cfg.metadata_parallelism, 12);
         assert_eq!(cfg.metadata_queue_capacity, 4096);
         assert_eq!(cfg.metadata_max_retries, 5);
+    }
+
+    #[test]
+    fn supports_global_event_mode() {
+        let cfg = Config::parse_from(["torii-tokens", "--mode", "global-event"]);
+        assert_eq!(cfg.mode, ExtractionMode::GlobalEvent);
     }
 }

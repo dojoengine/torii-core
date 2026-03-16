@@ -3,6 +3,8 @@
 pub mod block_range;
 pub mod composite;
 pub mod event;
+pub mod event_common;
+pub mod global_event;
 pub mod retry;
 pub mod sample;
 pub mod starknet_helpers;
@@ -20,6 +22,7 @@ use std::sync::Arc;
 pub use block_range::{BlockRangeConfig, BlockRangeExtractor};
 pub use composite::CompositeExtractor;
 pub use event::{ContractEventConfig, EventExtractor, EventExtractorConfig};
+pub use global_event::{GlobalEventExtractor, GlobalEventExtractorConfig};
 pub use retry::RetryPolicy;
 pub use sample::SampleExtractor;
 pub use starknet_helpers::ContractAbi;
