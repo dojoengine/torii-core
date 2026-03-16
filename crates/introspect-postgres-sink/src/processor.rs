@@ -1,56 +1,21 @@
 use crate::json::PostgresJsonSerializer;
-use crate::sql::write_conflict_res;
-use crate::table::{PgTable, PgTableError};
-use crate::types::{CreatePgTable, PgTypeError};
-use crate::INTROSPECT_PG_SINK_MIGRATIONS;
+use crate::query::CreatePgTable;
+use crate::table::PgTable;
+use crate::{PgDbError, PgDbResult, PgSchema, INTROSPECT_PG_SINK_MIGRATIONS};
 use introspect_types::ResultInto;
 use serde_json::Serializer as JsonSerializer;
-use sqlx::PgPool;
+use sqlx::{query, PgPool};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::io::Write;
 use std::ops::Deref;
-use std::sync::{PoisonError, RwLock};
+use std::rc::Rc;
+use std::sync::RwLock;
 use torii::etl::EventContext;
 use torii_introspect::events::IntrospectMsg;
 use torii_introspect::schema::TableSchema;
 use torii_introspect::InsertsFields;
-use torii_postgres::{PostgresConnection, SqlxError};
-
-#[derive(Debug, thiserror::Error)]
-pub enum PgDbError {
-    #[error(transparent)]
-    DatabaseError(#[from] SqlxError),
-    #[error("Invalid event format: {0}")]
-    InvalidEventFormat(String),
-    #[error(transparent)]
-    JsonError(#[from] serde_json::Error),
-    #[error(transparent)]
-    IoError(#[from] std::io::Error),
-    #[error(transparent)]
-    TableError(#[from] PgTableError),
-    #[error(transparent)]
-    TypeError(#[from] PgTypeError),
-    #[error("Table with id: {0} already exists, incoming name: {1}, existing name: {2}")]
-    TableAlreadyExists(Felt, String, String),
-    #[error("Table not found with id: {0}")]
-    TableNotFound(Felt),
-    #[error("Table not alive - id: {0}, name: {1}")]
-    TableNotAlive(Felt, String),
-    #[error("Manager does not support updating")]
-    UpdateNotSupported,
-    #[error("Table poison error: {0}")]
-    PoisonError(String),
-}
-
-type PgDbResult<T> = std::result::Result<T, PgDbError>;
-
-impl<T> From<PoisonError<T>> for PgDbError {
-    fn from(err: PoisonError<T>) -> Self {
-        Self::PoisonError(err.to_string())
-    }
-}
+use torii_postgres::PostgresConnection;
 
 #[derive(Debug, Default)]
 pub struct PostgresTables(pub RwLock<HashMap<Felt, PgTable>>);
@@ -60,18 +25,6 @@ impl Deref for PostgresTables {
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum PgSchema {
-    Public,
-    Custom(String),
-}
-
-impl PgSchema {
-    pub fn qualify(&self, name: &str) -> String {
-        format!("{self}.{name}")
     }
 }
 
@@ -105,27 +58,33 @@ impl From<Option<&str>> for PgSchema {
     }
 }
 
-impl Display for PgSchema {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PgSchema::Custom(namespace) => write!(f, "{namespace}",),
-            PgSchema::Public => write!(f, "public"),
-        }
-    }
-}
-
 impl PostgresTables {
     pub fn create_table(
         &self,
-        schema: &PgSchema,
+        schema: &Rc<PgSchema>,
         to_table: impl Into<TableSchema>,
         queries: &mut Vec<String>,
     ) -> PgDbResult<()> {
         let (id, table) = Into::<TableSchema>::into(to_table).into();
         self.assert_table_not_exists(&id, &table.name)?;
-        CreatePgTable::new(&id, &table)?.make_queries(schema, queries)?;
+        CreatePgTable::new(schema, &id, &table)?.make_queries(queries);
         let mut tables: std::sync::RwLockWriteGuard<'_, HashMap<Felt, PgTable>> = self.write()?;
-        tables.insert(id, table.into());
+        tables.insert(id, PgTable::new(schema, table));
+        Ok(())
+    }
+
+    pub fn update_table(
+        &self,
+        to_table: impl Into<TableSchema>,
+        queries: &mut Vec<String>,
+    ) -> PgDbResult<()> {
+        let (id, table) = Into::<TableSchema>::into(to_table).into();
+        let mut tables = self.write()?;
+        let existing = tables
+            .get_mut(&id)
+            .ok_or_else(|| PgDbError::TableNotFound(id))?;
+        let upgrades = existing.update_from_info(&id, &table.into())?;
+        upgrades.to_queries(queries);
         Ok(())
     }
 
@@ -139,46 +98,6 @@ impl PostgresTables {
             None => Ok(()),
         }
     }
-
-    // pub fn update_table(
-    //     &self,
-    //     schema: &PgSchema,
-    //     event: UpdateTable,
-    //     context: &EventContext,
-    //     queries: &mut Vec<String>,
-    // ) -> PgDbResult<()> {
-    //     let mut tables = self.write()?;
-    //     let Some(existing) = tables.get_mut(&event.id) else {
-    //         return self.create_table(schema, event, queries);
-    //     };
-
-    //     let mut type_queries = Vec::new();
-    //     let mut type_schema = PgTableStructure::new_empty(schema);
-    //     let branch = xxhash_rust::xxh3::Xxh3::new_based(existing.name());
-    //     let mut alterations = Vec::new();
-    //     for column in &event.columns {
-    //         let pg_type = column.extract_type(&mut type_schema, &branch, &mut type_queries)?;
-    //         match existing.columns.get(&column.id) {
-    //             None => alterations.push(add_column_query(&column.name, &pg_type)),
-    //             Some(old) if old.type_def != column.type_def => {
-    //                 alterations.push(modify_column_query(&column.name, &pg_type));
-    //             }
-    //             _ => {}
-    //         }
-    //     }
-    //     queries.extend(type_queries);
-    //     if !alterations.is_empty() {
-    //         queries.push(alter_table_query(schema, existing.name(), &alterations));
-    //     }
-
-    //     let mut ignored_queries = Vec::new();
-    //     let (_, replacement_table) =
-    //         PgTable::new_from_table(&schema, event.clone(), &mut ignored_queries)?;
-    //     let mut tables = self.write()?;
-
-    //     tables.insert(event.id, replacement_table);
-    //     Ok(())
-    // }
 
     pub fn set_table_dead(&self, id: &Felt) -> PgDbResult<()> {
         let mut tables = self.write()?;
@@ -205,16 +124,15 @@ impl PostgresTables {
         if !table.alive {
             return Ok(());
         }
-        let record = table.get_schema(&event.columns)?;
-        let table_name = table.name();
-
+        let record = table.get_record_schema(&event.columns)?;
+        let table_name = &table.name;
         let mut writer = Vec::new();
-        let schema = table.schema();
+        let schema = &table.schema;
         write!(
             writer,
-            r#"INSERT INTO "{schema}"."{table_name}"
-            SELECT * FROM jsonb_populate_recordset(NULL::"{schema}"."{table_name}", $$"#
-        )?;
+            r#"INSERT INTO "{schema}"."{table_name}" SELECT * FROM jsonb_populate_recordset(NULL::"{schema}"."{table_name}", $$"#
+        )
+        .unwrap();
         record.parse_records_with_metadata(
             &event.records,
             &(),
@@ -225,7 +143,8 @@ impl PostgresTables {
             writer,
             r#"$$) ON CONFLICT ("{}") DO UPDATE SET "#,
             record.primary().name
-        )?;
+        )
+        .unwrap();
         if let Some((coln, cols)) = record.columns().split_last() {
             for column in cols {
                 write_conflict_res::<true, _>(&mut writer, table_name, &column.name)?;
@@ -239,14 +158,14 @@ impl PostgresTables {
 
     pub fn handle_message(
         &self,
-        schema: &PgSchema,
+        schema: &Rc<PgSchema>,
         msg: &IntrospectMsg,
         context: &EventContext,
         queries: &mut Vec<String>,
     ) -> PgDbResult<()> {
         match msg {
             IntrospectMsg::CreateTable(event) => self.create_table(schema, event.clone(), queries),
-            IntrospectMsg::UpdateTable(event) => self.set_table_dead(&event.id),
+            IntrospectMsg::UpdateTable(event) => self.update_table(event.clone(), queries),
             IntrospectMsg::AddColumns(event) => self.set_table_dead(&event.table),
             IntrospectMsg::DropColumns(event) => self.set_table_dead(&event.table),
             IntrospectMsg::RetypeColumns(event) => self.set_table_dead(&event.table),
@@ -259,6 +178,18 @@ impl PostgresTables {
             IntrospectMsg::DeleteRecords(_) | IntrospectMsg::DeletesFields(_) => Ok(()),
         }
     }
+}
+
+pub fn write_conflict_res<const DELIMINATOR: bool, W: Write>(
+    writer: &mut W,
+    table: &str,
+    column: &str,
+) -> std::io::Result<()> {
+    let separator = if DELIMINATOR { ", " } else { "" };
+    write!(
+        writer,
+        r#""{column}" = COALESCE(EXCLUDED."{column}", "{table}"."{column}"){separator}"#,
+    )
 }
 
 pub struct PostgresSimpleDb<T> {
@@ -293,10 +224,9 @@ impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
     }
     pub fn load_tables_no_commit(&self, table_schemas: Vec<TableSchema>) -> PgDbResult<()> {
         let mut tables = self.tables.write()?;
-        let mut queries = Vec::new();
         for table in table_schemas {
-            let (id, table) = PgTable::new_from_table(&self.schema, table, &mut queries)?;
-            tables.insert(id, table);
+            let (id, table) = table.into();
+            tables.insert(id, PgTable::new(&self.schema, table));
         }
         Ok(())
     }
@@ -307,8 +237,11 @@ impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
         context: &EventContext,
     ) -> PgDbResult<()> {
         let mut queries = Vec::new();
-        self.tables
-            .handle_message(&self.schema, msg, context, &mut queries)?;
+        {
+            let schema = Rc::new(self.schema.clone());
+            self.tables
+                .handle_message(&schema, msg, context, &mut queries)?;
+        }
         self.execute_queries(&queries).await?;
         Ok(())
     }
@@ -319,11 +252,14 @@ impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
     ) -> PgDbResult<Vec<PgDbResult<()>>> {
         let mut queries = Vec::new();
         let mut results = Vec::with_capacity(msgs.len());
-        for (msg, context) in msgs {
-            results.push(
-                self.tables
-                    .handle_message(&self.schema, msg, context, &mut queries),
-            );
+        {
+            let schema = Rc::new(self.schema.clone());
+            for (msg, context) in msgs {
+                results.push(
+                    self.tables
+                        .handle_message(&schema, msg, context, &mut queries),
+                );
+            }
         }
         self.execute_queries(&queries).await?;
         Ok(results)

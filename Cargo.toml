@@ -102,10 +102,10 @@ starknet-types-core = "0.2.0"
 tonic-build = "0.12"
 
 # Introspect
-introspect-events = { git = "https://github.com/cartridge-gg/introspect", rev = "3d11aa5" }
-introspect-types = { git = "https://github.com/cartridge-gg/introspect", rev = "3d11aa5" }
-introspect-rust-macros = { git = "https://github.com/cartridge-gg/introspect", rev = "3d11aa5" }
-dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev = "dd87ef3" }
+introspect-events = { git = "https://github.com/cartridge-gg/introspect", rev = "60819cb" }
+introspect-types = { git = "https://github.com/cartridge-gg/introspect", rev = "60819cb" }
+introspect-rust-macros = { git = "https://github.com/cartridge-gg/introspect", rev = "60819cb" }
+dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev = "b4c7148" }
 
 
 # Utils

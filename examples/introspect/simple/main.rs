@@ -5,7 +5,7 @@ use torii::etl::EventContext;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::DojoToriiError;
-use torii_introspect_postgres_sink::processor::{PgSchema, PostgresSimpleDb};
+use torii_introspect_postgres_sink::PostgresSimpleDb;
 use torii_test_utils::{resolve_path_like, EventIterator, FakeProvider};
 
 const DB_URL: &str = "postgres://torii:torii@localhost:5432/torii";

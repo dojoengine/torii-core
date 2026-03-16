@@ -2,21 +2,21 @@ use crate::Record;
 use introspect_types::bytes::IntoByteSource;
 use introspect_types::serialize::CairoSeFrom;
 use introspect_types::serialize_def::CairoTypeSerialization;
-use introspect_types::{CairoDeserializer, ColumnDef, PrimaryDef, PrimaryTypeDef, TypeDef};
+use introspect_types::{CairoDeserializer, ColumnInfo, PrimaryDef, PrimaryTypeDef, TypeDef};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
 use std::ops::Deref;
 
 pub struct RecordSchema<'a> {
     primary: &'a PrimaryDef,
-    columns: Vec<&'a ColumnDef>,
+    columns: Vec<&'a ColumnInfo>,
 }
 
 impl<'a> RecordSchema<'a> {
-    pub fn new(primary: &'a PrimaryDef, columns: Vec<&'a ColumnDef>) -> Self {
+    pub fn new(primary: &'a PrimaryDef, columns: Vec<&'a ColumnInfo>) -> Self {
         Self { primary, columns }
     }
-    pub fn columns(&self) -> &[&'a ColumnDef] {
+    pub fn columns(&self) -> &[&'a ColumnInfo] {
         &self.columns
     }
 
@@ -91,7 +91,7 @@ where
     }
 }
 
-impl AsEntryPair for ColumnDef {
+impl AsEntryPair for ColumnInfo {
     type Key = String;
     type Value = TypeDef;
     fn to_entry_pair(&self) -> (&Self::Key, &Self::Value) {
@@ -124,7 +124,7 @@ impl<'a, M: SerializeEntries> RecordWithMetadata<'a, M> {
 
 pub struct RecordFrame<'a, C: CairoTypeSerialization, M: SerializeEntries> {
     primary: &'a PrimaryDef,
-    columns: &'a [&'a ColumnDef],
+    columns: &'a [&'a ColumnInfo],
     id: &'a [u8; 32],
     values: &'a [u8],
     cairo_se: &'a C,

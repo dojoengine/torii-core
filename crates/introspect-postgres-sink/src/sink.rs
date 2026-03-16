@@ -40,7 +40,7 @@ impl<T: Send + Sync + PostgresConnection> Sink for PostgresSimpleDb<T> {
                 continue;
             };
 
-            let context = batch
+            let context: torii::etl::EventContext = batch
                 .get_event_context(&body.transaction_hash, body.from_address)
                 .with_context(|| {
                     format!(

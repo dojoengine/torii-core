@@ -1,13 +1,22 @@
+pub mod create;
+pub mod error;
 pub mod json;
 pub mod processor;
+pub mod query;
 pub mod sink;
-pub mod sql;
 pub mod table;
 pub mod types;
 pub mod upgrade;
 pub mod utils;
-use sqlx::migrate::Migrator;
-pub use types::{PostgresField, PostgresType};
+
+pub use error::{
+    PgDbError, PgDbResult, PgTableError, PgTypeError, PgTypeResult, TableResult, UpgradeError,
+    UpgradeResult, UpgradeResultExt,
+};
+pub use processor::PostgresSimpleDb;
+pub use types::{
+    PgSchema, PostgresArray, PostgresField, PostgresScalar, PostgresType, PrimaryKey, SchemaName,
+};
 pub use utils::{truncate, HasherExt};
 
-pub const INTROSPECT_PG_SINK_MIGRATIONS: Migrator = sqlx::migrate!("./migrations");
+pub const INTROSPECT_PG_SINK_MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

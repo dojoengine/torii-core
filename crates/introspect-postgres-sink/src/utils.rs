@@ -30,6 +30,7 @@ fn parse_type_name(type_name: &str) -> String {
 pub trait HasherExt {
     fn new_based<T: AsBytes + ?Sized>(base: &T) -> Self;
     fn type_name(&self, name: &str) -> String;
+    fn tuple_name(&self) -> String;
     fn branch<T: AsBytes + ?Sized>(&self, name: &T) -> Self;
     fn branch_to_type_name<T: AsBytes + ?Sized>(&self, leaf: &T, name: &str) -> String;
 }
@@ -48,6 +49,10 @@ impl HasherExt for Xxh3 {
         format!("{}_{}", parse_type_name(name), hash)
     }
 
+    fn tuple_name(&self) -> String {
+        self.type_name("tuple")
+    }
+
     fn branch<T: AsBytes + ?Sized>(&self, name: &T) -> Xxh3 {
         let mut hasher = self.clone();
         let bytes = name.as_bytes();
@@ -58,11 +63,6 @@ impl HasherExt for Xxh3 {
 
     fn branch_to_type_name<T: AsBytes + ?Sized>(&self, leaf: &T, name: &str) -> String {
         self.branch(leaf).type_name(name)
-    }
-
-    fn digest128(&self) -> u128 {
-        let (low, high) = self.digest128_raw();
-        ((high as u128) << 64) | (low as u128)
     }
 }
 
@@ -85,5 +85,11 @@ impl AsBytes for str {
 impl AsBytes for String {
     fn as_bytes(&self) -> Vec<u8> {
         self.as_bytes().to_vec()
+    }
+}
+
+impl AsBytes for u32 {
+    fn as_bytes(&self) -> Vec<u8> {
+        self.to_le_bytes().to_vec()
     }
 }
