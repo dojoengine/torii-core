@@ -133,7 +133,6 @@ require_cmd rg
 require_cmd xxd
 require_cmd base64
 require_cmd mktemp
-require_cmd python3
 
 if [[ -n "$DB_URL" && "$DB_URL" =~ ^postgres(ql)?:// ]]; then
   DB_BACKEND="postgres"
@@ -240,7 +239,7 @@ log "verification passed"
 
 if [[ "$RUN_SUBSCRIPTIONS_SMOKE" == "1" ]]; then
   log "running subscriptions smoke checks"
-  GRPC_ADDR="$GRPC_ADDR" python3 "$REPO_ROOT/scripts/test-ecs-subscriptions-smoke.py"
+  GRPC_ADDR="$GRPC_ADDR" "$REPO_ROOT/scripts/test-ecs-subscriptions-smoke.sh"
 fi
 
 if [[ "${KEEP_TMP:-0}" == "1" ]]; then

@@ -285,6 +285,13 @@ impl EcsService {
         .await?;
 
         sqlx::query(
+            "CREATE INDEX IF NOT EXISTS torii_ecs_entity_meta_keyset_idx
+             ON torii_ecs_entity_meta(kind, deleted, entity_id, world_address)",
+        )
+        .execute(&self.state.pool)
+        .await?;
+
+        sqlx::query(
             "CREATE INDEX IF NOT EXISTS torii_ecs_entity_models_lookup_idx
              ON torii_ecs_entity_models(kind, world_address, entity_id)",
         )
@@ -294,6 +301,13 @@ impl EcsService {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS torii_ecs_entity_models_table_lookup_idx
              ON torii_ecs_entity_models(kind, table_id, world_address, entity_id)",
+        )
+        .execute(&self.state.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS torii_ecs_entity_models_key_lookup_idx
+             ON torii_ecs_entity_models(kind, world_address, entity_id)",
         )
         .execute(&self.state.pool)
         .await?;
@@ -1044,43 +1058,13 @@ impl EcsService {
             .map(|table| (felt_hex(table.table.id), table))
             .collect::<HashMap<_, _>>();
         let table_ids = model_map.keys().cloned().collect::<Vec<_>>();
+        let table_id_filter = if query.models.is_empty() {
+            None
+        } else {
+            Some(table_ids.as_slice())
+        };
         let member_pushdown = member_pushdown_from_clause(query.clause.as_ref(), &model_map);
-        let meta_start = Instant::now();
-        let candidate_meta = self
-            .load_entity_page_meta(
-                kind,
-                &world_filters,
-                table_ids.clone(),
-                member_pushdown.as_ref(),
-            )
-            .await?;
-        ::metrics::histogram!("torii_ecs_load_entity_page_meta_seconds")
-            .record(meta_start.elapsed().as_secs_f64());
-        ::metrics::gauge!("torii_ecs_load_entity_page_candidates").set(candidate_meta.len() as f64);
-        let mut candidate_keys = candidate_meta.keys().cloned().collect::<Vec<_>>();
-        candidate_keys.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-        if query
-            .pagination
-            .as_ref()
-            .is_some_and(|p| p.direction == PaginationDirection::Backward as i32)
-        {
-            candidate_keys.reverse();
-        }
-
-        if let Some(pagination) = &query.pagination {
-            if !pagination.cursor.is_empty() {
-                candidate_keys.retain(|(_, entity_id)| {
-                    let key = entity_id.trim_start_matches("0x");
-                    if pagination.direction == PaginationDirection::Backward as i32 {
-                        key < pagination.cursor.as_str()
-                    } else {
-                        key > pagination.cursor.as_str()
-                    }
-                });
-            }
-        }
-
-        let target_limit = query.pagination.as_ref().map_or(usize::MAX, |pagination| {
+        let target_limit = query.pagination.as_ref().map_or(100, |pagination| {
             if pagination.limit == 0 {
                 100
             } else {
@@ -1088,12 +1072,50 @@ impl EcsService {
             }
         });
 
+        let direction = query
+            .pagination
+            .as_ref()
+            .map_or(PaginationDirection::Forward as i32, |pagination| {
+                pagination.direction
+            });
+        let cursor = query
+            .pagination
+            .as_ref()
+            .map_or(String::new(), |pagination| pagination.cursor.clone());
+
+        let keys_start = Instant::now();
+        let mut candidate_keys = self
+            .load_entity_page_keys(
+                kind,
+                &world_filters,
+                table_id_filter,
+                member_pushdown.as_ref(),
+                &cursor,
+                direction,
+                target_limit.saturating_add(1),
+            )
+            .await?;
+        ::metrics::histogram!("torii_ecs_load_entity_page_meta_seconds")
+            .record(keys_start.elapsed().as_secs_f64());
+
+        let has_more = target_limit != usize::MAX && candidate_keys.len() > target_limit;
+        if has_more {
+            candidate_keys.truncate(target_limit);
+        }
+
+        let meta_start = Instant::now();
+        let candidate_meta = self
+            .load_entity_meta_for_keys(kind, table_id_filter, candidate_keys.as_slice())
+            .await?;
+        ::metrics::histogram!("torii_ecs_load_entity_page_meta_rows_seconds")
+            .record(meta_start.elapsed().as_secs_f64());
+        ::metrics::gauge!("torii_ecs_load_entity_page_candidates").set(candidate_keys.len() as f64);
+
         let mut items = Vec::new();
-        let mut built_any_snapshot_entity = false;
         for chunk in candidate_keys.chunks(256) {
             let rows_start = Instant::now();
             let rows = self
-                .load_entity_page_rows(kind, &world_filters, table_ids.as_slice(), chunk)
+                .load_entity_page_rows(kind, &world_filters, table_id_filter, chunk)
                 .await?;
             ::metrics::histogram!("torii_ecs_load_entity_page_rows_seconds")
                 .record(rows_start.elapsed().as_secs_f64());
@@ -1118,7 +1140,6 @@ impl EcsService {
                 else {
                     continue;
                 };
-                built_any_snapshot_entity = true;
                 let entity = entity.into_proto();
                 if query
                     .clause
@@ -1138,18 +1159,10 @@ impl EcsService {
             }
         }
 
-        if !built_any_snapshot_entity && !candidate_meta.is_empty() {
-            return self.load_entity_page_from_storage(kind, query).await;
-        }
-
-        let next_cursor = if target_limit != usize::MAX && items.len() == target_limit {
-            items
+        let next_cursor = if has_more {
+            candidate_keys
                 .last()
-                .map(|entity| {
-                    felt_from_bytes(&entity.hashed_keys)
-                        .map(|felt| felt_hex(felt).trim_start_matches("0x").to_string())
-                })
-                .transpose()?
+                .map(|(_, entity_id)| entity_id.trim_start_matches("0x").to_string())
                 .unwrap_or_default()
         } else {
             String::new()
@@ -1330,53 +1343,158 @@ impl EcsService {
             }))
     }
 
-    async fn load_entity_page_meta(
+    async fn load_entity_page_keys(
         &self,
         kind: TableKind,
         world_filters: &[Felt],
-        table_ids: Vec<String>,
+        table_ids: Option<&[String]>,
         member_pushdown: Option<&MemberPushdown>,
-    ) -> Result<HashMap<(String, String), HashMap<String, EntityMetaRow>>> {
-        if table_ids.is_empty() {
-            return Ok(HashMap::new());
+        cursor: &str,
+        direction: i32,
+        limit: usize,
+    ) -> Result<Vec<(String, String)>> {
+        if table_ids.is_some_and(|table_ids| table_ids.is_empty()) {
+            return Ok(Vec::new());
         }
+        let limit = limit.clamp(1, 200);
 
-        let deleted_sql = match self.state.backend {
-            DbBackend::Sqlite => "CAST(deleted AS INTEGER)",
-            DbBackend::Postgres => "CASE WHEN deleted THEN 1 ELSE 0 END",
+        let cursor_op = if direction == PaginationDirection::Backward as i32 {
+            "<"
+        } else {
+            ">"
         };
+        let order = if direction == PaginationDirection::Backward as i32 {
+            "DESC"
+        } else {
+            "ASC"
+        };
+
         let mut builder = QueryBuilder::<Any>::new(format!(
-            "SELECT world_address, table_id, entity_id, created_at, updated_at, executed_at, \
-                    {deleted_sql} AS deleted \
-             FROM torii_ecs_entity_meta m WHERE m.kind = "
+            "SELECT DISTINCT m.world_address, m.entity_id \
+             FROM torii_ecs_entity_meta m \
+             WHERE m.kind = "
         ));
         builder.push_bind(kind.as_str());
-        builder.push(" AND m.table_id IN (");
-        {
-            let mut separated = builder.separated(", ");
-            for table_id in &table_ids {
-                separated.push_bind(table_id);
+        if let Some(table_ids) = table_ids {
+            builder.push(" AND m.table_id IN (");
+            {
+                let mut separated = builder.separated(", ");
+                for table_id in table_ids {
+                    separated.push_bind(table_id);
+                }
             }
+            builder.push(")");
         }
-        builder.push(")");
         if !world_filters.is_empty() {
             builder.push(" AND m.world_address IN (");
-            let mut separated = builder.separated(", ");
-            for world_address in world_filters {
-                separated.push_bind(felt_hex(*world_address));
+            {
+                let mut separated = builder.separated(", ");
+                for world_address in world_filters {
+                    separated.push_bind(felt_hex(*world_address));
+                }
             }
             builder.push(")");
         }
         match self.state.backend {
             DbBackend::Sqlite => {
-                builder.push(" AND deleted = 0");
+                builder.push(" AND m.deleted = 0");
             }
             DbBackend::Postgres => {
-                builder.push(" AND deleted = FALSE");
+                builder.push(" AND m.deleted = FALSE");
             }
+        }
+        if !cursor.is_empty() {
+            builder.push(" AND m.entity_id ");
+            builder.push(cursor_op);
+            builder.push(" ");
+            builder.push_bind(format!("0x{cursor}"));
         }
         if let Some(member_pushdown) = member_pushdown {
             append_member_pushdown_sql(&mut builder, self.state.backend, member_pushdown);
+        }
+        builder.push(" ORDER BY m.entity_id ");
+        builder.push(order);
+        builder.push(", m.world_address ");
+        builder.push(order);
+        builder.push(" LIMIT ");
+        builder.push_bind(limit as i64);
+
+        let rows = builder.build().fetch_all(&self.state.pool).await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("world_address")?,
+                    row.try_get::<String, _>("entity_id")?,
+                ))
+            })
+            .collect()
+    }
+
+    async fn load_entity_meta_for_keys(
+        &self,
+        kind: TableKind,
+        table_ids: Option<&[String]>,
+        entity_keys: &[(String, String)],
+    ) -> Result<HashMap<(String, String), HashMap<String, EntityMetaRow>>> {
+        if table_ids.is_some_and(|table_ids| table_ids.is_empty()) || entity_keys.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let deleted_sql = match self.state.backend {
+            DbBackend::Sqlite => "CAST(m.deleted AS INTEGER)",
+            DbBackend::Postgres => "CASE WHEN m.deleted THEN 1 ELSE 0 END",
+        };
+
+        let mut builder = QueryBuilder::<Any>::new(format!(
+            "SELECT m.world_address, m.table_id, m.entity_id, m.created_at, m.updated_at, m.executed_at, \
+                    {deleted_sql} AS deleted \
+             FROM torii_ecs_entity_meta m WHERE m.kind = "
+        ));
+        builder.push_bind(kind.as_str());
+        if let Some(table_ids) = table_ids {
+            builder.push(" AND m.table_id IN (");
+            {
+                let mut separated = builder.separated(", ");
+                for table_id in table_ids {
+                    separated.push_bind(table_id);
+                }
+            }
+            builder.push(")");
+        }
+
+        let world_addresses = entity_keys
+            .iter()
+            .map(|(world_address, _)| world_address.clone())
+            .collect::<HashSet<_>>();
+        let entity_ids = entity_keys
+            .iter()
+            .map(|(_, entity_id)| entity_id.clone())
+            .collect::<HashSet<_>>();
+        let allowed = entity_keys.iter().cloned().collect::<HashSet<_>>();
+
+        builder.push(" AND m.world_address IN (");
+        {
+            let mut separated = builder.separated(", ");
+            for world_address in &world_addresses {
+                separated.push_bind(world_address);
+            }
+        }
+        builder.push(")");
+        builder.push(" AND m.entity_id IN (");
+        {
+            let mut separated = builder.separated(", ");
+            for entity_id in &entity_ids {
+                separated.push_bind(entity_id);
+            }
+        }
+        builder.push(")");
+        match self.state.backend {
+            DbBackend::Sqlite => {
+                builder.push(" AND m.deleted = 0");
+            }
+            DbBackend::Postgres => {
+                builder.push(" AND m.deleted = FALSE");
+            }
         }
 
         let rows = builder.build().fetch_all(&self.state.pool).await?;
@@ -1384,6 +1502,9 @@ impl EcsService {
         for row in rows {
             let world_address = row.try_get::<String, _>("world_address")?;
             let entity_id = row.try_get::<String, _>("entity_id")?;
+            if !allowed.contains(&(world_address.clone(), entity_id.clone())) {
+                continue;
+            }
             meta.entry((world_address, entity_id))
                 .or_insert_with(HashMap::new)
                 .insert(
@@ -1403,10 +1524,10 @@ impl EcsService {
         &self,
         kind: TableKind,
         _world_filters: &[Felt],
-        table_ids: &[String],
+        table_ids: Option<&[String]>,
         entity_keys: &[(String, String)],
     ) -> Result<Vec<EntityModelRow>> {
-        if entity_keys.is_empty() || table_ids.is_empty() {
+        if entity_keys.is_empty() || table_ids.is_some_and(|table_ids| table_ids.is_empty()) {
             return Ok(Vec::new());
         }
 
@@ -1415,37 +1536,60 @@ impl EcsService {
              FROM torii_ecs_entity_models WHERE kind = ",
         );
         builder.push_bind(kind.as_str());
-        builder.push(" AND table_id IN (");
+        if let Some(table_ids) = table_ids {
+            builder.push(" AND table_id IN (");
+            {
+                let mut separated = builder.separated(", ");
+                for table_id in table_ids {
+                    separated.push_bind(table_id);
+                }
+            }
+            builder.push(")");
+        }
+
+        let world_addresses = entity_keys
+            .iter()
+            .map(|(world_address, _)| world_address.clone())
+            .collect::<HashSet<_>>();
+        let entity_ids = entity_keys
+            .iter()
+            .map(|(_, entity_id)| entity_id.clone())
+            .collect::<HashSet<_>>();
+        let allowed = entity_keys.iter().cloned().collect::<HashSet<_>>();
+
+        builder.push(" AND world_address IN (");
         {
             let mut separated = builder.separated(", ");
-            for table_id in table_ids {
-                separated.push_bind(table_id);
+            for world_address in &world_addresses {
+                separated.push_bind(world_address);
             }
         }
-        builder.push(") AND (");
+        builder.push(")");
+        builder.push(" AND entity_id IN (");
         {
-            let mut separated = builder.separated(" OR ");
-            for (world_address, entity_id) in entity_keys {
-                separated.push("(world_address = ");
-                separated.push_bind(world_address);
-                separated.push(" AND entity_id = ");
+            let mut separated = builder.separated(", ");
+            for entity_id in &entity_ids {
                 separated.push_bind(entity_id);
-                separated.push(")");
             }
         }
         builder.push(")");
 
         let rows = builder.build().fetch_all(&self.state.pool).await?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(EntityModelRow {
-                    world_address: row.try_get("world_address")?,
-                    table_id: row.try_get("table_id")?,
-                    entity_id: row.try_get("entity_id")?,
-                    row_json: row.try_get("row_json")?,
-                })
-            })
-            .collect()
+        let mut output = Vec::new();
+        for row in rows {
+            let world_address: String = row.try_get("world_address")?;
+            let entity_id: String = row.try_get("entity_id")?;
+            if !allowed.contains(&(world_address.clone(), entity_id.clone())) {
+                continue;
+            }
+            output.push(EntityModelRow {
+                world_address,
+                table_id: row.try_get("table_id")?,
+                entity_id,
+                row_json: row.try_get("row_json")?,
+            });
+        }
+        Ok(output)
     }
 
     async fn load_entity_snapshot(
@@ -3253,5 +3397,58 @@ mod tests {
             world_contract.to_bytes_be().to_vec()
         );
         assert_eq!(contract.contract_type, ContractType::World as i32);
+    }
+
+    #[tokio::test]
+    async fn retrieve_entities_without_filters_uses_bounded_query() {
+        let db_path = test_db_path("retrieve-entities");
+        let service = EcsService::new(&db_path, Some(1))
+            .await
+            .expect("service init");
+        let world = Felt::from(900_u64);
+
+        seed_entity(
+            &service,
+            TableKind::Entity,
+            world,
+            Felt::from(901_u64),
+            "test-ModelA",
+            Felt::from(1001_u64),
+            true,
+        )
+        .await;
+        seed_entity(
+            &service,
+            TableKind::Entity,
+            world,
+            Felt::from(902_u64),
+            "test-ModelB",
+            Felt::from(1001_u64),
+            true,
+        )
+        .await;
+
+        let response = service
+            .retrieve_entities(Request::new(RetrieveEntitiesRequest {
+                query: Some(types::Query {
+                    pagination: Some(types::Pagination {
+                        cursor: String::new(),
+                        limit: 10,
+                        direction: PaginationDirection::Forward as i32,
+                        order_by: vec![],
+                    }),
+                    world_addresses: vec![],
+                    models: vec![],
+                    clause: None,
+                    no_hashed_keys: false,
+                    historical: false,
+                }),
+            }))
+            .await
+            .expect("retrieve entities")
+            .into_inner();
+
+        assert_eq!(response.entities.len(), 1);
+        assert!(!response.next_cursor.is_empty() || response.entities.len() < 10);
     }
 }
