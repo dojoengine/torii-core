@@ -1,4 +1,4 @@
-use crate::processor::PostgresSimpleDb;
+use crate::processor::IntrospectPgDb;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -15,7 +15,7 @@ pub const LOGGING_TARGET: &str = "torii::sinks::introspect::postgres";
 const INTROSPECT_TYPE: TypeId = TypeId::new("introspect");
 
 #[async_trait]
-impl<T: Send + Sync + PostgresConnection> Sink for PostgresSimpleDb<T> {
+impl<T: Send + Sync + PostgresConnection> Sink for IntrospectPgDb<T> {
     fn name(&self) -> &'static str {
         "introspect-postgres"
     }

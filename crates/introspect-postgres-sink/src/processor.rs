@@ -243,20 +243,20 @@ impl From<DeadFieldRow> for (Felt, u128, DeadField) {
     }
 }
 
-pub struct PostgresSimpleDb<T> {
+pub struct IntrospectPgDb<T> {
     tables: PostgresTables,
     schema: PgSchema,
     pool: T,
     dead_fields: DeadFields,
 }
 
-impl<T: PostgresConnection> PostgresConnection for PostgresSimpleDb<T> {
+impl<T: PostgresConnection> PostgresConnection for IntrospectPgDb<T> {
     fn pool(&self) -> &PgPool {
         self.pool.pool()
     }
 }
 
-impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
+impl<T: PostgresConnection + Send + Sync> IntrospectPgDb<T> {
     pub fn new(pool: T, schema: impl Into<PgSchema>) -> Self {
         Self {
             tables: PostgresTables::default(),

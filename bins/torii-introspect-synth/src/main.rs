@@ -26,7 +26,7 @@ use torii::etl::Decoder;
 use torii::grpc::SubscriptionManager;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::postgres::PgStore;
-use torii_introspect_postgres_sink::PostgresSimpleDb;
+use torii_introspect_postgres_sink::IntrospectPgDb;
 
 const EXTRACTOR_TYPE: &str = "synthetic_introspect";
 const STATE_KEY: &str = "last_block";
@@ -424,7 +424,7 @@ async fn main() -> Result<()> {
     }
 
     let started = Instant::now();
-    let mut sink = PostgresSimpleDb::new(pool.clone(), TABLE_SCHEMA);
+    let mut sink = IntrospectPgDb::new(pool.clone(), TABLE_SCHEMA);
     sink.initialize(
         Arc::new(EventBus::new(Arc::new(SubscriptionManager::new()))),
         &SinkContext {

@@ -13,7 +13,7 @@ pub use error::{
     PgDbError, PgDbResult, PgTableError, PgTypeError, PgTypeResult, TableResult, UpgradeError,
     UpgradeResult, UpgradeResultExt,
 };
-pub use processor::PostgresSimpleDb;
+pub use processor::IntrospectPgDb;
 pub use types::{
     PgSchema, PostgresArray, PostgresField, PostgresScalar, PostgresType, PrimaryKey, SchemaName,
 };
