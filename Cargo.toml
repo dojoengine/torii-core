@@ -82,7 +82,7 @@ crc = "3.4.0"
 
 # Hashing
 blake3 = "1.8.3"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
+xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
 
 # ETL Pipeline dependencies
 async-trait = "0.1"
@@ -164,7 +164,11 @@ path = "examples/test_block_extractor/main.rs"
 
 [[example]]
 name = "introspect_simple"
-path = "examples/introspect/simple/main.rs"
+path = "examples/introspect/simple.rs"
+
+[[example]]
+name = "introspect_restart"
+path = "examples/introspect/restart.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -189,6 +193,7 @@ tonic.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 prost.workspace = true
+xxhash-rust.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true

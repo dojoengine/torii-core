@@ -2,9 +2,8 @@
 
 use starknet::core::types::{EmittedEvent, Felt};
 use std::any::Any;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use xxhash_rust::const_xxh3::xxh3_64;
 
 /// Type identifier based on a string hash
 /// This allows sinks to identify and downcast envelope bodies
@@ -12,15 +11,13 @@ use std::hash::{Hash, Hasher};
 pub struct EnvelopeTypeId(u64);
 
 impl EnvelopeTypeId {
-    /// Creates a TypeId from a string (e.g., "sql.row_inserted")
-    pub fn new(type_name: &str) -> Self {
-        let mut hasher = DefaultHasher::new();
-        type_name.hash(&mut hasher);
-        EnvelopeTypeId(hasher.finish())
+    /// Creates a TypeId from a string at compile time.
+    pub const fn new(type_name: &str) -> Self {
+        EnvelopeTypeId(xxh3_64(type_name.as_bytes()))
     }
 
     /// Returns the TypeId as a u64.
-    pub fn as_u64(&self) -> u64 {
+    pub const fn as_u64(&self) -> u64 {
         self.0
     }
 }
