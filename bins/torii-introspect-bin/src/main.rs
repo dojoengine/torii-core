@@ -6,9 +6,10 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use config::{Config, StorageBackend};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use starknet::core::types::Felt;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use torii::etl::decoder::DecoderId;
 use torii::etl::engine_db::{EngineDb, EngineDbConfig};
@@ -19,23 +20,11 @@ use torii_config_common::apply_observability_env;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::store::sqlite::SqliteStore;
+use torii_ecs_sink::proto::world::world_server::WorldServer;
+use torii_ecs_sink::{EcsSink, FILE_DESCRIPTOR_SET as ECS_DESCRIPTOR_SET};
 use torii_introspect_postgres_sink::processor::IntrospectPgDb;
 use torii_introspect_sqlite_sink::processor::IntrospectSqliteDb;
-use torii_sqlite::{is_sqlite_memory_path, sqlite_connect_options};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DbBackend {
-    Postgres,
-    Sqlite,
-}
-
-fn detect_database_backend(database_url: &str) -> DbBackend {
-    if database_url.starts_with("postgres://") || database_url.starts_with("postgresql://") {
-        DbBackend::Postgres
-    } else {
-        DbBackend::Sqlite
-    }
-}
+use torii_sqlite::is_sqlite_memory_path;
 
 fn sqlite_connect_options(path: &str) -> Result<SqliteConnectOptions> {
     if path == ":memory:" || path == "sqlite::memory:" {
@@ -200,7 +189,7 @@ async fn run_with_postgres(
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
 
-    let ecs_sink = EcsSink::new(&storage_database_url, config.max_db_connections).await?;
+    let ecs_sink = EcsSink::new(storage_database_url, config.max_db_connections).await?;
     let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
 
     let reflection = tonic_reflection::server::Builder::configure()
