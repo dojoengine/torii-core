@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use chrono::Utc;
@@ -17,6 +18,7 @@ use sqlx::{
     sqlite::SqlitePoolOptions, Any, ConnectOptions, Pool, QueryBuilder, Row,
 };
 use starknet::core::types::Felt;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -86,7 +88,7 @@ struct EcsState {
     pool: Pool<Any>,
     backend: DbBackend,
     database_url: String,
-    managed_tables: Mutex<Option<HashMap<String, ManagedTable>>>,
+    managed_tables: Mutex<Option<Arc<HashMap<String, ManagedTable>>>>,
     entity_subscriptions: Mutex<HashMap<u64, EntitySubscription>>,
     event_message_subscriptions: Mutex<HashMap<u64, EntitySubscription>>,
     event_subscriptions: Mutex<HashMap<u64, EventSubscription>>,
@@ -95,7 +97,7 @@ struct EcsState {
 
 struct EntitySubscription {
     clause: Option<types::Clause>,
-    world_addresses: Vec<Vec<u8>>,
+    world_addresses: HashSet<Vec<u8>>,
     sender: mpsc::Sender<Result<SubscribeEntityResponse, Status>>,
 }
 
@@ -276,8 +278,29 @@ impl EcsService {
         .await?;
 
         sqlx::query(
+            "CREATE INDEX IF NOT EXISTS torii_ecs_entity_meta_table_lookup_idx
+             ON torii_ecs_entity_meta(kind, table_id, world_address, entity_id, deleted)",
+        )
+        .execute(&self.state.pool)
+        .await?;
+
+        sqlx::query(
             "CREATE INDEX IF NOT EXISTS torii_ecs_entity_models_lookup_idx
              ON torii_ecs_entity_models(kind, world_address, entity_id)",
+        )
+        .execute(&self.state.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS torii_ecs_entity_models_table_lookup_idx
+             ON torii_ecs_entity_models(kind, table_id, world_address, entity_id)",
+        )
+        .execute(&self.state.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS torii_ecs_events_cursor_idx
+             ON torii_ecs_events(event_id)",
         )
         .execute(&self.state.pool)
         .await?;
@@ -607,6 +630,7 @@ impl EcsService {
         world_address: Felt,
         entity_id: Felt,
     ) -> Result<()> {
+        let start = Instant::now();
         let subscriptions = match kind {
             TableKind::Entity => &self.state.entity_subscriptions,
             TableKind::EventMessage => &self.state.event_message_subscriptions,
@@ -622,61 +646,183 @@ impl EcsService {
         let Some(entity) = entity else {
             return Ok(());
         };
-        let subscriptions = subscriptions.lock().await;
-        for (&subscription_id, subscription) in subscriptions.iter() {
-            if !subscription.world_addresses.is_empty()
-                && !subscription.world_addresses.contains(&entity.world_address)
-            {
-                continue;
-            }
-            if let Some(clause) = &subscription.clause {
-                if !entity_matches_clause(&entity, clause) {
-                    continue;
-                }
-            }
-            let _ = subscription.sender.try_send(Ok(SubscribeEntityResponse {
+
+        let (checked, targets) = {
+            let subscriptions = subscriptions.lock().await;
+            let checked = subscriptions.len();
+            let targets = subscriptions
+                .iter()
+                .filter_map(|(&subscription_id, subscription)| {
+                    if !subscription.world_addresses.is_empty()
+                        && !subscription.world_addresses.contains(&entity.world_address)
+                    {
+                        return None;
+                    }
+                    if let Some(clause) = &subscription.clause {
+                        if !entity_matches_clause(&entity, clause) {
+                            return None;
+                        }
+                    }
+                    Some((subscription_id, subscription.sender.clone()))
+                })
+                .collect::<Vec<_>>();
+            (checked, targets)
+        };
+        let matched = targets.len();
+
+        let mut closed = Vec::new();
+        for (subscription_id, sender) in targets {
+            if let Err(err) = sender.try_send(Ok(SubscribeEntityResponse {
                 entity: Some(entity.clone()),
                 subscription_id,
-            }));
+            })) {
+                if matches!(err, TrySendError::Closed(_)) {
+                    closed.push(subscription_id);
+                }
+            }
         }
+
+        if !closed.is_empty() {
+            let mut subscriptions = subscriptions.lock().await;
+            for subscription_id in closed {
+                subscriptions.remove(&subscription_id);
+            }
+        }
+        ::metrics::histogram!("torii_ecs_publish_entity_update_seconds")
+            .record(start.elapsed().as_secs_f64());
+        ::metrics::counter!("torii_ecs_publish_entity_subscribers_checked_total")
+            .increment(checked as u64);
+        ::metrics::counter!("torii_ecs_publish_entity_subscribers_matched_total")
+            .increment(matched as u64);
         Ok(())
     }
 
     async fn publish_event_update(&self, event: types::Event) {
-        let subscriptions = self.state.event_subscriptions.lock().await;
-        if subscriptions.is_empty() {
-            return;
-        }
-        for subscription in subscriptions.values() {
-            if !match_keys(&event.keys, &subscription.keys) {
-                continue;
+        let start = Instant::now();
+        let (checked, targets) = {
+            let subscriptions = self.state.event_subscriptions.lock().await;
+            if subscriptions.is_empty() {
+                return;
             }
-            let _ = subscription.sender.try_send(Ok(SubscribeEventsResponse {
+            let checked = subscriptions.len();
+            let targets = subscriptions
+                .iter()
+                .filter_map(|(&subscription_id, subscription)| {
+                    if !match_keys(&event.keys, &subscription.keys) {
+                        return None;
+                    }
+                    Some((subscription_id, subscription.sender.clone()))
+                })
+                .collect::<Vec<_>>();
+            (checked, targets)
+        };
+        let matched = targets.len();
+
+        let mut closed = Vec::new();
+        for (subscription_id, sender) in targets {
+            if let Err(err) = sender.try_send(Ok(SubscribeEventsResponse {
                 event: Some(event.clone()),
-            }));
+            })) {
+                if matches!(err, TrySendError::Closed(_)) {
+                    closed.push(subscription_id);
+                }
+            }
         }
+
+        if !closed.is_empty() {
+            let mut subscriptions = self.state.event_subscriptions.lock().await;
+            for subscription_id in closed {
+                subscriptions.remove(&subscription_id);
+            }
+        }
+        ::metrics::histogram!("torii_ecs_publish_event_update_seconds")
+            .record(start.elapsed().as_secs_f64());
+        ::metrics::counter!("torii_ecs_publish_event_subscribers_checked_total")
+            .increment(checked as u64);
+        ::metrics::counter!("torii_ecs_publish_event_subscribers_matched_total")
+            .increment(matched as u64);
     }
 
     async fn publish_contract_update(&self, contract: types::Contract) {
-        let subscriptions = self.state.contract_subscriptions.lock().await;
-        if subscriptions.is_empty() {
-            return;
-        }
-        for subscription in subscriptions.values() {
-            if !contract_matches_query(&contract, &subscription.query) {
-                continue;
+        let start = Instant::now();
+        let (checked, targets) = {
+            let subscriptions = self.state.contract_subscriptions.lock().await;
+            if subscriptions.is_empty() {
+                return;
             }
-            let _ = subscription.sender.try_send(Ok(SubscribeContractsResponse {
+            let checked = subscriptions.len();
+            let targets = subscriptions
+                .iter()
+                .filter_map(|(&subscription_id, subscription)| {
+                    if !contract_matches_query(&contract, &subscription.query) {
+                        return None;
+                    }
+                    Some((subscription_id, subscription.sender.clone()))
+                })
+                .collect::<Vec<_>>();
+            (checked, targets)
+        };
+        let matched = targets.len();
+
+        let mut closed = Vec::new();
+        for (subscription_id, sender) in targets {
+            if let Err(err) = sender.try_send(Ok(SubscribeContractsResponse {
                 contract: Some(contract.clone()),
-            }));
+            })) {
+                if matches!(err, TrySendError::Closed(_)) {
+                    closed.push(subscription_id);
+                }
+            }
         }
+
+        if !closed.is_empty() {
+            let mut subscriptions = self.state.contract_subscriptions.lock().await;
+            for subscription_id in closed {
+                subscriptions.remove(&subscription_id);
+            }
+        }
+        ::metrics::histogram!("torii_ecs_publish_contract_update_seconds")
+            .record(start.elapsed().as_secs_f64());
+        ::metrics::counter!("torii_ecs_publish_contract_subscribers_checked_total")
+            .increment(checked as u64);
+        ::metrics::counter!("torii_ecs_publish_contract_subscribers_matched_total")
+            .increment(matched as u64);
     }
 
     async fn load_contracts(&self, query: &types::ContractQuery) -> Result<Vec<types::Contract>> {
-        let sql = "SELECT contract_address, contract_type, head, tps, last_block_timestamp, \
-                          last_pending_block_tx, updated_at, created_at \
-                   FROM torii_ecs_contracts";
-        let rows = sqlx::query(sql).fetch_all(&self.state.pool).await?;
+        let mut builder = QueryBuilder::<Any>::new(
+            "SELECT contract_address, contract_type, head, tps, last_block_timestamp, \
+                    last_pending_block_tx, updated_at, created_at \
+             FROM torii_ecs_contracts",
+        );
+        if !query.contract_addresses.is_empty() || !query.contract_types.is_empty() {
+            builder.push(" WHERE ");
+            if !query.contract_addresses.is_empty() {
+                builder.push("contract_address IN (");
+                {
+                    let mut separated = builder.separated(", ");
+                    for address in &query.contract_addresses {
+                        separated.push_bind(felt_hex(felt_from_bytes(address)?));
+                    }
+                }
+                builder.push(")");
+                if !query.contract_types.is_empty() {
+                    builder.push(" AND ");
+                }
+            }
+            if !query.contract_types.is_empty() {
+                builder.push("contract_type IN (");
+                {
+                    let mut separated = builder.separated(", ");
+                    for contract_type in &query.contract_types {
+                        separated.push_bind(*contract_type);
+                    }
+                }
+                builder.push(")");
+            }
+        }
+
+        let rows = builder.build().fetch_all(&self.state.pool).await?;
         let mut contracts = Vec::new();
         for row in rows {
             let contract_address = row.try_get::<String, _>("contract_address")?;
@@ -701,14 +847,13 @@ impl EcsService {
                 updated_at: row.try_get::<i64, _>("updated_at")? as u64,
                 created_at: row.try_get::<i64, _>("created_at")? as u64,
             };
-            if contract_matches_query(&contract, query) {
-                contracts.push(contract);
-            }
+            contracts.push(contract);
         }
         Ok(contracts)
     }
 
     async fn load_worlds(&self, requested: &[Felt]) -> Result<Vec<types::World>> {
+        let requested = requested.iter().copied().collect::<HashSet<_>>();
         let mut by_world: HashMap<Vec<u8>, Vec<types::Model>> = HashMap::new();
         for table in self.load_managed_tables(None).await? {
             if !requested.is_empty() && !requested.contains(&table.world_address) {
@@ -738,12 +883,11 @@ impl EcsService {
             let _ = self.load_managed_table_map().await;
         }
         let mut managed_tables = self.state.managed_tables.lock().await;
-        if let Some(tables) = managed_tables.as_mut() {
+        if let Some(tables) = managed_tables.as_ref() {
+            let mut next = (**tables).clone();
             let key = felt_hex(table.id);
-            let kind = tables
-                .get(&key)
-                .map_or(TableKind::Entity, |table| table.kind);
-            tables.insert(
+            let kind = next.get(&key).map_or(TableKind::Entity, |table| table.kind);
+            next.insert(
                 key,
                 ManagedTable {
                     world_address,
@@ -751,6 +895,7 @@ impl EcsService {
                     kind,
                 },
             );
+            *managed_tables = Some(Arc::new(next));
         }
     }
 
@@ -761,13 +906,15 @@ impl EcsService {
         kind: TableKind,
     ) {
         let mut managed_tables = self.state.managed_tables.lock().await;
-        let Some(tables) = managed_tables.as_mut() else {
+        let Some(tables) = managed_tables.as_ref() else {
             return;
         };
+        let mut next = (**tables).clone();
         let key = felt_hex(table_id);
-        if let Some(table) = tables.get_mut(&key) {
+        if let Some(table) = next.get_mut(&key) {
             table.world_address = world_address;
             table.kind = kind;
+            *managed_tables = Some(Arc::new(next));
         } else {
             *managed_tables = None;
         }
@@ -778,11 +925,11 @@ impl EcsService {
         Ok(self.load_managed_table_map().await?.get(&key).cloned())
     }
 
-    async fn load_managed_table_map(&self) -> Result<HashMap<String, ManagedTable>> {
+    async fn load_managed_table_map(&self) -> Result<Arc<HashMap<String, ManagedTable>>> {
         {
             let managed_tables = self.state.managed_tables.lock().await;
             if let Some(tables) = managed_tables.as_ref() {
-                return Ok(tables.clone());
+                return Ok(Arc::clone(tables));
             }
         }
 
@@ -808,7 +955,8 @@ impl EcsService {
         }
 
         let mut managed_tables = self.state.managed_tables.lock().await;
-        *managed_tables = Some(managed.clone());
+        let managed = Arc::new(managed);
+        *managed_tables = Some(Arc::clone(&managed));
         Ok(managed)
     }
 
@@ -855,8 +1003,9 @@ impl EcsService {
         Ok(self
             .load_managed_table_map()
             .await?
-            .into_values()
+            .values()
             .filter(|table| kind.is_none_or(|required| table.kind == required))
+            .cloned()
             .collect())
     }
 
@@ -870,13 +1019,20 @@ impl EcsService {
             .iter()
             .map(|bytes| felt_from_bytes(bytes))
             .collect::<Result<Vec<_>>>()?;
+        let world_filter_set = world_filters.iter().copied().collect::<HashSet<_>>();
+        let model_filter_set = query
+            .models
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
         let models = self
             .load_managed_tables(Some(kind))
             .await?
             .into_iter()
             .filter(|table| {
-                (world_filters.is_empty() || world_filters.contains(&table.world_address))
-                    && (query.models.is_empty() || query.models.contains(&table.table.name))
+                (world_filter_set.is_empty() || world_filter_set.contains(&table.world_address))
+                    && (model_filter_set.is_empty()
+                        || model_filter_set.contains(table.table.name.as_str()))
             })
             .collect::<Vec<_>>();
         if models.is_empty() {
@@ -887,9 +1043,20 @@ impl EcsService {
             .into_iter()
             .map(|table| (felt_hex(table.table.id), table))
             .collect::<HashMap<_, _>>();
+        let table_ids = model_map.keys().cloned().collect::<Vec<_>>();
+        let member_pushdown = member_pushdown_from_clause(query.clause.as_ref(), &model_map);
+        let meta_start = Instant::now();
         let candidate_meta = self
-            .load_entity_page_meta(kind, &world_filters, model_map.keys().cloned().collect())
+            .load_entity_page_meta(
+                kind,
+                &world_filters,
+                table_ids.clone(),
+                member_pushdown.as_ref(),
+            )
             .await?;
+        ::metrics::histogram!("torii_ecs_load_entity_page_meta_seconds")
+            .record(meta_start.elapsed().as_secs_f64());
+        ::metrics::gauge!("torii_ecs_load_entity_page_candidates").set(candidate_meta.len() as f64);
         let mut candidate_keys = candidate_meta.keys().cloned().collect::<Vec<_>>();
         candidate_keys.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
         if query
@@ -924,14 +1091,14 @@ impl EcsService {
         let mut items = Vec::new();
         let mut built_any_snapshot_entity = false;
         for chunk in candidate_keys.chunks(256) {
+            let rows_start = Instant::now();
             let rows = self
-                .load_entity_page_rows(
-                    kind,
-                    &world_filters,
-                    model_map.keys().cloned().collect(),
-                    chunk,
-                )
+                .load_entity_page_rows(kind, &world_filters, table_ids.as_slice(), chunk)
                 .await?;
+            ::metrics::histogram!("torii_ecs_load_entity_page_rows_seconds")
+                .record(rows_start.elapsed().as_secs_f64());
+            ::metrics::counter!("torii_ecs_load_entity_page_rows_total")
+                .increment(rows.len() as u64);
             let row_map = rows.into_iter().fold(
                 HashMap::<(String, String), Vec<(String, String)>>::new(),
                 |mut acc, row| {
@@ -1006,13 +1173,20 @@ impl EcsService {
             .iter()
             .map(|bytes| felt_from_bytes(bytes))
             .collect::<Result<Vec<_>>>()?;
+        let world_filter_set = world_filters.iter().copied().collect::<HashSet<_>>();
+        let model_filter_set = query
+            .models
+            .iter()
+            .map(String::as_str)
+            .collect::<HashSet<_>>();
         let models = self
             .load_managed_tables(Some(kind))
             .await?
             .into_iter()
             .filter(|table| {
-                (world_filters.is_empty() || world_filters.contains(&table.world_address))
-                    && (query.models.is_empty() || query.models.contains(&table.table.name))
+                (world_filter_set.is_empty() || world_filter_set.contains(&table.world_address))
+                    && (model_filter_set.is_empty()
+                        || model_filter_set.contains(table.table.name.as_str()))
             })
             .collect::<Vec<_>>();
 
@@ -1161,7 +1335,12 @@ impl EcsService {
         kind: TableKind,
         world_filters: &[Felt],
         table_ids: Vec<String>,
+        member_pushdown: Option<&MemberPushdown>,
     ) -> Result<HashMap<(String, String), HashMap<String, EntityMetaRow>>> {
+        if table_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
         let deleted_sql = match self.state.backend {
             DbBackend::Sqlite => "CAST(deleted AS INTEGER)",
             DbBackend::Postgres => "CASE WHEN deleted THEN 1 ELSE 0 END",
@@ -1169,10 +1348,10 @@ impl EcsService {
         let mut builder = QueryBuilder::<Any>::new(format!(
             "SELECT world_address, table_id, entity_id, created_at, updated_at, executed_at, \
                     {deleted_sql} AS deleted \
-             FROM torii_ecs_entity_meta WHERE kind = "
+             FROM torii_ecs_entity_meta m WHERE m.kind = "
         ));
         builder.push_bind(kind.as_str());
-        builder.push(" AND table_id IN (");
+        builder.push(" AND m.table_id IN (");
         {
             let mut separated = builder.separated(", ");
             for table_id in &table_ids {
@@ -1181,12 +1360,23 @@ impl EcsService {
         }
         builder.push(")");
         if !world_filters.is_empty() {
-            builder.push(" AND world_address IN (");
+            builder.push(" AND m.world_address IN (");
             let mut separated = builder.separated(", ");
             for world_address in world_filters {
                 separated.push_bind(felt_hex(*world_address));
             }
             builder.push(")");
+        }
+        match self.state.backend {
+            DbBackend::Sqlite => {
+                builder.push(" AND deleted = 0");
+            }
+            DbBackend::Postgres => {
+                builder.push(" AND deleted = FALSE");
+            }
+        }
+        if let Some(member_pushdown) = member_pushdown {
+            append_member_pushdown_sql(&mut builder, self.state.backend, member_pushdown);
         }
 
         let rows = builder.build().fetch_all(&self.state.pool).await?;
@@ -1206,33 +1396,19 @@ impl EcsService {
                     },
                 );
         }
-        meta.retain(|_, tables| tables.values().any(|meta| !meta.deleted));
         Ok(meta)
     }
 
     async fn load_entity_page_rows(
         &self,
         kind: TableKind,
-        world_filters: &[Felt],
-        table_ids: Vec<String>,
+        _world_filters: &[Felt],
+        table_ids: &[String],
         entity_keys: &[(String, String)],
     ) -> Result<Vec<EntityModelRow>> {
-        if entity_keys.is_empty() {
+        if entity_keys.is_empty() || table_ids.is_empty() {
             return Ok(Vec::new());
         }
-
-        let entity_ids = entity_keys
-            .iter()
-            .map(|(_, entity_id)| entity_id.clone())
-            .collect::<HashSet<_>>();
-        let world_addresses = if world_filters.is_empty() {
-            entity_keys
-                .iter()
-                .map(|(world_address, _)| world_address.clone())
-                .collect::<HashSet<_>>()
-        } else {
-            world_filters.iter().map(|world| felt_hex(*world)).collect()
-        };
 
         let mut builder = QueryBuilder::<Any>::new(
             "SELECT world_address, table_id, entity_id, row_json \
@@ -1242,43 +1418,34 @@ impl EcsService {
         builder.push(" AND table_id IN (");
         {
             let mut separated = builder.separated(", ");
-            for table_id in &table_ids {
+            for table_id in table_ids {
                 separated.push_bind(table_id);
             }
         }
-        builder.push(") AND world_address IN (");
+        builder.push(") AND (");
         {
-            let mut separated = builder.separated(", ");
-            for world_address in &world_addresses {
+            let mut separated = builder.separated(" OR ");
+            for (world_address, entity_id) in entity_keys {
+                separated.push("(world_address = ");
                 separated.push_bind(world_address);
-            }
-        }
-        builder.push(") AND entity_id IN (");
-        {
-            let mut separated = builder.separated(", ");
-            for entity_id in &entity_ids {
+                separated.push(" AND entity_id = ");
                 separated.push_bind(entity_id);
+                separated.push(")");
             }
         }
         builder.push(")");
 
-        let allowed = entity_keys.iter().cloned().collect::<HashSet<_>>();
         let rows = builder.build().fetch_all(&self.state.pool).await?;
-        let mut output = Vec::new();
-        for row in rows {
-            let world_address = row.try_get::<String, _>("world_address")?;
-            let entity_id = row.try_get::<String, _>("entity_id")?;
-            if !allowed.contains(&(world_address.clone(), entity_id.clone())) {
-                continue;
-            }
-            output.push(EntityModelRow {
-                world_address,
-                table_id: row.try_get("table_id")?,
-                entity_id,
-                row_json: row.try_get("row_json")?,
-            });
-        }
-        Ok(output)
+        rows.into_iter()
+            .map(|row| {
+                Ok(EntityModelRow {
+                    world_address: row.try_get("world_address")?,
+                    table_id: row.try_get("table_id")?,
+                    entity_id: row.try_get("entity_id")?,
+                    row_json: row.try_get("row_json")?,
+                })
+            })
+            .collect()
     }
 
     async fn load_entity_snapshot(
@@ -1502,6 +1669,8 @@ impl EcsService {
         builder.push_bind(fetch_limit as i64);
 
         let rows = builder.build().fetch_all(&self.state.pool).await?;
+        ::metrics::counter!("torii_ecs_retrieve_events_rows_fetched_total")
+            .increment(rows.len() as u64);
 
         let mut events = Vec::new();
         for row in rows {
@@ -1533,6 +1702,8 @@ impl EcsService {
                 break;
             }
         }
+        ::metrics::counter!("torii_ecs_retrieve_events_rows_decoded_total")
+            .increment(events.len() as u64);
 
         if direction_is_backward {
             events.reverse();
@@ -1588,6 +1759,7 @@ impl World for EcsService {
         &self,
         request: Request<WorldsRequest>,
     ) -> Result<Response<WorldsResponse>, Status> {
+        let start = Instant::now();
         let world_addresses = request
             .into_inner()
             .world_addresses
@@ -1595,10 +1767,10 @@ impl World for EcsService {
             .map(|bytes| felt_from_bytes(bytes))
             .collect::<Result<Vec<_>>>()
             .map_err(internal_status)?;
-        let worlds = self
-            .load_worlds(&world_addresses)
-            .await
-            .map_err(internal_status)?;
+        let worlds = self.load_worlds(&world_addresses).await;
+        ::metrics::histogram!("torii_ecs_worlds_latency_seconds")
+            .record(start.elapsed().as_secs_f64());
+        let worlds = worlds.map_err(internal_status)?;
         Ok(Response::new(WorldsResponse { worlds }))
     }
 
@@ -1620,7 +1792,7 @@ impl World for EcsService {
             subscription_id,
             EntitySubscription {
                 clause: request.clause,
-                world_addresses: request.world_addresses,
+                world_addresses: request.world_addresses.into_iter().collect(),
                 sender,
             },
         );
@@ -1640,7 +1812,7 @@ impl World for EcsService {
             .get_mut(&request.subscription_id)
         {
             subscription.clause = request.clause;
-            subscription.world_addresses = request.world_addresses;
+            subscription.world_addresses = request.world_addresses.into_iter().collect();
         }
         Ok(Response::new(()))
     }
@@ -1649,14 +1821,17 @@ impl World for EcsService {
         &self,
         request: Request<RetrieveEntitiesRequest>,
     ) -> Result<Response<RetrieveEntitiesResponse>, Status> {
+        let start = Instant::now();
         let query = request
             .into_inner()
             .query
             .ok_or_else(|| Status::invalid_argument("Missing query argument"))?;
-        let (entities, next_cursor) = self
-            .load_entity_page(TableKind::Entity, &query)
-            .await
-            .map_err(internal_status)?;
+        let result = self.load_entity_page(TableKind::Entity, &query).await;
+        ::metrics::histogram!("torii_ecs_retrieve_entities_latency_seconds")
+            .record(start.elapsed().as_secs_f64());
+        let (entities, next_cursor) = result.map_err(internal_status)?;
+        ::metrics::counter!("torii_ecs_retrieve_entities_returned_total")
+            .increment(entities.len() as u64);
         Ok(Response::new(RetrieveEntitiesResponse {
             next_cursor,
             entities,
@@ -1681,7 +1856,7 @@ impl World for EcsService {
             subscription_id,
             EntitySubscription {
                 clause: request.clause,
-                world_addresses: request.world_addresses,
+                world_addresses: request.world_addresses.into_iter().collect(),
                 sender,
             },
         );
@@ -1701,7 +1876,7 @@ impl World for EcsService {
             .get_mut(&request.subscription_id)
         {
             subscription.clause = request.clause;
-            subscription.world_addresses = request.world_addresses;
+            subscription.world_addresses = request.world_addresses.into_iter().collect();
         }
         Ok(Response::new(()))
     }
@@ -1710,14 +1885,17 @@ impl World for EcsService {
         &self,
         request: Request<RetrieveEntitiesRequest>,
     ) -> Result<Response<RetrieveEntitiesResponse>, Status> {
+        let start = Instant::now();
         let query = request
             .into_inner()
             .query
             .ok_or_else(|| Status::invalid_argument("Missing query argument"))?;
-        let (entities, next_cursor) = self
-            .load_entity_page(TableKind::EventMessage, &query)
-            .await
-            .map_err(internal_status)?;
+        let result = self.load_entity_page(TableKind::EventMessage, &query).await;
+        ::metrics::histogram!("torii_ecs_retrieve_event_messages_latency_seconds")
+            .record(start.elapsed().as_secs_f64());
+        let (entities, next_cursor) = result.map_err(internal_status)?;
+        ::metrics::counter!("torii_ecs_retrieve_event_messages_returned_total")
+            .increment(entities.len() as u64);
         Ok(Response::new(RetrieveEntitiesResponse {
             next_cursor,
             entities,
@@ -1728,14 +1906,17 @@ impl World for EcsService {
         &self,
         request: Request<RetrieveEventsRequest>,
     ) -> Result<Response<RetrieveEventsResponse>, Status> {
+        let start = Instant::now();
         let query = request
             .into_inner()
             .query
             .ok_or_else(|| Status::invalid_argument("Missing query argument"))?;
-        let (events, next_cursor) = self
-            .load_events_page(&query)
-            .await
-            .map_err(internal_status)?;
+        let result = self.load_events_page(&query).await;
+        ::metrics::histogram!("torii_ecs_retrieve_events_latency_seconds")
+            .record(start.elapsed().as_secs_f64());
+        let (events, next_cursor) = result.map_err(internal_status)?;
+        ::metrics::counter!("torii_ecs_retrieve_events_returned_total")
+            .increment(events.len() as u64);
         Ok(Response::new(RetrieveEventsResponse {
             next_cursor,
             events,
@@ -2323,6 +2504,148 @@ fn value_to_primary_felt(value: &Value, type_def: &PrimaryTypeDef) -> Result<Fel
     }
 }
 
+fn member_pushdown_from_clause(
+    clause: Option<&types::Clause>,
+    models: &HashMap<String, ManagedTable>,
+) -> Option<MemberPushdown> {
+    let ClauseType::Member(member) = clause?.clause_type.as_ref()? else {
+        return None;
+    };
+    if member.member.contains('.') {
+        return None;
+    }
+    if !member
+        .member
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+
+    let expected = scalar_from_member_value(member.value.as_ref()?)?;
+    if matches!(expected, ScalarValue::Bytes(_)) {
+        return None;
+    }
+
+    let table = models
+        .values()
+        .find(|table| table.table.name == member.model)?;
+    if !table
+        .table
+        .columns
+        .values()
+        .any(|column| column.name == member.member)
+    {
+        return None;
+    }
+
+    Some(MemberPushdown {
+        table_id: felt_hex(table.table.id),
+        member: member.member.clone(),
+        operator: member.operator,
+        expected,
+    })
+}
+
+fn sql_operator(operator: i32) -> Option<&'static str> {
+    match operator {
+        value if value == ComparisonOperator::Eq as i32 => Some("="),
+        value if value == ComparisonOperator::Neq as i32 => Some("!="),
+        value if value == ComparisonOperator::Gt as i32 => Some(">"),
+        value if value == ComparisonOperator::Gte as i32 => Some(">="),
+        value if value == ComparisonOperator::Lt as i32 => Some("<"),
+        value if value == ComparisonOperator::Lte as i32 => Some("<="),
+        _ => None,
+    }
+}
+
+fn append_member_pushdown_sql(
+    builder: &mut QueryBuilder<'_, Any>,
+    backend: DbBackend,
+    pushdown: &MemberPushdown,
+) {
+    let Some(operator) = sql_operator(pushdown.operator) else {
+        return;
+    };
+
+    builder.push(" AND EXISTS (SELECT 1 FROM torii_ecs_entity_models em WHERE em.kind = m.kind");
+    builder.push(
+        " AND em.world_address = m.world_address AND em.table_id = m.table_id AND em.entity_id = m.entity_id",
+    );
+    builder.push(" AND em.table_id = ");
+    builder.push_bind(pushdown.table_id.clone());
+
+    match (&pushdown.expected, backend) {
+        (ScalarValue::Bool(value), DbBackend::Sqlite) => {
+            builder.push(" AND CAST(json_extract(em.row_json, '$.");
+            builder.push(pushdown.member.as_str());
+            builder.push("') AS INTEGER) ");
+            builder.push(operator);
+            builder.push(" ");
+            builder.push_bind(i64::from(*value));
+        }
+        (ScalarValue::Bool(value), DbBackend::Postgres) => {
+            builder.push(" AND CASE WHEN lower((em.row_json::jsonb ->> '");
+            builder.push(pushdown.member.as_str());
+            builder.push("')) = 'true' THEN 1 ELSE 0 END ");
+            builder.push(operator);
+            builder.push(" ");
+            builder.push_bind(i64::from(*value));
+        }
+        (ScalarValue::Signed(value), DbBackend::Sqlite) => {
+            builder.push(" AND CAST(json_extract(em.row_json, '$.");
+            builder.push(pushdown.member.as_str());
+            builder.push("') AS INTEGER) ");
+            builder.push(operator);
+            builder.push(" ");
+            builder.push_bind(*value);
+        }
+        (ScalarValue::Signed(value), DbBackend::Postgres) => {
+            builder.push(" AND CAST((em.row_json::jsonb ->> '");
+            builder.push(pushdown.member.as_str());
+            builder.push("') AS BIGINT) ");
+            builder.push(operator);
+            builder.push(" ");
+            builder.push_bind(*value);
+        }
+        (ScalarValue::Unsigned(value), DbBackend::Sqlite) => {
+            builder.push(" AND CAST(json_extract(em.row_json, '$.");
+            builder.push(pushdown.member.as_str());
+            builder.push("') AS INTEGER) ");
+            builder.push(operator);
+            builder.push(" ");
+            builder.push_bind(*value as i64);
+        }
+        (ScalarValue::Unsigned(value), DbBackend::Postgres) => {
+            builder.push(" AND CAST((em.row_json::jsonb ->> '");
+            builder.push(pushdown.member.as_str());
+            builder.push("') AS BIGINT) ");
+            builder.push(operator);
+            builder.push(" ");
+            builder.push_bind(*value as i64);
+        }
+        (ScalarValue::Text(value), DbBackend::Sqlite) => {
+            builder.push(" AND CAST(json_extract(em.row_json, '$.");
+            builder.push(pushdown.member.as_str());
+            builder.push("') AS TEXT) ");
+            builder.push(operator);
+            builder.push(" ");
+            builder.push_bind(value.clone());
+        }
+        (ScalarValue::Text(value), DbBackend::Postgres) => {
+            builder.push(" AND (em.row_json::jsonb ->> '");
+            builder.push(pushdown.member.as_str());
+            builder.push("') ");
+            builder.push(operator);
+            builder.push(" ");
+            builder.push_bind(value.clone());
+        }
+        (ScalarValue::Bytes(_), _) => {}
+    }
+
+    builder.push(")");
+}
+
 fn entity_matches_clause(entity: &types::Entity, clause: &types::Clause) -> bool {
     match &clause.clause_type {
         Some(ClauseType::HashedKeys(hashed)) => {
@@ -2478,6 +2801,13 @@ enum ScalarValue {
     Unsigned(u64),
     Text(String),
     Bytes(Vec<u8>),
+}
+
+struct MemberPushdown {
+    table_id: String,
+    member: String,
+    operator: i32,
+    expected: ScalarValue,
 }
 
 fn compare_scalars(current: &ScalarValue, operator: i32, expected: &ScalarValue) -> bool {

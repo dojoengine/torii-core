@@ -4694,6 +4694,7 @@ dependencies = [
  "futures-util",
  "hex",
  "introspect-types",
+ "metrics",
  "prost 0.13.5",
  "prost-types 0.13.5",
  "serde",
