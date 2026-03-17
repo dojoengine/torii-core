@@ -30,7 +30,7 @@ where
 {
     type Target = PgConnection;
     fn deref(&self) -> &Self::Target {
-        &*self.connection
+        &self.connection
     }
 }
 
@@ -39,7 +39,7 @@ where
     A: Acquire<'a, Database = Postgres>,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut *self.connection
+        &mut self.connection
     }
 }
 
@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS {schema}._sqlx_migrations (
 
     fn lock(&mut self) -> BoxFuture<'_, Result<(), MigrateError>> {
         Box::pin(async move {
-            let database_name = current_database(&mut *self.connection).await?;
+            let database_name = current_database(&mut self.connection).await?;
             let lock_id = generate_lock_id(&database_name);
 
             // create an application lock over the database

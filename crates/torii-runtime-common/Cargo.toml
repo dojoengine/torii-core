@@ -1,0 +1,15 @@
+[package]
+name = "torii-runtime-common"
+version = "0.1.0"
+edition = "2021"
+description = "Shared runtime setup helpers for Torii binaries"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+tokio-postgres = "0.7"
+tracing.workspace = true
+torii.workspace = true
+
+[lints]
+workspace = true

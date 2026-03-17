@@ -84,6 +84,8 @@ torii-erc20 \
 
 `--database-url` (or `DATABASE_URL`) enables PostgreSQL-backed storage for both engine state and ERC20 data. If unset, local SQLite files are used.
 
+Runtime bootstrap in this binary is shared through `torii-runtime-common` (`resolve_single_db_setup`) so the database wiring matches other Torii binaries.
+
 ## Architecture
 
 ```

@@ -25,7 +25,8 @@ use starknet::core::types::{Felt, U256};
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
@@ -34,6 +35,15 @@ use torii_common::{u256_to_bytes, MetadataFetcher};
 /// Default threshold for "live" detection: 100 blocks from chain head.
 /// Events from blocks older than this won't be broadcast to real-time subscribers.
 const LIVE_THRESHOLD_BLOCKS: u64 = 100;
+const DEFAULT_METADATA_PARALLELISM: usize = 8;
+const DEFAULT_METADATA_QUEUE_CAPACITY: usize = 2048;
+const DEFAULT_METADATA_MAX_RETRIES: u8 = 5;
+
+#[derive(Debug, Clone, Copy)]
+struct MetadataJob {
+    token: Felt,
+    attempt: u8,
+}
 
 /// ERC20 transfer and approval sink
 ///
@@ -53,6 +63,16 @@ pub struct Erc20Sink {
     balance_fetcher: Option<Arc<BalanceFetcher>>,
     /// Metadata fetcher for token name/symbol/decimals
     metadata_fetcher: Option<Arc<MetadataFetcher>>,
+    /// In-flight contract metadata fetches to avoid duplicate jobs.
+    metadata_fetch_inflight: Arc<Mutex<HashSet<Felt>>>,
+    /// Background metadata worker job queue.
+    metadata_job_tx: Option<mpsc::Sender<MetadataJob>>,
+    /// Max concurrent metadata workers.
+    metadata_parallelism: usize,
+    /// Metadata queue capacity.
+    metadata_queue_capacity: usize,
+    /// Maximum metadata retries with capped backoff.
+    metadata_max_retries: u8,
     /// In-memory counters to avoid full-table COUNT(*) in the ingest hot path.
     total_transfers: AtomicU64,
     total_approvals: AtomicU64,
@@ -66,10 +86,28 @@ impl Erc20Sink {
             grpc_service: None,
             balance_fetcher: None,
             metadata_fetcher: None,
+            metadata_fetch_inflight: Arc::new(Mutex::new(HashSet::new())),
+            metadata_job_tx: None,
+            metadata_parallelism: DEFAULT_METADATA_PARALLELISM,
+            metadata_queue_capacity: DEFAULT_METADATA_QUEUE_CAPACITY,
+            metadata_max_retries: DEFAULT_METADATA_MAX_RETRIES,
             // Avoid startup full-table COUNT(*) scans on large datasets.
             total_transfers: AtomicU64::new(0),
             total_approvals: AtomicU64::new(0),
         }
+    }
+
+    /// Configure the async metadata pipeline.
+    pub fn with_metadata_pipeline(
+        mut self,
+        parallelism: usize,
+        queue_capacity: usize,
+        max_retries: u8,
+    ) -> Self {
+        self.metadata_parallelism = parallelism.max(1);
+        self.metadata_queue_capacity = queue_capacity.max(1);
+        self.metadata_max_retries = max_retries.max(1);
+        self
     }
 
     /// Set the gRPC service for dual publishing
@@ -223,6 +261,12 @@ impl Erc20Sink {
 
         true
     }
+
+    fn metadata_retry_delay(attempt: u8) -> std::time::Duration {
+        // attempt=1 => 250ms, then doubles up to capped retry count.
+        let shift = u32::from(attempt.saturating_sub(1).min(8));
+        std::time::Duration::from_millis(250 * (1u64 << shift))
+    }
 }
 
 #[async_trait]
@@ -241,6 +285,167 @@ impl Sink for Erc20Sink {
         _context: &torii::etl::sink::SinkContext,
     ) -> Result<()> {
         self.event_bus = Some(event_bus);
+
+        if self.metadata_fetcher.is_some() && self.metadata_job_tx.is_none() {
+            let (metadata_tx, metadata_rx) =
+                mpsc::channel::<MetadataJob>(self.metadata_queue_capacity);
+            self.metadata_job_tx = Some(metadata_tx.clone());
+
+            let Some(fetcher) = self.metadata_fetcher.clone() else {
+                return Ok(());
+            };
+            let storage = self.storage.clone();
+            let event_bus = self.event_bus.clone();
+            let inflight = self.metadata_fetch_inflight.clone();
+            let max_retries = self.metadata_max_retries;
+            let metadata_rx = Arc::new(AsyncMutex::new(metadata_rx));
+
+            let parallelism = self.metadata_parallelism;
+            for worker_id in 0..parallelism {
+                let worker_fetcher = fetcher.clone();
+                let worker_storage = storage.clone();
+                let worker_event_bus = event_bus.clone();
+                let worker_inflight = inflight.clone();
+                let worker_tx = metadata_tx.clone();
+                let worker_rx = metadata_rx.clone();
+
+                tokio::spawn(async move {
+                    loop {
+                        let maybe_job = {
+                            let mut rx = worker_rx.lock().await;
+                            rx.recv().await
+                        };
+                        let Some(job) = maybe_job else {
+                            break;
+                        };
+                        let token = job.token;
+
+                        let result: Result<()> = async {
+                            let meta = worker_fetcher.fetch_erc20_metadata(token).await;
+                            tracing::info!(
+                                target: "torii_erc20::sink",
+                                token = %format!("{:#x}", token),
+                                name = ?meta.name,
+                                symbol = ?meta.symbol,
+                                decimals = ?meta.decimals,
+                                "Fetched token metadata"
+                            );
+
+                            worker_storage
+                                .upsert_token_metadata(
+                                    token,
+                                    meta.name.as_deref(),
+                                    meta.symbol.as_deref(),
+                                    meta.decimals,
+                                )
+                                .await?;
+
+                            if let Some(event_bus) = &worker_event_bus {
+                                let meta_entry = proto::TokenMetadataEntry {
+                                    token: token.to_bytes_be().to_vec(),
+                                    name: meta.name,
+                                    symbol: meta.symbol,
+                                    decimals: meta.decimals.map(|d| d as u32),
+                                };
+
+                                let mut buf = Vec::new();
+                                meta_entry.encode(&mut buf)?;
+                                let any = Any {
+                                    type_url:
+                                        "type.googleapis.com/torii.sinks.erc20.TokenMetadataEntry"
+                                            .to_string(),
+                                    value: buf,
+                                };
+
+                                event_bus.publish_protobuf(
+                                    "erc20.metadata",
+                                    "erc20.metadata",
+                                    &any,
+                                    &meta_entry,
+                                    UpdateType::Created,
+                                    Self::matches_metadata_filters,
+                                );
+                            }
+
+                            Ok(())
+                        }
+                        .await;
+
+                        match result {
+                            Ok(()) => {
+                                let mut inflight = worker_inflight.lock().unwrap();
+                                inflight.remove(&token);
+                            }
+                            Err(error) => {
+                                if job.attempt < max_retries {
+                                    let next_attempt = job.attempt + 1;
+                                    let delay = Self::metadata_retry_delay(next_attempt);
+                                    ::metrics::counter!("torii_erc20_metadata_retries_total")
+                                        .increment(1);
+                                    tracing::warn!(
+                                        target: "torii_erc20::sink",
+                                        token = %format!("{:#x}", token),
+                                        attempt = next_attempt,
+                                        max_retries,
+                                        delay_ms = delay.as_millis() as u64,
+                                        error = %error,
+                                        "Metadata fetch/store failed, scheduling retry"
+                                    );
+
+                                    tokio::time::sleep(delay).await;
+                                    if let Err(send_err) = worker_tx
+                                        .send(MetadataJob {
+                                            token,
+                                            attempt: next_attempt,
+                                        })
+                                        .await
+                                    {
+                                        tracing::warn!(
+                                            target: "torii_erc20::sink",
+                                            token = %format!("{:#x}", token),
+                                            error = %send_err,
+                                            "Failed to enqueue metadata retry job"
+                                        );
+                                        let mut inflight = worker_inflight.lock().unwrap();
+                                        inflight.remove(&token);
+                                    }
+                                } else {
+                                    ::metrics::counter!(
+                                        "torii_erc20_metadata_terminal_failures_total"
+                                    )
+                                    .increment(1);
+                                    tracing::warn!(
+                                        target: "torii_erc20::sink",
+                                        token = %format!("{:#x}", token),
+                                        attempt = job.attempt,
+                                        max_retries,
+                                        error = %error,
+                                        "Metadata fetch/store failed after max retries"
+                                    );
+                                    let mut inflight = worker_inflight.lock().unwrap();
+                                    inflight.remove(&token);
+                                }
+                            }
+                        }
+                    }
+
+                    tracing::debug!(
+                        target: "torii_erc20::sink",
+                        worker_id,
+                        "ERC20 metadata worker stopped"
+                    );
+                });
+            }
+
+            tracing::info!(
+                target: "torii_erc20::sink",
+                metadata_parallelism = self.metadata_parallelism,
+                metadata_queue_capacity = self.metadata_queue_capacity,
+                metadata_max_retries = self.metadata_max_retries,
+                "Started ERC20 async metadata workers"
+            );
+        }
+
         tracing::info!(target: "torii_erc20::sink", "ERC20 sink initialized");
         Ok(())
     }
@@ -293,8 +498,8 @@ impl Sink for Erc20Sink {
             }
         }
 
-        // Fetch metadata for any new token contracts we haven't seen before
-        if let Some(ref fetcher) = self.metadata_fetcher {
+        // Enqueue metadata fetches for new token contracts (async workers).
+        if self.metadata_fetcher.is_some() {
             let mut new_tokens: HashSet<Felt> = HashSet::new();
             for transfer in &transfers {
                 new_tokens.insert(transfer.token);
@@ -319,57 +524,43 @@ impl Sink for Erc20Sink {
 
             for token in ordered_tokens
                 .into_iter()
-                .filter(|token| !existing_metadata.contains(token))
+                .filter(|t| !existing_metadata.contains(t))
             {
-                let meta = fetcher.fetch_erc20_metadata(token).await;
-                tracing::info!(
-                    target: "torii_erc20::sink",
-                    token = %format!("{:#x}", token),
-                    name = ?meta.name,
-                    symbol = ?meta.symbol,
-                    decimals = ?meta.decimals,
-                    "Fetched token metadata"
-                );
-                if let Err(e) = self
-                    .storage
-                    .upsert_token_metadata(
-                        token,
-                        meta.name.as_deref(),
-                        meta.symbol.as_deref(),
-                        meta.decimals,
-                    )
-                    .await
-                {
+                let scheduled = {
+                    let mut inflight = self.metadata_fetch_inflight.lock().unwrap();
+                    inflight.insert(token)
+                };
+                if !scheduled {
+                    continue;
+                }
+
+                let Some(metadata_tx) = &self.metadata_job_tx else {
+                    let mut inflight = self.metadata_fetch_inflight.lock().unwrap();
+                    inflight.remove(&token);
                     tracing::warn!(
                         target: "torii_erc20::sink",
                         token = %format!("{:#x}", token),
-                        error = %e,
-                        "Failed to store token metadata"
+                        "Metadata workers not initialized, skipping async metadata enqueue"
                     );
-                } else if let Some(event_bus) = &self.event_bus {
-                    let meta_entry = proto::TokenMetadataEntry {
-                        token: token.to_bytes_be().to_vec(),
-                        name: meta.name,
-                        symbol: meta.symbol,
-                        decimals: meta.decimals.map(|d| d as u32),
-                    };
+                    continue;
+                };
 
-                    let mut buf = Vec::new();
-                    meta_entry.encode(&mut buf)?;
-                    let any = Any {
-                        type_url: "type.googleapis.com/torii.sinks.erc20.TokenMetadataEntry"
-                            .to_string(),
-                        value: buf,
-                    };
-
-                    event_bus.publish_protobuf(
-                        "erc20.metadata",
-                        "erc20.metadata",
-                        &any,
-                        &meta_entry,
-                        UpdateType::Created,
-                        Self::matches_metadata_filters,
-                    );
+                match metadata_tx.try_send(MetadataJob { token, attempt: 1 }) {
+                    Ok(()) => {
+                        ::metrics::counter!("torii_erc20_metadata_jobs_enqueued_total")
+                            .increment(1);
+                    }
+                    Err(e) => {
+                        let mut inflight = self.metadata_fetch_inflight.lock().unwrap();
+                        inflight.remove(&token);
+                        ::metrics::counter!("torii_erc20_metadata_jobs_dropped_total").increment(1);
+                        tracing::warn!(
+                            target: "torii_erc20::sink",
+                            token = %format!("{:#x}", token),
+                            error = %e,
+                            "Failed to enqueue metadata job"
+                        );
+                    }
                 }
             }
         }
@@ -407,19 +598,19 @@ impl Sink for Erc20Sink {
                 if let Some(ref fetcher) = self.balance_fetcher {
                     // Step 1: Check which balances need adjustment (would go negative)
                     let check_balances_start = std::time::Instant::now();
-                    let adjustment_requests = match self
+                    let (adjustment_requests, balance_snapshot) = match self
                         .storage
-                        .check_balances_batch(&transfers)
+                        .check_balances_batch_with_snapshot(&transfers)
                         .await
                     {
-                        Ok(requests) => requests,
+                        Ok(result) => (result.adjustment_requests, Some(result.balance_snapshot)),
                         Err(e) => {
                             tracing::warn!(
                                 target: "torii_erc20::sink",
                                 error = %e,
                                 "Failed to check balance inconsistencies, skipping balance tracking"
                             );
-                            Vec::new()
+                            (Vec::new(), None)
                         }
                     };
                     ::metrics::histogram!("torii_erc20_sink_check_balances_duration_seconds")
@@ -458,7 +649,11 @@ impl Sink for Erc20Sink {
                     let apply_balances_start = std::time::Instant::now();
                     if let Err(e) = self
                         .storage
-                        .apply_transfers_with_adjustments(&transfers, &adjustments)
+                        .apply_transfers_with_adjustments_with_snapshot(
+                            &transfers,
+                            &adjustments,
+                            balance_snapshot,
+                        )
                         .await
                     {
                         tracing::error!(

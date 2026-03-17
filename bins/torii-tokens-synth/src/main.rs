@@ -10,13 +10,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio_postgres::NoTls;
 use torii::etl::decoder::ContractFilter;
 use torii::etl::engine_db::{EngineDb, EngineDbConfig};
 use torii::etl::extractor::SyntheticExtractor;
-use torii::etl::sink::{EventBus, Sink, SinkContext};
+use torii::etl::sink::Sink;
 use torii::etl::{Decoder, DecoderContext};
-use torii::grpc::SubscriptionManager;
 use torii_erc1155::{
     Erc1155Decoder, Erc1155Sink, Erc1155Storage, SyntheticErc1155Config, SyntheticErc1155Extractor,
 };
@@ -26,6 +24,7 @@ use torii_erc20::{
 use torii_erc721::{
     Erc721Decoder, Erc721Sink, Erc721Storage, SyntheticErc721Config, SyntheticErc721Extractor,
 };
+use torii_runtime_common::sink::{drop_postgres_schemas, initialize_sink};
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "torii-tokens-synth")]
@@ -300,14 +299,7 @@ async fn run_erc20_profile(config: Erc20ProfileConfig) -> Result<()> {
     let storage = Arc::new(Erc20Storage::new(&config.common.db_url).await?);
 
     let mut sink = Erc20Sink::new(storage.clone());
-    let event_bus = Arc::new(EventBus::new(Arc::new(SubscriptionManager::new())));
-    sink.initialize(
-        event_bus,
-        &SinkContext {
-            database_root: output_dir.clone(),
-        },
-    )
-    .await?;
+    initialize_sink(&mut sink, output_dir.clone()).await?;
 
     let synthetic_cfg = SyntheticErc20Config {
         from_block: config.common.from_block,
@@ -330,7 +322,7 @@ async fn run_erc20_profile(config: Erc20ProfileConfig) -> Result<()> {
 
     let decoder = Arc::new(Erc20Decoder::new()) as Arc<dyn Decoder>;
     let decoder_context =
-        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new());
+        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new(), 1);
 
     let mut samples = Vec::new();
     let mut cursor = None;
@@ -429,14 +421,7 @@ async fn run_erc721_profile(config: Erc721ProfileConfig) -> Result<()> {
     let storage = Arc::new(Erc721Storage::new(&config.common.db_url).await?);
 
     let mut sink = Erc721Sink::new(storage.clone());
-    let event_bus = Arc::new(EventBus::new(Arc::new(SubscriptionManager::new())));
-    sink.initialize(
-        event_bus,
-        &SinkContext {
-            database_root: output_dir.clone(),
-        },
-    )
-    .await?;
+    initialize_sink(&mut sink, output_dir.clone()).await?;
 
     let synthetic_cfg = SyntheticErc721Config {
         from_block: config.common.from_block,
@@ -463,7 +448,7 @@ async fn run_erc721_profile(config: Erc721ProfileConfig) -> Result<()> {
 
     let decoder = Arc::new(Erc721Decoder::new()) as Arc<dyn Decoder>;
     let decoder_context =
-        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new());
+        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new(), 1);
 
     let mut samples = Vec::new();
     let mut cursor = None;
@@ -562,14 +547,7 @@ async fn run_erc1155_profile(config: Erc1155ProfileConfig) -> Result<()> {
     let storage = Arc::new(Erc1155Storage::new(&config.common.db_url).await?);
 
     let mut sink = Erc1155Sink::new(storage.clone());
-    let event_bus = Arc::new(EventBus::new(Arc::new(SubscriptionManager::new())));
-    sink.initialize(
-        event_bus,
-        &SinkContext {
-            database_root: output_dir.clone(),
-        },
-    )
-    .await?;
+    initialize_sink(&mut sink, output_dir.clone()).await?;
 
     let synthetic_cfg = SyntheticErc1155Config {
         from_block: config.common.from_block,
@@ -598,7 +576,7 @@ async fn run_erc1155_profile(config: Erc1155ProfileConfig) -> Result<()> {
 
     let decoder = Arc::new(Erc1155Decoder::new()) as Arc<dyn Decoder>;
     let decoder_context =
-        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new());
+        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new(), 1);
 
     let mut samples = Vec::new();
     let mut cursor = None;
@@ -698,60 +676,15 @@ async fn run_all_profile(config: AllProfileConfig) -> Result<()> {
 }
 
 async fn reset_erc20_schema(db_url: &str) -> Result<()> {
-    let (client, connection) = tokio_postgres::connect(db_url, NoTls)
-        .await
-        .context("failed to connect for ERC20 schema reset")?;
-
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            tracing::error!(target: "torii_tokens_synth", error = %e, "postgres reset connection failed");
-        }
-    });
-
-    client
-        .batch_execute("DROP SCHEMA IF EXISTS erc20 CASCADE")
-        .await
-        .context("failed to drop erc20 schema")?;
-
-    Ok(())
+    drop_postgres_schemas(db_url, &["erc20"], "torii_tokens_synth").await
 }
 
 async fn reset_erc721_schema(db_url: &str) -> Result<()> {
-    let (client, connection) = tokio_postgres::connect(db_url, NoTls)
-        .await
-        .context("failed to connect for ERC721 schema reset")?;
-
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            tracing::error!(target: "torii_tokens_synth", error = %e, "postgres reset connection failed");
-        }
-    });
-
-    client
-        .batch_execute("DROP SCHEMA IF EXISTS erc721 CASCADE")
-        .await
-        .context("failed to drop erc721 schema")?;
-
-    Ok(())
+    drop_postgres_schemas(db_url, &["erc721"], "torii_tokens_synth").await
 }
 
 async fn reset_erc1155_schema(db_url: &str) -> Result<()> {
-    let (client, connection) = tokio_postgres::connect(db_url, NoTls)
-        .await
-        .context("failed to connect for ERC1155 schema reset")?;
-
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            tracing::error!(target: "torii_tokens_synth", error = %e, "postgres reset connection failed");
-        }
-    });
-
-    client
-        .batch_execute("DROP SCHEMA IF EXISTS erc1155 CASCADE")
-        .await
-        .context("failed to drop erc1155 schema")?;
-
-    Ok(())
+    drop_postgres_schemas(db_url, &["erc1155"], "torii_tokens_synth").await
 }
 
 fn build_report(

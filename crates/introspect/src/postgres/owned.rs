@@ -11,7 +11,7 @@ use sqlx::{FromRow, PgPool, Postgres};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 
-pub const TABLE_INSERT_QUERY: &str = r#"
+pub const TABLE_INSERT_QUERY: &str = "
     INSERT INTO introspect.tables (owner, id, name, attributes, primary_def, column_ids, updated_at, created_block, updated_block, created_tx, updated_tx)
         VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $7, $8, $8)
         ON CONFLICT (owner, id) DO UPDATE SET
@@ -22,7 +22,7 @@ pub const TABLE_INSERT_QUERY: &str = r#"
         updated_at = NOW(),
         updated_block = EXCLUDED.updated_block,
         updated_tx = EXCLUDED.updated_tx
-"#;
+";
 
 pub const COLUMN_INSERT_QUERY: &str = r#"
     INSERT INTO introspect.columns (owner, "table", id, name, attributes, type_def)
@@ -33,14 +33,25 @@ pub const COLUMN_INSERT_QUERY: &str = r#"
         type_def = EXCLUDED.type_def
 "#;
 
-pub const FETCH_TABLES_QUERY: &str = r#"
-    SELECT id, name, attributes, primary_def, column_ids, alive
+pub const FETCH_TABLES_QUERY: &str = "
+    SELECT
+        id::felt252 AS id,
+        name,
+        attributes,
+        primary_def,
+        column_ids::felt252[] AS column_ids,
+        alive
     FROM introspect.tables
     WHERE $1::felt252[] = '{}' OR owner = ANY($1)
-"#;
+";
 
 pub const FETCH_COLUMNS_QUERY: &str = r#"
-    SELECT "table", id, name, attributes, type_def
+    SELECT
+        "table"::felt252 AS "table",
+        id::felt252 AS id,
+        name,
+        attributes,
+        type_def
     FROM introspect.columns
     WHERE $1::felt252[] = '{}' OR owner = ANY($1)
 "#;

@@ -12,6 +12,9 @@ use starknet::core::types::Felt;
 /// - **Event**: Uses `starknet_getEvents` with per-contract cursors.
 ///   Best for indexing specific contracts - easy to add new ones without re-indexing.
 ///
+/// - **GlobalEvent**: Uses `starknet_getEvents` with a single global cursor.
+///   Best for event-mode auto-discovery across all contracts.
+///
 #[derive(Clone, Debug, Default, ValueEnum, PartialEq, Eq)]
 pub enum ExtractionMode {
     /// Fetch all events from blocks (single global cursor)
@@ -19,6 +22,8 @@ pub enum ExtractionMode {
     BlockRange,
     /// Fetch events per contract (per-contract cursors)
     Event,
+    /// Fetch all events with one global cursor
+    GlobalEvent,
 }
 
 /// Metadata fetching behavior.
@@ -41,6 +46,9 @@ pub enum MetadataMode {
 ///
 /// - **event**: Uses `starknet_getEvents` with per-contract cursors.
 ///   Easy to add new contracts without re-indexing existing ones.
+///
+/// - **global-event**: Uses `starknet_getEvents` with one global cursor.
+///   Supports runtime auto-discovery without preconfigured contracts.
 ///
 /// # Examples
 ///
@@ -67,6 +75,7 @@ pub struct Config {
     ///
     /// - block-range: Fetch all events from blocks (single global cursor)
     /// - event: Fetch events per contract (per-contract cursors, easy to add new contracts)
+    /// - global-event: Fetch all events via getEvents (single global cursor)
     #[arg(long, value_enum, default_value = "block-range")]
     pub mode: ExtractionMode,
 
@@ -153,6 +162,34 @@ pub struct Config {
     #[arg(long, default_value = "10000")]
     pub event_block_batch_size: u64,
 
+    /// Number of blocks to scan for automatic event-mode bootstrap discovery.
+    #[arg(long, default_value = "20000")]
+    pub event_bootstrap_blocks: u64,
+
+    /// Number of extracted batches to prefetch ahead of decode/store.
+    #[arg(long, default_value = "2")]
+    pub max_prefetch_batches: usize,
+
+    /// Chunk-level decode parallelism (`0` = auto).
+    #[arg(long, default_value = "0")]
+    pub decode_parallelism: usize,
+
+    /// Maximum chunked RPC requests to run concurrently (`0` = auto).
+    #[arg(long, default_value = "0")]
+    pub rpc_parallelism: usize,
+
+    /// Concurrent workers for async token metadata fetching.
+    #[arg(long, default_value = "8")]
+    pub metadata_parallelism: usize,
+
+    /// Queue capacity for async metadata jobs.
+    #[arg(long, default_value = "2048")]
+    pub metadata_queue_capacity: usize,
+
+    /// Max retries for metadata fetch/store with capped backoff.
+    #[arg(long, default_value = "5")]
+    pub metadata_max_retries: u8,
+
     /// Metadata fetching mode.
     ///
     /// If omitted: defaults to `inline`.
@@ -214,5 +251,36 @@ mod tests {
     fn observability_flag_enables_features() {
         let cfg = Config::parse_from(["torii-tokens", "--observability"]);
         assert!(cfg.observability);
+    }
+
+    #[test]
+    fn concurrency_flags_parse() {
+        let cfg = Config::parse_from([
+            "torii-tokens",
+            "--max-prefetch-batches",
+            "4",
+            "--decode-parallelism",
+            "8",
+            "--rpc-parallelism",
+            "6",
+            "--metadata-parallelism",
+            "12",
+            "--metadata-queue-capacity",
+            "4096",
+            "--metadata-max-retries",
+            "5",
+        ]);
+        assert_eq!(cfg.max_prefetch_batches, 4);
+        assert_eq!(cfg.decode_parallelism, 8);
+        assert_eq!(cfg.rpc_parallelism, 6);
+        assert_eq!(cfg.metadata_parallelism, 12);
+        assert_eq!(cfg.metadata_queue_capacity, 4096);
+        assert_eq!(cfg.metadata_max_retries, 5);
+    }
+
+    #[test]
+    fn supports_global_event_mode() {
+        let cfg = Config::parse_from(["torii-tokens", "--mode", "global-event"]);
+        assert_eq!(cfg.mode, ExtractionMode::GlobalEvent);
     }
 }
