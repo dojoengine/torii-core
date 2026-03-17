@@ -128,8 +128,9 @@ where
     }
 
     pub async fn load_tables(&self, owners: &[Felt]) -> DojoToriiResult<()> {
+        let new = self.read_tables(owners).await?;
         let mut tables = self.tables.write()?;
-        tables.extend(self.read_tables(owners).await?.into_iter().map_into());
+        tables.extend(new.into_iter().map_into());
         Ok(())
     }
 

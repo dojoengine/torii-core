@@ -166,10 +166,7 @@ impl SchemaName {
 
 impl PostgresType {
     pub fn is_composite(&self) -> bool {
-        match self.scalar {
-            PostgresScalar::Composite(_) => true,
-            _ => false,
-        }
+        matches!(self.scalar, PostgresScalar::Composite(_))
     }
     pub fn to_array(self, size: Option<u32>) -> PgTypeResult<Self> {
         let arr = match (self.array, size) {

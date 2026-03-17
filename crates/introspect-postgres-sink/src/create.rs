@@ -103,7 +103,7 @@ impl PostgresFieldExtractor for (&Felt, &VariantDef) {
         &self.1.type_def
     }
     fn id(&self) -> &Self::Id {
-        &self.0
+        self.0
     }
 }
 

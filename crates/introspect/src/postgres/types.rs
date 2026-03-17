@@ -45,7 +45,7 @@ impl PgHasArrayType for PgFelt {
 
 impl Encode<'_, Postgres> for PgFelt {
     fn encode_by_ref(&self, buf: &mut PgArgumentBuffer) -> Result<IsNull, BoxDynError> {
-        <&[u8] as Encode<Postgres>>::encode(&self.0.as_slice(), buf)
+        <&[u8] as Encode<Postgres>>::encode(self.0.as_slice(), buf)
     }
 }
 

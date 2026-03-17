@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::ops::Deref;
 use std::sync::{PoisonError, RwLock};
-use torii::etl::EventContext;
+use torii::etl::MetaData;
 use torii_introspect::events::IntrospectMsg;
 use torii_introspect::schema::TableSchema;
 use torii_introspect::InsertsFields;
@@ -196,7 +196,7 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
     pub async fn process_message(
         &self,
         msg: &IntrospectMsg,
-        context: &EventContext,
+        metadata: &MetaData,
     ) -> SqliteDbResult<()> {
         match msg {
             IntrospectMsg::CreateTable(event) => {
@@ -215,14 +215,14 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
             | IntrospectMsg::RenamePrimary(_)
             | IntrospectMsg::DeleteRecords(_)
             | IntrospectMsg::DeletesFields(_) => Ok(()),
-            IntrospectMsg::InsertsFields(event) => self.insert_fields(event, context).await,
+            IntrospectMsg::InsertsFields(event) => self.insert_fields(event, metadata).await,
         }
     }
 
     async fn insert_fields(
         &self,
         event: &InsertsFields,
-        _context: &EventContext,
+        _metadata: &MetaData,
     ) -> SqliteDbResult<()> {
         let table = self
             .tables

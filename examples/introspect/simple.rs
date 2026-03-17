@@ -55,7 +55,7 @@ async fn main() {
         for res in db.process_messages(msgs_ref).await.unwrap() {
             match res {
                 Err(err) => println!("Failed to process message: {err:?}"),
-                Ok(_) => success += 1,
+                Ok(()) => success += 1,
             }
         }
         println!(

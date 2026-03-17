@@ -107,7 +107,7 @@ impl PostgresTables {
         let existing = tables
             .get_mut(&id)
             .ok_or_else(|| PgDbError::TableNotFound(id))?;
-        let upgrades = existing.update_from_info(&id, &table.into())?;
+        let upgrades = existing.update_from_info(&id, &table)?;
         upgrades.to_queries(&id, queries);
         Ok(())
     }

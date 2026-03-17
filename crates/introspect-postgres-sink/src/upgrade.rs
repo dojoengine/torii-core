@@ -306,7 +306,7 @@ pub trait UpgradeField {
     ) -> UpgradeResult<()> {
         let pg_type =
             self.type_def_mut()
-                .compare_type(schema, branch, &new.type_def(), dead, queries)?;
+                .compare_type(schema, branch, new.type_def(), dead, queries)?;
         queries.maybe_alter(schema, name, self.name(), pg_type);
         Ok(())
     }
@@ -318,7 +318,7 @@ pub trait UpgradeField {
     ) -> UpgradeResult<StructMod> {
         let pg_type = self
             .type_def()
-            .extract_type(schema, &branch, &mut queries.atomic)?;
+            .extract_type(schema, branch, &mut queries.atomic)?;
         Ok(StructMod::add(self.name(), pg_type))
     }
 }
@@ -499,8 +499,8 @@ impl CompareType for EnumDef {
             } else {
                 add.push(variant.name.clone());
                 variant.add_field(schema, &branch, queries)?;
-                self.variants.insert(id.clone(), variant.clone());
-                self.order.push(id.clone());
+                self.variants.insert(*id, variant.clone());
+                self.order.push(*id);
             }
         }
         queries.add_enum_mod(

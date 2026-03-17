@@ -111,14 +111,14 @@ impl std::fmt::Debug for Envelope {
 
 #[derive(Debug, Clone)]
 pub struct MetaData {
-    pub block_number: u64,
+    pub block_number: Option<u64>,
     pub transaction_hash: Felt,
     pub from_address: Felt,
 }
 
 #[derive(Debug, Clone)]
 pub struct EventBody<T> {
-    pub meta_data: MetaData,
+    pub metadata: MetaData,
     pub msg: T,
 }
 
@@ -130,7 +130,7 @@ pub trait EventMsg: Send + Sync + 'static {
         Self: Sized,
     {
         EventBody {
-            meta_data: raw.into(),
+            metadata: raw.into(),
             msg: self,
         }
     }
@@ -144,26 +144,29 @@ pub trait EventMsg: Send + Sync + 'static {
 
 impl<T> From<EventBody<T>> for (T, MetaData) {
     fn from(value: EventBody<T>) -> Self {
-        (value.msg, value.meta_data)
+        (value.msg, value.metadata)
     }
 }
 
 impl<T> From<(T, MetaData)> for EventBody<T> {
     fn from(value: (T, MetaData)) -> Self {
         let (msg, meta_data) = value;
-        EventBody { msg, meta_data }
+        EventBody {
+            msg,
+            metadata: meta_data,
+        }
     }
 }
 
 impl<'a, T> From<&'a EventBody<T>> for (&'a T, &'a MetaData) {
     fn from(value: &'a EventBody<T>) -> Self {
-        (&value.msg, &value.meta_data)
+        (&value.msg, &value.metadata)
     }
 }
 impl From<&EmittedEvent> for MetaData {
     fn from(value: &EmittedEvent) -> Self {
         MetaData {
-            block_number: value.block_number.unwrap(),
+            block_number: value.block_number,
             transaction_hash: value.transaction_hash,
             from_address: value.from_address,
         }

@@ -4869,6 +4869,7 @@ dependencies = [
  "async-trait",
  "hex",
  "introspect-types",
+ "itertools 0.14.0",
  "metrics",
  "serde",
  "serde_json",

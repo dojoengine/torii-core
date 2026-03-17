@@ -64,7 +64,7 @@ impl CairoTypeSerialization for PostgresJsonSerializer {
             _ => {
                 let mut map = serializer.serialize_map(Some(2))?;
                 map.serialize_entry("_variant", name)?;
-                map.serialize_entry(&format!("{name}"), &type_def.to_de_se(data, self))?;
+                map.serialize_entry(name, &type_def.to_de_se(data, self))?;
                 map
             }
         }
