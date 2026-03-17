@@ -1,12 +1,14 @@
+use std::fmt::Display;
+
 use introspect_types::{Attribute, PrimaryDef, PrimaryTypeDef};
 use itertools::Itertools;
 use sqlx::{
     postgres::{PgHasArrayType, PgTypeInfo},
-    types::Json,
+    types::{BigDecimal, Json},
 };
 use starknet_types_core::felt::Felt;
 
-#[derive(sqlx::Type)]
+#[derive(sqlx::Type, Debug)]
 #[sqlx(type_name = "introspect.attribute", no_pg_array)]
 pub struct PgAttribute {
     pub name: String,
@@ -19,13 +21,42 @@ impl PgHasArrayType for PgAttribute {
     }
 }
 
-#[derive(sqlx::Type)]
+#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[sqlx(type_name = "felt252")]
 pub struct PgFelt(pub [u8; 32]);
 
 impl PgHasArrayType for PgFelt {
     fn array_type_info() -> PgTypeInfo {
         PgTypeInfo::with_name("_felt252")
+    }
+}
+
+impl Display for PgFelt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "'\\x{}'::felt252", hex::encode(self.0))
+    }
+}
+
+#[derive(sqlx::Type, Debug, Clone, PartialEq, PartialOrd)]
+#[sqlx(type_name = "uint128")]
+pub struct Uint128(pub BigDecimal);
+
+impl PgHasArrayType for Uint128 {
+    fn array_type_info() -> PgTypeInfo {
+        PgTypeInfo::with_name("_uint128")
+    }
+}
+
+impl From<Uint128> for u128 {
+    fn from(value: Uint128) -> Self {
+        use bigdecimal::ToPrimitive;
+        value.0.to_u128().expect("value out of range for u128")
+    }
+}
+
+impl From<u128> for Uint128 {
+    fn from(value: u128) -> Self {
+        Uint128(BigDecimal::from(value))
     }
 }
 
@@ -68,7 +99,7 @@ impl From<Felt> for PgFelt {
     }
 }
 
-#[derive(sqlx::Type)]
+#[derive(sqlx::Type, Debug)]
 #[sqlx(type_name = "introspect.primary_def")]
 pub struct PgPrimary {
     name: String,

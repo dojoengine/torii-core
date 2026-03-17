@@ -1,10 +1,12 @@
 use crate::json::PostgresJsonSerializer;
 use crate::query::CreatePgTable;
-use crate::table::PgTable;
+use crate::table::{DeadField, PgTable};
 use crate::{PgDbError, PgDbResult, PgSchema, INTROSPECT_PG_SINK_MIGRATIONS};
-use introspect_types::ResultInto;
+use introspect_types::{ColumnInfo, ResultInto, TypeDef};
+use serde::ser::SerializeMap;
 use serde_json::Serializer as JsonSerializer;
-use sqlx::PgPool;
+use sqlx::types::Json;
+use sqlx::{FromRow, PgPool};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::io::Write;
@@ -13,15 +15,33 @@ use std::rc::Rc;
 use std::sync::RwLock;
 use torii::etl::EventContext;
 use torii_introspect::events::IntrospectMsg;
+use torii_introspect::postgres::types::Uint128;
+use torii_introspect::postgres::PgFelt;
 use torii_introspect::schema::TableSchema;
+use torii_introspect::tables::SerializeEntries;
 use torii_introspect::InsertsFields;
 use torii_postgres::PostgresConnection;
+
+pub const COMMIT_CMD: &str = "--COMMIT";
+pub const DEAD_MEMBERS_TABLE: &str = "__torii_dead_fields";
+pub const METADATA_CONFLICTS: &str = "__updated_at = NOW(), __updated_block = EXCLUDED.__updated_block, __updated_tx = EXCLUDED.__updated_tx";
 
 #[derive(Debug, Default)]
 pub struct PostgresTables(pub RwLock<HashMap<Felt, PgTable>>);
 
+#[derive(Debug, Default)]
+pub struct DeadFields(pub RwLock<HashMap<Felt, Vec<(u128, DeadField)>>>);
+
 impl Deref for PostgresTables {
     type Target = RwLock<HashMap<Felt, PgTable>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Deref for DeadFields {
+    type Target = RwLock<HashMap<Felt, Vec<(u128, DeadField)>>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -58,6 +78,34 @@ impl From<Option<&str>> for PgSchema {
     }
 }
 
+impl From<&EventContext> for MetaData {
+    fn from(value: &EventContext) -> Self {
+        MetaData {
+            block_number: value.block.number,
+            transaction_hash: value.transaction.hash,
+        }
+    }
+}
+struct MetaData {
+    block_number: u64,
+    transaction_hash: Felt,
+}
+
+impl SerializeEntries for MetaData {
+    fn entry_count(&self) -> usize {
+        4
+    }
+    fn serialize_entries<S: serde::Serializer>(
+        &self,
+        map: &mut <S as serde::Serializer>::SerializeMap,
+    ) -> Result<(), S::Error> {
+        map.serialize_entry("__created_block", &self.block_number)?;
+        map.serialize_entry("__updated_block", &self.block_number)?;
+        map.serialize_entry("__created_tx", &self.transaction_hash)?;
+        map.serialize_entry("__updated_tx", &self.transaction_hash)
+    }
+}
+
 impl PostgresTables {
     pub fn create_table(
         &self,
@@ -69,7 +117,7 @@ impl PostgresTables {
         self.assert_table_not_exists(&id, &table.name)?;
         CreatePgTable::new(schema, &id, &table)?.make_queries(queries);
         let mut tables: std::sync::RwLockWriteGuard<'_, HashMap<Felt, PgTable>> = self.write()?;
-        tables.insert(id, PgTable::new(schema, table));
+        tables.insert(id, PgTable::new(schema, table, None));
         Ok(())
     }
 
@@ -84,7 +132,7 @@ impl PostgresTables {
             .get_mut(&id)
             .ok_or_else(|| PgDbError::TableNotFound(id))?;
         let upgrades = existing.update_from_info(&id, &table.into())?;
-        upgrades.to_queries(queries);
+        upgrades.to_queries(&id, queries);
         Ok(())
     }
 
@@ -113,7 +161,7 @@ impl PostgresTables {
     pub fn insert_fields(
         &self,
         event: &InsertsFields,
-        _context: &EventContext,
+        context: &MetaData,
         queries: &mut Vec<String>,
     ) -> PgDbResult<()> {
         let tables = self.read().unwrap();
@@ -135,21 +183,23 @@ impl PostgresTables {
         .unwrap();
         record.parse_records_with_metadata(
             &event.records,
-            &(),
+            context,
             &mut JsonSerializer::new(&mut writer),
             &PostgresJsonSerializer,
         )?;
         write!(
             writer,
-            r#"$$) ON CONFLICT ("{}") DO UPDATE SET "#,
+            r#"$$) ON CONFLICT ("{}") DO UPDATE SET {METADATA_CONFLICTS}"#,
             record.primary().name
         )
         .unwrap();
-        if let Some((coln, cols)) = record.columns().split_last() {
-            for column in cols {
-                write_conflict_res::<true, _>(&mut writer, table_name, &column.name)?;
-            }
-            write_conflict_res::<false, _>(&mut writer, table_name, &coln.name)?;
+        for ColumnInfo { name, .. } in record.columns() {
+            write!(
+                writer,
+                r#", "{name}" = COALESCE(EXCLUDED."{name}", "{table_name}"."{name}")"#,
+                name = name
+            )
+            .unwrap();
         }
         let string = unsafe { String::from_utf8_unchecked(writer) };
         queries.push(string);
@@ -180,22 +230,48 @@ impl PostgresTables {
     }
 }
 
-pub fn write_conflict_res<const DELIMINATOR: bool, W: Write>(
-    writer: &mut W,
-    table: &str,
-    column: &str,
-) -> std::io::Result<()> {
-    let separator = if DELIMINATOR { ", " } else { "" };
-    write!(
-        writer,
-        r#""{column}" = COALESCE(EXCLUDED."{column}", "{table}"."{column}"){separator}"#,
+fn make_dead_members_table_query(schema: &PgSchema) -> String {
+    format!(
+        r#"CREATE TABLE IF NOT EXISTS "{schema}"."{DEAD_MEMBERS_TABLE}" (
+            "table" public.felt252,
+            id public.uint128,
+            name TEXT,
+            type_def JSONB,
+            PRIMARY KEY ("table", id)
+        )"#,
     )
+}
+
+fn make_schema_query(schema: &PgSchema) -> String {
+    format!(r#"CREATE SCHEMA IF NOT EXISTS "{schema}""#)
+}
+
+#[derive(Debug, FromRow)]
+pub struct DeadFieldRow {
+    pub table: PgFelt,
+    pub id: Uint128,
+    pub name: String,
+    pub type_def: Json<TypeDef>,
+}
+
+impl From<DeadFieldRow> for (Felt, u128, DeadField) {
+    fn from(value: DeadFieldRow) -> Self {
+        (
+            value.table.into(),
+            value.id.into(),
+            DeadField {
+                name: value.name,
+                type_def: value.type_def.0,
+            },
+        )
+    }
 }
 
 pub struct PostgresSimpleDb<T> {
     tables: PostgresTables,
     schema: PgSchema,
     pool: T,
+    dead_fields: DeadFields,
 }
 
 impl<T: PostgresConnection> PostgresConnection for PostgresSimpleDb<T> {
@@ -210,23 +286,58 @@ impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
             tables: PostgresTables::default(),
             schema: schema.into(),
             pool,
+            dead_fields: DeadFields::default(),
         }
+    }
+
+    pub async fn read_dead_field_rows(&self) -> PgDbResult<Vec<DeadFieldRow>> {
+        let schema = &self.schema;
+        let query =
+            format!(r#"SELECT "table", id, name, type_def FROM "{schema}"."{DEAD_MEMBERS_TABLE}""#);
+        sqlx::query_as::<_, DeadFieldRow>(&query)
+            .fetch_all(self.pool())
+            .await
+            .err_into()
+    }
+
+    pub async fn load_dead_fields(&self) -> PgDbResult<()> {
+        let mut dead_fields_map: HashMap<Felt, Vec<(u128, DeadField)>> = HashMap::new();
+        for row in self.read_dead_field_rows().await? {
+            let (table, id, dead_field) = row.into();
+            dead_fields_map
+                .entry(table)
+                .or_default()
+                .push((id, dead_field));
+        }
+        let mut tables = self.tables.write()?;
+        let mut dead_fields = self.dead_fields.write()?;
+        for (table, fields) in dead_fields_map {
+            match tables.get_mut(&table) {
+                Some(table) => table.dead.extend(fields),
+                None => dead_fields.entry(table).or_default().extend(fields),
+            }
+        }
+        Ok(())
     }
 
     pub async fn initialize_introspect_pg_sink(&self) -> PgDbResult<()> {
         self.migrate(Some("introspect"), INTROSPECT_PG_SINK_MIGRATIONS)
             .await?;
-        let mut tx = self.begin().await?;
-        sqlx::query(format!("CREATE SCHEMA IF NOT EXISTS {}", self.schema).as_str())
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await.err_into()
+        let queries = [
+            make_schema_query(&self.schema),
+            make_dead_members_table_query(&self.schema),
+        ];
+        self.execute_queries(&queries).await?;
+        self.load_dead_fields().await
     }
+
     pub fn load_tables_no_commit(&self, table_schemas: Vec<TableSchema>) -> PgDbResult<()> {
-        let mut tables = self.tables.write()?;
+        let mut tables: std::sync::RwLockWriteGuard<'_, HashMap<Felt, PgTable>> =
+            self.tables.write()?;
+        let mut deads = self.dead_fields.write()?;
         for table in table_schemas {
             let (id, table) = table.into();
-            tables.insert(id, PgTable::new(&self.schema, table));
+            tables.insert(id, PgTable::new(&self.schema, table, deads.remove(&id)));
         }
         Ok(())
     }
@@ -261,7 +372,14 @@ impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
                 );
             }
         }
-        self.execute_queries(&queries).await?;
+        let mut start = 0;
+        for (n, query) in queries.iter().enumerate() {
+            if query == COMMIT_CMD {
+                self.execute_queries(&queries[start..n]).await?;
+                start = n + 1;
+            }
+        }
+        self.execute_queries(&queries[start..]).await?;
         Ok(results)
     }
 }

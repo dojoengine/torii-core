@@ -1,8 +1,18 @@
-use crate::{PgSchema, PostgresField, PostgresType, PrimaryKey, SchemaName};
+use introspect_types::{MemberDef, TypeDef};
+use starknet_types_core::felt::Felt;
+use torii_introspect::postgres::PgFelt;
+
+use crate::{
+    processor::{COMMIT_CMD, DEAD_MEMBERS_TABLE},
+    table::DeadField,
+    PgSchema, PostgresField, PostgresType, PrimaryKey, SchemaName,
+};
 use std::{
     fmt::{Display, Formatter, Result as FmtResult, Write},
     rc::Rc,
 };
+
+const CREATE_METADATA_COLUMNS: &str =  "__created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), __updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), __created_block public.uint64 NOT NULL, __updated_block public.uint64 NOT NULL, __created_tx public.felt252 NOT NULL, __updated_tx public.felt252 NOT NULL);";
 
 #[derive(Debug)]
 pub struct CreatePgTable {
@@ -20,6 +30,7 @@ pub struct TableUpgrade {
     pub atomic: Vec<TypeMod>,
     pub alters: Vec<StructAlter>,
     pub columns: Vec<ColumnMod>,
+    pub dead: Vec<DeadFieldWithId>,
     pub col_alters: Vec<PostgresField>,
 }
 
@@ -27,6 +38,7 @@ pub struct TableUpgrade {
 pub struct ColumnUpgrade {
     pub atomic: Vec<TypeMod>,
     pub alters: Vec<StructAlter>,
+    pub dead: Vec<DeadFieldWithId>,
     pub altered: bool,
 }
 
@@ -83,6 +95,35 @@ pub struct EnumUpgrade {
 }
 
 #[derive(Debug)]
+pub struct DeadFieldWithId {
+    pub id: u128,
+    pub name: String,
+    pub type_def: TypeDef,
+}
+
+impl From<DeadFieldWithId> for (u128, DeadField) {
+    fn from(value: DeadFieldWithId) -> Self {
+        (
+            value.id,
+            DeadField {
+                name: value.name,
+                type_def: value.type_def,
+            },
+        )
+    }
+}
+
+impl From<(u128, DeadField)> for DeadFieldWithId {
+    fn from(value: (u128, DeadField)) -> Self {
+        DeadFieldWithId {
+            id: value.0,
+            name: value.1.name,
+            type_def: value.1.type_def,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum CreatesType {
     Struct(CreateStruct),
     Enum(CreateEnum),
@@ -92,13 +133,13 @@ impl Display for CreatePgTable {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(
             f,
-            r#"CREATE TABLE IF NOT EXISTS {} ({}"#,
+            r#"CREATE TABLE IF NOT EXISTS {} ({}, "#,
             self.name, self.primary
         )?;
         for column in &self.columns {
-            write!(f, ", {column}")?;
+            write!(f, "{column}, ")?;
         }
-        write!(f, ");")
+        CREATE_METADATA_COLUMNS.fmt(f)
     }
 }
 
@@ -170,6 +211,7 @@ impl TableUpgrade {
             columns: Vec::new(),
             alters: Vec::new(),
             atomic: Vec::new(),
+            dead: Vec::new(),
             col_alters: Vec::new(),
         }
     }
@@ -204,6 +246,7 @@ impl TableUpgrade {
         }
         self.atomic = upgrade.atomic;
         self.alters = upgrade.alters;
+        self.dead = upgrade.dead;
     }
 
     pub fn add_column(&mut self, name: &str, pg_type: PostgresType) {
@@ -217,14 +260,17 @@ impl TableUpgrade {
         ColumnUpgrade {
             atomic: std::mem::take(&mut self.atomic),
             alters: std::mem::take(&mut self.alters),
+            dead: std::mem::take(&mut self.dead),
             altered: false,
         }
     }
 
-    pub fn to_queries(&self, queries: &mut Vec<String>) {
-        println!("{self:?}");
+    pub fn to_queries(&self, table_id: &Felt, queries: &mut Vec<String>) {
         let schema = &self.schema;
         let name = &self.name;
+        if let Some(query) = insert_dead_member_query(&self.schema, table_id, &self.dead) {
+            queries.push(query);
+        }
         if let Some(old_name) = &self.old_name {
             queries.push(format!(
                 r#"ALTER TABLE "{schema}"."{old_name}" RENAME TO "{name}";"#
@@ -240,9 +286,6 @@ impl TableUpgrade {
             queries.push(alterations);
         }
         self.alter_queries(queries);
-        for q in queries.iter() {
-            println!("{q}");
-        }
     }
 
     fn alter_queries(&self, queries: &mut Vec<String>) {
@@ -331,6 +374,7 @@ impl EnumUpgrade {
         for variant in &self.add {
             queries.push(format!(r#"ALTER TYPE {name} ADD VALUE '{variant}';"#));
         }
+        queries.push(COMMIT_CMD.to_string());
     }
 }
 
@@ -409,6 +453,13 @@ impl ColumnUpgrade {
             }))
         }
     }
+    pub fn add_dead_member(&mut self, id: u128, member: &MemberDef) {
+        self.dead.push(DeadFieldWithId {
+            id,
+            name: member.name.clone(),
+            type_def: member.type_def.clone(),
+        });
+    }
 }
 
 pub trait StructMods {
@@ -434,4 +485,37 @@ impl From<CreatesType> for TypeMod {
     fn from(value: CreatesType) -> Self {
         TypeMod::Create(value)
     }
+}
+
+fn insert_dead_member_query(
+    schema: &PgSchema,
+    table: &Felt,
+    fields: &[DeadFieldWithId],
+) -> Option<String> {
+    fn write(w: &mut String, table: &PgFelt, field: &DeadFieldWithId) {
+        let type_def = serde_json::to_string(&field.type_def).unwrap();
+        let name = field.name.replace('\'', "''");
+        write!(
+            w,
+            "({table}, {id}, '{name}', '{type_def}'::jsonb)",
+            id = field.id,
+        )
+        .unwrap();
+    }
+    let table: PgFelt = (*table).into();
+    let (last, rest) = fields.split_last()?;
+    let mut query = format!(
+        r#"INSERT INTO "{schema}"."{DEAD_MEMBERS_TABLE}" ("table", id, name, type_def) VALUES "#
+    );
+
+    for field in rest {
+        write(&mut query, &table, field);
+        query.push_str(", ");
+    }
+    write(&mut query, &table, last);
+    query
+        .push_str(
+            r#" ON CONFLICT ("table", id) DO UPDATE SET name = EXCLUDED.name, type_def = EXCLUDED.type_def"#,
+        );
+    Some(query)
 }

@@ -1,7 +1,7 @@
 use crate::{
     create::PostgresTypeExtractor,
     query::{ColumnUpgrade, StructMod, StructMods, TableUpgrade},
-    table::PgTable,
+    table::{DeadField, PgTable},
     HasherExt, PgSchema, PgTypeError, PgTypeResult, PostgresScalar, PostgresType, TableResult,
     UpgradeError, UpgradeResult, UpgradeResultExt,
 };
@@ -132,7 +132,7 @@ pub trait ExtractItem {
         schema: &Rc<PgSchema>,
         branch: &Xxh3,
         new: &ArrayDef,
-        dead: &mut HashMap<u128, MemberDef>,
+        dead: &mut HashMap<u128, DeadField>,
         queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>>;
     fn update_as_option(
@@ -140,7 +140,7 @@ pub trait ExtractItem {
         schema: &Rc<PgSchema>,
         branch: &Xxh3,
         new: &TypeDef,
-        dead: &mut HashMap<u128, MemberDef>,
+        dead: &mut HashMap<u128, DeadField>,
         queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>>;
     fn get_pg_type(&self, schema: &Rc<PgSchema>, branch: &Xxh3) -> PgTypeResult<PostgresType>;
@@ -184,7 +184,7 @@ impl ExtractItem for TypeDef {
         schema: &Rc<PgSchema>,
         branch: &Xxh3,
         new: &ArrayDef,
-        dead: &mut HashMap<u128, MemberDef>,
+        dead: &mut HashMap<u128, DeadField>,
         queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>> {
         self.as_array()?
@@ -198,7 +198,7 @@ impl ExtractItem for TypeDef {
         schema: &Rc<PgSchema>,
         branch: &Xxh3,
         new: &TypeDef,
-        dead: &mut HashMap<u128, MemberDef>,
+        dead: &mut HashMap<u128, DeadField>,
         queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>> {
         match self {
@@ -260,7 +260,7 @@ pub trait CompareType {
         schema: &Rc<PgSchema>,
         branch: &Xxh3,
         new: &Self,
-        dead: &mut HashMap<u128, MemberDef>,
+        dead: &mut HashMap<u128, DeadField>,
         queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>>;
 }
@@ -301,7 +301,7 @@ pub trait UpgradeField {
         name: &str,
         branch: &Xxh3,
         new: &Self,
-        dead: &mut HashMap<u128, MemberDef>,
+        dead: &mut HashMap<u128, DeadField>,
         queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<()> {
         let pg_type =
@@ -353,7 +353,7 @@ impl CompareType for TypeDef {
         schema: &Rc<PgSchema>,
         branch: &Xxh3,
         new: &TypeDef,
-        dead: &mut HashMap<u128, MemberDef>,
+        dead: &mut HashMap<u128, DeadField>,
         queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>> {
         use introspect_types::TypeDef::{
@@ -442,7 +442,7 @@ impl CompareType for StructDef {
         schema: &Rc<PgSchema>,
         branch: &Xxh3,
         new: &StructDef,
-        dead: &mut HashMap<u128, MemberDef>,
+        dead: &mut HashMap<u128, DeadField>,
         queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>> {
         let mut mods: Vec<StructMod> = Vec::new();
@@ -455,7 +455,7 @@ impl CompareType for StructDef {
             let branch = branch.branch(&member.name);
             if let Some(mut current) = current_map
                 .remove(&member.name)
-                .or_else(|| dead.remove(&branch.digest128()))
+                .or_else(|| dead.remove(&branch.digest128()).map(Into::into))
             {
                 current.upgrade_field(schema, &struct_name, &branch, member, dead, queries)?;
                 self.members.push(current);
@@ -465,7 +465,9 @@ impl CompareType for StructDef {
             }
         }
         for (_, dead_member) in current_map.drain() {
-            dead.insert(branch.branch(&dead_member.name).digest128(), dead_member);
+            let id = branch.branch(&dead_member.name).digest128();
+            queries.add_dead_member(id, &dead_member);
+            dead.insert(id, dead_member.into());
         }
         queries.add_struct_mod(schema, struct_name, mods);
         Ok(None)
@@ -478,7 +480,7 @@ impl CompareType for EnumDef {
         schema: &Rc<PgSchema>,
         branch: &Xxh3,
         new: &EnumDef,
-        dead: &mut HashMap<u128, MemberDef>,
+        dead: &mut HashMap<u128, DeadField>,
         queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>> {
         let mut rename = Vec::new();
@@ -518,7 +520,7 @@ impl CompareType for FixedArrayDef {
         schema: &Rc<PgSchema>,
         branch: &Xxh3,
         new: &Self,
-        dead: &mut HashMap<u128, MemberDef>,
+        dead: &mut HashMap<u128, DeadField>,
         queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>> {
         let pg_type = self
@@ -541,7 +543,7 @@ impl CompareType for TupleDef {
         schema: &Rc<PgSchema>,
         branch: &Xxh3,
         new: &Self,
-        dead: &mut HashMap<u128, MemberDef>,
+        dead: &mut HashMap<u128, DeadField>,
         queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>> {
         let mut mods = Vec::new();

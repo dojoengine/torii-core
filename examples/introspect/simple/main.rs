@@ -1,7 +1,6 @@
 use itertools::Itertools;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
-use torii::etl::EventContext;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::DojoToriiError;
@@ -28,7 +27,6 @@ async fn main() {
     let db = PostgresSimpleDb::new(pool.clone(), SCHEMA_NAME);
     decoder.store.initialize().await.unwrap();
     db.initialize_introspect_pg_sink().await.unwrap();
-    let context = EventContext::default();
     let mut event_n = 0;
     let mut success = 0;
     let mut running = true;
@@ -52,8 +50,8 @@ async fn main() {
                 }
             };
         }
-        let msgs_with_context = msgs.iter().map(|msg| (msg, &context)).collect_vec();
-        for res in db.process_messages(msgs_with_context).await.unwrap() {
+        let msgs_ref = msgs.iter().collect_vec();
+        for res in db.process_messages(msgs_ref).await.unwrap() {
             match res {
                 Err(err) => println!("Failed to process message: {err:?}"),
                 Ok(_) => success += 1,

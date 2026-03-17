@@ -1,8 +1,8 @@
 use std::ops::Deref;
 
 pub use async_trait::async_trait;
-use sqlx::migrate::Migrator;
 use sqlx::Postgres;
+use sqlx::{migrate::Migrator, Executor};
 pub use sqlx::{PgPool, Transaction};
 
 use crate::{migration::SchemaMigrator, SqlxResult};
@@ -24,7 +24,7 @@ pub trait PostgresConnection {
     async fn execute_queries(&self, queries: &[String]) -> SqlxResult<()> {
         let mut transaction = self.begin().await?;
         for query in queries {
-            sqlx::query(query).execute(&mut *transaction).await?;
+            transaction.execute(query.as_str()).await?;
         }
         transaction.commit().await
     }
