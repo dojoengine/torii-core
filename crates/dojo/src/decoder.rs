@@ -20,8 +20,8 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::RwLock;
 use torii::etl::event::EmittedEventExt;
-use torii::etl::{Decoder, Envelope, EventBody};
-use torii_introspect::events::IntrospectMsg;
+use torii::etl::{Decoder, Envelope, EventMsg};
+use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_introspect::schema::{TableMetadata, TableSchema};
 use torii_introspect::EventId;
 
@@ -288,11 +288,17 @@ where
         }
     }
 
-    pub async fn decode_raw_event(&self, raw: &EmittedEvent) -> DojoToriiResult<IntrospectMsg> {
+    pub async fn decode_raw_event_msg(&self, raw: &EmittedEvent) -> DojoToriiResult<IntrospectMsg> {
         let (selector, keys) = raw
             .split_keys()
             .ok_or(DojoToriiError::MissingEventSelector)?;
         self.decode_event_data(raw, selector, keys, &raw.data).await
+    }
+
+    pub async fn decode_raw_event(&self, raw: &EmittedEvent) -> DojoToriiResult<IntrospectBody> {
+        self.decode_raw_event_msg(raw)
+            .await
+            .map(|msg| msg.to_body(raw))
     }
 }
 
@@ -309,8 +315,8 @@ where
     async fn decode_event(&self, event: &EmittedEvent) -> AnyResult<Vec<Envelope>> {
         self.decode_raw_event(event)
             .await
-            .map(|msg| vec![EventBody::new_envelope(msg, event)])
-            .map_err(Into::into)
+            .map(|msg| vec![msg.into()])
+            .err_into()
     }
 }
 

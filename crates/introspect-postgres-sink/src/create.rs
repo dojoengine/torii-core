@@ -314,5 +314,9 @@ impl CreatePgTable {
             queries.push(pg_type.to_string());
         }
         queries.push(self.to_string());
+        queries.push(format!(
+            r#"CREATE TRIGGER set_timestamps BEFORE INSERT ON {} FOR EACH ROW EXECUTE FUNCTION introspect.set_default_timestamps();"#,
+            self.name
+        ));
     }
 }

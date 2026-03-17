@@ -1,5 +1,5 @@
 use crate::processor::PostgresSimpleDb;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
 use torii::axum::Router;
@@ -23,9 +23,9 @@ impl<T: Send + Sync + PostgresConnection> Sink for PostgresSimpleDb<T> {
         vec![TypeId::new("introspect")]
     }
 
-    async fn process(&self, envelopes: &[Envelope], batch: &ExtractionBatch) -> Result<()> {
+    async fn process(&self, envelopes: &[Envelope], _batch: &ExtractionBatch) -> Result<()> {
         let mut processed = 0usize;
-        let mut create_tables = 0usize;
+        let mut create_tables: usize = 0usize;
         let mut update_tables = 0usize;
         let mut inserts_fields = 0usize;
         let mut inserted_records = 0usize;
@@ -39,19 +39,10 @@ impl<T: Send + Sync + PostgresConnection> Sink for PostgresSimpleDb<T> {
             let Some(body) = envelope.downcast_ref::<IntrospectBody>() else {
                 continue;
             };
-
-            let context: torii::etl::EventContext = batch
-                .get_event_context(&body.transaction_hash, body.from_address)
-                .with_context(|| {
-                    format!(
-                        "failed to resolve event context for introspect tx {:#x}",
-                        body.transaction_hash
-                    )
-                })?;
-
-            self.process_message(&body.msg, &context).await?;
+            let (msg, metadata) = body.into();
+            self.process_message(msg, metadata).await?;
             processed += 1;
-            match &body.msg {
+            match msg {
                 IntrospectMsg::CreateTable(_) => create_tables += 1,
                 IntrospectMsg::UpdateTable(_) => update_tables += 1,
                 IntrospectMsg::InsertsFields(event) => {

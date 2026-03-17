@@ -112,16 +112,75 @@ impl std::fmt::Debug for Envelope {
     }
 }
 
-pub trait EventMsg {
-    fn event_id(&self) -> String;
-    fn envelope_type_id(&self) -> TypeId;
+#[derive(Debug, Clone)]
+pub struct MetaData {
+    pub block_number: u64,
+    pub transaction_hash: Felt,
+    pub from_address: Felt,
 }
 
 #[derive(Debug, Clone)]
-pub struct EventBody<T: EventMsg + 'static + Send + Sync> {
-    pub from_address: Felt,
-    pub transaction_hash: Felt,
+pub struct EventBody<T> {
+    pub meta_data: MetaData,
     pub msg: T,
+}
+
+pub trait EventMsg: Send + Sync + 'static {
+    fn event_id(&self) -> String;
+    fn envelope_type_id(&self) -> TypeId;
+    fn to_body(self, raw: &EmittedEvent) -> EventBody<Self>
+    where
+        Self: Sized,
+    {
+        EventBody {
+            meta_data: raw.into(),
+            msg: self,
+        }
+    }
+    fn to_envelope(self, raw: &EmittedEvent) -> Envelope
+    where
+        Self: Sized,
+    {
+        Envelope::new(self.event_id(), Box::new(self.to_body(raw)), HashMap::new())
+    }
+}
+
+impl<T> From<EventBody<T>> for (T, MetaData) {
+    fn from(value: EventBody<T>) -> Self {
+        (value.msg, value.meta_data)
+    }
+}
+
+impl<T> From<(T, MetaData)> for EventBody<T> {
+    fn from(value: (T, MetaData)) -> Self {
+        let (msg, meta_data) = value;
+        EventBody { msg, meta_data }
+    }
+}
+
+impl<'a, T> From<&'a EventBody<T>> for (&'a T, &'a MetaData) {
+    fn from(value: &'a EventBody<T>) -> Self {
+        (&value.msg, &value.meta_data)
+    }
+}
+impl From<&EmittedEvent> for MetaData {
+    fn from(value: &EmittedEvent) -> Self {
+        MetaData {
+            block_number: value.block_number.unwrap(),
+            transaction_hash: value.transaction_hash,
+            from_address: value.from_address,
+        }
+    }
+}
+
+impl<T: EventMsg + Send + Sync + 'static> From<EventBody<T>> for Envelope {
+    fn from(value: EventBody<T>) -> Self {
+        Envelope::new(
+            value.msg.event_id(),
+            Box::new(value),
+            HashMap::new(), // You can add relevant metadata here
+        )
+    }
 }
 
 impl<T> TypedBody for EventBody<T>
@@ -138,21 +197,5 @@ where
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
-    }
-}
-
-impl<T: EventMsg + 'static + Send + Sync> EventBody<T> {
-    pub fn new(msg: T, raw: &EmittedEvent) -> Self {
-        Self {
-            from_address: raw.from_address,
-            transaction_hash: raw.transaction_hash,
-            msg,
-        }
-    }
-
-    pub fn new_envelope(msg: T, raw: &EmittedEvent) -> Envelope {
-        let id = msg.event_id();
-        let event_body = Self::new(msg, raw);
-        Envelope::new(id, Box::new(event_body), HashMap::new())
     }
 }

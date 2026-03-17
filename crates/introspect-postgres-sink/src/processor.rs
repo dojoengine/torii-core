@@ -3,7 +3,6 @@ use crate::query::CreatePgTable;
 use crate::table::{DeadField, PgTable};
 use crate::{PgDbError, PgDbResult, PgSchema, INTROSPECT_PG_SINK_MIGRATIONS};
 use introspect_types::{ColumnInfo, ResultInto, TypeDef};
-use serde::ser::SerializeMap;
 use serde_json::Serializer as JsonSerializer;
 use sqlx::types::Json;
 use sqlx::{FromRow, PgPool};
@@ -13,12 +12,11 @@ use std::io::Write;
 use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::RwLock;
-use torii::etl::EventContext;
-use torii_introspect::events::IntrospectMsg;
+use torii::etl::envelope::MetaData;
+use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_introspect::postgres::types::Uint128;
 use torii_introspect::postgres::PgFelt;
 use torii_introspect::schema::TableSchema;
-use torii_introspect::tables::SerializeEntries;
 use torii_introspect::InsertsFields;
 use torii_postgres::PostgresConnection;
 
@@ -75,34 +73,6 @@ impl From<Option<&str>> for PgSchema {
             Some(s) => Self::Custom(s.to_string()),
             None => PgSchema::Public,
         }
-    }
-}
-
-impl From<&EventContext> for MetaData {
-    fn from(value: &EventContext) -> Self {
-        MetaData {
-            block_number: value.block.number,
-            transaction_hash: value.transaction.hash,
-        }
-    }
-}
-struct MetaData {
-    block_number: u64,
-    transaction_hash: Felt,
-}
-
-impl SerializeEntries for MetaData {
-    fn entry_count(&self) -> usize {
-        4
-    }
-    fn serialize_entries<S: serde::Serializer>(
-        &self,
-        map: &mut <S as serde::Serializer>::SerializeMap,
-    ) -> Result<(), S::Error> {
-        map.serialize_entry("__created_block", &self.block_number)?;
-        map.serialize_entry("__updated_block", &self.block_number)?;
-        map.serialize_entry("__created_tx", &self.transaction_hash)?;
-        map.serialize_entry("__updated_tx", &self.transaction_hash)
     }
 }
 
@@ -210,7 +180,7 @@ impl PostgresTables {
         &self,
         schema: &Rc<PgSchema>,
         msg: &IntrospectMsg,
-        context: &EventContext,
+        metadata: &MetaData,
         queries: &mut Vec<String>,
     ) -> PgDbResult<()> {
         match msg {
@@ -224,7 +194,7 @@ impl PostgresTables {
             | IntrospectMsg::DropTable(_)
             | IntrospectMsg::RenameColumns(_)
             | IntrospectMsg::RenamePrimary(_) => Ok(()),
-            IntrospectMsg::InsertsFields(event) => self.insert_fields(event, context, queries),
+            IntrospectMsg::InsertsFields(event) => self.insert_fields(event, metadata, queries),
             IntrospectMsg::DeleteRecords(_) | IntrospectMsg::DeletesFields(_) => Ok(()),
         }
     }
@@ -345,13 +315,13 @@ impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
     pub async fn process_message(
         &self,
         msg: &IntrospectMsg,
-        context: &EventContext,
+        metadata: &MetaData,
     ) -> PgDbResult<()> {
         let mut queries = Vec::new();
         {
             let schema = Rc::new(self.schema.clone());
             self.tables
-                .handle_message(&schema, msg, context, &mut queries)?;
+                .handle_message(&schema, msg, metadata, &mut queries)?;
         }
         self.execute_queries(&queries).await?;
         Ok(())
@@ -359,16 +329,17 @@ impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
 
     pub async fn process_messages(
         &self,
-        msgs: Vec<(&IntrospectMsg, &EventContext)>,
+        msgs: Vec<&IntrospectBody>,
     ) -> PgDbResult<Vec<PgDbResult<()>>> {
         let mut queries = Vec::new();
         let mut results = Vec::with_capacity(msgs.len());
         {
             let schema = Rc::new(self.schema.clone());
-            for (msg, context) in msgs {
+            for body in msgs {
+                let (msg, metadata) = body.into();
                 results.push(
                     self.tables
-                        .handle_message(&schema, msg, context, &mut queries),
+                        .handle_message(&schema, msg, metadata, &mut queries),
                 );
             }
         }
@@ -386,7 +357,7 @@ impl<T: PostgresConnection + Send + Sync> PostgresSimpleDb<T> {
 
 pub struct MessageWithContext<'a, M> {
     pub msg: &'a M,
-    pub context: &'a EventContext,
+    pub context: &'a MetaData,
 }
 
 #[cfg(test)]
