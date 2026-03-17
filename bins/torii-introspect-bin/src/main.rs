@@ -2,7 +2,7 @@
 
 mod config;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use clap::Parser;
 use config::{Config, StorageBackend};
 use sqlx::postgres::PgPoolOptions;
@@ -12,7 +12,6 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use torii::etl::decoder::DecoderId;
-use torii::etl::engine_db::{EngineDb, EngineDbConfig};
 use torii::etl::extractor::{
     ContractEventConfig, EventExtractor, EventExtractorConfig, RetryPolicy,
 };
@@ -88,7 +87,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         if config.ignore_saved_state {
             "ignoring persisted extractor state"
         } else {
-            "failing closed if persisted extractor state exists"
+            "resuming from persisted extractor state when available"
         }
     );
     tracing::info!(
@@ -129,12 +128,6 @@ async fn run_indexer(config: Config) -> Result<()> {
     if matches!(backend, StorageBackend::Sqlite) {
         tokio::fs::create_dir_all(db_dir).await?;
     }
-
-    let engine_db = EngineDb::new(EngineDbConfig {
-        path: engine_database_url.clone(),
-    })
-    .await?;
-    ensure_no_saved_state(&engine_db, &contracts, config.ignore_saved_state).await?;
 
     match backend {
         StorageBackend::Postgres => {
@@ -312,41 +305,4 @@ async fn run_with_sqlite(
         .await
         .map_err(|e| anyhow::anyhow!("Torii error: {e}"))?;
     Ok(())
-}
-
-async fn ensure_no_saved_state(
-    engine_db: &EngineDb,
-    contracts: &[Felt],
-    ignore_saved_state: bool,
-) -> Result<()> {
-    if ignore_saved_state {
-        return Ok(());
-    }
-
-    let mut owners_with_saved_state = Vec::new();
-    for owner in contracts {
-        let state_key = format!("{owner:#x}");
-        if engine_db
-            .get_extractor_state("event", &state_key)
-            .await?
-            .is_some()
-        {
-            owners_with_saved_state.push(*owner);
-        }
-    }
-
-    if owners_with_saved_state.is_empty() {
-        return Ok(());
-    }
-
-    bail!(
-        "persisted extractor state exists for contract(s): {}. \
-         Historical schema bootstrap is not supported on this branch; \
-         re-run with --ignore-saved-state or use a fresh database",
-        owners_with_saved_state
-            .iter()
-            .map(|owner| format!("{owner:#x}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
 }

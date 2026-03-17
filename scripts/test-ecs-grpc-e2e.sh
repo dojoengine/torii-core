@@ -9,6 +9,7 @@ GRPC_ADDR="${GRPC_ADDR:-localhost:3000}"
 DB_PATH="${DB_PATH:-${REPO_ROOT}/torii-data/introspect.db}"
 DB_URL="${DB_URL:-${DATABASE_URL:-}}"
 LIMIT="${LIMIT:-1}"
+RUN_SUBSCRIPTIONS_SMOKE="${RUN_SUBSCRIPTIONS_SMOKE:-1}"
 
 log() {
   printf '[ecs-e2e] %s\n' "$*"
@@ -43,27 +44,27 @@ model_name_query() {
   case "$DB_BACKEND" in
     sqlite)
       cat <<EOF
-SELECT json_extract(m.table_json, '$.name')
+SELECT m.name
 FROM torii_ecs_table_kinds k
-JOIN torii_dojo_manager_state m
+JOIN dojo_tables m
   ON ltrim(lower(hex(m.owner)), '0') = ltrim(substr(k.world_address, 3), '0')
- AND ltrim(lower(hex(m.table_id)), '0') = ltrim(substr(k.table_id, 3), '0')
+ AND ltrim(lower(hex(m.id)), '0') = ltrim(substr(k.table_id, 3), '0')
 WHERE k.world_address = '$WORLD_ADDRESS'
   AND k.kind = '$kind'
-ORDER BY json_extract(m.table_json, '$.name')
+ORDER BY m.name
 LIMIT 1;
 EOF
       ;;
     postgres)
       cat <<EOF
-SELECT m.table_json::json ->> 'name'
+SELECT m.name
 FROM torii_ecs_table_kinds k
-JOIN torii_dojo_manager_state m
+JOIN dojo_tables m
   ON ltrim(lower(encode(m.owner, 'hex')), '0') = ltrim(substr(k.world_address, 3), '0')
- AND ltrim(lower(encode(m.table_id, 'hex')), '0') = ltrim(substr(k.table_id, 3), '0')
+ AND ltrim(lower(encode(m.id, 'hex')), '0') = ltrim(substr(k.table_id, 3), '0')
 WHERE k.world_address = '$WORLD_ADDRESS'
   AND k.kind = '$kind'
-ORDER BY m.table_json::json ->> 'name'
+ORDER BY m.name
 LIMIT 1;
 EOF
       ;;
@@ -132,6 +133,7 @@ require_cmd rg
 require_cmd xxd
 require_cmd base64
 require_cmd mktemp
+require_cmd python3
 
 if [[ -n "$DB_URL" && "$DB_URL" =~ ^postgres(ql)?:// ]]; then
   DB_BACKEND="postgres"
@@ -235,6 +237,12 @@ grpc_call \
 assert_non_empty_events "$events_output"
 
 log "verification passed"
+
+if [[ "$RUN_SUBSCRIPTIONS_SMOKE" == "1" ]]; then
+  log "running subscriptions smoke checks"
+  GRPC_ADDR="$GRPC_ADDR" python3 "$REPO_ROOT/scripts/test-ecs-subscriptions-smoke.py"
+fi
+
 if [[ "${KEEP_TMP:-0}" == "1" ]]; then
   log "artifacts kept in $tmp_dir"
 fi

@@ -2,6 +2,7 @@ use crate::json::SqliteJsonSerializer;
 use crate::table::{SqliteTable, SqliteTableError};
 use crate::INTROSPECT_SQLITE_SINK_MIGRATIONS;
 use serde_json::{Serializer as JsonSerializer, Value};
+use sqlx::Row;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -181,6 +182,70 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
     pub async fn initialize_introspect_sqlite_sink(&self) -> SqliteDbResult<()> {
         self.migrate(Some("introspect"), INTROSPECT_SQLITE_SINK_MIGRATIONS)
             .await?;
+        self.load_persisted_state().await?;
+        Ok(())
+    }
+
+    async fn load_persisted_state(&self) -> SqliteDbResult<()> {
+        let rows = sqlx::query(
+            r#"
+            SELECT table_schema_json, alive
+            FROM introspect_sink_schema_state
+            ORDER BY updated_at ASC
+            "#,
+        )
+        .fetch_all(self.pool())
+        .await?;
+
+        let mut tables = self.tables.write()?;
+        for row in rows {
+            let schema_json: String = row.try_get("table_schema_json")?;
+            let alive: i64 = row.try_get("alive")?;
+            let table_schema: TableSchema = serde_json::from_str(&schema_json)?;
+            let (id, mut table) =
+                SqliteTable::new_from_table(self.namespace.prefix(), table_schema);
+            table.alive = alive != 0;
+            tables.insert(id, table);
+        }
+
+        Ok(())
+    }
+
+    async fn persist_table_state(&self, table: &TableSchema, alive: bool) -> SqliteDbResult<()> {
+        let schema_json = serde_json::to_string(table)?;
+        let alive = i64::from(alive);
+        sqlx::query(
+            r#"
+            INSERT INTO introspect_sink_schema_state (table_id, table_schema_json, alive, updated_at)
+            VALUES (?1, ?2, ?3, unixepoch())
+            ON CONFLICT (table_id)
+            DO UPDATE SET
+                table_schema_json = excluded.table_schema_json,
+                alive = excluded.alive,
+                updated_at = unixepoch()
+            "#,
+        )
+        .bind(format!("{:#x}", table.id))
+        .bind(schema_json)
+        .bind(alive)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    async fn persist_alive_state(&self, table_id: Felt, alive: bool) -> SqliteDbResult<()> {
+        let alive = i64::from(alive);
+        sqlx::query(
+            r#"
+            UPDATE introspect_sink_schema_state
+            SET alive = ?1, updated_at = unixepoch()
+            WHERE table_id = ?2
+            "#,
+        )
+        .bind(alive)
+        .bind(format!("{table_id:#x}"))
+        .execute(self.pool())
+        .await?;
         Ok(())
     }
 
@@ -202,13 +267,30 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
             IntrospectMsg::CreateTable(event) => {
                 let (_, query) = self.tables.create_table(&self.namespace, event.clone())?;
                 self.execute_queries(&[query]).await?;
+                self.persist_table_state(&event.clone().into(), true)
+                    .await?;
                 Ok(())
             }
-            IntrospectMsg::UpdateTable(event) => self.tables.set_table_dead(&event.id),
-            IntrospectMsg::AddColumns(event) => self.tables.set_table_dead(&event.table),
-            IntrospectMsg::DropColumns(event) => self.tables.set_table_dead(&event.table),
-            IntrospectMsg::RetypeColumns(event) => self.tables.set_table_dead(&event.table),
-            IntrospectMsg::RetypePrimary(event) => self.tables.set_table_dead(&event.table),
+            IntrospectMsg::UpdateTable(event) => {
+                self.tables.set_table_dead(&event.id)?;
+                self.persist_alive_state(event.id, false).await
+            }
+            IntrospectMsg::AddColumns(event) => {
+                self.tables.set_table_dead(&event.table)?;
+                self.persist_alive_state(event.table, false).await
+            }
+            IntrospectMsg::DropColumns(event) => {
+                self.tables.set_table_dead(&event.table)?;
+                self.persist_alive_state(event.table, false).await
+            }
+            IntrospectMsg::RetypeColumns(event) => {
+                self.tables.set_table_dead(&event.table)?;
+                self.persist_alive_state(event.table, false).await
+            }
+            IntrospectMsg::RetypePrimary(event) => {
+                self.tables.set_table_dead(&event.table)?;
+                self.persist_alive_state(event.table, false).await
+            }
             IntrospectMsg::RenameTable(_)
             | IntrospectMsg::DropTable(_)
             | IntrospectMsg::RenameColumns(_)

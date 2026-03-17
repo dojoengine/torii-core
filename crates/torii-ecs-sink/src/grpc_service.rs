@@ -2293,8 +2293,17 @@ fn value_as_bytes(value: &Value) -> Vec<u8> {
 }
 
 fn value_as_felt_bytes(value: &Value) -> Result<Vec<u8>> {
+    if value.is_null() {
+        return Ok(Felt::ZERO.to_bytes_be().to_vec());
+    }
+
     let string = value_as_string(value);
-    Ok(felt_from_hex(&string)?.to_bytes_be().to_vec())
+    let trimmed = string.trim();
+    if trimmed.is_empty() {
+        return Ok(Felt::ZERO.to_bytes_be().to_vec());
+    }
+
+    Ok(felt_from_hex(trimmed)?.to_bytes_be().to_vec())
 }
 
 fn value_to_primary_felt(value: &Value, type_def: &PrimaryTypeDef) -> Result<Felt> {
@@ -2549,4 +2558,370 @@ fn felt_from_hex(value: &str) -> Result<Felt> {
 
 fn felt_from_bytes(value: &[u8]) -> Result<Felt> {
     Ok(Felt::from_bytes_be_slice(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use introspect_types::{ColumnDef, PrimaryDef, PrimaryTypeDef, TypeDef};
+    use tokio::time::{timeout, Duration};
+    use tokio_stream::StreamExt;
+
+    fn test_db_path(name: &str) -> String {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        format!("sqlite:file:torii-ecs-sink-{name}-{nonce}?mode=memory&cache=shared")
+    }
+
+    fn member_bool_clause(model: &str, member: &str, value: bool) -> types::Clause {
+        types::Clause {
+            clause_type: Some(ClauseType::Member(types::MemberClause {
+                model: model.to_string(),
+                member: member.to_string(),
+                operator: ComparisonOperator::Eq as i32,
+                value: Some(types::MemberValue {
+                    value_type: Some(ValueType::Primitive(types::Primitive {
+                        primitive_type: Some(types::primitive::PrimitiveType::Bool(value)),
+                    })),
+                }),
+            })),
+        }
+    }
+
+    async fn seed_entity(
+        service: &EcsService,
+        kind: TableKind,
+        world_address: Felt,
+        table_id: Felt,
+        table_name: &str,
+        entity_id: Felt,
+        open: bool,
+    ) {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS dojo_tables (
+                owner BLOB NOT NULL,
+                id BLOB NOT NULL,
+                name TEXT NOT NULL,
+                attributes TEXT NOT NULL,
+                keys_json TEXT NOT NULL,
+                values_json TEXT NOT NULL,
+                legacy INTEGER NOT NULL,
+                created_at INTEGER,
+                updated_at INTEGER,
+                created_block INTEGER,
+                updated_block INTEGER,
+                created_tx BLOB,
+                updated_tx BLOB,
+                PRIMARY KEY(owner, id)
+            )",
+        )
+        .execute(&service.state.pool)
+        .await
+        .expect("create dojo_tables");
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS dojo_columns (
+                owner BLOB NOT NULL,
+                table_id BLOB NOT NULL,
+                id BLOB NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY(owner, table_id, id)
+            )",
+        )
+        .execute(&service.state.pool)
+        .await
+        .expect("create dojo_columns");
+
+        let table = CreateTable {
+            id: table_id,
+            name: table_name.to_string(),
+            attributes: vec![],
+            primary: PrimaryDef {
+                name: "entity_id".to_string(),
+                attributes: vec![],
+                type_def: PrimaryTypeDef::Felt252,
+            },
+            columns: vec![ColumnDef {
+                id: Felt::from(1_u64),
+                name: "open".to_string(),
+                attributes: vec![],
+                type_def: TypeDef::Bool,
+            }],
+        };
+
+        service.cache_created_table(world_address, &table).await;
+        service
+            .record_table_kind(world_address, table_id, kind)
+            .await
+            .expect("record table kind");
+        service
+            .upsert_entity_meta(kind, world_address, table_id, entity_id, 1, false)
+            .await
+            .expect("upsert entity meta");
+
+        let row_json = serde_json::json!({ "open": open }).to_string();
+        sqlx::query(
+            "INSERT INTO torii_ecs_entity_models (
+                kind, world_address, table_id, entity_id, row_json, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(kind, world_address, table_id, entity_id) DO UPDATE SET
+                row_json = excluded.row_json,
+                updated_at = excluded.updated_at",
+        )
+        .bind(kind.as_str())
+        .bind(felt_hex(world_address))
+        .bind(felt_hex(table_id))
+        .bind(felt_hex(entity_id))
+        .bind(row_json)
+        .bind(1_i64)
+        .execute(&service.state.pool)
+        .await
+        .expect("insert entity model");
+    }
+
+    #[tokio::test]
+    async fn subscribe_entities_update_flow() {
+        let db_path = test_db_path("entities-sub");
+        let service = EcsService::new(&db_path, Some(1))
+            .await
+            .expect("service init");
+        let world = Felt::from(10_u64);
+        let table = Felt::from(20_u64);
+        let entity = Felt::from(30_u64);
+        seed_entity(
+            &service,
+            TableKind::Entity,
+            world,
+            table,
+            "test-Lobby",
+            entity,
+            true,
+        )
+        .await;
+
+        let response = service
+            .subscribe_entities(Request::new(SubscribeEntitiesRequest {
+                clause: Some(member_bool_clause("test-Lobby", "open", true)),
+                world_addresses: vec![world.to_bytes_be().to_vec()],
+            }))
+            .await
+            .expect("subscribe entities");
+        let mut stream = response.into_inner();
+
+        let setup = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("setup timeout")
+            .expect("setup frame")
+            .expect("setup ok");
+        let subscription_id = setup.subscription_id;
+        assert!(setup.entity.is_none());
+
+        service
+            .publish_entity_update(TableKind::Entity, world, entity)
+            .await
+            .expect("publish entity update");
+        let matched = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("entity timeout")
+            .expect("entity frame")
+            .expect("entity ok");
+        assert_eq!(matched.subscription_id, subscription_id);
+        let matched_entity = matched.entity.expect("entity payload");
+        assert_eq!(matched_entity.world_address, world.to_bytes_be().to_vec());
+
+        service
+            .update_entities_subscription(Request::new(UpdateEntitiesSubscriptionRequest {
+                subscription_id,
+                clause: Some(member_bool_clause("test-Lobby", "open", false)),
+                world_addresses: vec![world.to_bytes_be().to_vec()],
+            }))
+            .await
+            .expect("update entities subscription");
+
+        service
+            .publish_entity_update(TableKind::Entity, world, entity)
+            .await
+            .expect("publish filtered entity update");
+        let filtered = timeout(Duration::from_millis(150), stream.next()).await;
+        assert!(filtered.is_err(), "entity should be filtered out");
+    }
+
+    #[tokio::test]
+    async fn subscribe_event_messages_update_flow() {
+        let db_path = test_db_path("event-messages-sub");
+        let service = EcsService::new(&db_path, Some(1))
+            .await
+            .expect("service init");
+        let world = Felt::from(101_u64);
+        let table = Felt::from(201_u64);
+        let entity = Felt::from(301_u64);
+        seed_entity(
+            &service,
+            TableKind::EventMessage,
+            world,
+            table,
+            "test-EventMessage",
+            entity,
+            true,
+        )
+        .await;
+
+        let response = service
+            .subscribe_event_messages(Request::new(SubscribeEntitiesRequest {
+                clause: Some(member_bool_clause("test-EventMessage", "open", true)),
+                world_addresses: vec![world.to_bytes_be().to_vec()],
+            }))
+            .await
+            .expect("subscribe event messages");
+        let mut stream = response.into_inner();
+
+        let setup = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("setup timeout")
+            .expect("setup frame")
+            .expect("setup ok");
+        let subscription_id = setup.subscription_id;
+        assert!(setup.entity.is_none());
+
+        service
+            .publish_entity_update(TableKind::EventMessage, world, entity)
+            .await
+            .expect("publish event message update");
+        let matched = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("event message timeout")
+            .expect("event message frame")
+            .expect("event message ok");
+        assert_eq!(matched.subscription_id, subscription_id);
+        assert!(matched.entity.is_some());
+
+        service
+            .update_event_messages_subscription(Request::new(UpdateEntitiesSubscriptionRequest {
+                subscription_id,
+                clause: Some(member_bool_clause("test-EventMessage", "open", false)),
+                world_addresses: vec![world.to_bytes_be().to_vec()],
+            }))
+            .await
+            .expect("update event messages subscription");
+
+        service
+            .publish_entity_update(TableKind::EventMessage, world, entity)
+            .await
+            .expect("publish filtered event message update");
+        let filtered = timeout(Duration::from_millis(150), stream.next()).await;
+        assert!(filtered.is_err(), "event message should be filtered out");
+    }
+
+    #[tokio::test]
+    async fn subscribe_events_keys_filter() {
+        let db_path = test_db_path("events-sub");
+        let service = EcsService::new(&db_path, Some(1))
+            .await
+            .expect("service init");
+        let world = Felt::from(1_u64);
+        let tx1 = Felt::from(2_u64);
+        let tx2 = Felt::from(3_u64);
+        let key_match = Felt::from(444_u64);
+
+        let response = service
+            .subscribe_events(Request::new(SubscribeEventsRequest {
+                keys: vec![types::KeysClause {
+                    keys: vec![key_match.to_bytes_be().to_vec()],
+                    pattern_matching: PatternMatching::VariableLen as i32,
+                    models: vec![],
+                }],
+            }))
+            .await
+            .expect("subscribe events");
+        let mut stream = response.into_inner();
+
+        let setup = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("setup timeout")
+            .expect("setup frame")
+            .expect("setup ok");
+        assert!(setup.event.is_none());
+
+        service
+            .store_event(
+                world,
+                tx1,
+                1,
+                1,
+                &[Felt::from(999_u64)],
+                &[Felt::from(7_u64)],
+                0,
+            )
+            .await
+            .expect("store non matching event");
+        let no_match = timeout(Duration::from_millis(150), stream.next()).await;
+        assert!(
+            no_match.is_err(),
+            "non matching event should be filtered out"
+        );
+
+        service
+            .store_event(world, tx2, 1, 1, &[key_match, Felt::from(123_u64)], &[], 1)
+            .await
+            .expect("store matching event");
+        let matched = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("matched timeout")
+            .expect("matched frame")
+            .expect("matched ok");
+        let event = matched.event.expect("event payload");
+        assert_eq!(event.transaction_hash, tx2.to_bytes_be().to_vec());
+        assert_eq!(
+            event.keys.first().cloned(),
+            Some(key_match.to_bytes_be().to_vec())
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_contracts_query_filter() {
+        let db_path = test_db_path("contracts-sub");
+        let service = EcsService::new(&db_path, Some(1))
+            .await
+            .expect("service init");
+        let world_contract = Felt::from(1111_u64);
+        let other_contract = Felt::from(2222_u64);
+
+        let response = service
+            .subscribe_contracts(Request::new(SubscribeContractsRequest {
+                query: Some(types::ContractQuery {
+                    contract_addresses: vec![world_contract.to_bytes_be().to_vec()],
+                    contract_types: vec![ContractType::World as i32],
+                }),
+            }))
+            .await
+            .expect("subscribe contracts");
+        let mut stream = response.into_inner();
+
+        service
+            .record_contract_progress(other_contract, ContractType::World, 7, 77, None)
+            .await
+            .expect("record other contract progress");
+        let no_match = timeout(Duration::from_millis(150), stream.next()).await;
+        assert!(
+            no_match.is_err(),
+            "non matching contract should be filtered out"
+        );
+
+        service
+            .record_contract_progress(world_contract, ContractType::World, 9, 99, None)
+            .await
+            .expect("record world contract progress");
+        let matched = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("matched timeout")
+            .expect("matched frame")
+            .expect("matched ok");
+        let contract = matched.contract.expect("contract payload");
+        assert_eq!(
+            contract.contract_address,
+            world_contract.to_bytes_be().to_vec()
+        );
+        assert_eq!(contract.contract_type, ContractType::World as i32);
+    }
 }

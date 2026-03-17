@@ -81,9 +81,6 @@ pub struct Config {
     pub max_db_connections: Option<u32>,
 
     /// Ignore persisted extractor state and force extraction from `from_block`.
-    ///
-    /// This binary no longer supports historical schema bootstrap, so resumed
-    /// runs must opt into a fresh extraction window explicitly.
     #[arg(long)]
     pub ignore_saved_state: bool,
 }

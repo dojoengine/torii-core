@@ -1,11 +1,12 @@
 use crate::json::PostgresJsonSerializer;
 use crate::query::CreatePgTable;
+use crate::sql::write_conflict_res;
 use crate::table::{DeadField, PgTable};
 use crate::{PgDbError, PgDbResult, PgSchema, INTROSPECT_PG_SINK_MIGRATIONS};
 use introspect_types::{ColumnInfo, ResultInto, TypeDef};
 use serde_json::Serializer as JsonSerializer;
 use sqlx::types::Json;
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgPool, Row};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::io::Write;
@@ -330,6 +331,30 @@ impl<T: PostgresConnection + Send + Sync> IntrospectPgDb<T> {
                 .handle_message(&schema, msg, metadata, &mut queries)?;
         }
         self.execute_queries(&queries).await?;
+
+        match msg {
+            IntrospectMsg::CreateTable(event) => {
+                self.persist_table_state(&event.clone().into(), true)
+                    .await?;
+            }
+            IntrospectMsg::UpdateTable(event) => {
+                self.persist_alive_state(event.id, false).await?;
+            }
+            IntrospectMsg::AddColumns(event) => {
+                self.persist_alive_state(event.table, false).await?;
+            }
+            IntrospectMsg::DropColumns(event) => {
+                self.persist_alive_state(event.table, false).await?;
+            }
+            IntrospectMsg::RetypeColumns(event) => {
+                self.persist_alive_state(event.table, false).await?;
+            }
+            IntrospectMsg::RetypePrimary(event) => {
+                self.persist_alive_state(event.table, false).await?;
+            }
+            _ => {}
+        }
+
         Ok(())
     }
 
@@ -365,105 +390,3 @@ pub struct MessageWithContext<'a, M> {
     pub msg: &'a M,
     pub context: &'a MetaData,
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use introspect_types::{ColumnDef, PrimaryDef, PrimaryTypeDef, TypeDef};
-//     use torii_introspect::{CreateTable, UpdateTable};
-
-//     fn primary() -> PrimaryDef {
-//         PrimaryDef {
-//             name: "entity_id".to_string(),
-//             attributes: vec![],
-//             type_def: PrimaryTypeDef::Felt252,
-//         }
-//     }
-
-//     fn column(id: u64, name: &str) -> ColumnDef {
-//         ColumnDef {
-//             id: Felt::from(id),
-//             name: name.to_string(),
-//             attributes: vec![],
-//             type_def: TypeDef::U32,
-//         }
-//     }
-
-//     fn create_table(id: u64, columns: Vec<ColumnDef>) -> CreateTable {
-//         CreateTable {
-//             id: Felt::from(id),
-//             name: "duel-state".to_string(),
-//             attributes: vec![],
-//             primary: primary(),
-//             columns,
-//         }
-//     }
-
-//     fn update_table(id: u64, columns: Vec<ColumnDef>) -> UpdateTable {
-//         UpdateTable {
-//             id: Felt::from(id),
-//             name: "duel-state".to_string(),
-//             attributes: vec![],
-//             primary: primary(),
-//             columns,
-//         }
-//     }
-
-//     // #[test]
-//     // fn update_table_creates_unknown_table() {
-//     //     let mut tables = PostgresTables::default();
-//     //     let mut queries = Vec::new();
-//     //     let schema = PgSchema::Public;
-//     //     tables
-//     //         .update_table(
-//     //             &schema,
-//     //             update_table(1, vec![column(10, "duelist_count")]),
-//     //             &mut queries,
-//     //         )
-//     //         .unwrap();
-
-//     //     assert!(!queries.is_empty());
-//     //     assert!(queries
-//     //         .iter()
-//     //         .any(|query| query.contains("CREATE TABLE IF NOT EXISTS")));
-//     //     assert!(tables.read().unwrap().contains_key(&Felt::from(1_u64)));
-//     // }
-
-//     // #[test]
-//     // fn update_table_emits_alter_queries_for_new_columns() {
-//     //     let mut tables = PostgresTables::default();
-//     //     let mut create_queries = Vec::new();
-//     //     let schema = PgSchema::Public;
-//     //     tables
-//     //         .create_table(
-//     //             &schema,
-//     //             create_table(1, vec![column(10, "duelist_count")]),
-//     //             &mut create_queries,
-//     //         )
-//     //         .unwrap();
-
-//     //     let mut update_queries = Vec::new();
-//     //     tables
-//     //         .update_table(
-//     //             &schema,
-//     //             update_table(
-//     //                 1,
-//     //                 vec![
-//     //                     column(10, "duelist_count"),
-//     //                     column(11, "alive_duelist_count"),
-//     //                 ],
-//     //             ),
-//     //             &EventContext::default(),
-//     //             &mut update_queries,
-//     //         )
-//     //         .unwrap();
-
-//     //     assert!(update_queries
-//     //         .iter()
-//     //         .any(|query| query.contains("ALTER TABLE") && query.contains("alive_duelist_count")));
-//     //     assert!(tables.read().unwrap()[&Felt::from(1_u64)]
-//     //         .columns
-//     //         .values()
-//     //         .any(|column| column.name == "alive_duelist_count"));
-//     // }
-// }
