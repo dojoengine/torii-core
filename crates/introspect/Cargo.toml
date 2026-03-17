@@ -22,8 +22,10 @@ sqlx = { workspace = true, features = [
     "runtime-tokio-rustls",
     "macros",
     "migrate",
+    "bigdecimal",
 ] }
 async-trait.workspace = true
+bigdecimal.workspace = true
 
 [build-dependencies]
 tonic-build = "0.12"

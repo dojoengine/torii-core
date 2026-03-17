@@ -14,6 +14,13 @@ impl CairoTypeSerialization for PostgresJsonSerializer {
     ) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&format!("\\x{}", hex::encode(value)))
     }
+    fn serialize_string<S: Serializer>(
+        &self,
+        serializer: S,
+        value: &str,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.replace('\0', "\u{FFFD}"))
+    }
     fn serialize_felt<S: Serializer>(
         &self,
         serializer: S,
@@ -51,13 +58,13 @@ impl CairoTypeSerialization for PostgresJsonSerializer {
         match type_def {
             TypeDef::None => {
                 let mut map = serializer.serialize_map(Some(1))?;
-                map.serialize_entry("variant", name)?;
+                map.serialize_entry("_variant", name)?;
                 map
             }
             _ => {
                 let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("variant", name)?;
-                map.serialize_entry(&format!("_{name}"), &type_def.to_de_se(data, self))?;
+                map.serialize_entry("_variant", name)?;
+                map.serialize_entry(name, &type_def.to_de_se(data, self))?;
                 map
             }
         }

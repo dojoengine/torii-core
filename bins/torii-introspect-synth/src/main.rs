@@ -26,7 +26,7 @@ use torii::etl::Decoder;
 use torii::grpc::SubscriptionManager;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::postgres::PgStore;
-use torii_introspect_postgres_sink::processor::IntrospectPgDb;
+use torii_introspect_postgres_sink::IntrospectPgDb;
 
 const EXTRACTOR_TYPE: &str = "synthetic_introspect";
 const STATE_KEY: &str = "last_block";

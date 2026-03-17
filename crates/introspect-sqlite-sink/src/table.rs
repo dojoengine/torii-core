@@ -1,4 +1,5 @@
-use introspect_types::{ColumnDef, FeltIds, PrimaryDef};
+use introspect_types::{ColumnDef, ColumnInfo, FeltIds, PrimaryDef};
+use itertools::Itertools;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use thiserror::Error;
@@ -18,7 +19,7 @@ pub struct SqliteTable {
     pub name: String,
     pub storage_name: String,
     pub primary: PrimaryDef,
-    pub columns: HashMap<Felt, ColumnDef>,
+    pub columns: HashMap<Felt, ColumnInfo>,
     pub order: Vec<Felt>,
     pub alive: bool,
 }
@@ -35,10 +36,7 @@ impl SqliteTable {
             storage_name,
             primary,
             order: columns.ids(),
-            columns: columns
-                .into_iter()
-                .map(|column| (column.id, column))
-                .collect(),
+            columns: columns.into_iter().map_into().collect(),
             alive: true,
         }
     }
@@ -56,7 +54,7 @@ impl SqliteTable {
         )
     }
 
-    pub fn get_column(&self, selector: &Felt) -> TableResult<&ColumnDef> {
+    pub fn get_column(&self, selector: &Felt) -> TableResult<&ColumnInfo> {
         self.columns
             .get(selector)
             .ok_or_else(|| SqliteTableError::ColumnNotFound(*selector, self.name.clone()))

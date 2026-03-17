@@ -1,4 +1,4 @@
-use crate::schema::TableInfo;
+use crate::schema::Table;
 use async_trait::async_trait;
 use introspect_types::{Attribute, ColumnDef, PrimaryTypeDef, TypeDef};
 use starknet_types_core::felt::Felt;
@@ -6,13 +6,8 @@ use starknet_types_core::felt::Felt;
 #[async_trait]
 pub trait TableStore {
     type Error;
-    async fn save_table(
-        &self,
-        owner: &Felt,
-        id: &Felt,
-        table: &TableInfo,
-    ) -> Result<(), Self::Error>;
-    async fn load_tables(&self, owners: &[Felt]) -> Result<TableInfo, Self::Error>;
+    async fn save_table(&self, owner: &Felt, id: &Felt, table: &Table) -> Result<(), Self::Error>;
+    async fn load_tables(&self, owners: &[Felt]) -> Result<Table, Self::Error>;
     async fn add_columns(
         &self,
         owner: &Felt,
@@ -65,12 +60,12 @@ impl<T: TableStore + Send + Sync> TableStore for TableStoreRO<T> {
         &self,
         _owner: &Felt,
         _id: &Felt,
-        _table: &TableInfo,
+        _table: &Table,
     ) -> Result<(), Self::Error> {
         Ok(())
     }
 
-    async fn load_tables(&self, owners: &[Felt]) -> Result<TableInfo, Self::Error> {
+    async fn load_tables(&self, owners: &[Felt]) -> Result<Table, Self::Error> {
         self.0.load_tables(owners).await
     }
     async fn add_columns(

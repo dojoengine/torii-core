@@ -1,45 +1,23 @@
-use crate::processor::PgSchema;
-use crate::sql::{
-    create_enum_type_query, create_struct_type_query, create_table_query, create_tuple_type_query,
-};
-use crate::utils::HasherExt;
-use introspect_types::{
-    ColumnDef, EnumDef, FixedArrayDef, MemberDef, OptionDef, PrimaryDef, PrimaryTypeDef, StructDef,
-    TupleDef, TypeDef, VariantDef,
-};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fmt::{self, Display};
-use thiserror::Error;
-use torii_introspect::CreateTable;
-use xxhash_rust::xxh3::Xxh3;
+use std::{
+    collections::VecDeque,
+    fmt::{Display, Formatter, Result as FmtResult},
+    rc::Rc,
+};
 
-#[derive(Debug)]
-pub struct PgTableStructure {
-    schema: PgSchema,
-    columns: HashMap<String, PostgresType>,
-    structs: HashMap<String, PgStructDef>,
-    tuples: HashMap<String, Vec<PostgresType>>,
-    enums: HashMap<String, PgRustEnum>,
+use crate::{PgTypeError, PgTypeResult};
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub enum PgSchema {
+    Public,
+    Custom(String),
 }
 
-#[derive(Debug, Error)]
-pub enum PgTypeError {
-    #[error("Type {0} not found")]
-    TypeNotFound(String),
-    #[error("Struct {0} not found")]
-    StructNotFound(String),
-    #[error("Not a struct type: {0}")]
-    NotStructType(String),
-    #[error("Unsupported type for {0}")]
-    UnsupportedType(String),
-}
+#[derive(Clone, Deserialize, Serialize, PartialEq, Debug)]
+pub struct SchemaName(pub Rc<PgSchema>, pub String);
 
-pub type PgTypeResult<T> = std::result::Result<T, PgTypeError>;
-
-#[derive(Clone, Deserialize, Serialize, PartialEq, Debug, Default)]
-pub enum PostgresType {
-    #[default]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Debug)]
+pub enum PostgresScalar {
     None,
     Boolean,
     SmallInt, // i16
@@ -56,506 +34,170 @@ pub enum PostgresType {
     Felt252,
     StarknetHash,
     EthAddress,
-    Numeric(u32, u32),
     Text,
-    Char(u32),
-    Varchar(u32),
     Char31,
-    Json,
-    JsonB,
-    Array(Box<PostgresType>, Option<u32>),
-    Struct(String),
-    Tuple(String),
-    Enum(String),
-    RustEnum(String),
     Bytes31,
     Bytea,
+    Composite(SchemaName),
 }
 
-impl Display for PostgresType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PostgresType::None => f.write_str("VOID"),
-            PostgresType::Boolean => f.write_str("BOOLEAN"),
-            PostgresType::SmallInt => f.write_str("SMALLINT"),
-            PostgresType::Int => f.write_str("INTEGER"),
-            PostgresType::BigInt => f.write_str("BIGINT"),
-            PostgresType::Int128 => f.write_str("int128"),
-            PostgresType::Uint8 => f.write_str("uint8"),
-            PostgresType::Uint16 => f.write_str("uint16"),
-            PostgresType::Uint32 => f.write_str("uint32"),
-            PostgresType::Uint64 => f.write_str("uint64"),
-            PostgresType::Uint128 => f.write_str("uint128"),
-            PostgresType::Uint256 => f.write_str("uint256"),
-            PostgresType::Uint512 => f.write_str("uint512"),
-            PostgresType::Felt252 => f.write_str("felt252"),
-            PostgresType::Char31 => f.write_str("char31"),
-            PostgresType::Bytes31 => f.write_str("byte31"),
-            PostgresType::StarknetHash => f.write_str("starknet_hash"),
-            PostgresType::EthAddress => f.write_str("eth_address"),
-            PostgresType::Numeric(precision, scale) => {
-                write!(f, "NUMERIC({precision}, {scale})")
-            }
-            PostgresType::Text => f.write_str("TEXT"),
-            PostgresType::Char(size) => write!(f, "CHAR({size})"),
-            PostgresType::Varchar(size) => write!(f, "VARCHAR({size})"),
-            PostgresType::Json => f.write_str("JSON"),
-            PostgresType::JsonB => f.write_str("JSONB"),
-            PostgresType::Array(element_type, size) => match size {
-                Some(s) => write!(f, "{element_type}[{s}]"),
-                None => write!(f, "{element_type}[]"),
-            },
-            PostgresType::Struct(type_name)
-            | PostgresType::Enum(type_name)
-            | PostgresType::RustEnum(type_name)
-            | PostgresType::Tuple(type_name) => f.write_str(type_name),
-            PostgresType::Bytea => f.write_str("BYTEA"),
-        }
-    }
+#[derive(Debug)]
+pub struct PrimaryKey {
+    pub name: String,
+    pub pg_type: PostgresScalar,
 }
 
-pub fn variant_member_name(variant: &str) -> String {
-    format!("_{}", variant)
+#[derive(Clone, Deserialize, Serialize, PartialEq, Debug)]
+pub struct PostgresType {
+    pub scalar: PostgresScalar,
+    pub array: PostgresArray,
 }
 
-#[derive(Deserialize, Serialize, Debug, Default)]
-pub struct PgStructDef {
-    pub fields: HashMap<String, PostgresType>,
-    pub order: Vec<String>,
-}
-
-#[derive(Deserialize, Serialize, Debug, Default)]
-pub struct PgRustEnum {
-    pub variants: HashMap<String, PostgresType>,
-    pub order: Vec<String>,
-    pub variants_type_name: String,
-}
-
-#[derive(Deserialize, Serialize, Debug, Default)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct PostgresField {
     pub name: String,
     pub pg_type: PostgresType,
 }
 
+#[derive(Clone, Deserialize, Serialize, PartialEq, Debug)]
+pub enum PostgresArray {
+    None,
+    Dynamic,
+    Fixed(VecDeque<u32>),
+}
+
+impl From<PostgresScalar> for PostgresType {
+    fn from(value: PostgresScalar) -> Self {
+        PostgresType {
+            scalar: value,
+            array: PostgresArray::None,
+        }
+    }
+}
+
+impl Display for PgSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PgSchema::Custom(namespace) => write!(f, "{namespace}",),
+            PgSchema::Public => write!(f, "public"),
+        }
+    }
+}
+
+impl Display for SchemaName {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, r#""{}"."{}""#, self.0, self.1)
+    }
+}
+
+impl Display for PostgresScalar {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            PostgresScalar::None => f.write_str("VOID"),
+            PostgresScalar::Boolean => f.write_str("BOOLEAN"),
+            PostgresScalar::SmallInt => f.write_str("SMALLINT"),
+            PostgresScalar::Int => f.write_str("INTEGER"),
+            PostgresScalar::BigInt => f.write_str("BIGINT"),
+            PostgresScalar::Int128 => f.write_str("public.int128"),
+            PostgresScalar::Uint8 => f.write_str("public.uint8"),
+            PostgresScalar::Uint16 => f.write_str("public.uint16"),
+            PostgresScalar::Uint32 => f.write_str("public.uint32"),
+            PostgresScalar::Uint64 => f.write_str("public.uint64"),
+            PostgresScalar::Uint128 => f.write_str("public.uint128"),
+            PostgresScalar::Uint256 => f.write_str("public.uint256"),
+            PostgresScalar::Uint512 => f.write_str("public.uint512"),
+            PostgresScalar::Felt252 => f.write_str("public.felt252"),
+            PostgresScalar::Char31 => f.write_str("public.char31"),
+            PostgresScalar::Bytes31 => f.write_str("public.byte31"),
+            PostgresScalar::StarknetHash => f.write_str("public.starknet_hash"),
+            PostgresScalar::EthAddress => f.write_str("public.eth_address"),
+            PostgresScalar::Text => f.write_str("TEXT"),
+            PostgresScalar::Bytea => f.write_str("BYTEA"),
+            PostgresScalar::Composite(name) => name.fmt(f),
+        }
+    }
+}
+
+impl Display for PostgresArray {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            PostgresArray::None => Ok(()),
+            PostgresArray::Dynamic => write!(f, "[]"),
+            PostgresArray::Fixed(sizes) => sizes.iter().try_for_each(|size| write!(f, "[{size}]")),
+        }
+    }
+}
+
+impl Display for PostgresType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{}{}", self.scalar, self.array)
+    }
+}
+
+impl Display for PrimaryKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, r#""{}" {} PRIMARY KEY"#, self.name, self.pg_type)
+    }
+}
+
+impl Display for PostgresField {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, r#""{}" {}"#, self.name, self.pg_type)
+    }
+}
+
+impl From<SchemaName> for PostgresType {
+    fn from(value: SchemaName) -> Self {
+        PostgresType {
+            scalar: PostgresScalar::Composite(value),
+            array: PostgresArray::None,
+        }
+    }
+}
+
+impl SchemaName {
+    pub fn new<T: Into<String>>(schema: &Rc<PgSchema>, name: T) -> Self {
+        Self(schema.clone(), name.into())
+    }
+    pub fn replace<S: Into<String>>(&mut self, name: S) -> String {
+        std::mem::replace(&mut self.1, name.into())
+    }
+}
+
+impl PostgresType {
+    pub fn is_composite(&self) -> bool {
+        matches!(self.scalar, PostgresScalar::Composite(_))
+    }
+    pub fn to_array(self, size: Option<u32>) -> PgTypeResult<Self> {
+        let arr = match (self.array, size) {
+            (PostgresArray::None, None) => PostgresArray::Dynamic,
+            (PostgresArray::None, Some(size)) => PostgresArray::Fixed(VecDeque::from([size])),
+            (PostgresArray::Fixed(mut sizes), Some(size)) => {
+                sizes.push_back(size);
+                PostgresArray::Fixed(sizes)
+            }
+            _ => return Err(PgTypeError::NestedArrays),
+        };
+        Ok(Self {
+            scalar: self.scalar,
+            array: arr,
+        })
+    }
+
+    pub fn composite<S: Into<String>>(schema: &Rc<PgSchema>, name: S) -> Self {
+        Self {
+            scalar: PostgresScalar::Composite(SchemaName::new(schema, name)),
+            array: PostgresArray::None,
+        }
+    }
+
+    pub fn to_field(self, name: impl Into<String>) -> PostgresField {
+        PostgresField::new(name, self)
+    }
+}
+
 impl From<PostgresField> for (String, PostgresType) {
     fn from(val: PostgresField) -> Self {
         (val.name, val.pg_type)
-    }
-}
-
-impl PgRustEnum {
-    pub fn new(branch: &Xxh3, name: &str, variants: Vec<PostgresField>) -> (String, Self) {
-        let variants_type_name = branch.branch_to_type_name("variants", name);
-        let order = variants.iter().map(|f| f.name.clone()).collect();
-        let variants_map = variants.into_iter().map(PostgresField::into).collect();
-        (
-            branch.type_name(name),
-            Self {
-                order,
-                variants: variants_map,
-                variants_type_name,
-            },
-        )
-    }
-
-    pub fn variant_fields(&self) -> Vec<PostgresField> {
-        self.order
-            .iter()
-            .filter_map(|v| match self.variants.get(v)? {
-                PostgresType::None => None,
-                pg_type => Some(PostgresField::new(variant_member_name(v), pg_type.clone())),
-            })
-            .collect()
-    }
-
-    pub fn all_fields(&self, schema: &PgSchema) -> Vec<PostgresField> {
-        let mut fields = vec![PostgresField::new_enum(
-            "variant".to_string(),
-            &schema.qualify(&self.variants_type_name),
-        )];
-        fields.extend(self.variant_fields());
-        fields
-    }
-}
-
-pub trait PostgresTypeExtractor {
-    fn extract_type(
-        &self,
-        schema: &mut PgTableStructure,
-        branch: &Xxh3,
-        queries: &mut Vec<String>,
-    ) -> PgTypeResult<PostgresType>;
-    fn extract_type_string(
-        &self,
-        branch: &Xxh3,
-        schema: &mut PgTableStructure,
-        queries: &mut Vec<String>,
-    ) -> PgTypeResult<String> {
-        self.extract_type(schema, branch, queries)
-            .map(|ty| ty.to_string())
-    }
-}
-
-pub trait PostgresFieldExtractor {
-    fn name(&self) -> &str;
-    fn type_def(&self) -> &TypeDef;
-    fn extract_type(
-        &self,
-        schema: &mut PgTableStructure,
-        branch: &Xxh3,
-        queries: &mut Vec<String>,
-    ) -> PgTypeResult<PostgresType> {
-        self.type_def()
-            .extract_type(schema, &branch.branch(self.name()), queries)
-    }
-    fn extract_field(
-        &self,
-        schema: &mut PgTableStructure,
-        branch: &Xxh3,
-        queries: &mut Vec<String>,
-    ) -> PgTypeResult<PostgresField> {
-        Ok(PostgresField::new(
-            self.name().to_string(),
-            self.extract_type(schema, branch, queries)?,
-        ))
-    }
-}
-
-impl PostgresField {
-    pub fn new(name: String, pg_type: PostgresType) -> Self {
-        Self { name, pg_type }
-    }
-    pub fn new_struct(name: String, type_name: &str) -> Self {
-        Self {
-            name,
-            pg_type: PostgresType::Struct(type_name.to_string()),
-        }
-    }
-    pub fn new_enum(name: String, type_name: &str) -> Self {
-        Self {
-            name,
-            pg_type: PostgresType::Enum(type_name.to_string()),
-        }
-    }
-    pub fn new_rust_enum(name: String, type_name: &str) -> Self {
-        Self {
-            name,
-            pg_type: PostgresType::RustEnum(type_name.to_string()),
-        }
-    }
-
-    pub fn new_tuple(name: String, type_name: &str) -> Self {
-        Self {
-            name,
-            pg_type: PostgresType::Tuple(type_name.to_string()),
-        }
-    }
-}
-
-impl PostgresFieldExtractor for ColumnDef {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn type_def(&self) -> &TypeDef {
-        &self.type_def
-    }
-}
-
-impl PostgresFieldExtractor for MemberDef {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn type_def(&self) -> &TypeDef {
-        &self.type_def
-    }
-}
-
-impl PostgresFieldExtractor for VariantDef {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn type_def(&self) -> &TypeDef {
-        &self.type_def
-    }
-}
-
-// impl PostgresFieldExtractor for PrimaryDef {
-//     fn name(&self) -> &str {
-//         &self.name
-//     }
-
-//     fn type_def(&self) -> &TypeDef {
-//         &self.type_def
-//     }
-// }
-
-impl PostgresTypeExtractor for TypeDef {
-    fn extract_type(
-        &self,
-        schema: &mut PgTableStructure,
-        branch: &Xxh3,
-        queries: &mut Vec<String>,
-    ) -> PgTypeResult<PostgresType> {
-        match self {
-            TypeDef::None => Ok(PostgresType::None),
-            TypeDef::Bool => Ok(PostgresType::Boolean),
-            TypeDef::I8 | TypeDef::I16 => Ok(PostgresType::SmallInt),
-            TypeDef::I32 => Ok(PostgresType::Int),
-            TypeDef::I64 => Ok(PostgresType::BigInt),
-            TypeDef::U8 => Ok(PostgresType::Uint8),
-            TypeDef::U16 => Ok(PostgresType::Uint16),
-            TypeDef::U32 => Ok(PostgresType::Uint32),
-            TypeDef::U64 => Ok(PostgresType::Uint64),
-            TypeDef::U128 => Ok(PostgresType::Uint128),
-            TypeDef::I128 => Ok(PostgresType::Int128),
-            TypeDef::U256 => Ok(PostgresType::Uint256),
-            TypeDef::U512 => Ok(PostgresType::Uint512),
-            TypeDef::Felt252 => Ok(PostgresType::Felt252),
-            TypeDef::ContractAddress
-            | TypeDef::ClassHash
-            | TypeDef::StorageAddress
-            | TypeDef::StorageBaseAddress => Ok(PostgresType::StarknetHash),
-            TypeDef::EthAddress => Ok(PostgresType::EthAddress),
-            TypeDef::Utf8String => Ok(PostgresType::Text),
-            TypeDef::ShortUtf8 => Ok(PostgresType::Char31),
-            TypeDef::ByteArray | TypeDef::ByteArrayEncoded(_) => Ok(PostgresType::Bytea),
-            TypeDef::Bytes31 | TypeDef::Bytes31Encoded(_) => Ok(PostgresType::Bytes31),
-            TypeDef::Tuple(type_defs) => type_defs.extract_type(schema, branch, queries),
-            TypeDef::Enum(enum_def) => enum_def.extract_type(schema, branch, queries),
-            TypeDef::Array(array_def) => Ok(PostgresType::Array(
-                Box::new(array_def.extract_type(schema, branch, queries)?),
-                None,
-            )),
-            TypeDef::FixedArray(fixed_array_def) => {
-                fixed_array_def.extract_type(schema, branch, queries)
-            }
-            TypeDef::Struct(struct_def) => struct_def.extract_type(schema, branch, queries),
-            TypeDef::Option(def) => def.type_def.extract_type(schema, branch, queries),
-            TypeDef::Nullable(def) => def.type_def.extract_type(schema, branch, queries),
-            TypeDef::Felt252Dict(_) | TypeDef::Result(_) | TypeDef::Ref(_) | TypeDef::Custom(_) => {
-                Err(PgTypeError::UnsupportedType(format!("{self:?}")))
-            }
-        }
-    }
-}
-
-impl PostgresTypeExtractor for PrimaryTypeDef {
-    fn extract_type(
-        &self,
-        _schema: &mut PgTableStructure,
-        _branch: &Xxh3,
-        _queries: &mut Vec<String>,
-    ) -> PgTypeResult<PostgresType> {
-        match self {
-            PrimaryTypeDef::Bool => Ok(PostgresType::Boolean),
-            PrimaryTypeDef::I8 | PrimaryTypeDef::I16 => Ok(PostgresType::SmallInt),
-            PrimaryTypeDef::I32 => Ok(PostgresType::Int),
-            PrimaryTypeDef::I64 => Ok(PostgresType::BigInt),
-            PrimaryTypeDef::U8 => Ok(PostgresType::Uint8),
-            PrimaryTypeDef::U16 => Ok(PostgresType::Uint16),
-            PrimaryTypeDef::U32 => Ok(PostgresType::Uint32),
-            PrimaryTypeDef::U64 => Ok(PostgresType::Uint64),
-            PrimaryTypeDef::U128 => Ok(PostgresType::Uint128),
-            PrimaryTypeDef::I128 => Ok(PostgresType::Int128),
-            PrimaryTypeDef::Felt252 => Ok(PostgresType::Felt252),
-            PrimaryTypeDef::ContractAddress
-            | PrimaryTypeDef::ClassHash
-            | PrimaryTypeDef::StorageAddress
-            | PrimaryTypeDef::StorageBaseAddress => Ok(PostgresType::StarknetHash),
-            PrimaryTypeDef::EthAddress => Ok(PostgresType::EthAddress),
-            PrimaryTypeDef::ShortUtf8 => Ok(PostgresType::Char31),
-            PrimaryTypeDef::Bytes31 | PrimaryTypeDef::Bytes31Encoded(_) => {
-                Ok(PostgresType::Bytes31)
-            }
-        }
-    }
-}
-
-impl PostgresTypeExtractor for FixedArrayDef {
-    fn extract_type(
-        &self,
-        schema: &mut PgTableStructure,
-        branch: &Xxh3,
-        queries: &mut Vec<String>,
-    ) -> PgTypeResult<PostgresType> {
-        Ok(PostgresType::Array(
-            Box::new(self.type_def.extract_type(schema, branch, queries)?),
-            Some(self.size),
-        ))
-    }
-}
-
-impl PostgresTypeExtractor for StructDef {
-    fn extract_type(
-        &self,
-        schema: &mut PgTableStructure,
-        branch: &Xxh3,
-        queries: &mut Vec<String>,
-    ) -> PgTypeResult<PostgresType> {
-        let members = self
-            .members
-            .iter()
-            .map(|f| f.extract_field(schema, branch, queries))
-            .collect::<PgTypeResult<Vec<_>>>()?;
-        schema
-            .add_struct(branch, &self.name, members, queries)
-            .map(PostgresType::Struct)
-    }
-}
-
-impl PostgresTypeExtractor for EnumDef {
-    fn extract_type(
-        &self,
-        structure: &mut PgTableStructure,
-        branch: &Xxh3,
-        queries: &mut Vec<String>,
-    ) -> PgTypeResult<PostgresType> {
-        let variants = self
-            .order
-            .iter()
-            .map(|selector| {
-                let variant = &self.variants[selector];
-                variant.extract_field(structure, branch, queries)
-            })
-            .collect::<PgTypeResult<Vec<_>>>()?;
-        structure
-            .add_rust_enum(branch, &self.name, variants, queries)
-            .map(PostgresType::RustEnum)
-    }
-}
-
-impl PostgresTypeExtractor for TupleDef {
-    fn extract_type(
-        &self,
-        schema: &mut PgTableStructure,
-        branch: &Xxh3,
-        queries: &mut Vec<String>,
-    ) -> PgTypeResult<PostgresType> {
-        let variants = self
-            .iter()
-            .enumerate()
-            .map(|(i, type_def)| {
-                type_def.extract_type(schema, &branch.branch(&format!("_{i}")), queries)
-            })
-            .collect::<PgTypeResult<Vec<_>>>()?;
-        schema
-            .add_tuple(branch, variants, queries)
-            .map(PostgresType::Tuple)
-    }
-}
-
-impl PostgresTypeExtractor for OptionDef {
-    fn extract_type(
-        &self,
-        schema: &mut PgTableStructure,
-        branch: &Xxh3,
-        queries: &mut Vec<String>,
-    ) -> PgTypeResult<PostgresType> {
-        self.type_def.extract_type(schema, branch, queries)
-    }
-}
-
-impl PgTableStructure {
-    pub fn new(
-        schema: &PgSchema,
-        name: &str,
-        primary_key: &PrimaryDef,
-        columns: &[ColumnDef],
-        queries: &mut Vec<String>,
-    ) -> PgTypeResult<Self> {
-        let mut table = PgTableStructure::new_empty(schema);
-        let branch = Xxh3::new_based(name);
-        let type_def = primary_key
-            .type_def
-            .extract_type(&mut table, &branch, queries)?;
-        let mut column_queries = vec![format!(r#""{}" {type_def} PRIMARY KEY"#, primary_key.name)];
-        table.columns.insert(primary_key.name.clone(), type_def);
-
-        for col in columns.iter() {
-            let type_def = col.extract_type(&mut table, &branch, queries)?;
-            column_queries.push(format!("\"{}\" {type_def}", col.name));
-            table.columns.insert(col.name.clone(), type_def);
-        }
-        queries.push(create_table_query(schema, name, &column_queries));
-        Ok(table)
-    }
-
-    pub fn schema(&self) -> &PgSchema {
-        &self.schema
-    }
-    pub fn new_empty(schema: &PgSchema) -> Self {
-        Self {
-            schema: schema.clone(),
-            columns: HashMap::new(),
-            structs: HashMap::new(),
-            tuples: HashMap::new(),
-            enums: HashMap::new(),
-        }
-    }
-    pub fn new_from_event(
-        schema: &PgSchema,
-        event: &CreateTable,
-        queries: &mut Vec<String>,
-    ) -> PgTypeResult<Self> {
-        PgTableStructure::new(schema, &event.name, &event.primary, &event.columns, queries)
-    }
-
-    pub fn add_column(&mut self, name: &str, type_def: PostgresType) -> String {
-        self.columns.insert(name.to_string(), type_def.clone());
-        format!("ADD COLUMN \"{name}\" {type_def}")
-    }
-
-    pub fn add_struct(
-        &mut self,
-        branch: &Xxh3,
-        name: &str,
-        fields: Vec<PostgresField>,
-        queries: &mut Vec<String>,
-    ) -> PgTypeResult<String> {
-        let name = branch.type_name(name);
-        queries.push(create_struct_type_query(&self.schema, &name, &fields));
-        let qualified_name = self.schema.qualify(&name);
-        self.structs
-            .insert(qualified_name.clone(), PgStructDef::new(fields));
-        Ok(qualified_name)
-    }
-
-    pub fn add_rust_enum(
-        &mut self,
-        branch: &Xxh3,
-        name: &str,
-        variants: Vec<PostgresField>,
-        queries: &mut Vec<String>,
-    ) -> PgTypeResult<String> {
-        let (struct_name, enum_def) = PgRustEnum::new(branch, name, variants);
-        queries.push(create_enum_type_query(
-            &self.schema,
-            &enum_def.variants_type_name,
-            &enum_def.order,
-        ));
-        queries.push(create_struct_type_query(
-            &self.schema,
-            &struct_name,
-            &enum_def.all_fields(&self.schema),
-        ));
-        let qualified_name = self.schema.qualify(&struct_name);
-        self.enums.insert(qualified_name.clone(), enum_def);
-        Ok(qualified_name)
-    }
-
-    pub fn add_tuple(
-        &mut self,
-        branch: &Xxh3,
-        elements: Vec<PostgresType>,
-        queries: &mut Vec<String>,
-    ) -> PgTypeResult<String> {
-        let name = branch.type_name("tuple");
-        queries.push(create_tuple_type_query(&self.schema, &name, &elements));
-        let qualified_name = self.schema.qualify(&name);
-        self.tuples.insert(qualified_name.clone(), elements);
-        Ok(qualified_name)
     }
 }

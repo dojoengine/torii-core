@@ -1,6 +1,6 @@
 use crate::postgres::types::PgPrimary;
 use crate::postgres::{PgAttribute, PgFelt, SqlxResult};
-use crate::schema::{ColumnKeyTrait, TableInfo};
+use crate::schema::{ColumnKeyTrait, Table};
 use async_trait::async_trait;
 use introspect_types::{Attribute, ColumnDef, ColumnInfo, PrimaryDef, TypeDef};
 use itertools::Itertools;
@@ -105,11 +105,11 @@ impl From<ColumnRow> for (Felt, ColumnDef) {
     }
 }
 
-impl From<TableRow> for (Felt, TableInfo) {
+impl From<TableRow> for (Felt, Table) {
     fn from(value: TableRow) -> Self {
         (
             value.id.into(),
-            TableInfo {
+            Table {
                 name: value.name,
                 attributes: value.attributes.into_iter().map_into().collect(),
                 primary: value.primary_def.into(),
@@ -195,7 +195,7 @@ impl PgTypeDef<Felt> for ColumnDef {
 }
 
 #[async_trait]
-impl PgTypeDef<Felt> for TableInfo {
+impl PgTypeDef<Felt> for Table {
     type Row = TableRow;
     async fn get_rows(
         pool: &PgPool,

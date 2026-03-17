@@ -82,7 +82,7 @@ crc = "3.4.0"
 
 # Hashing
 blake3 = "1.8.3"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
+xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
 
 # ETL Pipeline dependencies
 async-trait = "0.1"
@@ -101,15 +101,16 @@ thiserror = "2.0.17"
 hex = "0.4"
 primitive-types = { version = "0.14.0", features = ["serde"] }
 starknet-types-core = "0.2.0"
+bigdecimal = "0.4.10"
 
 # Build
 tonic-build = "0.12"
 
 # Introspect
-introspect-events = { git = "https://github.com/cartridge-gg/introspect", rev = "3d11aa5" }
-introspect-types = { git = "https://github.com/cartridge-gg/introspect", rev = "3d11aa5" }
-introspect-rust-macros = { git = "https://github.com/cartridge-gg/introspect", rev = "3d11aa5" }
-dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev = "dd87ef3" }
+introspect-events = { git = "https://github.com/cartridge-gg/introspect", rev = "34e93c1" }
+introspect-types = { git = "https://github.com/cartridge-gg/introspect", rev = "34e93c1" }
+introspect-rust-macros = { git = "https://github.com/cartridge-gg/introspect", rev = "34e93c1" }
+dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev = "aadc3c9" }
 
 
 # Utils
@@ -163,7 +164,11 @@ path = "examples/test_block_extractor/main.rs"
 
 [[example]]
 name = "introspect_simple"
-path = "examples/introspect/simple/main.rs"
+path = "examples/introspect/simple.rs"
+
+[[example]]
+name = "introspect_restart"
+path = "examples/introspect/restart.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -188,6 +193,7 @@ tonic.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 prost.workspace = true
+xxhash-rust.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true

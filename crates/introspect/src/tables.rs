@@ -2,28 +2,37 @@ use crate::Record;
 use introspect_types::bytes::IntoByteSource;
 use introspect_types::serialize::CairoSeFrom;
 use introspect_types::serialize_def::CairoTypeSerialization;
-use introspect_types::{CairoDeserializer, ColumnDef, PrimaryDef, PrimaryTypeDef, TypeDef};
+use introspect_types::{CairoDeserializer, ColumnInfo, PrimaryDef, PrimaryTypeDef, TypeDef};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
+use starknet_types_core::felt::Felt;
 use std::ops::Deref;
+use torii::etl::envelope::MetaData;
 
 pub struct RecordSchema<'a> {
     primary: &'a PrimaryDef,
-    columns: Vec<&'a ColumnDef>,
+    columns: Vec<&'a ColumnInfo>,
 }
 
 impl<'a> RecordSchema<'a> {
-    pub fn new(primary: &'a PrimaryDef, columns: Vec<&'a ColumnDef>) -> Self {
+    pub fn new(primary: &'a PrimaryDef, columns: Vec<&'a ColumnInfo>) -> Self {
         Self { primary, columns }
     }
-    pub fn columns(&self) -> &[&'a ColumnDef] {
+    pub fn columns(&self) -> &[&'a ColumnInfo] {
         &self.columns
+    }
+
+    pub fn column_names(&self) -> Vec<&str> {
+        self.columns.iter().map(|col| col.name.as_str()).collect()
     }
 
     pub fn primary(&self) -> &PrimaryDef {
         self.primary
     }
 
+    pub fn primary_name(&self) -> &str {
+        &self.primary.name
+    }
     pub fn to_frame<C: CairoTypeSerialization, M: SerializeEntries>(
         &'a self,
         record: &'a Record,
@@ -91,7 +100,7 @@ where
     }
 }
 
-impl AsEntryPair for ColumnDef {
+impl AsEntryPair for ColumnInfo {
     type Key = String;
     type Value = TypeDef;
     fn to_entry_pair(&self) -> (&Self::Key, &Self::Value) {
@@ -124,7 +133,7 @@ impl<'a, M: SerializeEntries> RecordWithMetadata<'a, M> {
 
 pub struct RecordFrame<'a, C: CairoTypeSerialization, M: SerializeEntries> {
     primary: &'a PrimaryDef,
-    columns: &'a [&'a ColumnDef],
+    columns: &'a [&'a ColumnInfo],
     id: &'a [u8; 32],
     values: &'a [u8],
     cairo_se: &'a C,
@@ -204,5 +213,25 @@ impl SerializeEntries for () {
         _map: &mut <S as Serializer>::SerializeMap,
     ) -> Result<(), S::Error> {
         Ok(())
+    }
+}
+
+pub fn pg_json_felt252(value: &Felt) -> String {
+    format!("\\x{}", hex::encode(value.to_bytes_be()))
+}
+
+impl SerializeEntries for MetaData {
+    fn entry_count(&self) -> usize {
+        4
+    }
+    fn serialize_entries<S: serde::Serializer>(
+        &self,
+        map: &mut <S as serde::Serializer>::SerializeMap,
+    ) -> Result<(), S::Error> {
+        let tx_hash = pg_json_felt252(&self.transaction_hash);
+        map.serialize_entry("__created_block", &self.block_number)?;
+        map.serialize_entry("__updated_block", &self.block_number)?;
+        map.serialize_entry("__created_tx", &tx_hash)?;
+        map.serialize_entry("__updated_tx", &tx_hash)
     }
 }

@@ -1,18 +1,17 @@
 use itertools::Itertools;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
-use torii::etl::EventContext;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::DojoToriiError;
-use torii_introspect_postgres_sink::processor::IntrospectPgDb;
+use torii_introspect_postgres_sink::IntrospectPgDb;
 use torii_test_utils::{resolve_path_like, EventIterator, FakeProvider};
 
 const DB_URL: &str = "postgres://torii:torii@localhost:5432/torii";
-// const CHAIN_DATA_PATH: &str = "~/tc-tests/pistols";
-// const SCHEMA_NAME: &str = "pistols";
-const CHAIN_DATA_PATH: &str = "~/tc-tests/blob-arena";
-const SCHEMA_NAME: &str = "blob_arena";
+const CHAIN_DATA_PATH: &str = "~/tc-tests/pistols";
+const SCHEMA_NAME: &str = "pistols";
+// const CHAIN_DATA_PATH: &str = "~/tc-tests/blob-arena";
+// const SCHEMA_NAME: &str = "blob_arena";
 const BATCH_SIZE: usize = 1000;
 
 #[tokio::main]
@@ -28,7 +27,7 @@ async fn main() {
     let db = IntrospectPgDb::new(pool.clone(), SCHEMA_NAME);
     decoder.store.initialize().await.unwrap();
     db.initialize_introspect_pg_sink().await.unwrap();
-    let context = EventContext::default();
+
     let mut event_n = 0;
     let mut success = 0;
     let mut running = true;
@@ -52,8 +51,8 @@ async fn main() {
                 }
             };
         }
-        let msgs_with_context = msgs.iter().map(|msg| (msg, &context)).collect_vec();
-        for res in db.process_messages(msgs_with_context).await.unwrap() {
+        let msgs_ref = msgs.iter().collect_vec();
+        for res in db.process_messages(msgs_ref).await.unwrap() {
             match res {
                 Err(err) => println!("Failed to process message: {err:?}"),
                 Ok(()) => success += 1,

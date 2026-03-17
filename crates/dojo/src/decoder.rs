@@ -14,14 +14,15 @@ use introspect_types::{
     CairoEvent, CairoEventInfo, CairoSerde, IntoFeltSource, PrimaryDef, PrimaryTypeDef, ResultInto,
     SliceFeltSource,
 };
+use itertools::Itertools;
 use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::RwLock;
 use torii::etl::event::EmittedEventExt;
-use torii::etl::{Decoder, Envelope, EventBody};
-use torii_introspect::events::IntrospectMsg;
+use torii::etl::{Decoder, Envelope, EventMsg};
+use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_introspect::schema::{TableMetadata, TableSchema};
 use torii_introspect::EventId;
 
@@ -82,9 +83,9 @@ where
             .map_err(DojoToriiError::store_error)
     }
 
-    async fn load_tables(&self, owners: &[Felt]) -> DojoToriiResult<Vec<DojoTable>> {
+    async fn read_tables(&self, owners: &[Felt]) -> DojoToriiResult<Vec<DojoTable>> {
         self.store
-            .load_tables(owners)
+            .read_tables(owners)
             .await
             .map_err(DojoToriiError::store_error)
     }
@@ -127,17 +128,19 @@ where
     }
 
     pub async fn load_tables(&self, owners: &[Felt]) -> DojoToriiResult<()> {
-        let new_tables = self
-            .store
-            .load_tables(owners)
-            .await
-            .map_err(DojoToriiError::store_error)?;
+        let new = self.read_tables(owners).await?;
         let mut tables = self.tables.write()?;
-        for table in new_tables {
-            let (id, info) = table.into();
-            tables.insert(id, info);
-        }
+        tables.extend(new.into_iter().map_into());
         Ok(())
+    }
+
+    pub fn get_dojo_tables(&self) -> DojoToriiResult<Vec<DojoTable>> {
+        let tables = self.tables.read()?;
+        Ok(tables.iter().map_into().collect())
+    }
+
+    pub fn get_tables(&self) -> DojoToriiResult<Vec<TableSchema>> {
+        Ok(self.get_dojo_tables()?.into_iter().map_into().collect())
     }
 
     pub fn with_tables<S: Into<Store>>(store: S, fetcher: F, tables: Vec<DojoTable>) -> Self {
@@ -203,10 +206,8 @@ where
         info.key_fields = key_fields;
         info.value_fields = value_fields;
         let table = (id, info).into();
-        self.store
-            .save_table(owner, &table, meta_data.tx_hash(), meta_data.block_number())
-            .await
-            .map_err(DojoToriiError::store_error)?;
+        self.save_table(owner, &table, meta_data.tx_hash(), meta_data.block_number())
+            .await?;
         let (_, info) = table.clone().into();
         self.tables.write()?.insert(id, info);
         Ok(table.to_schema())
@@ -288,11 +289,17 @@ where
         }
     }
 
-    pub async fn decode_raw_event(&self, raw: &EmittedEvent) -> DojoToriiResult<IntrospectMsg> {
+    pub async fn decode_raw_event_msg(&self, raw: &EmittedEvent) -> DojoToriiResult<IntrospectMsg> {
         let (selector, keys) = raw
             .split_keys()
             .ok_or(DojoToriiError::MissingEventSelector)?;
         self.decode_event_data(raw, selector, keys, &raw.data).await
+    }
+
+    pub async fn decode_raw_event(&self, raw: &EmittedEvent) -> DojoToriiResult<IntrospectBody> {
+        self.decode_raw_event_msg(raw)
+            .await
+            .map(|msg| msg.to_body(raw))
     }
 }
 
@@ -309,8 +316,8 @@ where
     async fn decode_event(&self, event: &EmittedEvent) -> AnyResult<Vec<Envelope>> {
         self.decode_raw_event(event)
             .await
-            .map(|msg| vec![EventBody::new_envelope(msg, event)])
-            .map_err(Into::into)
+            .map(|msg| vec![msg.into()])
+            .err_into()
     }
 }
 
@@ -346,7 +353,7 @@ mod tests {
             Ok(())
         }
 
-        async fn load_tables(&self, _owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
+        async fn read_tables(&self, _owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
             Ok(Vec::new())
         }
     }

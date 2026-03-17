@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS dojo.tables (
     name TEXT NOT NULL,
     attributes TEXT[] NOT NULL DEFAULT '{}',
     keys felt252[] NOT NULL,
-    "values" felt252[] NOT NULL,
+    "values" felt252[] NOT NULL ,
     legacy BOOLEAN NOT NULL, 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -35,16 +35,16 @@ CREATE TABLE IF NOT EXISTS dojo.tables (
     created_tx felt252 NOT NULL,
     updated_tx felt252 NOT NULL,
     PRIMARY KEY (owner, id)
-
 );
 
 CREATE TABLE IF NOT EXISTS dojo.columns(
     owner felt252,
-    "table" felt252 NOT NULL,
+    "table" felt252 NOT NULL ,
     id felt252 NOT NULL,
     name TEXT NOT NULL,
     attributes introspect.attribute[] NOT NULL DEFAULT '{}',
     type_def jsonb NOT NULL,
-    PRIMARY KEY (owner, "table", id)
+    PRIMARY KEY (owner, "table", id),
+    FOREIGN KEY (owner, "table") REFERENCES dojo.tables(owner, id)
 );
 
