@@ -23,7 +23,8 @@ impl FakeProvider {
 #[derive(serde::Deserialize)]
 struct ModelContract {
     schema: Vec<Felt>,
-    use_legacy_storage: bool,
+    #[serde(default)]
+    use_legacy_storage: Option<bool>,
 }
 
 #[async_trait]
@@ -32,8 +33,8 @@ impl DojoSchemaFetcher for FakeProvider {
         let ModelContract {
             schema,
             use_legacy_storage: legacy,
-        } = read_json_file(&self.path.join(format!("{contract_address:#x}.json"))).unwrap();
-        let mut deserializer = DojoSerde::new_from_source(schema, legacy);
+        } = read_json_file(&self.path.join(format!("{contract_address:#066x}.json"))).unwrap();
+        let mut deserializer = DojoSerde::new_from_source(schema, legacy.unwrap_or(true));
         DojoSchema::deserialize(&mut deserializer).map_err(Into::into)
     }
 }

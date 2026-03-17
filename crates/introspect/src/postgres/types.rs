@@ -3,8 +3,11 @@ use std::fmt::Display;
 use introspect_types::{Attribute, PrimaryDef, PrimaryTypeDef};
 use itertools::Itertools;
 use sqlx::{
-    postgres::{PgHasArrayType, PgTypeInfo},
+    encode::IsNull,
+    error::BoxDynError,
+    postgres::{PgArgumentBuffer, PgHasArrayType, PgTypeInfo, PgValueRef},
     types::{BigDecimal, Json},
+    Decode, Encode, Postgres, Type,
 };
 use starknet_types_core::felt::Felt;
 
@@ -17,17 +20,42 @@ pub struct PgAttribute {
 
 impl PgHasArrayType for PgAttribute {
     fn array_type_info() -> PgTypeInfo {
-        PgTypeInfo::with_name("introspect._attribute")
+        PgTypeInfo::with_name("introspect.attribute[]")
     }
 }
 
-#[derive(sqlx::Type, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[sqlx(type_name = "felt252")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PgFelt(pub [u8; 32]);
+
+impl Type<Postgres> for PgFelt {
+    fn type_info() -> PgTypeInfo {
+        PgTypeInfo::with_name("felt252")
+    }
+
+    fn compatible(ty: &PgTypeInfo) -> bool {
+        *ty == PgTypeInfo::with_name("felt252") || <[u8] as Type<Postgres>>::compatible(ty)
+    }
+}
 
 impl PgHasArrayType for PgFelt {
     fn array_type_info() -> PgTypeInfo {
         PgTypeInfo::with_name("_felt252")
+    }
+}
+
+impl Encode<'_, Postgres> for PgFelt {
+    fn encode_by_ref(&self, buf: &mut PgArgumentBuffer) -> Result<IsNull, BoxDynError> {
+        <&[u8] as Encode<Postgres>>::encode(&self.0.as_slice(), buf)
+    }
+}
+
+impl Decode<'_, Postgres> for PgFelt {
+    fn decode(value: PgValueRef<'_>) -> Result<Self, BoxDynError> {
+        let bytes = <&[u8] as Decode<Postgres>>::decode(value)?;
+        let arr: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| format!("expected 32 bytes for felt252, got {}", bytes.len()))?;
+        Ok(PgFelt(arr))
     }
 }
 
@@ -37,13 +65,35 @@ impl Display for PgFelt {
     }
 }
 
-#[derive(sqlx::Type, Debug, Clone, PartialEq, PartialOrd)]
-#[sqlx(type_name = "uint128")]
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
 pub struct Uint128(pub BigDecimal);
+
+impl Type<Postgres> for Uint128 {
+    fn type_info() -> PgTypeInfo {
+        PgTypeInfo::with_name("uint128")
+    }
+
+    fn compatible(ty: &PgTypeInfo) -> bool {
+        *ty == PgTypeInfo::with_name("uint128") || <BigDecimal as Type<Postgres>>::compatible(ty)
+    }
+}
 
 impl PgHasArrayType for Uint128 {
     fn array_type_info() -> PgTypeInfo {
         PgTypeInfo::with_name("_uint128")
+    }
+}
+
+impl Encode<'_, Postgres> for Uint128 {
+    fn encode_by_ref(&self, buf: &mut PgArgumentBuffer) -> Result<IsNull, BoxDynError> {
+        <BigDecimal as Encode<Postgres>>::encode_by_ref(&self.0, buf)
+    }
+}
+
+impl Decode<'_, Postgres> for Uint128 {
+    fn decode(value: PgValueRef<'_>) -> Result<Self, BoxDynError> {
+        let bd = <BigDecimal as Decode<Postgres>>::decode(value)?;
+        Ok(Uint128(bd))
     }
 }
 

@@ -83,9 +83,9 @@ where
             .map_err(DojoToriiError::store_error)
     }
 
-    async fn load_tables(&self, owners: &[Felt]) -> DojoToriiResult<Vec<DojoTable>> {
+    async fn read_tables(&self, owners: &[Felt]) -> DojoToriiResult<Vec<DojoTable>> {
         self.store
-            .load_tables(owners)
+            .read_tables(owners)
             .await
             .map_err(DojoToriiError::store_error)
     }
@@ -128,16 +128,8 @@ where
     }
 
     pub async fn load_tables(&self, owners: &[Felt]) -> DojoToriiResult<()> {
-        let new_tables = self
-            .store
-            .load_tables(owners)
-            .await
-            .map_err(DojoToriiError::store_error)?;
         let mut tables = self.tables.write()?;
-        for table in new_tables {
-            let (id, info) = table.into();
-            tables.insert(id, info);
-        }
+        tables.extend(self.read_tables(owners).await?.into_iter().map_into());
         Ok(())
     }
 
@@ -213,10 +205,8 @@ where
         info.key_fields = key_fields;
         info.value_fields = value_fields;
         let table = (id, info).into();
-        self.store
-            .save_table(owner, &table, meta_data.tx_hash(), meta_data.block_number())
-            .await
-            .map_err(DojoToriiError::store_error)?;
+        self.save_table(owner, &table, meta_data.tx_hash(), meta_data.block_number())
+            .await?;
         let (_, info) = table.clone().into();
         self.tables.write()?.insert(id, info);
         Ok(table.to_schema())
@@ -362,7 +352,7 @@ mod tests {
             Ok(())
         }
 
-        async fn load_tables(&self, _owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
+        async fn read_tables(&self, _owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
             Ok(Vec::new())
         }
     }

@@ -19,19 +19,19 @@ use torii_postgres::db::PostgresConnection;
 
 pub const FETCH_TABLES_QUERY: &str = r#"
     SELECT
-        id::felt252 AS id,
+        id,
         name,
         attributes,
-        keys::felt252[] AS keys,
-        "values"::felt252[] AS "values",
+        keys,
+        "values",
         legacy
     FROM dojo.tables
     WHERE $1::felt252[] = '{}' OR owner = ANY($1)"#;
 
 pub const FETCH_COLUMNS_QUERY: &str = r#"
     SELECT
-        "table"::felt252 AS "table",
-        id::felt252 AS id,
+        "table",
+        id,
         name,
         attributes,
         type_def
@@ -254,7 +254,7 @@ impl<T: PostgresConnection + Send + Sync + 'static> DojoStoreTrait for PgStore<T
         transaction.commit().await.err_into()
     }
 
-    async fn load_tables(&self, owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
+    async fn read_tables(&self, owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
         let mut tables = DojoTable::get_rows(self.pool(), FETCH_TABLES_QUERY, owners)
             .await?
             .into_iter()

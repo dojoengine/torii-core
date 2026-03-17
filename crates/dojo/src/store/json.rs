@@ -80,7 +80,7 @@ impl DojoStoreTrait for JsonStore {
         self.dump_table(table)
     }
 
-    async fn load_tables(&self, _owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
+    async fn read_tables(&self, _owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
         self.load_all_tables()
     }
 }

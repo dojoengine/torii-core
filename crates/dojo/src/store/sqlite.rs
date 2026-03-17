@@ -254,7 +254,7 @@ impl<T: SqliteConnection + Send + Sync + 'static> DojoStoreTrait for SqliteStore
         Ok(())
     }
 
-    async fn load_tables(&self, owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
+    async fn read_tables(&self, owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
         let (table_query, table_args) = select_table_query(owners);
         let rows = sqlx::query_as_with::<Sqlite, TableRow, _>(&table_query, table_args)
             .fetch_all(self.pool())

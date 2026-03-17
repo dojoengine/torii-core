@@ -21,13 +21,13 @@ where
         tx_hash: &Felt,
         block_number: u64,
     ) -> Result<(), Self::Error>;
-    async fn load_tables(&self, owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error>;
-    async fn load_table_map(
+    async fn read_tables(&self, owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error>;
+    async fn read_table_map(
         &self,
         owners: &[Felt],
     ) -> Result<HashMap<Felt, DojoTableInfo>, Self::Error> {
         Ok(self
-            .load_tables(owners)
+            .read_tables(owners)
             .await?
             .into_iter()
             .map(Into::into)

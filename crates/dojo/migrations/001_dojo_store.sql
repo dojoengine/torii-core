@@ -35,7 +35,6 @@ CREATE TABLE IF NOT EXISTS dojo.tables (
     created_tx felt252 NOT NULL,
     updated_tx felt252 NOT NULL,
     PRIMARY KEY (owner, id)
-
 );
 
 CREATE TABLE IF NOT EXISTS dojo.columns(
