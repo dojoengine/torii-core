@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use crate::read_json_file;
 
+#[derive(Clone)]
 pub struct FakeProvider {
     pub path: PathBuf,
 }

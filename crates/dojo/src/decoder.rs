@@ -14,6 +14,7 @@ use introspect_types::{
     CairoEvent, CairoEventInfo, CairoSerde, IntoFeltSource, PrimaryDef, PrimaryTypeDef, ResultInto,
     SliceFeltSource,
 };
+use itertools::Itertools;
 use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
@@ -138,6 +139,15 @@ where
             tables.insert(id, info);
         }
         Ok(())
+    }
+
+    pub fn get_dojo_tables(&self) -> DojoToriiResult<Vec<DojoTable>> {
+        let tables = self.tables.read()?;
+        Ok(tables.iter().map_into().collect())
+    }
+
+    pub fn get_tables(&self) -> DojoToriiResult<Vec<TableSchema>> {
+        Ok(self.get_dojo_tables()?.into_iter().map_into().collect())
     }
 
     pub fn with_tables<S: Into<Store>>(store: S, fetcher: F, tables: Vec<DojoTable>) -> Self {

@@ -131,6 +131,22 @@ impl From<(Felt, DojoTableInfo)> for DojoTable {
     }
 }
 
+impl From<(&Felt, &DojoTableInfo)> for DojoTable {
+    fn from(value: (&Felt, &DojoTableInfo)) -> Self {
+        let (id, info) = value;
+        DojoTable {
+            id: *id,
+            name: info.name.clone(),
+            attributes: info.attributes.clone(),
+            primary: info.primary.clone(),
+            columns: info.columns.clone(),
+            key_fields: info.key_fields.clone(),
+            value_fields: info.value_fields.clone(),
+            legacy: info.legacy,
+        }
+    }
+}
+
 impl DojoTable {
     pub fn from_schema(
         schema: DojoSchema,
