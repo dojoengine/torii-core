@@ -1,7 +1,7 @@
 use crate::json::SqliteJsonSerializer;
 use crate::table::{SqliteTable, SqliteTableError};
 use crate::INTROSPECT_SQLITE_SINK_MIGRATIONS;
-use serde_json::Value;
+use serde_json::{Serializer as JsonSerializer, Value};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -269,10 +269,18 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
             update_columns
         );
 
+        let mut bytes = Vec::new();
+        let mut serializer = JsonSerializer::new(&mut bytes);
+        record_schema.parse_records_with_metadata(
+            &event.records,
+            &(),
+            &mut serializer,
+            &SqliteJsonSerializer,
+        )?;
+        let rows = serde_json::from_slice::<Vec<Value>>(&bytes)?;
+
         let mut tx = self.begin().await?;
-        for record in &event.records {
-            let value =
-                serde_json::to_value(record_schema.to_frame(record, &(), &SqliteJsonSerializer))?;
+        for value in rows {
             let object = value.as_object().ok_or(SqliteDbError::InvalidRecordFrame)?;
 
             let mut query = sqlx::query(&sql);
