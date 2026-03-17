@@ -9,10 +9,10 @@ use torii_introspect_postgres_sink::PostgresSimpleDb;
 use torii_test_utils::{resolve_path_like, EventIterator, FakeProvider};
 
 const DB_URL: &str = "postgres://torii:torii@localhost:5432/torii";
-const CHAIN_DATA_PATH: &str = "~/tc-tests/pistols";
-const SCHEMA_NAME: &str = "pistols";
-// const CHAIN_DATA_PATH: &str = "~/tc-tests/blob-arena";
-// const SCHEMA_NAME: &str = "blob-arena";
+// const CHAIN_DATA_PATH: &str = "~/tc-tests/pistols";
+// const SCHEMA_NAME: &str = "pistols";
+const CHAIN_DATA_PATH: &str = "~/tc-tests/blob-arena";
+const SCHEMA_NAME: &str = "blob_arena";
 const BATCH_SIZE: usize = 1000;
 
 #[tokio::main]

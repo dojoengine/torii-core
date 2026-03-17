@@ -4,7 +4,7 @@ use crate::table::PgTable;
 use crate::{PgDbError, PgDbResult, PgSchema, INTROSPECT_PG_SINK_MIGRATIONS};
 use introspect_types::ResultInto;
 use serde_json::Serializer as JsonSerializer;
-use sqlx::{query, PgPool};
+use sqlx::PgPool;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::io::Write;

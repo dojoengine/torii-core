@@ -46,8 +46,11 @@ pub trait PostgresFieldExtractor {
 }
 
 impl PostgresField {
-    pub fn new(name: String, pg_type: PostgresType) -> Self {
-        Self { name, pg_type }
+    pub fn new(name: impl Into<String>, pg_type: PostgresType) -> Self {
+        Self {
+            name: name.into(),
+            pg_type,
+        }
     }
 
     pub fn new_composite<S, T>(name: S, schema: &Rc<PgSchema>, type_name: T) -> Self

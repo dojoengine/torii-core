@@ -194,7 +194,7 @@ impl PostgresType {
         }
     }
 
-    pub fn to_field(self, name: String) -> PostgresField {
+    pub fn to_field(self, name: impl Into<String>) -> PostgresField {
         PostgresField::new(name, self)
     }
 }

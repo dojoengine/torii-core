@@ -1,9 +1,9 @@
 use crate::{
     create::PostgresTypeExtractor,
-    query::{StructMod, StructMods, TableUpgrade, TypeMod, TypeMods},
+    query::{ColumnUpgrade, StructMod, StructMods, TableUpgrade},
     table::PgTable,
-    HasherExt, PgSchema, PostgresScalar, PostgresType, TableResult, UpgradeError, UpgradeResult,
-    UpgradeResultExt,
+    HasherExt, PgSchema, PgTypeError, PgTypeResult, PostgresScalar, PostgresType, TableResult,
+    UpgradeError, UpgradeResult, UpgradeResultExt,
 };
 use introspect_types::{
     ArrayDef, ColumnDef, EnumDef, FixedArrayDef, MemberDef, OptionDef, PrimaryDef, PrimaryTypeDef,
@@ -33,11 +33,12 @@ impl PgTable {
         let pg_type = self
             .retype_primary(&primary.type_def)
             .to_table_result(&self.name, &self.primary.name)?;
-        table_mod.retype_column(&self.primary.name, pg_type);
+        table_mod.retype_primary(&self.primary.name, pg_type);
         for column in columns {
             let branch = branch.branch(&column.id);
             if let Some(current) = self.columns.get_mut(&column.id) {
                 table_mod.rename_column(&mut current.name, &column.name);
+                let mut column_upgrade = table_mod.column_upgrade();
                 let pg_type = current
                     .type_def
                     .compare_type(
@@ -45,17 +46,18 @@ impl PgTable {
                         &branch,
                         &column.type_def,
                         &mut self.dead,
-                        &mut table_mod.type_mods,
+                        &mut column_upgrade,
                     )
                     .to_table_result(&self.name, &current.name)?;
-                table_mod.retype_column(&current.name, pg_type);
+                let type_name = current.type_def.get_pg_type(&schema, &branch)?;
+                table_mod.retype_column(&current.name, pg_type, column_upgrade, type_name);
             } else {
                 let (column_id, info) = column.clone().into();
                 self.columns.insert(column_id, info);
                 let pg_type =
                     column
                         .type_def
-                        .extract_type(&schema, &branch, &mut table_mod.type_mods)?;
+                        .extract_type(&schema, &branch, &mut table_mod.atomic)?;
                 table_mod.add_column(&column.name, pg_type);
             }
         }
@@ -131,7 +133,7 @@ pub trait ExtractItem {
         branch: &Xxh3,
         new: &ArrayDef,
         dead: &mut HashMap<u128, MemberDef>,
-        queries: &mut Vec<TypeMod>,
+        queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>>;
     fn update_as_option(
         &mut self,
@@ -139,8 +141,9 @@ pub trait ExtractItem {
         branch: &Xxh3,
         new: &TypeDef,
         dead: &mut HashMap<u128, MemberDef>,
-        queries: &mut Vec<TypeMod>,
+        queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>>;
+    fn get_pg_type(&self, schema: &Rc<PgSchema>, branch: &Xxh3) -> PgTypeResult<PostgresType>;
 }
 
 impl ExtractItem for TypeDef {
@@ -182,7 +185,7 @@ impl ExtractItem for TypeDef {
         branch: &Xxh3,
         new: &ArrayDef,
         dead: &mut HashMap<u128, MemberDef>,
-        queries: &mut Vec<TypeMod>,
+        queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>> {
         self.as_array()?
             .compare_type(schema, branch, new, dead, queries)?
@@ -196,7 +199,7 @@ impl ExtractItem for TypeDef {
         branch: &Xxh3,
         new: &TypeDef,
         dead: &mut HashMap<u128, MemberDef>,
-        queries: &mut Vec<TypeMod>,
+        queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>> {
         match self {
             TypeDef::Option(def) => def.compare_type(schema, branch, new, dead, queries),
@@ -204,6 +207,48 @@ impl ExtractItem for TypeDef {
                 let pg_type = self.compare_type(schema, branch, new, dead, queries);
                 *self = OptionDef::new_type_def(std::mem::take(self));
                 pg_type
+            }
+        }
+    }
+    fn get_pg_type(&self, schema: &Rc<PgSchema>, branch: &Xxh3) -> PgTypeResult<PostgresType> {
+        match self {
+            TypeDef::None => Ok(PostgresScalar::None.into()),
+            TypeDef::Bool => Ok(PostgresScalar::Boolean.into()),
+            TypeDef::I8 | TypeDef::I16 => Ok(PostgresScalar::SmallInt.into()),
+            TypeDef::I32 => Ok(PostgresScalar::Int.into()),
+            TypeDef::I64 => Ok(PostgresScalar::BigInt.into()),
+            TypeDef::U8 => Ok(PostgresScalar::Uint8.into()),
+            TypeDef::U16 => Ok(PostgresScalar::Uint16.into()),
+            TypeDef::U32 => Ok(PostgresScalar::Uint32.into()),
+            TypeDef::U64 => Ok(PostgresScalar::Uint64.into()),
+            TypeDef::U128 => Ok(PostgresScalar::Uint128.into()),
+            TypeDef::I128 => Ok(PostgresScalar::Int128.into()),
+            TypeDef::U256 => Ok(PostgresScalar::Uint256.into()),
+            TypeDef::U512 => Ok(PostgresScalar::Uint512.into()),
+            TypeDef::Felt252 => Ok(PostgresScalar::Felt252.into()),
+            TypeDef::ContractAddress
+            | TypeDef::ClassHash
+            | TypeDef::StorageAddress
+            | TypeDef::StorageBaseAddress => Ok(PostgresScalar::StarknetHash.into()),
+            TypeDef::EthAddress => Ok(PostgresScalar::EthAddress.into()),
+            TypeDef::Utf8String => Ok(PostgresScalar::Text.into()),
+            TypeDef::ShortUtf8 => Ok(PostgresScalar::Char31.into()),
+            TypeDef::ByteArray | TypeDef::ByteArrayEncoded(_) => Ok(PostgresScalar::Bytea.into()),
+            TypeDef::Bytes31 | TypeDef::Bytes31Encoded(_) => Ok(PostgresScalar::Bytes31.into()),
+            TypeDef::Tuple(_) => Ok(PostgresType::composite(schema, branch.tuple_name())),
+            TypeDef::Enum(def) => Ok(PostgresType::composite(schema, branch.type_name(&def.name))),
+            TypeDef::Array(def) => def.get_pg_type(schema, branch)?.to_array(None),
+            TypeDef::FixedArray(def) => def
+                .type_def
+                .get_pg_type(schema, branch)?
+                .to_array(Some(def.size)),
+            TypeDef::Struct(def) => {
+                Ok(PostgresType::composite(schema, branch.type_name(&def.name)))
+            }
+            TypeDef::Option(def) => def.get_pg_type(schema, branch),
+            TypeDef::Nullable(def) => def.get_pg_type(schema, branch),
+            TypeDef::Felt252Dict(_) | TypeDef::Result(_) | TypeDef::Ref(_) | TypeDef::Custom(_) => {
+                Err(PgTypeError::UnsupportedType(format!("{self:?}")))
             }
         }
     }
@@ -216,7 +261,7 @@ pub trait CompareType {
         branch: &Xxh3,
         new: &Self,
         dead: &mut HashMap<u128, MemberDef>,
-        queries: &mut Vec<TypeMod>,
+        queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>>;
 }
 
@@ -253,25 +298,27 @@ pub trait UpgradeField {
     fn upgrade_field(
         &mut self,
         schema: &Rc<PgSchema>,
+        name: &str,
         branch: &Xxh3,
         new: &Self,
         dead: &mut HashMap<u128, MemberDef>,
-        queries: &mut Vec<TypeMod>,
-        mods: &mut Vec<StructMod>,
+        queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<()> {
         let pg_type =
             self.type_def_mut()
                 .compare_type(schema, branch, &new.type_def(), dead, queries)?;
-        mods.maybe_alter(self.name(), pg_type);
+        queries.maybe_alter(schema, name, self.name(), pg_type);
         Ok(())
     }
     fn add_field(
         &self,
         schema: &Rc<PgSchema>,
         branch: &Xxh3,
-        queries: &mut Vec<TypeMod>,
+        queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<StructMod> {
-        let pg_type = self.type_def().extract_type(schema, &branch, queries)?;
+        let pg_type = self
+            .type_def()
+            .extract_type(schema, &branch, &mut queries.atomic)?;
         Ok(StructMod::add(self.name(), pg_type))
     }
 }
@@ -307,7 +354,7 @@ impl CompareType for TypeDef {
         branch: &Xxh3,
         new: &TypeDef,
         dead: &mut HashMap<u128, MemberDef>,
-        queries: &mut Vec<TypeMod>,
+        queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>> {
         use introspect_types::TypeDef::{
             Array, Bool, ByteArray, ByteArrayEncoded, Bytes31, Bytes31Encoded, ClassHash,
@@ -396,20 +443,21 @@ impl CompareType for StructDef {
         branch: &Xxh3,
         new: &StructDef,
         dead: &mut HashMap<u128, MemberDef>,
-        queries: &mut Vec<TypeMod>,
+        queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>> {
         let mut mods: Vec<StructMod> = Vec::new();
         let mut current_map: HashMap<String, MemberDef> = std::mem::take(&mut self.members)
             .into_iter()
             .map(|m| (m.name.clone(), m))
             .collect();
+        let struct_name = branch.type_name(&self.name);
         for member in &new.members {
             let branch = branch.branch(&member.name);
             if let Some(mut current) = current_map
                 .remove(&member.name)
                 .or_else(|| dead.remove(&branch.digest128()))
             {
-                current.upgrade_field(schema, &branch, member, dead, queries, &mut mods)?;
+                current.upgrade_field(schema, &struct_name, &branch, member, dead, queries)?;
                 self.members.push(current);
             } else {
                 mods.push(member.add_field(schema, &branch, queries)?);
@@ -419,7 +467,7 @@ impl CompareType for StructDef {
         for (_, dead_member) in current_map.drain() {
             dead.insert(branch.branch(&dead_member.name).digest128(), dead_member);
         }
-        queries.add_struct_mod(schema, branch.type_name(&self.name), mods);
+        queries.add_struct_mod(schema, struct_name, mods);
         Ok(None)
     }
 }
@@ -431,11 +479,12 @@ impl CompareType for EnumDef {
         branch: &Xxh3,
         new: &EnumDef,
         dead: &mut HashMap<u128, MemberDef>,
-        queries: &mut Vec<TypeMod>,
+        queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>> {
         let mut rename = Vec::new();
         let mut add = Vec::new();
         let mut mods = Vec::new();
+        let enum_name = branch.type_name(&self.name);
         for (id, variant) in &new.variants {
             let branch = branch.branch(id);
             if let Some(current) = self.variants.get_mut(id) {
@@ -444,7 +493,7 @@ impl CompareType for EnumDef {
                     mods.rename(&current.name, &variant.name);
                     current.name = variant.name.clone();
                 }
-                current.upgrade_field(schema, &branch, variant, dead, queries, &mut mods)?;
+                current.upgrade_field(schema, &enum_name, &branch, variant, dead, queries)?;
             } else {
                 add.push(variant.name.clone());
                 variant.add_field(schema, &branch, queries)?;
@@ -458,7 +507,7 @@ impl CompareType for EnumDef {
             rename,
             add,
         );
-        queries.add_struct_mod(schema, branch.type_name(&self.name), mods);
+        queries.add_struct_mod(schema, enum_name, mods);
         Ok(None)
     }
 }
@@ -470,7 +519,7 @@ impl CompareType for FixedArrayDef {
         branch: &Xxh3,
         new: &Self,
         dead: &mut HashMap<u128, MemberDef>,
-        queries: &mut Vec<TypeMod>,
+        queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>> {
         let pg_type = self
             .type_def
@@ -493,28 +542,27 @@ impl CompareType for TupleDef {
         branch: &Xxh3,
         new: &Self,
         dead: &mut HashMap<u128, MemberDef>,
-        queries: &mut Vec<TypeMod>,
+        queries: &mut ColumnUpgrade,
     ) -> UpgradeResult<Option<PostgresType>> {
         let mut mods = Vec::new();
+        let name = branch.tuple_name();
         if self.elements.len() > new.elements.len() {
             return Err(UpgradeError::TupleReductionError);
         }
         for (n, ty) in new.elements.iter().enumerate() {
             let branch = branch.branch(&(n as u32));
             if let Some(current) = self.elements.get_mut(n) {
-                mods.maybe_alter(
-                    format!("_{}", n),
-                    current.compare_type(schema, &branch, ty, dead, queries)?,
-                );
+                let pg_type = current.compare_type(schema, &branch, ty, dead, queries)?;
+                queries.maybe_alter(schema, &name, &format!("_{}", n), pg_type);
             } else {
                 self.elements.push(ty.clone());
                 mods.add(
                     format!("_{}", n),
-                    ty.extract_type(schema, &branch, queries)?,
+                    ty.extract_type(schema, &branch, &mut queries.atomic)?,
                 );
             }
         }
-        queries.add_struct_mod(schema, branch.tuple_name(), mods);
+        queries.add_struct_mod(schema, name, mods);
         Ok(None)
     }
 }

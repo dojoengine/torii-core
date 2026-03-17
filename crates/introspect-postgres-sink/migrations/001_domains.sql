@@ -111,11 +111,3 @@ BEGIN
     END IF;
 END $$;
 
-
-CREATE OR REPLACE FUNCTION set_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.__updated_at = NOW();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;

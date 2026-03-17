@@ -52,5 +52,6 @@ CREATE TABLE IF NOT EXISTS introspect.columns(
     name TEXT NOT NULL,
     attributes introspect.attribute[] NOT NULL DEFAULT '{}',
     type_def jsonb NOT NULL,
-    PRIMARY KEY (owner, "table", id)
+    PRIMARY KEY (owner, "table", id),
+    FOREIGN KEY (owner, "table") REFERENCES introspect.tables(owner, id)
 );
