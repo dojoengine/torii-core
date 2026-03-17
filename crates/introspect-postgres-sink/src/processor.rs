@@ -3,9 +3,10 @@ use crate::sql::write_conflict_res;
 use crate::table::{PgTable, PgTableError};
 use crate::types::PgTypeError;
 use crate::INTROSPECT_PG_SINK_MIGRATIONS;
-use introspect_types::ResultInto;
+use introspect_types::{ColumnDef, PrimaryDef};
+use serde::{Deserialize, Serialize};
 use serde_json::Serializer as JsonSerializer;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -246,8 +247,17 @@ impl PostgresTables {
     pub fn prepared_insert_fields(
         &self,
         event: &InsertsFields,
-    ) -> PGSinkResult<Option<(String, String)>> {
-        let table = self.get_living_table(&event.table)?;
+    ) -> PgDbResult<Option<(String, String)>> {
+        let tables = self.read()?;
+        let table = tables
+            .get(&event.table)
+            .ok_or(PgDbError::TableNotFound(event.table))?;
+        if !table.alive {
+            return Err(PgDbError::TableNotAlive(
+                event.table,
+                table.name().to_string(),
+            ));
+        }
         let schema = table.get_schema(&event.columns)?;
         let table_name = table.name();
 
@@ -312,6 +322,41 @@ pub struct IntrospectPgDb<T> {
     pool: T,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedTableState {
+    id: Felt,
+    name: String,
+    primary: PrimaryDef,
+    columns: Vec<ColumnDef>,
+    alive: bool,
+}
+
+impl PersistedTableState {
+    fn from_pg_table(id: Felt, table: &PgTable) -> Self {
+        Self {
+            id,
+            name: table.name.clone(),
+            primary: table.primary.clone(),
+            columns: table
+                .order
+                .iter()
+                .filter_map(|column_id| table.columns.get(column_id).cloned())
+                .collect(),
+            alive: table.alive,
+        }
+    }
+
+    fn into_table_schema(self) -> TableSchema {
+        TableSchema {
+            id: self.id,
+            name: self.name,
+            attributes: vec![],
+            primary: self.primary,
+            columns: self.columns,
+        }
+    }
+}
+
 impl<T: PostgresConnection> PostgresConnection for IntrospectPgDb<T> {
     fn pool(&self) -> &PgPool {
         self.pool.pool()
@@ -334,7 +379,10 @@ impl<T: PostgresConnection + Send + Sync> IntrospectPgDb<T> {
         sqlx::query(format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", self.schema).as_str())
             .execute(&mut *tx)
             .await?;
-        tx.commit().await.err_into()
+        tx.commit().await?;
+
+        self.load_persisted_tables().await?;
+        Ok(())
     }
     pub fn load_tables_no_commit(&self, table_schemas: Vec<TableSchema>) -> PgDbResult<()> {
         let mut tables = self.tables.write()?;
@@ -352,9 +400,13 @@ impl<T: PostgresConnection + Send + Sync> IntrospectPgDb<T> {
         context: &EventContext,
     ) -> PgDbResult<()> {
         let mut queries = Vec::new();
+        let state_table_id = state_table_id(msg);
         self.tables
             .handle_message(&self.schema, msg, context, &mut queries)?;
         self.execute_queries(&queries).await?;
+        if let Some(id) = state_table_id {
+            self.persist_table_state(id).await?;
+        }
         Ok(())
     }
 
@@ -364,14 +416,114 @@ impl<T: PostgresConnection + Send + Sync> IntrospectPgDb<T> {
     ) -> PgDbResult<Vec<PgDbResult<()>>> {
         let mut queries = Vec::new();
         let mut results = Vec::with_capacity(msgs.len());
+        let mut state_table_ids = Vec::with_capacity(msgs.len());
         for (msg, context) in msgs {
+            state_table_ids.push(state_table_id(msg));
             results.push(
                 self.tables
                     .handle_message(&self.schema, msg, context, &mut queries),
             );
         }
         self.execute_queries(&queries).await?;
+
+        for (result, state_table_id) in results.iter().zip(state_table_ids) {
+            if result.is_ok() {
+                if let Some(id) = state_table_id {
+                    self.persist_table_state(id).await?;
+                }
+            }
+        }
+
         Ok(results)
+    }
+
+    async fn load_persisted_tables(&self) -> PgDbResult<()> {
+        let rows = sqlx::query(
+            r#"
+            SELECT table_json
+            FROM torii_introspect_schema_state
+            ORDER BY updated_at ASC
+            "#,
+        )
+        .fetch_all(self.pool())
+        .await?;
+
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let persisted = rows
+            .into_iter()
+            .map(|row| {
+                let json: String = row.try_get("table_json")?;
+                serde_json::from_str::<PersistedTableState>(&json)
+                    .map_err(|error| sqlx::Error::Protocol(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut tables = self.tables.write()?;
+        for persisted_table in persisted {
+            let id = persisted_table.id;
+            let alive = persisted_table.alive;
+            let mut ignored_queries = Vec::new();
+            let (_, mut table) = PgTable::new_from_table(
+                &self.schema,
+                persisted_table.into_table_schema(),
+                &mut ignored_queries,
+            )?;
+            table.alive = alive;
+            tables.insert(id, table);
+        }
+
+        let total = tables.len();
+        let dead = tables.values().filter(|table| !table.alive).count();
+        tracing::info!(
+            target: "torii::sinks::introspect",
+            restored_tables = total,
+            dead_tables = dead,
+            "Restored persisted introspect schema state"
+        );
+
+        Ok(())
+    }
+
+    fn current_table_state(&self, id: Felt) -> PgDbResult<PersistedTableState> {
+        let tables = self.tables.read()?;
+        let table = tables.get(&id).ok_or(PgDbError::TableNotFound(id))?;
+        Ok(PersistedTableState::from_pg_table(id, table))
+    }
+
+    async fn persist_table_state(&self, id: Felt) -> PgDbResult<()> {
+        let table = self.current_table_state(id)?;
+        let json = serde_json::to_string(&table)?;
+        sqlx::query(
+            r#"
+            INSERT INTO torii_introspect_schema_state (table_id, table_json, updated_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (table_id)
+            DO UPDATE SET
+                table_json = EXCLUDED.table_json,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(id.to_bytes_be().to_vec())
+        .bind(json)
+        .execute(self.pool())
+        .await?;
+
+        Ok(())
+    }
+}
+
+fn state_table_id(msg: &IntrospectMsg) -> Option<Felt> {
+    match msg {
+        IntrospectMsg::CreateTable(event) => Some(event.id),
+        IntrospectMsg::UpdateTable(event) => Some(event.id),
+        IntrospectMsg::AddColumns(event) => Some(event.table),
+        IntrospectMsg::DropColumns(event) => Some(event.table),
+        IntrospectMsg::RetypeColumns(event) => Some(event.table),
+        IntrospectMsg::RetypePrimary(event) => Some(event.table),
+        _ => None,
     }
 }
 

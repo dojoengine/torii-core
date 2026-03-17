@@ -13,13 +13,15 @@ use serde::ser::SerializeMap;
 use serde::Serializer;
 use serde_json::{Map, Serializer as JsonSerializer, Value};
 use sqlx::{
-    any::AnyPoolOptions, sqlite::SqliteConnectOptions, Any, ConnectOptions, Pool, QueryBuilder, Row,
+    any::AnyPoolOptions, postgres::PgPoolOptions, sqlite::SqliteConnectOptions,
+    sqlite::SqlitePoolOptions, Any, ConnectOptions, Pool, QueryBuilder, Row,
 };
 use starknet::core::types::Felt;
 use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use torii_dojo::manager::{PostgresStore, SqliteStore};
+use torii_dojo::store::postgres::PgStore;
+use torii_dojo::store::sqlite::SqliteStore as DojoSqliteStore;
 use torii_dojo::store::DojoStoreTrait;
 use torii_dojo::DojoTable;
 use torii_introspect::events::{CreateTable, Record, UpdateTable};
@@ -831,11 +833,21 @@ impl EcsService {
     async fn load_dojo_tables(&self) -> Result<Vec<DojoTable>> {
         match self.state.backend {
             DbBackend::Sqlite => {
-                let store = SqliteStore::new(&self.state.database_url).await?;
+                let options = SqliteConnectOptions::from_str(&self.state.database_url)
+                    .map_err(|error| anyhow!("invalid sqlite database url: {error}"))?;
+                let pool = SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect_with(options)
+                    .await?;
+                let store = DojoSqliteStore::from(Arc::new(pool));
                 Ok(store.load_tables(&[]).await?)
             }
             DbBackend::Postgres => {
-                let store = PostgresStore::new(&self.state.database_url).await?;
+                let pool = PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&self.state.database_url)
+                    .await?;
+                let store = PgStore::from(Arc::new(pool));
                 Ok(store.load_tables(&[]).await?)
             }
         }

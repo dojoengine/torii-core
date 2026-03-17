@@ -1,7 +1,10 @@
 use crate::json::SqliteJsonSerializer;
 use crate::table::{SqliteTable, SqliteTableError};
 use crate::INTROSPECT_SQLITE_SINK_MIGRATIONS;
+use introspect_types::{ColumnDef, PrimaryDef};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sqlx::Row;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -163,6 +166,41 @@ pub struct IntrospectSqliteDb<T> {
     pool: T,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedTableState {
+    id: Felt,
+    name: String,
+    primary: PrimaryDef,
+    columns: Vec<ColumnDef>,
+    alive: bool,
+}
+
+impl PersistedTableState {
+    fn from_sqlite_table(id: Felt, table: &SqliteTable) -> Self {
+        Self {
+            id,
+            name: table.name.clone(),
+            primary: table.primary.clone(),
+            columns: table
+                .order
+                .iter()
+                .filter_map(|column_id| table.columns.get(column_id).cloned())
+                .collect(),
+            alive: table.alive,
+        }
+    }
+
+    fn into_table_schema(self) -> TableSchema {
+        TableSchema {
+            id: self.id,
+            name: self.name,
+            attributes: vec![],
+            primary: self.primary,
+            columns: self.columns,
+        }
+    }
+}
+
 impl<T: SqliteConnection> SqliteConnection for IntrospectSqliteDb<T> {
     fn pool(&self) -> &sqlx::SqlitePool {
         self.pool.pool()
@@ -181,6 +219,8 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
     pub async fn initialize_introspect_sqlite_sink(&self) -> SqliteDbResult<()> {
         self.migrate(Some("introspect"), INTROSPECT_SQLITE_SINK_MIGRATIONS)
             .await?;
+
+        self.load_persisted_tables().await?;
         Ok(())
     }
 
@@ -202,13 +242,29 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
             IntrospectMsg::CreateTable(event) => {
                 let (_, query) = self.tables.create_table(&self.namespace, event.clone())?;
                 self.execute_queries(&[query]).await?;
+                self.persist_table_state(event.id).await?;
                 Ok(())
             }
-            IntrospectMsg::UpdateTable(event) => self.tables.set_table_dead(&event.id),
-            IntrospectMsg::AddColumns(event) => self.tables.set_table_dead(&event.table),
-            IntrospectMsg::DropColumns(event) => self.tables.set_table_dead(&event.table),
-            IntrospectMsg::RetypeColumns(event) => self.tables.set_table_dead(&event.table),
-            IntrospectMsg::RetypePrimary(event) => self.tables.set_table_dead(&event.table),
+            IntrospectMsg::UpdateTable(event) => {
+                self.tables.set_table_dead(&event.id)?;
+                self.persist_table_state(event.id).await
+            }
+            IntrospectMsg::AddColumns(event) => {
+                self.tables.set_table_dead(&event.table)?;
+                self.persist_table_state(event.table).await
+            }
+            IntrospectMsg::DropColumns(event) => {
+                self.tables.set_table_dead(&event.table)?;
+                self.persist_table_state(event.table).await
+            }
+            IntrospectMsg::RetypeColumns(event) => {
+                self.tables.set_table_dead(&event.table)?;
+                self.persist_table_state(event.table).await
+            }
+            IntrospectMsg::RetypePrimary(event) => {
+                self.tables.set_table_dead(&event.table)?;
+                self.persist_table_state(event.table).await
+            }
             IntrospectMsg::RenameTable(_)
             | IntrospectMsg::DropTable(_)
             | IntrospectMsg::RenameColumns(_)
@@ -217,6 +273,80 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
             | IntrospectMsg::DeletesFields(_) => Ok(()),
             IntrospectMsg::InsertsFields(event) => self.insert_fields(event, context).await,
         }
+    }
+
+    async fn load_persisted_tables(&self) -> SqliteDbResult<()> {
+        let rows = sqlx::query(
+            r#"
+            SELECT table_json
+            FROM torii_introspect_schema_state
+            ORDER BY updated_at ASC
+            "#,
+        )
+        .fetch_all(self.pool())
+        .await?;
+
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let persisted = rows
+            .into_iter()
+            .map(|row| {
+                let json: String = row.try_get("table_json")?;
+                serde_json::from_str::<PersistedTableState>(&json)
+                    .map_err(|error| sqlx::Error::Protocol(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut tables = self.tables.write()?;
+        for persisted_table in persisted {
+            let id = persisted_table.id;
+            let alive = persisted_table.alive;
+            let (_, mut table) = SqliteTable::new_from_table(
+                self.namespace.prefix(),
+                persisted_table.into_table_schema(),
+            );
+            table.alive = alive;
+            tables.insert(id, table);
+        }
+
+        let total = tables.len();
+        let dead = tables.values().filter(|table| !table.alive).count();
+        tracing::info!(
+            target: "torii::sinks::introspect::sqlite",
+            restored_tables = total,
+            dead_tables = dead,
+            "Restored persisted introspect schema state"
+        );
+
+        Ok(())
+    }
+
+    fn current_table_state(&self, id: Felt) -> SqliteDbResult<PersistedTableState> {
+        let tables = self.tables.read()?;
+        let table = tables.get(&id).ok_or(SqliteDbError::TableNotFound(id))?;
+        Ok(PersistedTableState::from_sqlite_table(id, table))
+    }
+
+    async fn persist_table_state(&self, id: Felt) -> SqliteDbResult<()> {
+        let table = self.current_table_state(id)?;
+        let json = serde_json::to_string(&table)?;
+        sqlx::query(
+            r#"
+            INSERT INTO torii_introspect_schema_state (table_id, table_json, updated_at)
+            VALUES (?1, ?2, unixepoch())
+            ON CONFLICT (table_id)
+            DO UPDATE SET
+                table_json = excluded.table_json,
+                updated_at = unixepoch()
+            "#,
+        )
+        .bind(id.to_bytes_be().to_vec())
+        .bind(json)
+        .execute(self.pool())
+        .await?;
+        Ok(())
     }
 
     async fn insert_fields(
