@@ -107,10 +107,10 @@ bigdecimal = "0.4.10"
 tonic-build = "0.12"
 
 # Introspect
-introspect-events = { git = "https://github.com/cartridge-gg/introspect", rev = "60819cb" }
-introspect-types = { git = "https://github.com/cartridge-gg/introspect", rev = "60819cb" }
-introspect-rust-macros = { git = "https://github.com/cartridge-gg/introspect", rev = "60819cb" }
-dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev = "b4c7148" }
+introspect-events = { git = "https://github.com/cartridge-gg/introspect", rev = "34e93c1" }
+introspect-types = { git = "https://github.com/cartridge-gg/introspect", rev = "34e93c1" }
+introspect-rust-macros = { git = "https://github.com/cartridge-gg/introspect", rev = "34e93c1" }
+dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev = "aadc3c9" }
 
 
 # Utils
