@@ -2,7 +2,8 @@ use anyhow::Context;
 use introspect_types::serialize::ToCairoDeSeFrom;
 use introspect_types::serialize_def::CairoTypeSerialization;
 use introspect_types::{
-    CairoDeserializer, ColumnDef, PrimaryDef, PrimaryTypeDef, ResultDef, TupleDef, TypeDef,
+    CairoDeserializer, ColumnDef, ColumnInfo, PrimaryDef, PrimaryTypeDef, ResultDef, TupleDef,
+    TypeDef,
 };
 use serde::ser::SerializeMap;
 use serde::Serializer;
@@ -435,14 +436,18 @@ fn sqlite_records_for_event(
     table: &SqliteTable,
     event: &InsertsFields,
 ) -> SqliteResult<Vec<SqliteRow>> {
-    let schema = torii_introspect::tables::RecordSchema::new(
-        &table.primary,
-        event
-            .columns
-            .iter()
-            .map(|column_id| table.get_living_column(column_id))
-            .collect::<SqliteResult<Vec<_>>>()?,
-    );
+    let column_infos = event
+        .columns
+        .iter()
+        .map(|column_id| {
+            table.get_living_column(column_id).cloned().map(|column| {
+                let (_, info): (Felt, ColumnInfo) = column.into();
+                info
+            })
+        })
+        .collect::<SqliteResult<Vec<_>>>()?;
+    let schema =
+        torii_introspect::tables::RecordSchema::new(&table.primary, column_infos.iter().collect());
 
     let mut bytes = Vec::new();
     let mut serializer = JsonSerializer::new(&mut bytes);

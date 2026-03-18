@@ -112,25 +112,25 @@ impl Sink for EcsSink {
                 continue;
             };
             let context = batch
-                .get_event_context(&body.transaction_hash, body.from_address)
+                .get_event_context(&body.metadata.transaction_hash, body.metadata.from_address)
                 .unwrap_or_default();
 
             match &body.msg {
                 IntrospectMsg::CreateTable(table) => {
                     self.service
-                        .cache_created_table(body.from_address, table)
+                        .cache_created_table(body.metadata.from_address, table)
                         .await;
                     self.service
-                        .record_table_kind(body.from_address, table.id, TableKind::Entity)
+                        .record_table_kind(body.metadata.from_address, table.id, TableKind::Entity)
                         .await
                         .ok();
                 }
                 IntrospectMsg::UpdateTable(table) => {
                     self.service
-                        .cache_updated_table(body.from_address, table)
+                        .cache_updated_table(body.metadata.from_address, table)
                         .await;
                     self.service
-                        .record_table_kind(body.from_address, table.id, TableKind::Entity)
+                        .record_table_kind(body.metadata.from_address, table.id, TableKind::Entity)
                         .await
                         .ok();
                 }
@@ -146,14 +146,14 @@ impl Sink for EcsSink {
                         TableKind::Entity
                     };
                     self.service
-                        .record_table_kind(body.from_address, insert.table, kind)
+                        .record_table_kind(body.metadata.from_address, insert.table, kind)
                         .await?;
                     for record in &insert.records {
                         let entity_id = Felt::from_bytes_be(&record.id);
                         self.service
                             .upsert_entity_meta(
                                 kind,
-                                body.from_address,
+                                body.metadata.from_address,
                                 insert.table,
                                 entity_id,
                                 context.block.timestamp,
@@ -163,7 +163,7 @@ impl Sink for EcsSink {
                         self.service
                             .upsert_entity_model(
                                 kind,
-                                body.from_address,
+                                body.metadata.from_address,
                                 insert.table,
                                 &insert.columns,
                                 record,
@@ -171,7 +171,7 @@ impl Sink for EcsSink {
                             )
                             .await?;
                         self.service
-                            .publish_entity_update(kind, body.from_address, entity_id)
+                            .publish_entity_update(kind, body.metadata.from_address, entity_id)
                             .await?;
                     }
                 }
@@ -182,7 +182,7 @@ impl Sink for EcsSink {
                         self.service
                             .upsert_entity_meta(
                                 kind,
-                                body.from_address,
+                                body.metadata.from_address,
                                 delete.table,
                                 entity_id,
                                 context.block.timestamp,
@@ -190,10 +190,15 @@ impl Sink for EcsSink {
                             )
                             .await?;
                         self.service
-                            .delete_entity_model(kind, body.from_address, delete.table, entity_id)
+                            .delete_entity_model(
+                                kind,
+                                body.metadata.from_address,
+                                delete.table,
+                                entity_id,
+                            )
                             .await?;
                         self.service
-                            .publish_entity_update(kind, body.from_address, entity_id)
+                            .publish_entity_update(kind, body.metadata.from_address, entity_id)
                             .await?;
                     }
                 }

@@ -22,31 +22,10 @@ use super::{ContractFilter, Decoder, DecoderId};
 use crate::etl::engine_db::EngineDb;
 use crate::etl::envelope::Envelope;
 
-fn felt_to_utf8_lossy(felt: &Felt) -> String {
-    let bytes = felt.to_bytes_be();
-    let start = bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[start..]).into_owned()
-}
-
 fn event_preview(event: &EmittedEvent) -> String {
-    let key0 = event.keys.first();
-    let data0 = event.data.first();
-    let key0_hex = key0
-        .map(|k| format!("{k:#x}"))
-        .unwrap_or_else(|| "<none>".to_string());
-    let key0_utf8 = key0
-        .map(felt_to_utf8_lossy)
-        .unwrap_or_else(|| "<none>".to_string());
-    let data0_hex = data0
-        .map(|d| format!("{d:#x}"))
-        .unwrap_or_else(|| "<none>".to_string());
-    let data0_utf8 = data0
-        .map(felt_to_utf8_lossy)
-        .unwrap_or_else(|| "<none>".to_string());
-
     format!(
-        "contract={:#x} tx={:#x} key0_hex={} key0_utf8={:?} data0_hex={} data0_utf8={:?}",
-        event.from_address, event.transaction_hash, key0_hex, key0_utf8, data0_hex, data0_utf8
+        "contract={:#x} tx={:#x}",
+        event.from_address, event.transaction_hash
     )
 }
 

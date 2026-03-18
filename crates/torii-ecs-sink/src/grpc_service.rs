@@ -8,7 +8,8 @@ use chrono::Utc;
 use introspect_types::serialize::ToCairoDeSeFrom;
 use introspect_types::serialize_def::CairoTypeSerialization;
 use introspect_types::{
-    Attributes, CairoDeserializer, ColumnDef, PrimaryTypeDef, ResultDef, TupleDef, TypeDef,
+    Attributes, CairoDeserializer, ColumnDef, ColumnInfo, PrimaryTypeDef, ResultDef, TupleDef,
+    TypeDef,
 };
 use serde::ser::SerializeMap;
 use serde::Serializer;
@@ -1000,7 +1001,7 @@ impl EcsService {
                     .connect_with(SqliteConnectOptions::from_str(&self.state.database_url)?)
                     .await?;
                 let store = SqliteStore(Arc::new(pool));
-                Ok(store.load_tables(&[]).await?)
+                Ok(store.read_tables(&[]).await?)
             }
             DbBackend::Postgres => {
                 let pool = PgPoolOptions::new()
@@ -1008,7 +1009,7 @@ impl EcsService {
                     .connect(&self.state.database_url)
                     .await?;
                 let store = PgStore(Arc::new(pool));
-                Ok(store.load_tables(&[]).await?)
+                Ok(store.read_tables(&[]).await?)
             }
         }
     }
@@ -1176,6 +1177,7 @@ impl EcsService {
         Ok((items, next_cursor))
     }
 
+    #[allow(dead_code)]
     async fn load_entity_page_from_storage(
         &self,
         kind: TableKind,
@@ -1353,7 +1355,7 @@ impl EcsService {
         direction: i32,
         limit: usize,
     ) -> Result<Vec<(String, String)>> {
-        if table_ids.is_some_and(|table_ids| table_ids.is_empty()) {
+        if table_ids.is_some_and(<[String]>::is_empty) {
             return Ok(Vec::new());
         }
         let limit = limit.clamp(1, 200);
@@ -1369,11 +1371,11 @@ impl EcsService {
             "ASC"
         };
 
-        let mut builder = QueryBuilder::<Any>::new(format!(
+        let mut builder = QueryBuilder::<Any>::new(
             "SELECT DISTINCT m.world_address, m.entity_id \
              FROM torii_ecs_entity_meta m \
-             WHERE m.kind = "
-        ));
+             WHERE m.kind = ",
+        );
         builder.push_bind(kind.as_str());
         if let Some(table_ids) = table_ids {
             builder.push(" AND m.table_id IN (");
@@ -1436,7 +1438,7 @@ impl EcsService {
         table_ids: Option<&[String]>,
         entity_keys: &[(String, String)],
     ) -> Result<HashMap<(String, String), HashMap<String, EntityMetaRow>>> {
-        if table_ids.is_some_and(|table_ids| table_ids.is_empty()) || entity_keys.is_empty() {
+        if table_ids.is_some_and(<[String]>::is_empty) || entity_keys.is_empty() {
             return Ok(HashMap::new());
         }
 
@@ -1527,7 +1529,7 @@ impl EcsService {
         table_ids: Option<&[String]>,
         entity_keys: &[(String, String)],
     ) -> Result<Vec<EntityModelRow>> {
-        if entity_keys.is_empty() || table_ids.is_some_and(|table_ids| table_ids.is_empty()) {
+        if entity_keys.is_empty() || table_ids.is_some_and(<[String]>::is_empty) {
             return Ok(Vec::new());
         }
 
@@ -1703,6 +1705,7 @@ impl EcsService {
         Ok(meta)
     }
 
+    #[allow(dead_code)]
     async fn load_entity_meta(
         &self,
         kind: TableKind,
@@ -1742,6 +1745,7 @@ impl EcsService {
         Ok(meta)
     }
 
+    #[allow(dead_code)]
     async fn fetch_table_rows(&self, table: &ManagedTable) -> Result<Vec<Map<String, Value>>> {
         match self.state.backend {
             DbBackend::Sqlite => {
@@ -2269,8 +2273,18 @@ fn record_to_json_map(
                 .get(column_id)
                 .ok_or_else(|| anyhow!("column {column_id:#x} not found in table {}", table.name))
         })
-        .collect::<Result<Vec<&ColumnDef>>>()?;
-    let schema = torii_introspect::tables::RecordSchema::new(&schema_table.primary, schema_columns);
+        .collect::<Result<Vec<&ColumnDef>>>()?
+        .into_iter()
+        .cloned()
+        .map(|column| {
+            let (_, info): (Felt, ColumnInfo) = column.into();
+            info
+        })
+        .collect::<Vec<_>>();
+    let schema = torii_introspect::tables::RecordSchema::new(
+        &schema_table.primary,
+        schema_columns.iter().collect(),
+    );
 
     let mut bytes = Vec::new();
     let mut serializer = JsonSerializer::new(&mut bytes);
@@ -2339,6 +2353,7 @@ fn build_entity_from_snapshot(
     Ok(Some(aggregate))
 }
 
+#[allow(dead_code)]
 fn any_row_to_json_map(row: &sqlx::any::AnyRow, table: &DojoTable) -> Result<Map<String, Value>> {
     let mut map = Map::new();
     let primary_name = &table.primary.name;
@@ -2355,6 +2370,7 @@ fn any_row_to_json_map(row: &sqlx::any::AnyRow, table: &DojoTable) -> Result<Map
     Ok(map)
 }
 
+#[allow(dead_code)]
 fn read_row_value(row: &sqlx::any::AnyRow, name: &str, type_def: &TypeDef) -> Result<Value> {
     if is_integer_type(type_def) {
         let value = row.try_get::<Option<i64>, _>(name)?;
@@ -2372,6 +2388,7 @@ fn read_row_value(row: &sqlx::any::AnyRow, name: &str, type_def: &TypeDef) -> Re
     }
 }
 
+#[allow(dead_code)]
 fn is_integer_type(type_def: &TypeDef) -> bool {
     matches!(
         type_def,
@@ -2386,6 +2403,7 @@ fn is_integer_type(type_def: &TypeDef) -> bool {
     )
 }
 
+#[allow(dead_code)]
 fn is_json_text_type(type_def: &TypeDef) -> bool {
     matches!(
         type_def,
@@ -2631,6 +2649,7 @@ fn value_as_felt_bytes(value: &Value) -> Result<Vec<u8>> {
     Ok(felt_from_hex(trimmed)?.to_bytes_be().to_vec())
 }
 
+#[allow(dead_code)]
 fn value_to_primary_felt(value: &Value, type_def: &PrimaryTypeDef) -> Result<Felt> {
     match type_def {
         PrimaryTypeDef::Bool => Ok(Felt::from(value.as_bool().unwrap_or_default() as u64)),

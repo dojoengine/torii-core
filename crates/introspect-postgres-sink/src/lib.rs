@@ -4,7 +4,6 @@ pub mod json;
 pub mod processor;
 pub mod query;
 pub mod sink;
-pub mod sql;
 pub mod sqlite;
 pub mod table;
 pub mod types;

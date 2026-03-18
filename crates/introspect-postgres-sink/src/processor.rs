@@ -1,12 +1,11 @@
 use crate::json::PostgresJsonSerializer;
 use crate::query::CreatePgTable;
-use crate::sql::write_conflict_res;
 use crate::table::{DeadField, PgTable};
 use crate::{PgDbError, PgDbResult, PgSchema, INTROSPECT_PG_SINK_MIGRATIONS};
 use introspect_types::{ColumnInfo, ResultInto, TypeDef};
 use serde_json::Serializer as JsonSerializer;
 use sqlx::types::Json;
-use sqlx::{FromRow, PgPool, Row};
+use sqlx::{FromRow, PgPool};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::io::Write;
@@ -294,6 +293,42 @@ impl<T: PostgresConnection + Send + Sync> IntrospectPgDb<T> {
                 None => dead_fields.entry(table).or_default().extend(fields),
             }
         }
+        Ok(())
+    }
+
+    async fn persist_table_state(&self, table: &TableSchema, alive: bool) -> PgDbResult<()> {
+        let schema_json = serde_json::to_string(table)?;
+        sqlx::query(
+            r#"
+            INSERT INTO introspect.introspect_sink_schema_state (table_id, table_schema_json, alive, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (table_id)
+            DO UPDATE SET
+                table_schema_json = EXCLUDED.table_schema_json,
+                alive = EXCLUDED.alive,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(format!("{:#x}", table.id))
+        .bind(schema_json)
+        .bind(alive)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
+    async fn persist_alive_state(&self, table_id: Felt, alive: bool) -> PgDbResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE introspect.introspect_sink_schema_state
+            SET alive = $1, updated_at = NOW()
+            WHERE table_id = $2
+            "#,
+        )
+        .bind(alive)
+        .bind(format!("{table_id:#x}"))
+        .execute(self.pool())
+        .await?;
         Ok(())
     }
 

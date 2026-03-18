@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::ops::Deref;
 use std::sync::{PoisonError, RwLock};
-use torii::etl::MetaData;
-use torii_introspect::events::IntrospectMsg;
+use torii::etl::envelope::MetaData;
+use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_introspect::schema::TableSchema;
 use torii_introspect::InsertsFields;
 use torii_sqlite::{SqliteConnection, SqlxError};
@@ -188,11 +188,11 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
 
     async fn load_persisted_state(&self) -> SqliteDbResult<()> {
         let rows = sqlx::query(
-            r#"
+            r"
             SELECT table_schema_json, alive
             FROM introspect_sink_schema_state
             ORDER BY updated_at ASC
-            "#,
+            ",
         )
         .fetch_all(self.pool())
         .await?;
@@ -215,7 +215,7 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
         let schema_json = serde_json::to_string(table)?;
         let alive = i64::from(alive);
         sqlx::query(
-            r#"
+            r"
             INSERT INTO introspect_sink_schema_state (table_id, table_schema_json, alive, updated_at)
             VALUES (?1, ?2, ?3, unixepoch())
             ON CONFLICT (table_id)
@@ -223,7 +223,7 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
                 table_schema_json = excluded.table_schema_json,
                 alive = excluded.alive,
                 updated_at = unixepoch()
-            "#,
+            ",
         )
         .bind(format!("{:#x}", table.id))
         .bind(schema_json)
@@ -236,11 +236,11 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
     async fn persist_alive_state(&self, table_id: Felt, alive: bool) -> SqliteDbResult<()> {
         let alive = i64::from(alive);
         sqlx::query(
-            r#"
+            r"
             UPDATE introspect_sink_schema_state
             SET alive = ?1, updated_at = unixepoch()
             WHERE table_id = ?2
-            "#,
+            ",
         )
         .bind(alive)
         .bind(format!("{table_id:#x}"))
@@ -299,6 +299,18 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
             | IntrospectMsg::DeletesFields(_) => Ok(()),
             IntrospectMsg::InsertsFields(event) => self.insert_fields(event, metadata).await,
         }
+    }
+
+    pub async fn process_messages(
+        &self,
+        msgs: Vec<&IntrospectBody>,
+    ) -> SqliteDbResult<Vec<SqliteDbResult<()>>> {
+        let mut results = Vec::with_capacity(msgs.len());
+        for body in msgs {
+            let (msg, metadata) = body.into();
+            results.push(self.process_message(msg, metadata).await);
+        }
+        Ok(results)
     }
 
     async fn insert_fields(
