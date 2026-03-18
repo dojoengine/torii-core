@@ -9,6 +9,7 @@ license = "Apache-2.0"
 [dependencies]
 sqlx = { workspace = true, features = [
   "postgres",
+  "sqlite",
   "runtime-tokio-rustls",
   "macros",
   "migrate",

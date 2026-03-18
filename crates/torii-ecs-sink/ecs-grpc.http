@@ -1,0 +1,159 @@
+@address=localhost:3000
+
+@world_1_hex=0x2d26295d6c541d64740e1ae56abc079b82b22c35ab83985ef8bd15dc0f9edfb
+@world_1_b64=LSYpXWxUHWR0DhrlarwHm4KyLDWrg5he+L0V3A+e3w==
+
+@world_2_hex=0x02ef591697f0fd9adc0ba9dbe0ca04dabad80cf95f08ba02e435d9cb6698a28a
+@world_2_b64=Au9ZFpfw/ZrcC6nb4MoE2rrYDPlfCLoC5DXZy2aYooo=
+
+@world_3_hex=0x8b4838140a3cbd36ebe64d4b5aaf56a30cc3753c928a79338bf56c53f506c5
+@world_3_b64=i0g4FAo8vTbr5k1LWq9WowzDdTySinkzi/VsU/UGxQ==
+
+@world_4_hex=0x07a079295990e43441a7389fdc3b9ba063c6cd6aee16fb846f598c42a9f04ff7
+@world_4_b64=B6B5KVmQ5DRBpzif3DuboGPGzWruFvuEb1mMQqnwT/c=
+
+@subscription_id=1
+
+### Shared
+# @grpc-plaintext
+# @grpc-import-path proto
+# @grpc-proto world.proto
+
+### List gRPC Services
+GRPC {{address}} list
+
+### Describe ECS Service
+GRPC {{address}} describe world.World
+
+### Describe RetrieveEntities
+GRPC {{address}} describe world.World/RetrieveEntities
+
+### Worlds For First Indexed World
+GRPC {{address}} world.World/Worlds
+Content-Type: application/json
+
+{
+  "world_addresses": ["{{world_1_b64}}"]
+}
+
+### Worlds For All Indexed Worlds
+GRPC {{address}} world.World/Worlds
+Content-Type: application/json
+
+{
+  "world_addresses": [
+    "{{world_1_b64}}",
+    "{{world_2_b64}}",
+    "{{world_3_b64}}",
+    "{{world_4_b64}}"
+  ]
+}
+
+### Subscribe Contracts For First World
+GRPC {{address}} world.World/SubscribeContracts
+Content-Type: application/json
+
+{
+  "query": {
+    "contract_addresses": ["{{world_1_b64}}"],
+    "contract_types": ["WORLD"]
+  }
+}
+
+### Retrieve Entities For First World
+GRPC {{address}} world.World/RetrieveEntities
+Content-Type: application/json
+
+{
+  "query": {
+    "world_addresses": ["{{world_1_b64}}"],
+    "pagination": {
+      "limit": 5,
+      "direction": "FORWARD"
+    }
+  }
+}
+
+### Retrieve Entities For First World And Specific Model
+GRPC {{address}} world.World/RetrieveEntities
+Content-Type: application/json
+
+{
+  "query": {
+    "world_addresses": ["{{world_1_b64}}"],
+    "models": ["blob_arena-CombatantState"],
+    "pagination": {
+      "limit": 5,
+      "direction": "FORWARD"
+    }
+  }
+}
+
+### Subscribe Entities For First World
+GRPC {{address}} world.World/SubscribeEntities
+Content-Type: application/json
+
+{
+  "world_addresses": ["{{world_1_b64}}"]
+}
+
+### Update Entity Subscription
+GRPC {{address}} world.World/UpdateEntitiesSubscription
+Content-Type: application/json
+
+{
+  "subscription_id": {{subscription_id}},
+  "world_addresses": ["{{world_1_b64}}"]
+}
+
+### Retrieve Event Messages For First World
+GRPC {{address}} world.World/RetrieveEventMessages
+Content-Type: application/json
+
+{
+  "query": {
+    "world_addresses": ["{{world_1_b64}}"],
+    "pagination": {
+      "limit": 5,
+      "direction": "FORWARD"
+    }
+  }
+}
+
+### Subscribe Event Messages For First World
+GRPC {{address}} world.World/SubscribeEventMessages
+Content-Type: application/json
+
+{
+  "world_addresses": ["{{world_1_b64}}"]
+}
+
+### Update Event Message Subscription
+GRPC {{address}} world.World/UpdateEventMessagesSubscription
+Content-Type: application/json
+
+{
+  "subscription_id": {{subscription_id}},
+  "world_addresses": ["{{world_1_b64}}"]
+}
+
+### Retrieve Events
+GRPC {{address}} world.World/RetrieveEvents
+Content-Type: application/json
+
+{
+  "query": {
+    "pagination": {
+      "limit": 5,
+      "direction": "FORWARD"
+    }
+  }
+}
+
+### Subscribe Events
+GRPC {{address}} world.World/SubscribeEvents
+Content-Type: application/json
+
+{
+  "keys": []
+}

@@ -22,6 +22,13 @@ use super::{ContractFilter, Decoder, DecoderId};
 use crate::etl::engine_db::EngineDb;
 use crate::etl::envelope::Envelope;
 
+fn event_preview(event: &EmittedEvent) -> String {
+    format!(
+        "contract={:#x} tx={:#x}",
+        event.from_address, event.transaction_hash
+    )
+}
+
 /// DecoderContext manages multiple decoders with contract filtering.
 ///
 /// Routes events to decoders based on:
@@ -237,9 +244,10 @@ impl DecoderContext {
                     Err(e) => {
                         tracing::warn!(
                             target: "torii::etl::decoder_context",
-                            "Decoder '{}' failed: {}",
+                            "Decoder '{}' failed: {} | {}",
                             decoder.decoder_name(),
-                            e
+                            e,
+                            event_preview(event)
                         );
                     }
                 }
@@ -280,9 +288,10 @@ impl DecoderContext {
                 Err(e) => {
                     tracing::warn!(
                         target: "torii::etl::decoder_context",
-                        "Decoder '{}' failed: {}",
+                        "Decoder '{}' failed: {} | {}",
                         decoder.decoder_name(),
-                        e
+                        e,
+                        event_preview(event)
                     );
                 }
             }

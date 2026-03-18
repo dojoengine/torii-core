@@ -31,6 +31,7 @@ impl<T: Send + Sync + SqliteConnection> Sink for IntrospectSqliteDb<T> {
         let mut inserts_fields = 0usize;
         let mut inserted_records = 0usize;
         let mut delete_records = 0usize;
+        let mut msgs = Vec::with_capacity(envelopes.len());
         for envelope in envelopes {
             if envelope.type_id == INTROSPECT_TYPE {
                 if let Some(body) = envelope.downcast_ref::<IntrospectBody>() {
@@ -47,10 +48,11 @@ impl<T: Send + Sync + SqliteConnection> Sink for IntrospectSqliteDb<T> {
                         _ => {}
                     }
                     processed += 1;
-                    self.process_message(&body.msg, &body.metadata).await?;
+                    msgs.push(body);
                 }
             }
         }
+        self.process_messages(msgs).await?;
 
         if processed > 0 {
             tracing::info!(
