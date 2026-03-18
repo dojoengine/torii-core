@@ -15,6 +15,7 @@ perf.data*
 perf/runs/
 
 .claude-modified-files
+.idea/
 .DS_Store
 **/.DS_Store
 /data/

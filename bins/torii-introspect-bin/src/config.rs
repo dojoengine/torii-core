@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use starknet::core::types::Felt;
 use std::path::Path;
 
@@ -14,11 +14,17 @@ pub enum StorageBackend {
 /// This binary targets explicitly configured Dojo contracts and persists the
 /// decoded introspect messages into SQL tables.
 #[derive(Parser, Debug)]
-#[command(name = "torii-introspect")]
+#[command(name = "torii-introspect-bin")]
 #[command(
-    about = "Index Dojo introspect events into PostgreSQL or SQLite",
+    about = "Index Dojo introspect events and token transfers into PostgreSQL or SQLite",
     long_about = None
 )]
+#[command(group(
+    ArgGroup::new("targets")
+        .args(["contracts", "erc20", "erc721", "erc1155"])
+        .multiple(true)
+        .required(true)
+))]
 pub struct Config {
     /// Starknet RPC URL.
     #[arg(
@@ -29,8 +35,20 @@ pub struct Config {
     pub rpc_url: String,
 
     /// Dojo contracts to index (comma-separated hex addresses).
-    #[arg(long, value_delimiter = ',', required = true)]
+    #[arg(long = "contract", visible_alias = "contracts", value_delimiter = ',')]
     pub contracts: Vec<String>,
+
+    /// ERC20 contracts to index (comma-separated hex addresses).
+    #[arg(long, value_delimiter = ',')]
+    pub erc20: Vec<String>,
+
+    /// ERC721 contracts to index (comma-separated hex addresses).
+    #[arg(long, value_delimiter = ',')]
+    pub erc721: Vec<String>,
+
+    /// ERC1155 contracts to index (comma-separated hex addresses).
+    #[arg(long, value_delimiter = ',')]
+    pub erc1155: Vec<String>,
 
     /// Starting block number for fresh extraction, or when `--ignore-saved-state` is set.
     #[arg(long, default_value = "0")]
@@ -56,7 +74,9 @@ pub struct Config {
 
     /// Optional PostgreSQL storage database URL.
     ///
-    /// When omitted, the binary uses SQLite storage at `<db-dir>/introspect.db`.
+    /// When omitted, the binary uses SQLite storage at `<db-dir>/introspect.db` for
+    /// introspect data and `<db-dir>/erc20.db`, `<db-dir>/erc721.db`, `<db-dir>/erc1155.db`
+    /// for token data.
     #[arg(long, env = "STORAGE_DATABASE_URL")]
     pub storage_database_url: Option<String>,
 
@@ -69,12 +89,20 @@ pub struct Config {
     pub observability: bool,
 
     /// Events per `starknet_getEvents` request.
-    #[arg(long, default_value = "1000")]
+    #[arg(long, visible_alias = "chunk-size", default_value = "1000")]
     pub event_chunk_size: u64,
 
     /// Block range to query per iteration.
-    #[arg(long, default_value = "10000")]
+    #[arg(long, visible_alias = "batch-size", default_value = "10000")]
     pub event_block_batch_size: u64,
+
+    /// Number of extracted batches to prefetch ahead of decode/store.
+    #[arg(long, default_value = "2")]
+    pub max_prefetch_batches: usize,
+
+    /// Maximum chunked RPC requests to run concurrently (`0` = auto).
+    #[arg(long, default_value = "0")]
+    pub rpc_parallelism: usize,
 
     /// Maximum SQL connections for the storage backend.
     #[arg(long)]
@@ -86,13 +114,30 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn contract_addresses(&self) -> Result<Vec<Felt>> {
-        self.contracts
+    fn parse_addresses(kind: &str, addrs: &[String]) -> Result<Vec<Felt>> {
+        addrs
             .iter()
             .map(|addr| {
-                Felt::from_hex(addr).map_err(|e| anyhow::anyhow!("Invalid contract {addr}: {e}"))
+                Felt::from_hex(addr)
+                    .map_err(|e| anyhow::anyhow!("Invalid {kind} contract {addr}: {e}"))
             })
             .collect()
+    }
+
+    pub fn contract_addresses(&self) -> Result<Vec<Felt>> {
+        Self::parse_addresses("Dojo", &self.contracts)
+    }
+
+    pub fn erc20_addresses(&self) -> Result<Vec<Felt>> {
+        Self::parse_addresses("ERC20", &self.erc20)
+    }
+
+    pub fn erc721_addresses(&self) -> Result<Vec<Felt>> {
+        Self::parse_addresses("ERC721", &self.erc721)
+    }
+
+    pub fn erc1155_addresses(&self) -> Result<Vec<Felt>> {
+        Self::parse_addresses("ERC1155", &self.erc1155)
     }
 
     pub fn storage_backend(&self) -> StorageBackend {
@@ -130,21 +175,26 @@ mod tests {
 
     #[test]
     fn observability_defaults_to_disabled() {
-        let cfg = Config::parse_from(["torii-introspect", "--contracts", "0x1"]);
+        let cfg = Config::parse_from(["torii-introspect-bin", "--contract", "0x1"]);
         assert!(!cfg.observability);
     }
 
     #[test]
     fn observability_flag_enables_metrics() {
-        let cfg = Config::parse_from(["torii-introspect", "--contracts", "0x1", "--observability"]);
+        let cfg = Config::parse_from([
+            "torii-introspect-bin",
+            "--contract",
+            "0x1",
+            "--observability",
+        ]);
         assert!(cfg.observability);
     }
 
     #[test]
     fn storage_database_url_accepts_sqlite() {
         let cfg = Config::parse_from([
-            "torii-introspect",
-            "--contracts",
+            "torii-introspect-bin",
+            "--contract",
             "0x1",
             "--storage-database-url",
             "sqlite://torii.db",
@@ -155,7 +205,7 @@ mod tests {
 
     #[test]
     fn sqlite_is_default_when_storage_database_url_is_omitted() {
-        let cfg = Config::parse_from(["torii-introspect", "--contracts", "0x1"]);
+        let cfg = Config::parse_from(["torii-introspect-bin", "--contract", "0x1"]);
 
         assert_eq!(cfg.storage_backend(), StorageBackend::Sqlite);
         assert!(cfg
@@ -166,11 +216,50 @@ mod tests {
 
     #[test]
     fn contract_addresses_parse_from_hex() {
-        let cfg = Config::parse_from(["torii-introspect", "--contracts", "0x1,0x2"]);
+        let cfg = Config::parse_from(["torii-introspect-bin", "--contract", "0x1,0x2"]);
 
         let contracts = cfg.contract_addresses().unwrap();
         assert_eq!(contracts.len(), 2);
         assert_eq!(contracts[0], Felt::ONE);
         assert_eq!(contracts[1], Felt::TWO);
+    }
+
+    #[test]
+    fn concurrency_flags_parse() {
+        let cfg = Config::parse_from([
+            "torii-introspect-bin",
+            "--contract",
+            "0x1",
+            "--chunk-size",
+            "777",
+            "--batch-size",
+            "8888",
+            "--max-prefetch-batches",
+            "4",
+            "--rpc-parallelism",
+            "6",
+        ]);
+
+        assert_eq!(cfg.event_chunk_size, 777);
+        assert_eq!(cfg.event_block_batch_size, 8888);
+        assert_eq!(cfg.max_prefetch_batches, 4);
+        assert_eq!(cfg.rpc_parallelism, 6);
+    }
+
+    #[test]
+    fn token_flags_parse() {
+        let cfg = Config::parse_from([
+            "torii-introspect-bin",
+            "--erc20",
+            "0x1,0x2",
+            "--erc721",
+            "0x3",
+            "--erc1155",
+            "0x4",
+        ]);
+
+        assert_eq!(cfg.erc20_addresses().unwrap(), vec![Felt::ONE, Felt::TWO]);
+        assert_eq!(cfg.erc721_addresses().unwrap(), vec![Felt::from(3_u64)]);
+        assert_eq!(cfg.erc1155_addresses().unwrap(), vec![Felt::from(4_u64)]);
     }
 }

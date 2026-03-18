@@ -322,7 +322,7 @@ async fn run_erc20_profile(config: Erc20ProfileConfig) -> Result<()> {
 
     let decoder = Arc::new(Erc20Decoder::new()) as Arc<dyn Decoder>;
     let decoder_context =
-        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new(), 1);
+        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new());
 
     let mut samples = Vec::new();
     let mut cursor = None;
@@ -448,7 +448,7 @@ async fn run_erc721_profile(config: Erc721ProfileConfig) -> Result<()> {
 
     let decoder = Arc::new(Erc721Decoder::new()) as Arc<dyn Decoder>;
     let decoder_context =
-        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new(), 1);
+        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new());
 
     let mut samples = Vec::new();
     let mut cursor = None;
@@ -576,7 +576,7 @@ async fn run_erc1155_profile(config: Erc1155ProfileConfig) -> Result<()> {
 
     let decoder = Arc::new(Erc1155Decoder::new()) as Arc<dyn Decoder>;
     let decoder_context =
-        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new(), 1);
+        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new());
 
     let mut samples = Vec::new();
     let mut cursor = None;

@@ -445,7 +445,7 @@ async fn main() -> Result<()> {
     decoder.load_tables(&[]).await?;
     let decoder: Arc<dyn Decoder> = Arc::new(decoder);
     let decoder_context =
-        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new(), 1);
+        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new());
 
     let mut extractor = SyntheticIntrospectExtractor::new(SyntheticIntrospectConfig {
         from_block: config.from_block,

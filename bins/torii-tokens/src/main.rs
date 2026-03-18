@@ -517,7 +517,6 @@ async fn run_indexer(config: Config) -> Result<()> {
         .database_root(&config.db_dir)
         .etl_concurrency(EtlConcurrencyConfig {
             max_prefetch_batches: config.max_prefetch_batches,
-            decode_parallelism: config.decode_parallelism,
         })
         .engine_database_url(db_setup.engine_url.clone())
         .with_extractor(extractor)
@@ -726,9 +725,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("Torii configured, starting ETL pipeline...");
     tracing::info!("Enabled token types: {}", enabled_types.join(", "));
     tracing::info!(
-        "ETL concurrency: prefetch_batches={} decode_parallelism={} rpc_parallelism={} metadata_parallelism={} metadata_queue_capacity={} metadata_max_retries={}",
+        "ETL concurrency: prefetch_batches={} rpc_parallelism={} metadata_parallelism={} metadata_queue_capacity={} metadata_max_retries={}",
         config.max_prefetch_batches,
-        config.decode_parallelism,
         config.rpc_parallelism,
         config.metadata_parallelism,
         config.metadata_queue_capacity,

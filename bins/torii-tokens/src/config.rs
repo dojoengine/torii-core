@@ -170,10 +170,6 @@ pub struct Config {
     #[arg(long, default_value = "2")]
     pub max_prefetch_batches: usize,
 
-    /// Chunk-level decode parallelism (`0` = auto).
-    #[arg(long, default_value = "0")]
-    pub decode_parallelism: usize,
-
     /// Maximum chunked RPC requests to run concurrently (`0` = auto).
     #[arg(long, default_value = "0")]
     pub rpc_parallelism: usize,
@@ -259,8 +255,6 @@ mod tests {
             "torii-tokens",
             "--max-prefetch-batches",
             "4",
-            "--decode-parallelism",
-            "8",
             "--rpc-parallelism",
             "6",
             "--metadata-parallelism",
@@ -271,7 +265,6 @@ mod tests {
             "5",
         ]);
         assert_eq!(cfg.max_prefetch_batches, 4);
-        assert_eq!(cfg.decode_parallelism, 8);
         assert_eq!(cfg.rpc_parallelism, 6);
         assert_eq!(cfg.metadata_parallelism, 12);
         assert_eq!(cfg.metadata_queue_capacity, 4096);
