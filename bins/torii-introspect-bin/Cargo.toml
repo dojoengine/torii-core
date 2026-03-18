@@ -10,11 +10,16 @@ path = "src/main.rs"
 
 [dependencies]
 torii = { path = "../../" }
+torii-common = { path = "../../crates/torii-common" }
 torii-config-common.workspace = true
 torii-dojo = { path = "../../crates/dojo" }
+torii-erc20 = { path = "../../crates/torii-erc20" }
+torii-erc721 = { path = "../../crates/torii-erc721" }
+torii-erc1155 = { path = "../../crates/torii-erc1155" }
 torii-ecs-sink = { path = "../../crates/torii-ecs-sink" }
 torii-introspect-postgres-sink = { path = "../../crates/introspect-postgres-sink" }
 torii-introspect-sqlite-sink = { path = "../../crates/introspect-sqlite-sink" }
+torii-runtime-common.workspace = true
 torii-sqlite = { path = "../../crates/sqlite" }
 
 tokio = { version = "1", features = ["full"] }

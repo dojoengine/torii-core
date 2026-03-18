@@ -226,7 +226,7 @@ async fn main() -> Result<()> {
 
     let decoder = Arc::new(Erc20Decoder::new()) as Arc<dyn Decoder>;
     let decoder_context =
-        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new(), 1);
+        DecoderContext::new(vec![decoder], engine_db.clone(), ContractFilter::new());
 
     let mut samples = Vec::new();
     let mut cursor = None;

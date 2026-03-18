@@ -70,29 +70,17 @@ pub const TORII_DESCRIPTOR_SET: &[u8] = FILE_DESCRIPTOR_SET;
 #[derive(Debug, Clone)]
 pub struct EtlConcurrencyConfig {
     pub max_prefetch_batches: usize,
-    pub decode_parallelism: usize,
 }
 
 impl Default for EtlConcurrencyConfig {
     fn default() -> Self {
         Self {
             max_prefetch_batches: 2,
-            decode_parallelism: 0,
         }
     }
 }
 
 impl EtlConcurrencyConfig {
-    pub fn resolved_decode_parallelism(&self) -> usize {
-        if self.decode_parallelism == 0 {
-            std::thread::available_parallelism()
-                .map(|parallelism| parallelism.get().clamp(2, 16))
-                .unwrap_or(4)
-        } else {
-            self.decode_parallelism.max(1)
-        }
-    }
-
     pub fn resolved_prefetch_batches(&self) -> usize {
         self.max_prefetch_batches.max(1)
     }
@@ -651,19 +639,13 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
             engine_db.clone(),
             config.contract_filter,
             registry_cache,
-            config.etl_concurrency.resolved_decode_parallelism(),
         )
     } else {
         tracing::info!(
             target: "torii::etl",
             "Creating DecoderContext without registry (all decoders for unmapped contracts)"
         );
-        DecoderContext::new(
-            config.decoders,
-            engine_db.clone(),
-            config.contract_filter,
-            config.etl_concurrency.resolved_decode_parallelism(),
-        )
+        DecoderContext::new(config.decoders, engine_db.clone(), config.contract_filter)
     };
 
     let topics = multi_sink.topics();

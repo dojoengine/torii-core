@@ -85,14 +85,13 @@ torii-tokens --db-dir /path/to/data --from-block 0
 
 ### Throughput Tuning
 
-For large backfills, tune concurrency in this order: `--rpc-parallelism`, then `--decode-parallelism`, then queue depth.
+For large backfills, tune concurrency in this order: `--rpc-parallelism`, then queue depth.
 
 ```bash
 # Conservative baseline
 torii-tokens --from-block 0 \
   --batch-size 1000 \
   --rpc-parallelism 4 \
-  --decode-parallelism 0 \
   --max-prefetch-batches 8 \
   --metadata-mode deferred
 
@@ -100,7 +99,6 @@ torii-tokens --from-block 0 \
 torii-tokens --from-block 0 \
   --batch-size 1000 \
   --rpc-parallelism 6 \
-  --decode-parallelism 8 \
   --max-prefetch-batches 8 \
   --metadata-mode deferred
 ```
@@ -108,7 +106,6 @@ torii-tokens --from-block 0 \
 Notes:
 
 - `--rpc-parallelism`: concurrent chunked RPC requests (`0` = auto).
-- `--decode-parallelism`: concurrent decode workers (`0` = auto).
 - `--max-prefetch-batches`: extracted batches buffered ahead of decode/store.
 - `--metadata-mode deferred`: reduce metadata-side RPC/load during backfill.
 - `--metadata-parallelism`, `--metadata-queue-capacity`, `--metadata-max-retries` control async metadata workers (ERC20), queue depth, and capped retry attempts.
@@ -133,7 +130,6 @@ Notes:
 | `--event-chunk-size` | `1000` | Events per RPC request (event mode) |
 | `--event-block-batch-size` | `10000` | Block range per iteration (event mode) |
 | `--max-prefetch-batches` | `2` | Number of extracted batches prefetched ahead |
-| `--decode-parallelism` | `0` | Chunk-level decode concurrency (`0` = auto) |
 | `--rpc-parallelism` | `0` | Concurrent chunked RPC requests (`0` = auto) |
 | `--metadata-mode` | `inline` | Metadata behavior (`inline` or `deferred`) |
 | `--metadata-parallelism` | `8` | Async metadata workers (ERC20 metadata pipeline) |

@@ -54,9 +54,6 @@ pub struct DecoderContext {
 
     /// Whether a registry is configured (affects fallback behavior)
     has_registry: bool,
-
-    /// Chunk-level decode parallelism (`0` is not allowed here; use resolved value).
-    decode_parallelism: usize,
 }
 
 impl DecoderContext {
@@ -71,7 +68,6 @@ impl DecoderContext {
         decoders: Vec<Arc<dyn Decoder>>,
         engine_db: Arc<EngineDb>,
         contract_filter: ContractFilter,
-        decode_parallelism: usize,
     ) -> Self {
         let decoder_map = Self::build_decoder_map(&decoders);
 
@@ -105,7 +101,6 @@ impl DecoderContext {
             contract_filter,
             registry_cache: Arc::new(RwLock::new(HashMap::new())),
             has_registry: false,
-            decode_parallelism: decode_parallelism.max(1),
         }
     }
 
@@ -127,7 +122,6 @@ impl DecoderContext {
         engine_db: Arc<EngineDb>,
         contract_filter: ContractFilter,
         registry_cache: Arc<RwLock<HashMap<Felt, Vec<DecoderId>>>>,
-        decode_parallelism: usize,
     ) -> Self {
         let decoder_map = Self::build_decoder_map(&decoders);
 
@@ -162,7 +156,6 @@ impl DecoderContext {
             contract_filter,
             registry_cache,
             has_registry: true,
-            decode_parallelism: decode_parallelism.max(1),
         }
     }
 
@@ -458,7 +451,7 @@ mod tests {
         let contract = Felt::from(0x1234_u64);
         let decoder: Arc<dyn Decoder> = Arc::new(OrderedDecoder { contract });
         let engine_db = make_engine_db().await;
-        let context = DecoderContext::new(vec![decoder], engine_db, ContractFilter::new(), 4);
+        let context = DecoderContext::new(vec![decoder], engine_db, ContractFilter::new());
 
         let events = (0..600_u64)
             .map(|seq| EmittedEvent {
