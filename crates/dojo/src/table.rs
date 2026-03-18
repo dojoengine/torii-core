@@ -22,6 +22,7 @@ pub struct DojoTable {
     pub legacy: bool,
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct DojoTableInfo {
     pub name: String,
     pub attributes: Vec<String>,

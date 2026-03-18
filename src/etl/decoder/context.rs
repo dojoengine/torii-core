@@ -12,7 +12,6 @@
 //! - Deterministic ordering: decoders are always called in sorted DecoderId order
 
 use async_trait::async_trait;
-use futures::stream::{self, StreamExt};
 use starknet::core::types::{EmittedEvent, Felt};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,12 +21,21 @@ use super::{ContractFilter, Decoder, DecoderId};
 use crate::etl::engine_db::EngineDb;
 use crate::etl::envelope::Envelope;
 
+fn event_preview(event: &EmittedEvent) -> String {
+    format!(
+        "contract={:#x} tx={:#x}",
+        event.from_address, event.transaction_hash
+    )
+}
+
 /// DecoderContext manages multiple decoders with contract filtering.
 ///
 /// Routes events to decoders based on:
 /// 1. Explicit mappings (highest priority, from ContractFilter)
 /// 2. Registry mappings (from ContractRegistry auto-identification)
 /// 3. All decoders (fallback when no registry is configured)
+///
+#[allow(dead_code)]
 pub struct DecoderContext {
     /// Decoders indexed by their ID (hash of name)
     decoders: HashMap<DecoderId, Arc<dyn Decoder>>,
@@ -237,9 +245,10 @@ impl DecoderContext {
                     Err(e) => {
                         tracing::warn!(
                             target: "torii::etl::decoder_context",
-                            "Decoder '{}' failed: {}",
+                            "Decoder '{}' failed: {} | {}",
                             decoder.decoder_name(),
-                            e
+                            e,
+                            event_preview(event)
                         );
                     }
                 }
@@ -280,9 +289,10 @@ impl DecoderContext {
                 Err(e) => {
                     tracing::warn!(
                         target: "torii::etl::decoder_context",
-                        "Decoder '{}' failed: {}",
+                        "Decoder '{}' failed: {} | {}",
                         decoder.decoder_name(),
-                        e
+                        e,
+                        event_preview(event)
                     );
                 }
             }
@@ -361,42 +371,13 @@ impl Decoder for DecoderContext {
     }
 
     async fn decode(&self, events: &[EmittedEvent]) -> anyhow::Result<Vec<Envelope>> {
-        const DECODE_CHUNK_SIZE: usize = 256;
-
-        let chunk_count = events.len().div_ceil(DECODE_CHUNK_SIZE);
-        ::metrics::gauge!("torii_decode_parallelism").set(self.decode_parallelism as f64);
-
-        let decode_start = std::time::Instant::now();
-        let decode_tasks = events
-            .chunks(DECODE_CHUNK_SIZE)
-            .enumerate()
-            .map(|(chunk_index, chunk)| async move {
-                let mut chunk_envelopes = Vec::new();
-                for event in chunk {
-                    let envelopes = self.decode_event(event).await?;
-                    chunk_envelopes.extend(envelopes);
-                }
-
-                Ok::<_, anyhow::Error>((chunk_index, chunk_envelopes))
-            })
-            .collect::<Vec<_>>();
-
-        let mut decoded_chunks = stream::iter(decode_tasks)
-            .buffer_unordered(self.decode_parallelism)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<anyhow::Result<Vec<_>>>()?;
-
-        decoded_chunks.sort_by_key(|(chunk_index, _)| *chunk_index);
-
         let mut all_envelopes = Vec::new();
-        for (_, envelopes) in decoded_chunks {
+
+        for event in events {
+            let envelopes = self.decode_event(event).await?;
+
             all_envelopes.extend(envelopes);
         }
-
-        ::metrics::histogram!("torii_decode_chunk_duration_seconds")
-            .record(decode_start.elapsed().as_secs_f64() / chunk_count.max(1) as f64);
 
         tracing::debug!(
             target: "torii::etl::decoder_context",
