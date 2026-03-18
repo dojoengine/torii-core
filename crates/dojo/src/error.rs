@@ -8,21 +8,21 @@ use starknet_types_core::felt::Felt;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DojoToriiError {
-    #[error("Unknown Dojo Event selector {0}")]
+    #[error("Unknown Dojo Event selector {0:#066x}")]
     UnknownDojoEventSelector(Felt),
     #[error("Missing event selector")]
     MissingEventSelector,
-    #[error("Column {0} not found in table {1}")]
+    #[error("Column {0:#066x} not found in table {1}")]
     ColumnNotFound(Felt, String),
-    #[error("Failed to parse field {0} in table {1}")]
+    #[error("Failed to parse field {0:#066x} in table {1}")]
     FieldParseError(Felt, String),
-    #[error("Too many values provided for field {0}")]
+    #[error("Too many values provided for field {0:#066x}")]
     TooManyFieldValues(Felt),
     #[error("Failed to parse values for table {0}")]
     ParseValuesError(String),
-    #[error("Cannot add {2} table already exists with id {0} and name {1}")]
+    #[error("Cannot add {2} table already exists with id {0:#066x} and name {1}")]
     TableAlreadyExists(Felt, String, String),
-    #[error("Table not found with id {0}")]
+    #[error("Table not found with id {0:#066x}")]
     TableNotFoundById(Felt),
     #[error("Failed to acquire lock: {0}")]
     LockError(String),

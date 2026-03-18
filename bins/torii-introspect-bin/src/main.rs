@@ -160,8 +160,11 @@ async fn run_with_postgres(
     );
 
     let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), provider);
+    let sink = IntrospectPgDb::new(pool.clone(), ());
     decoder.store.initialize().await?;
+    sink.initialize_introspect_pg_sink().await?;
     decoder.load_tables(&[]).await?;
+    sink.load_tables_no_commit(decoder.get_tables()?)?;
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
 
@@ -170,7 +173,7 @@ async fn run_with_postgres(
         .engine_database_url(engine_database_url)
         .with_extractor(extractor)
         .add_decoder(decoder)
-        .add_sink_boxed(Box::new(IntrospectPgDb::new(pool.clone(), ())));
+        .add_sink_boxed(Box::new(sink));
 
     let decoder_id = DecoderId::new("dojo-introspect");
     for contract in contracts {
