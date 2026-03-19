@@ -4674,6 +4674,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "starknet",
+ "tempfile",
  "tokio",
  "tonic",
  "tonic-build",

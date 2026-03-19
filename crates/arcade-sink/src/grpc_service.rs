@@ -23,6 +23,7 @@ use crate::proto::arcade::{
 const GAME_TABLE: &str = "ARCADE-Game";
 const EDITION_TABLE: &str = "ARCADE-Edition";
 const COLLECTION_TABLE: &str = "ARCADE-Collection";
+const COLLECTION_EDITION_TABLE: &str = "ARCADE-CollectionEdition";
 const ORDER_TABLE: &str = "ARCADE-Order";
 const LISTING_TABLE: &str = "ARCADE-Listing";
 const SALE_TABLE: &str = "ARCADE-Sale";
@@ -146,6 +147,7 @@ impl ArcadeService {
     }
 
     pub async fn bootstrap_from_source(&self) -> Result<()> {
+        self.clear_projection_tables().await?;
         self.bootstrap_games().await?;
         self.bootstrap_editions().await?;
         self.bootstrap_collections().await?;
@@ -158,10 +160,8 @@ impl ArcadeService {
         if !self.source_table_exists(GAME_TABLE).await? {
             return Ok(());
         }
-        let sql = select_by_entity_sql(self.state.backend, GAME_TABLE);
-        if let Some(row) = sqlx::query(&sql)
-            .bind(felt_hex(entity_id))
-            .fetch_optional(&self.state.pool)
+        if let Some(row) = self
+            .fetch_source_row_by_entity_id(GAME_TABLE, entity_id)
             .await?
         {
             self.upsert_game_row(&row).await?;
@@ -173,10 +173,8 @@ impl ArcadeService {
         if !self.source_table_exists(EDITION_TABLE).await? {
             return Ok(());
         }
-        let sql = select_by_entity_sql(self.state.backend, EDITION_TABLE);
-        if let Some(row) = sqlx::query(&sql)
-            .bind(felt_hex(entity_id))
-            .fetch_optional(&self.state.pool)
+        if let Some(row) = self
+            .fetch_source_row_by_entity_id(EDITION_TABLE, entity_id)
             .await?
         {
             self.upsert_edition_row(&row).await?;
@@ -185,17 +183,32 @@ impl ArcadeService {
     }
 
     pub async fn refresh_collection(&self, entity_id: Felt) -> Result<()> {
-        if !self.source_table_exists(COLLECTION_TABLE).await? {
+        let collection_table_exists = self.source_table_exists(COLLECTION_TABLE).await?;
+        let relation_table_exists = self.source_table_exists(COLLECTION_EDITION_TABLE).await?;
+        if !collection_table_exists && !relation_table_exists {
             return Ok(());
         }
-        let sql = select_by_entity_sql(self.state.backend, COLLECTION_TABLE);
-        if let Some(row) = sqlx::query(&sql)
-            .bind(felt_hex(entity_id))
-            .fetch_optional(&self.state.pool)
-            .await?
-        {
-            self.upsert_collection_row(&row).await?;
+
+        if collection_table_exists {
+            if let Some(row) = self
+                .fetch_source_row_by_entity_id(COLLECTION_TABLE, entity_id)
+                .await?
+            {
+                self.refresh_collection_from_row(&row).await?;
+                return Ok(());
+            }
         }
+
+        if relation_table_exists {
+            if let Some(row) = self
+                .fetch_source_row_by_entity_id(COLLECTION_EDITION_TABLE, entity_id)
+                .await?
+            {
+                self.upsert_collection_relation_row(&row).await?;
+                return Ok(());
+            }
+        }
+
         Ok(())
     }
 
@@ -203,10 +216,8 @@ impl ArcadeService {
         let Some(listing_table) = self.listing_source_table().await? else {
             return Ok(());
         };
-        let sql = select_by_entity_sql(self.state.backend, listing_table);
-        if let Some(row) = sqlx::query(&sql)
-            .bind(felt_hex(entity_id))
-            .fetch_optional(&self.state.pool)
+        if let Some(row) = self
+            .fetch_source_row_by_entity_id(listing_table, entity_id)
             .await?
         {
             self.upsert_listing_row(&row).await?;
@@ -218,10 +229,8 @@ impl ArcadeService {
         if !self.source_table_exists(SALE_TABLE).await? {
             return Ok(());
         }
-        let sql = select_by_entity_sql(self.state.backend, SALE_TABLE);
-        if let Some(row) = sqlx::query(&sql)
-            .bind(felt_hex(entity_id))
-            .fetch_optional(&self.state.pool)
+        if let Some(row) = self
+            .fetch_source_row_by_entity_id(SALE_TABLE, entity_id)
             .await?
         {
             self.upsert_sale_row(&row).await?;
@@ -239,8 +248,7 @@ impl ArcadeService {
     }
 
     pub async fn delete_collection(&self, entity_id: Felt) -> Result<()> {
-        self.delete_by_entity("torii_arcade_collections", entity_id)
-            .await
+        self.delete_collection_rows_for_entity(entity_id).await
     }
 
     pub async fn delete_listing(&self, entity_id: Felt) -> Result<()> {
@@ -253,15 +261,122 @@ impl ArcadeService {
     }
 
     async fn delete_by_entity(&self, table: &str, entity_id: Felt) -> Result<()> {
-        let sql = match self.state.backend {
-            DbBackend::Sqlite => format!("DELETE FROM {table} WHERE entity_id = ?1"),
-            DbBackend::Postgres => format!("DELETE FROM {table} WHERE entity_id = $1"),
-        };
+        let sql = select_by_entity_match_sql(self.state.backend, table, "DELETE FROM");
         sqlx::query(&sql)
             .bind(felt_hex(entity_id))
+            .bind(felt_hex_padded(entity_id))
             .execute(&self.state.pool)
             .await?;
         Ok(())
+    }
+
+    async fn clear_projection_tables(&self) -> Result<()> {
+        for table in [
+            "torii_arcade_games",
+            "torii_arcade_editions",
+            "torii_arcade_collections",
+            "torii_arcade_listings",
+            "torii_arcade_sales",
+        ] {
+            sqlx::query(&format!("DELETE FROM {table}"))
+                .execute(&self.state.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn fetch_source_row_by_entity_id(
+        &self,
+        table: &str,
+        entity_id: Felt,
+    ) -> Result<Option<sqlx::any::AnyRow>> {
+        let sql = select_by_entity_match_sql(self.state.backend, table, "SELECT * FROM");
+        let entity_id_hex = felt_hex(entity_id);
+        let entity_id_padded = felt_hex_padded(entity_id);
+        let row = sqlx::query(&sql)
+            .bind(entity_id_hex.clone())
+            .bind(entity_id_padded.clone())
+            .fetch_optional(&self.state.pool)
+            .await?;
+        Ok(row)
+    }
+
+    async fn fetch_source_row_by_field(
+        &self,
+        table: &str,
+        field: &str,
+        value: &str,
+    ) -> Result<Option<sqlx::any::AnyRow>> {
+        let padded = felt_from_hex(value)
+            .map(felt_hex_padded)
+            .unwrap_or_else(|_| value.to_string());
+        let sql = select_by_field_match_sql(self.state.backend, table, field, "SELECT * FROM");
+        let row = sqlx::query(&sql)
+            .bind(value)
+            .bind(padded.clone())
+            .fetch_optional(&self.state.pool)
+            .await?;
+        Ok(row)
+    }
+
+    async fn fetch_source_rows_by_field(
+        &self,
+        table: &str,
+        field: &str,
+        value: &str,
+    ) -> Result<Vec<sqlx::any::AnyRow>> {
+        let padded = felt_from_hex(value)
+            .map(felt_hex_padded)
+            .unwrap_or_else(|_| value.to_string());
+        let sql = select_by_field_match_sql(self.state.backend, table, field, "SELECT * FROM");
+        let rows = sqlx::query(&sql)
+            .bind(value)
+            .bind(padded.clone())
+            .fetch_all(&self.state.pool)
+            .await?;
+        Ok(rows)
+    }
+
+    async fn delete_collection_rows_for_entity(&self, entity_id: Felt) -> Result<()> {
+        let entity_id_hex = felt_hex(entity_id);
+        let entity_id_padded = felt_hex_padded(entity_id);
+        let sql = match self.state.backend {
+            DbBackend::Sqlite => {
+                "DELETE FROM torii_arcade_collections
+                 WHERE entity_id = ?1 OR entity_id = ?2
+                    OR collection_entity_id = ?1 OR collection_entity_id = ?2"
+            }
+            DbBackend::Postgres => {
+                "DELETE FROM torii_arcade_collections
+                 WHERE entity_id = $1 OR entity_id = $2
+                    OR collection_entity_id = $1 OR collection_entity_id = $2"
+            }
+        };
+        sqlx::query(sql)
+            .bind(entity_id_hex.clone())
+            .bind(entity_id_padded.clone())
+            .execute(&self.state.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn refresh_collection_from_row(&self, row: &sqlx::any::AnyRow) -> Result<()> {
+        let collection_id = row_felt_hex(row, "id")?;
+        let collection_entity_id = row_felt_hex(row, "entity_id")?;
+
+        if self.source_table_exists(COLLECTION_EDITION_TABLE).await? {
+            self.delete_collection_rows_for_entity(felt_from_hex(&collection_entity_id)?)
+                .await?;
+            let relation_rows = self
+                .fetch_source_rows_by_field(COLLECTION_EDITION_TABLE, "collection", &collection_id)
+                .await?;
+            for relation_row in relation_rows {
+                self.upsert_collection_relation_row(&relation_row).await?;
+            }
+            return Ok(());
+        }
+
+        self.upsert_collection_row(row).await
     }
 
     async fn bootstrap_games(&self) -> Result<()> {
@@ -294,11 +409,20 @@ impl ArcadeService {
         if !self.source_table_exists(COLLECTION_TABLE).await? {
             return Ok(());
         }
-        let rows = sqlx::query(r#"SELECT * FROM "ARCADE-Collection""#)
-            .fetch_all(&self.state.pool)
-            .await?;
-        for row in rows {
-            self.upsert_collection_row(&row).await?;
+        if self.source_table_exists(COLLECTION_EDITION_TABLE).await? {
+            let rows = sqlx::query(r#"SELECT * FROM "ARCADE-CollectionEdition""#)
+                .fetch_all(&self.state.pool)
+                .await?;
+            for row in rows {
+                self.upsert_collection_relation_row(&row).await?;
+            }
+        } else {
+            let rows = sqlx::query(r#"SELECT * FROM "ARCADE-Collection""#)
+                .fetch_all(&self.state.pool)
+                .await?;
+            for row in rows {
+                self.upsert_collection_row(&row).await?;
+            }
         }
         Ok(())
     }
@@ -332,20 +456,18 @@ impl ArcadeService {
     async fn source_table_exists(&self, table_name: &str) -> Result<bool> {
         let sql = match self.state.backend {
             DbBackend::Sqlite => {
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)"
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1"
             }
             DbBackend::Postgres => {
-                "SELECT EXISTS(
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = 'public' AND table_name = $1
-                )"
+                "SELECT COUNT(*) FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = $1"
             }
         };
-        Ok(sqlx::query_scalar(sql)
+        let count: i64 = sqlx::query_scalar(sql)
             .bind(table_name)
             .fetch_one(&self.state.pool)
-            .await
-            .unwrap_or(false))
+            .await?;
+        Ok(count > 0)
     }
 
     pub async fn load_tracked_table_names_by_id(&self) -> Result<HashMap<String, String>> {
@@ -360,6 +482,7 @@ impl ArcadeService {
             GAME_TABLE,
             EDITION_TABLE,
             COLLECTION_TABLE,
+            COLLECTION_EDITION_TABLE,
             ORDER_TABLE,
             LISTING_TABLE,
             SALE_TABLE,
@@ -388,6 +511,8 @@ impl ArcadeService {
     }
 
     async fn upsert_game_row(&self, row: &sqlx::any::AnyRow) -> Result<()> {
+        let game_id = row_felt_hex(row, "id")?;
+        let entity_id = row_felt_hex(row, "entity_id")?;
         let sql = match self.state.backend {
             DbBackend::Sqlite => {
                 "INSERT INTO torii_arcade_games (
@@ -434,8 +559,8 @@ impl ArcadeService {
         };
 
         sqlx::query(sql)
-            .bind(row_string(row, "id")?)
-            .bind(row_string(row, "entity_id")?)
+            .bind(game_id.clone())
+            .bind(entity_id.clone())
             .bind(row_opt_string(row, "name")?)
             .bind(row_opt_string(row, "description")?)
             .bind(row_bool_i64(row, "published")?)
@@ -454,6 +579,9 @@ impl ArcadeService {
     }
 
     async fn upsert_edition_row(&self, row: &sqlx::any::AnyRow) -> Result<()> {
+        let edition_id = row_felt_hex(row, "id")?;
+        let entity_id = row_felt_hex(row, "entity_id")?;
+        let game_id = row_felt_hex(row, "game_id")?;
         let sql = match self.state.backend {
             DbBackend::Sqlite => {
                 "INSERT INTO torii_arcade_editions (
@@ -512,11 +640,11 @@ impl ArcadeService {
         };
 
         sqlx::query(sql)
-            .bind(row_string(row, "id")?)
-            .bind(row_string(row, "entity_id")?)
-            .bind(row_string(row, "game_id")?)
-            .bind(row_opt_string(row, "world_address")?)
-            .bind(row_opt_string(row, "namespace")?)
+            .bind(edition_id.clone())
+            .bind(entity_id.clone())
+            .bind(game_id.clone())
+            .bind(row_opt_felt_hex(row, "world_address")?)
+            .bind(row_opt_felt_hex(row, "namespace")?)
             .bind(row_opt_string(row, "name")?)
             .bind(row_opt_string(row, "description")?)
             .bind(row_bool_i64(row, "published")?)
@@ -537,23 +665,32 @@ impl ArcadeService {
     }
 
     async fn upsert_collection_row(&self, row: &sqlx::any::AnyRow) -> Result<()> {
+        let collection_id = row_felt_hex(row, "id")?;
+        let entity_id = row_felt_hex(row, "entity_id")?;
+        let contract_address = row_felt_hex(row, "contract_address")?;
         let sql = match self.state.backend {
             DbBackend::Sqlite => {
                 "INSERT INTO torii_arcade_collections (
-                    collection_id, entity_id, uuid, contract_address, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, strftime('%s','now'))
-                 ON CONFLICT(collection_id) DO UPDATE SET
-                    entity_id = excluded.entity_id,
+                    entity_id, collection_entity_id, collection_id, edition_id, uuid,
+                    contract_address, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now'))
+                 ON CONFLICT(entity_id) DO UPDATE SET
+                    collection_entity_id = excluded.collection_entity_id,
+                    collection_id = excluded.collection_id,
+                    edition_id = excluded.edition_id,
                     uuid = excluded.uuid,
                     contract_address = excluded.contract_address,
                     updated_at = excluded.updated_at"
             }
             DbBackend::Postgres => {
                 "INSERT INTO torii_arcade_collections (
-                    collection_id, entity_id, uuid, contract_address, updated_at
-                 ) VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::BIGINT)
-                 ON CONFLICT(collection_id) DO UPDATE SET
-                    entity_id = EXCLUDED.entity_id,
+                    entity_id, collection_entity_id, collection_id, edition_id, uuid,
+                    contract_address, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, EXTRACT(EPOCH FROM NOW())::BIGINT)
+                 ON CONFLICT(entity_id) DO UPDATE SET
+                    collection_entity_id = EXCLUDED.collection_entity_id,
+                    collection_id = EXCLUDED.collection_id,
+                    edition_id = EXCLUDED.edition_id,
                     uuid = EXCLUDED.uuid,
                     contract_address = EXCLUDED.contract_address,
                     updated_at = EXCLUDED.updated_at"
@@ -561,10 +698,77 @@ impl ArcadeService {
         };
 
         sqlx::query(sql)
-            .bind(row_string(row, "id")?)
-            .bind(row_string(row, "entity_id")?)
-            .bind(row_opt_string(row, "uuid")?)
-            .bind(row_string(row, "contract_address")?)
+            .bind(entity_id.clone())
+            .bind(entity_id.clone())
+            .bind(collection_id.clone())
+            .bind(Option::<String>::None)
+            .bind(row_opt_felt_hex(row, "uuid")?)
+            .bind(contract_address.clone())
+            .execute(&self.state.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn upsert_collection_relation_row(&self, relation_row: &sqlx::any::AnyRow) -> Result<()> {
+        let relation_entity_id = row_felt_hex(relation_row, "entity_id")?;
+        let collection_id = row_felt_hex(relation_row, "collection")?;
+        let edition_id = row_felt_hex(relation_row, "edition")?;
+        let active = row_bool_i64(relation_row, "active")? != 0;
+
+        if !active {
+            self.delete_by_entity(
+                "torii_arcade_collections",
+                felt_from_hex(&relation_entity_id)?,
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let Some(collection_row) = self
+            .fetch_source_row_by_field(COLLECTION_TABLE, "id", &collection_id)
+            .await?
+        else {
+            return Ok(());
+        };
+
+        let collection_entity_id = row_felt_hex(&collection_row, "entity_id")?;
+        let contract_address = row_felt_hex(&collection_row, "contract_address")?;
+        let sql = match self.state.backend {
+            DbBackend::Sqlite => {
+                "INSERT INTO torii_arcade_collections (
+                    entity_id, collection_entity_id, collection_id, edition_id, uuid,
+                    contract_address, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now'))
+                 ON CONFLICT(entity_id) DO UPDATE SET
+                    collection_entity_id = excluded.collection_entity_id,
+                    collection_id = excluded.collection_id,
+                    edition_id = excluded.edition_id,
+                    uuid = excluded.uuid,
+                    contract_address = excluded.contract_address,
+                    updated_at = excluded.updated_at"
+            }
+            DbBackend::Postgres => {
+                "INSERT INTO torii_arcade_collections (
+                    entity_id, collection_entity_id, collection_id, edition_id, uuid,
+                    contract_address, updated_at
+                 ) VALUES ($1, $2, $3, $4, $5, $6, EXTRACT(EPOCH FROM NOW())::BIGINT)
+                 ON CONFLICT(entity_id) DO UPDATE SET
+                    collection_entity_id = EXCLUDED.collection_entity_id,
+                    collection_id = EXCLUDED.collection_id,
+                    edition_id = EXCLUDED.edition_id,
+                    uuid = EXCLUDED.uuid,
+                    contract_address = EXCLUDED.contract_address,
+                    updated_at = EXCLUDED.updated_at"
+            }
+        };
+
+        sqlx::query(sql)
+            .bind(relation_entity_id.clone())
+            .bind(collection_entity_id.clone())
+            .bind(collection_id.clone())
+            .bind(edition_id.clone())
+            .bind(row_opt_felt_hex(&collection_row, "uuid")?)
+            .bind(contract_address.clone())
             .execute(&self.state.pool)
             .await?;
         Ok(())
@@ -703,7 +907,9 @@ impl ArcadeService {
 
     async fn load_collection_records(&self) -> Result<Vec<CollectionRecord>> {
         let rows = sqlx::query(
-            "SELECT collection_id, uuid, contract_address FROM torii_arcade_collections ORDER BY collection_id ASC",
+            "SELECT DISTINCT collection_id, edition_id, uuid, contract_address
+             FROM torii_arcade_collections
+             ORDER BY collection_id ASC",
         )
         .fetch_all(&self.state.pool)
         .await?;
@@ -782,6 +988,18 @@ impl Arcade for ArcadeService {
             let game_id = felt_hex(felt_from_bytes(&req.game_id).map_err(internal_status)?);
             builder.push(" AND game_id = ").push_bind(game_id);
         }
+        if !req.collection_id.is_empty() {
+            let collection_id =
+                felt_hex(felt_from_bytes(&req.collection_id).map_err(internal_status)?);
+            builder.push(
+                " AND EXISTS (
+                    SELECT 1
+                    FROM torii_arcade_collections collections
+                    WHERE collections.edition_id = torii_arcade_editions.edition_id
+                      AND collections.collection_id = ",
+            );
+            builder.push_bind(collection_id).push(")");
+        }
         if !req.include_unpublished {
             builder.push(" AND published = ").push_bind(1_i64);
         }
@@ -814,7 +1032,12 @@ impl Arcade for ArcadeService {
         let req = request.into_inner();
         let limit = limit_or_default(req.limit, 500);
         let rows = QueryBuilder::<Any>::new(
-            "SELECT collection_id, uuid, contract_address FROM torii_arcade_collections ORDER BY collection_id ASC LIMIT ",
+            "SELECT collection_id, uuid, contract_address
+             FROM (
+                SELECT DISTINCT collection_id, uuid, contract_address
+                FROM torii_arcade_collections
+             )
+             ORDER BY collection_id ASC LIMIT ",
         )
         .push_bind(i64::from(limit))
         .build()
@@ -1156,15 +1379,22 @@ fn projection_schema_sql() -> &'static [&'static str] {
         )",
         "CREATE INDEX IF NOT EXISTS torii_arcade_editions_game_idx
             ON torii_arcade_editions(game_id, published, whitelisted, priority DESC)",
+        "DROP TABLE IF EXISTS torii_arcade_collections",
         "CREATE TABLE IF NOT EXISTS torii_arcade_collections (
-            collection_id TEXT PRIMARY KEY,
-            entity_id TEXT NOT NULL,
+            entity_id TEXT PRIMARY KEY,
+            collection_entity_id TEXT NOT NULL,
+            collection_id TEXT NOT NULL,
+            edition_id TEXT,
             uuid TEXT,
             contract_address TEXT NOT NULL,
             updated_at BIGINT NOT NULL
         )",
         "CREATE INDEX IF NOT EXISTS torii_arcade_collections_contract_idx
             ON torii_arcade_collections(contract_address)",
+        "CREATE INDEX IF NOT EXISTS torii_arcade_collections_collection_idx
+            ON torii_arcade_collections(collection_id)",
+        "CREATE INDEX IF NOT EXISTS torii_arcade_collections_edition_idx
+            ON torii_arcade_collections(edition_id)",
         "CREATE TABLE IF NOT EXISTS torii_arcade_listings (
             order_id BIGINT PRIMARY KEY,
             entity_id TEXT NOT NULL,
@@ -1415,36 +1645,54 @@ fn edition_from_row(row: &sqlx::any::AnyRow) -> Result<Edition> {
 }
 
 fn parse_listing_row(row: &sqlx::any::AnyRow) -> Result<ListingRecord> {
-    let entity_id = row_string(row, "entity_id")?;
-    let order_value = serde_json::from_str::<Value>(&row_string(row, "order")?)?;
+    if row.try_get_raw("order").is_ok() {
+        let entity_id = row_felt_hex(row, "entity_id")?;
+        let order_value = serde_json::from_str::<Value>(&row_string(row, "order")?)?;
+        return Ok(ListingRecord {
+            order_id: row_u64(row, "order_id")?,
+            entity_id,
+            collection_id: json_felt_string(&order_value, "collection")?,
+            token_id: json_string(&order_value, "token_id")?,
+            currency: json_felt_string(&order_value, "currency")?,
+            owner: json_felt_string(&order_value, "owner")?,
+            price: json_number_string(&order_value, "price")?,
+            quantity: json_number_string(&order_value, "quantity")?,
+            expiration: json_u64(&order_value, "expiration")?,
+            status: json_u64(&order_value, "status")? as u32,
+            category: json_u64(&order_value, "category")? as u32,
+            royalties: json_bool(&order_value, "royalties")?,
+            time: row_opt_u64(row, "time")?.unwrap_or_default(),
+        });
+    }
+
     Ok(ListingRecord {
-        order_id: row_u64(row, "order_id")?,
-        entity_id,
-        collection_id: json_string(&order_value, "collection")?,
-        token_id: json_string(&order_value, "token_id")?,
-        currency: json_string(&order_value, "currency")?,
-        owner: json_string(&order_value, "owner")?,
-        price: json_number_string(&order_value, "price")?,
-        quantity: json_number_string(&order_value, "quantity")?,
-        expiration: json_u64(&order_value, "expiration")?,
-        status: json_u64(&order_value, "status")? as u32,
-        category: json_u64(&order_value, "category")? as u32,
-        royalties: json_bool(&order_value, "royalties")?,
-        time: row_u64(row, "time")?,
+        order_id: row_u64(row, "id")?,
+        entity_id: row_felt_hex(row, "entity_id")?,
+        collection_id: row_felt_hex(row, "collection")?,
+        token_id: row_string(row, "token_id")?,
+        currency: row_felt_hex(row, "currency")?,
+        owner: row_felt_hex(row, "owner")?,
+        price: row_string(row, "price")?,
+        quantity: row_string(row, "quantity")?,
+        expiration: row_u64(row, "expiration")?,
+        status: row_u64(row, "status")? as u32,
+        category: row_u64(row, "category")? as u32,
+        royalties: row_bool_i64(row, "royalties")? != 0,
+        time: row_opt_u64(row, "time")?.unwrap_or_default(),
     })
 }
 
 fn parse_sale_row(row: &sqlx::any::AnyRow) -> Result<SaleRecord> {
-    let entity_id = row_string(row, "entity_id")?;
+    let entity_id = row_felt_hex(row, "entity_id")?;
     let order_value = serde_json::from_str::<Value>(&row_string(row, "order")?)?;
     Ok(SaleRecord {
         order_id: row_u64(row, "order_id")?,
         entity_id,
-        collection_id: json_string(&order_value, "collection")?,
+        collection_id: json_felt_string(&order_value, "collection")?,
         token_id: json_string(&order_value, "token_id")?,
-        currency: json_string(&order_value, "currency")?,
-        seller: row_string(row, "from")?,
-        buyer: row_string(row, "to")?,
+        currency: json_felt_string(&order_value, "currency")?,
+        seller: row_felt_hex(row, "from")?,
+        buyer: row_felt_hex(row, "to")?,
         price: json_number_string(&order_value, "price")?,
         quantity: json_number_string(&order_value, "quantity")?,
         expiration: json_u64(&order_value, "expiration")?,
@@ -1455,10 +1703,30 @@ fn parse_sale_row(row: &sqlx::any::AnyRow) -> Result<SaleRecord> {
     })
 }
 
-fn select_by_entity_sql(backend: DbBackend, table: &str) -> String {
+fn select_by_entity_match_sql(backend: DbBackend, table: &str, statement: &str) -> String {
     match backend {
-        DbBackend::Sqlite => format!(r#"SELECT * FROM "{table}" WHERE entity_id = ?1"#),
-        DbBackend::Postgres => format!(r#"SELECT * FROM "{table}" WHERE entity_id = $1"#),
+        DbBackend::Sqlite => {
+            format!(r#"{statement} "{table}" WHERE entity_id = ?1 OR entity_id = ?2"#)
+        }
+        DbBackend::Postgres => {
+            format!(r#"{statement} "{table}" WHERE entity_id = $1 OR entity_id = $2"#)
+        }
+    }
+}
+
+fn select_by_field_match_sql(
+    backend: DbBackend,
+    table: &str,
+    field: &str,
+    statement: &str,
+) -> String {
+    match backend {
+        DbBackend::Sqlite => {
+            format!(r#"{statement} "{table}" WHERE "{field}" = ?1 OR "{field}" = ?2"#)
+        }
+        DbBackend::Postgres => {
+            format!(r#"{statement} "{table}" WHERE "{field}" = $1 OR "{field}" = $2"#)
+        }
     }
 }
 
@@ -1494,6 +1762,21 @@ fn row_opt_string(row: &sqlx::any::AnyRow, column: &str) -> Result<Option<String
         .map_err(|err| anyhow!("failed to read {column}: {err}"))
 }
 
+fn row_opt_felt_hex(row: &sqlx::any::AnyRow, column: &str) -> Result<Option<String>> {
+    if row.try_get_raw(column).is_err() {
+        return Ok(None);
+    }
+    let value = row_opt_string(row, column)?;
+    value
+        .map(|raw| {
+            let felt = felt_from_hex(&raw)
+                .or_else(|_| Felt::from_hex(&raw))
+                .map_err(|err| anyhow!("failed to parse {column} as felt: {err}"))?;
+            Ok(felt_hex(felt))
+        })
+        .transpose()
+}
+
 fn row_u64(row: &sqlx::any::AnyRow, column: &str) -> Result<u64> {
     if let Ok(value) = row.try_get::<i64, _>(column) {
         return Ok(value as u64);
@@ -1504,6 +1787,25 @@ fn row_u64(row: &sqlx::any::AnyRow, column: &str) -> Result<u64> {
             .map_err(|err| anyhow!("failed to parse {column}: {err}"));
     }
     Err(anyhow!("failed to read {column} as u64"))
+}
+
+fn row_opt_u64(row: &sqlx::any::AnyRow, column: &str) -> Result<Option<u64>> {
+    if row.try_get_raw(column).is_err() {
+        return Ok(None);
+    }
+    if let Ok(value) = row.try_get::<Option<i64>, _>(column) {
+        return Ok(value.map(|value| value as u64));
+    }
+    if let Ok(value) = row.try_get::<Option<String>, _>(column) {
+        return value
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .map_err(|err| anyhow!("failed to parse {column}: {err}"))
+            })
+            .transpose();
+    }
+    Err(anyhow!("failed to read {column} as optional u64"))
 }
 
 fn row_bool_i64(row: &sqlx::any::AnyRow, column: &str) -> Result<i64> {
@@ -1528,6 +1830,14 @@ fn json_string(value: &Value, key: &str) -> Result<String> {
         .and_then(Value::as_str)
         .map(ToString::to_string)
         .ok_or_else(|| anyhow!("missing string field {key}"))
+}
+
+fn json_felt_string(value: &Value, key: &str) -> Result<String> {
+    let raw = json_string(value, key)?;
+    let felt = felt_from_hex(&raw)
+        .or_else(|_| Felt::from_hex(&raw))
+        .map_err(|err| anyhow!("invalid felt field {key}: {err}"))?;
+    Ok(felt_hex(felt))
 }
 
 fn json_number_string(value: &Value, key: &str) -> Result<String> {
@@ -1556,6 +1866,10 @@ fn json_bool(value: &Value, key: &str) -> Result<bool> {
 
 fn felt_hex(value: Felt) -> String {
     format!("{value:#x}")
+}
+
+fn felt_hex_padded(value: Felt) -> String {
+    format!("{:#066x}", value)
 }
 
 fn felt_from_hex(value: &str) -> Result<Felt> {
@@ -1618,4 +1932,276 @@ fn sqlite_url(path: &str) -> Result<String> {
 
 fn internal_status(error: impl std::fmt::Display) -> Status {
     Status::internal(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use std::str::FromStr;
+    use tempfile::tempdir;
+    use tonic::Request;
+
+    #[tokio::test]
+    async fn bootstrap_from_current_arcade_sqlite_schema_populates_projections() {
+        let temp_dir = tempdir().expect("tempdir");
+        let source_db = temp_dir.path().join("source.db");
+        let erc721_db = temp_dir.path().join("erc721.db");
+        let source_url = source_db.to_string_lossy().to_string();
+        let source_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::from_str(&format!("sqlite://{source_url}"))
+                    .expect("sqlite connect options")
+                    .create_if_missing(true),
+            )
+            .await
+            .expect("connect source");
+
+        sqlx::query(
+            r#"CREATE TABLE "ARCADE-Game" (
+                "entity_id" TEXT PRIMARY KEY,
+                "id" TEXT,
+                "published" TEXT,
+                "whitelisted" TEXT,
+                "color" TEXT,
+                "image" TEXT,
+                "image_data" TEXT,
+                "external_url" TEXT,
+                "description" TEXT,
+                "name" TEXT,
+                "animation_url" TEXT,
+                "youtube_url" TEXT,
+                "attributes" TEXT,
+                "properties" TEXT,
+                "socials" TEXT
+            )"#,
+        )
+        .execute(&source_pool)
+        .await
+        .expect("create game table");
+
+        sqlx::query(
+            r#"CREATE TABLE "ARCADE-Edition" (
+                "entity_id" TEXT PRIMARY KEY,
+                "id" TEXT,
+                "game_id" TEXT,
+                "world_address" TEXT,
+                "namespace" TEXT,
+                "name" TEXT,
+                "description" TEXT,
+                "published" TEXT,
+                "whitelisted" TEXT,
+                "priority" TEXT,
+                "config" TEXT,
+                "color" TEXT,
+                "image" TEXT,
+                "external_url" TEXT,
+                "animation_url" TEXT,
+                "youtube_url" TEXT,
+                "attributes" TEXT,
+                "properties" TEXT,
+                "socials" TEXT
+            )"#,
+        )
+        .execute(&source_pool)
+        .await
+        .expect("create edition table");
+
+        sqlx::query(
+            r#"CREATE TABLE "ARCADE-Collection" (
+                "entity_id" TEXT PRIMARY KEY,
+                "id" TEXT,
+                "uuid" TEXT,
+                "contract_address" TEXT
+            )"#,
+        )
+        .execute(&source_pool)
+        .await
+        .expect("create collection table");
+
+        sqlx::query(
+            r#"CREATE TABLE "ARCADE-CollectionEdition" (
+                "entity_id" TEXT PRIMARY KEY,
+                "collection" TEXT,
+                "edition" TEXT,
+                "active" TEXT
+            )"#,
+        )
+        .execute(&source_pool)
+        .await
+        .expect("create collection edition table");
+
+        sqlx::query(
+            r#"CREATE TABLE "ARCADE-Order" (
+                "entity_id" TEXT PRIMARY KEY,
+                "id" TEXT,
+                "collection" TEXT,
+                "token_id" TEXT,
+                "royalties" TEXT,
+                "category" TEXT,
+                "status" TEXT,
+                "expiration" TEXT,
+                "quantity" TEXT,
+                "price" TEXT,
+                "currency" TEXT,
+                "owner" TEXT
+            )"#,
+        )
+        .execute(&source_pool)
+        .await
+        .expect("create order table");
+
+        sqlx::query(
+            r#"INSERT INTO "ARCADE-Game" (
+                entity_id, id, published, whitelisted, color, image, external_url, description,
+                name, animation_url, youtube_url, attributes, properties, socials
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"#,
+        )
+        .bind("0x004533cf8322e4e8109cf9479dfb8d5425a5b33b2e8ea09b780760b6ebefaf1c")
+        .bind("0x0000000000000000000000000000000000000000000000000000000000000001")
+        .bind("true")
+        .bind("true")
+        .bind("#ffffff")
+        .bind("https://example.com/game.png")
+        .bind("https://example.com/game")
+        .bind("Example game")
+        .bind("Loot Survivor")
+        .bind("https://example.com/game.mp4")
+        .bind("https://example.com/game.mp4")
+        .bind("[]")
+        .bind("{}")
+        .bind("{}")
+        .execute(&source_pool)
+        .await
+        .expect("insert game");
+
+        sqlx::query(
+            r#"INSERT INTO "ARCADE-Edition" (
+                entity_id, id, game_id, world_address, namespace, name, description, published,
+                whitelisted, priority, config, color, image, external_url, animation_url,
+                youtube_url, attributes, properties, socials
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)"#,
+        )
+        .bind("0x0011111111111111111111111111111111111111111111111111111111111111")
+        .bind("0x0000000000000000000000000000000000000000000000000000000000000002")
+        .bind("0x0000000000000000000000000000000000000000000000000000000000000001")
+        .bind("0x0123")
+        .bind("0x0456")
+        .bind("Edition One")
+        .bind("Example edition")
+        .bind("true")
+        .bind("true")
+        .bind("10")
+        .bind("{}")
+        .bind("#000000")
+        .bind("https://example.com/edition.png")
+        .bind("https://example.com/edition")
+        .bind("")
+        .bind("")
+        .bind("[]")
+        .bind("{}")
+        .bind("{}")
+        .execute(&source_pool)
+        .await
+        .expect("insert edition");
+
+        sqlx::query(
+            r#"INSERT INTO "ARCADE-Collection" (entity_id, id, uuid, contract_address)
+               VALUES (?1, ?2, ?3, ?4)"#,
+        )
+        .bind("0x0022222222222222222222222222222222222222222222222222222222222222")
+        .bind("0x046da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4")
+        .bind("0x0999")
+        .bind("0x046da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4")
+        .execute(&source_pool)
+        .await
+        .expect("insert collection");
+
+        sqlx::query(
+            r#"INSERT INTO "ARCADE-CollectionEdition" (entity_id, collection, edition, active)
+               VALUES (?1, ?2, ?3, ?4)"#,
+        )
+        .bind("0x0033333333333333333333333333333333333333333333333333333333333333")
+        .bind("0x046da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4")
+        .bind("0x0000000000000000000000000000000000000000000000000000000000000002")
+        .bind("true")
+        .execute(&source_pool)
+        .await
+        .expect("insert collection edition");
+
+        sqlx::query(
+            r#"INSERT INTO "ARCADE-Order" (
+                entity_id, id, collection, token_id, royalties, category, status, expiration,
+                quantity, price, currency, owner
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"#,
+        )
+        .bind("0x007aebc55e8392be3f8b5140abb8debbc5430b2499f16fa7a4095e6d0e42c40c")
+        .bind("1")
+        .bind("0x046da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4")
+        .bind("16345572918946916709028395658032763347530533577384345871581184")
+        .bind("false")
+        .bind("2")
+        .bind("1")
+        .bind("0")
+        .bind("1")
+        .bind("1000000000000000000")
+        .bind("0x04718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d")
+        .bind("0x06b0fda70d073743a3b0f6b02cbc1ab5c1c85f2a36d7c3c17ca5dbf8ea0883a0")
+        .execute(&source_pool)
+        .await
+        .expect("insert order");
+
+        drop(source_pool);
+
+        let service = ArcadeService::new(&source_url, &erc721_db.to_string_lossy(), Some(1))
+            .await
+            .expect("create arcade service");
+
+        let game_count: i64 = sqlx::query_scalar("SELECT count(*) FROM torii_arcade_games")
+            .fetch_one(&service.state.pool)
+            .await
+            .expect("count games");
+        let edition_count: i64 = sqlx::query_scalar("SELECT count(*) FROM torii_arcade_editions")
+            .fetch_one(&service.state.pool)
+            .await
+            .expect("count editions");
+        let collection_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM torii_arcade_collections")
+                .fetch_one(&service.state.pool)
+                .await
+                .expect("count collections");
+        let listing_count: i64 = sqlx::query_scalar("SELECT count(*) FROM torii_arcade_listings")
+            .fetch_one(&service.state.pool)
+            .await
+            .expect("count listings");
+
+        assert_eq!(game_count, 1);
+        assert_eq!(edition_count, 1);
+        assert_eq!(collection_count, 1);
+        assert_eq!(listing_count, 1);
+
+        let editions = service
+            .list_editions(Request::new(ListEditionsRequest {
+                game_id: Vec::new(),
+                include_unpublished: true,
+                include_unwhitelisted: true,
+                limit: 10,
+                collection_id: felt_from_hex(
+                    "0x046da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4",
+                )
+                .expect("collection id")
+                .to_bytes_be()
+                .to_vec(),
+            }))
+            .await
+            .expect("list editions")
+            .into_inner()
+            .editions;
+        assert_eq!(editions.len(), 1);
+        assert_eq!(
+            felt_hex(felt_from_bytes(&editions[0].edition_id).expect("edition id bytes"),),
+            "0x2"
+        );
+    }
 }

@@ -21,6 +21,20 @@ pub struct ArcadeSink {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProjectionOp {
+    Refresh(TrackedTable, Felt),
+    Delete(TrackedTable, Felt),
+}
+
+#[derive(Debug, Default)]
+struct ProjectionBatchPlan {
+    tracked_tables: HashMap<String, TrackedTable>,
+    projection_ops: Vec<ProjectionOp>,
+    reload_tracked_tables: bool,
+    requires_full_rebuild: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TrackedTable {
     Game,
     Edition,
@@ -30,8 +44,8 @@ enum TrackedTable {
 }
 
 impl TrackedTable {
-    fn known_table_ids() -> [(&'static str, Self); 5] {
-        [
+    fn known_table_ids() -> &'static [(&'static str, Self)] {
+        &[
             (
                 "0x6143bc86ed1a08df992c568392c454a92ef7e7b5ba08e9bf75643cf5cfc8b14",
                 Self::Game,
@@ -49,6 +63,10 @@ impl TrackedTable {
                 Self::Listing,
             ),
             (
+                "0x49a3252a2f65bab4482e38d0667850e31e0baa69416eab3d825c4a27cf31b2a",
+                Self::Listing,
+            ),
+            (
                 "0x2641babd55028e5173f25aec79c7481d2625d36a6856060fa02b0818ca8a199",
                 Self::Sale,
             ),
@@ -59,7 +77,7 @@ impl TrackedTable {
         match table_name {
             "ARCADE-Game" => Some(Self::Game),
             "ARCADE-Edition" => Some(Self::Edition),
-            "ARCADE-Collection" => Some(Self::Collection),
+            "ARCADE-Collection" | "ARCADE-CollectionEdition" => Some(Self::Collection),
             "ARCADE-Order" | "ARCADE-Listing" => Some(Self::Listing),
             "ARCADE-Sale" => Some(Self::Sale),
             _ => None,
@@ -95,19 +113,7 @@ impl ArcadeSink {
     ) -> Result<Self> {
         let service =
             Arc::new(ArcadeService::new(database_url, erc721_database_url, max_connections).await?);
-        let mut tracked_tables = TrackedTable::known_table_ids()
-            .into_iter()
-            .map(|(table_id, tracked_table)| (table_id.to_string(), tracked_table))
-            .collect::<HashMap<_, _>>();
-        tracked_tables.extend(
-            service
-                .load_tracked_table_names_by_id()
-                .await?
-                .into_iter()
-                .filter_map(|(table_id, table_name)| {
-                    TrackedTable::from_table_name(&table_name).map(|tracked| (table_id, tracked))
-                }),
-        );
+        let tracked_tables = Self::load_tracked_tables(service.as_ref()).await?;
 
         Ok(Self {
             service,
@@ -119,20 +125,44 @@ impl ArcadeSink {
         self.service.clone()
     }
 
-    async fn reload_if_tracked_table(&self, table_name: &str) -> Result<()> {
-        match TrackedTable::from_table_name(table_name) {
-            Some(_) => self.service.bootstrap_from_source().await,
-            None => Ok(()),
-        }
+    async fn load_tracked_tables(service: &ArcadeService) -> Result<HashMap<String, TrackedTable>> {
+        let mut tracked_tables = TrackedTable::known_table_ids()
+            .iter()
+            .copied()
+            .map(|(table_id, tracked_table)| (table_id.to_string(), tracked_table))
+            .collect::<HashMap<_, _>>();
+        tracked_tables.extend(
+            service
+                .load_tracked_table_names_by_id()
+                .await?
+                .into_iter()
+                .filter_map(|(table_id, table_name)| {
+                    TrackedTable::from_table_name(&table_name).map(|tracked| (table_id, tracked))
+                }),
+        );
+        Ok(tracked_tables)
     }
 
-    fn update_tracked_table(&self, table_id: Felt, table_name: &str) {
-        let table_id = format!("{table_id:#x}");
-        let mut tracked_tables = self
+    fn tracked_tables_snapshot(&self) -> HashMap<String, TrackedTable> {
+        self.tracked_tables
+            .read()
+            .expect("tracked table map lock poisoned")
+            .clone()
+    }
+
+    fn replace_tracked_tables(&self, tracked_tables: HashMap<String, TrackedTable>) {
+        *self
             .tracked_tables
             .write()
-            .expect("tracked table map lock poisoned");
+            .expect("tracked table map lock poisoned") = tracked_tables;
+    }
 
+    fn update_tracked_table(
+        tracked_tables: &mut HashMap<String, TrackedTable>,
+        table_id: Felt,
+        table_name: &str,
+    ) {
+        let table_id = format!("{table_id:#x}");
         if let Some(tracked_table) = TrackedTable::from_table_name(table_name) {
             tracked_tables.insert(table_id, tracked_table);
         } else {
@@ -140,19 +170,136 @@ impl ArcadeSink {
         }
     }
 
-    fn remove_tracked_table(&self, table_id: Felt) {
-        self.tracked_tables
-            .write()
-            .expect("tracked table map lock poisoned")
-            .remove(&format!("{table_id:#x}"));
+    fn tracked_table_for_id(
+        tracked_tables: &HashMap<String, TrackedTable>,
+        table_id: Felt,
+    ) -> Option<TrackedTable> {
+        tracked_tables.get(&format!("{table_id:#x}")).copied()
     }
 
-    fn tracked_table_for_id(&self, table_id: Felt) -> Option<TrackedTable> {
-        self.tracked_tables
-            .read()
-            .expect("tracked table map lock poisoned")
-            .get(&format!("{table_id:#x}"))
-            .copied()
+    fn is_schema_rebuild_msg(
+        tracked_tables: &HashMap<String, TrackedTable>,
+        msg: &IntrospectMsg,
+    ) -> bool {
+        match msg {
+            IntrospectMsg::CreateTable(table) => {
+                TrackedTable::from_table_name(&table.name).is_some()
+                    || Self::tracked_table_for_id(tracked_tables, table.id).is_some()
+            }
+            IntrospectMsg::UpdateTable(table) => {
+                TrackedTable::from_table_name(&table.name).is_some()
+                    || Self::tracked_table_for_id(tracked_tables, table.id).is_some()
+            }
+            IntrospectMsg::RenameTable(table) => {
+                TrackedTable::from_table_name(&table.name).is_some()
+                    || Self::tracked_table_for_id(tracked_tables, table.id).is_some()
+            }
+            IntrospectMsg::DropTable(table) => {
+                Self::tracked_table_for_id(tracked_tables, table.id).is_some()
+            }
+            IntrospectMsg::AddColumns(event) => {
+                Self::tracked_table_for_id(tracked_tables, event.table).is_some()
+            }
+            IntrospectMsg::DropColumns(event) => {
+                Self::tracked_table_for_id(tracked_tables, event.table).is_some()
+            }
+            IntrospectMsg::RetypeColumns(event) => {
+                Self::tracked_table_for_id(tracked_tables, event.table).is_some()
+            }
+            IntrospectMsg::RetypePrimary(event) => {
+                Self::tracked_table_for_id(tracked_tables, event.table).is_some()
+            }
+            IntrospectMsg::RenameColumns(event) => {
+                Self::tracked_table_for_id(tracked_tables, event.table).is_some()
+            }
+            IntrospectMsg::RenamePrimary(event) => {
+                Self::tracked_table_for_id(tracked_tables, event.table).is_some()
+            }
+            _ => false,
+        }
+    }
+
+    fn build_batch_plan(&self, envelopes: &[Envelope]) -> ProjectionBatchPlan {
+        Self::build_batch_plan_from_tables(self.tracked_tables_snapshot(), envelopes)
+    }
+
+    fn build_batch_plan_from_tables(
+        tracked_tables: HashMap<String, TrackedTable>,
+        envelopes: &[Envelope],
+    ) -> ProjectionBatchPlan {
+        let mut plan = ProjectionBatchPlan {
+            tracked_tables,
+            ..ProjectionBatchPlan::default()
+        };
+
+        for envelope in envelopes {
+            if envelope.type_id != TypeId::new("introspect") {
+                continue;
+            }
+
+            let Some(body) = envelope.downcast_ref::<IntrospectBody>() else {
+                continue;
+            };
+
+            if Self::is_schema_rebuild_msg(&plan.tracked_tables, &body.msg) {
+                plan.requires_full_rebuild = true;
+            }
+
+            match &body.msg {
+                IntrospectMsg::CreateTable(table) => {
+                    Self::update_tracked_table(&mut plan.tracked_tables, table.id, &table.name);
+                    plan.reload_tracked_tables = true;
+                }
+                IntrospectMsg::UpdateTable(table) => {
+                    Self::update_tracked_table(&mut plan.tracked_tables, table.id, &table.name);
+                    plan.reload_tracked_tables = true;
+                }
+                IntrospectMsg::RenameTable(table) => {
+                    Self::update_tracked_table(&mut plan.tracked_tables, table.id, &table.name);
+                    plan.reload_tracked_tables = true;
+                }
+                IntrospectMsg::DropTable(table) => {
+                    plan.tracked_tables.remove(&format!("{:#x}", table.id));
+                    plan.reload_tracked_tables = true;
+                }
+                IntrospectMsg::InsertsFields(insert) => {
+                    if let Some(tracked_table) =
+                        Self::tracked_table_for_id(&plan.tracked_tables, insert.table)
+                    {
+                        for record in &insert.records {
+                            let entity_id = Felt::from_bytes_be_slice(&record.id);
+                            plan.projection_ops
+                                .push(ProjectionOp::Refresh(tracked_table, entity_id));
+                        }
+                    }
+                }
+                IntrospectMsg::DeletesFields(delete) => {
+                    if let Some(tracked_table) =
+                        Self::tracked_table_for_id(&plan.tracked_tables, delete.table)
+                    {
+                        for row in &delete.rows {
+                            let entity_id = row.to_felt();
+                            plan.projection_ops
+                                .push(ProjectionOp::Refresh(tracked_table, entity_id));
+                        }
+                    }
+                }
+                IntrospectMsg::DeleteRecords(delete) => {
+                    if let Some(tracked_table) =
+                        Self::tracked_table_for_id(&plan.tracked_tables, delete.table)
+                    {
+                        for row in &delete.rows {
+                            let entity_id = row.to_felt();
+                            plan.projection_ops
+                                .push(ProjectionOp::Delete(tracked_table, entity_id));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        plan
     }
 }
 
@@ -167,53 +314,31 @@ impl Sink for ArcadeSink {
     }
 
     async fn process(&self, envelopes: &[Envelope], _batch: &ExtractionBatch) -> Result<()> {
-        for envelope in envelopes {
-            if envelope.type_id != TypeId::new("introspect") {
-                continue;
-            }
+        let mut plan = self.build_batch_plan(envelopes);
 
-            let Some(body) = envelope.downcast_ref::<IntrospectBody>() else {
-                continue;
-            };
+        if plan.reload_tracked_tables {
+            plan.tracked_tables = Self::load_tracked_tables(self.service.as_ref()).await?;
+        }
 
-            match &body.msg {
-                IntrospectMsg::CreateTable(table) => {
-                    self.update_tracked_table(table.id, &table.name);
-                    self.reload_if_tracked_table(&table.name).await?;
+        self.replace_tracked_tables(plan.tracked_tables);
+
+        if plan.requires_full_rebuild {
+            self.service.bootstrap_from_source().await?;
+            return Ok(());
+        }
+
+        for op in plan.projection_ops {
+            match op {
+                ProjectionOp::Refresh(tracked_table, entity_id) => {
+                    tracked_table
+                        .refresh(self.service.as_ref(), entity_id)
+                        .await?;
                 }
-                IntrospectMsg::UpdateTable(table) => {
-                    self.update_tracked_table(table.id, &table.name);
-                    self.reload_if_tracked_table(&table.name).await?;
+                ProjectionOp::Delete(tracked_table, entity_id) => {
+                    tracked_table
+                        .delete(self.service.as_ref(), entity_id)
+                        .await?;
                 }
-                IntrospectMsg::RenameTable(table) => {
-                    self.update_tracked_table(table.id, &table.name);
-                    self.reload_if_tracked_table(&table.name).await?;
-                }
-                IntrospectMsg::DropTable(table) => {
-                    self.remove_tracked_table(table.id);
-                }
-                IntrospectMsg::InsertsFields(insert) => {
-                    for record in &insert.records {
-                        let entity_id =
-                            starknet::core::types::Felt::from_bytes_be_slice(&record.id);
-                        if let Some(tracked_table) = self.tracked_table_for_id(insert.table) {
-                            tracked_table
-                                .refresh(self.service.as_ref(), entity_id)
-                                .await?;
-                        }
-                    }
-                }
-                IntrospectMsg::DeleteRecords(delete) => {
-                    for row in &delete.rows {
-                        let entity_id = row.to_felt();
-                        if let Some(tracked_table) = self.tracked_table_for_id(delete.table) {
-                            tracked_table
-                                .delete(self.service.as_ref(), entity_id)
-                                .await?;
-                        }
-                    }
-                }
-                _ => {}
             }
         }
 
@@ -233,6 +358,81 @@ impl Sink for ArcadeSink {
         _event_bus: Arc<EventBus>,
         _context: &SinkContext,
     ) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use anyhow::Result;
+    use starknet::core::types::Felt;
+    use torii::etl::{Envelope, MetaData};
+    use torii_introspect::events::{
+        InsertsFields, IntrospectBody, IntrospectMsg, Record, RenamePrimary,
+    };
+
+    use super::*;
+
+    const GAME_TABLE_ID: &str = "0x6143bc86ed1a08df992c568392c454a92ef7e7b5ba08e9bf75643cf5cfc8b14";
+
+    fn introspect_envelope(msg: IntrospectMsg) -> Envelope {
+        Envelope::from(IntrospectBody {
+            metadata: MetaData {
+                block_number: Some(1),
+                transaction_hash: Felt::ZERO,
+                from_address: Felt::ZERO,
+            },
+            msg,
+        })
+    }
+
+    fn tracked_tables() -> HashMap<String, TrackedTable> {
+        TrackedTable::known_table_ids()
+            .iter()
+            .copied()
+            .map(|(table_id, tracked_table)| (table_id.to_string(), tracked_table))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn builds_refresh_ops_for_live_insert_envelopes() -> Result<()> {
+        let entity = Felt::from_hex_unchecked("0x201");
+        let envelope = introspect_envelope(IntrospectMsg::InsertsFields(InsertsFields {
+            table: Felt::from_hex_unchecked(GAME_TABLE_ID),
+            columns: vec![],
+            records: vec![Record {
+                id: entity.to_bytes_be(),
+                values: Vec::new(),
+            }],
+        }));
+        let plan = ArcadeSink::build_batch_plan_from_tables(tracked_tables(), &[envelope]);
+
+        assert_eq!(
+            plan.projection_ops,
+            vec![ProjectionOp::Refresh(
+                TrackedTable::Game,
+                Felt::from_hex_unchecked("0x201")
+            )]
+        );
+        assert!(!plan.requires_full_rebuild);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn marks_tracked_schema_changes_for_full_rebuild() -> Result<()> {
+        let plan = ArcadeSink::build_batch_plan_from_tables(
+            tracked_tables(),
+            &[introspect_envelope(IntrospectMsg::RenamePrimary(
+                RenamePrimary {
+                    table: Felt::from_hex_unchecked(GAME_TABLE_ID),
+                    name: "entity_id".to_string(),
+                },
+            ))],
+        );
+
+        assert!(plan.requires_full_rebuild);
         Ok(())
     }
 }

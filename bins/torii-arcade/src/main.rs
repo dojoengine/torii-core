@@ -10,10 +10,13 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tonic_reflection::server::Builder as ReflectionBuilder;
+use torii::axum::Router;
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{
     ContractEventConfig, EventExtractor, EventExtractorConfig, Extractor, RetryPolicy,
 };
+use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
+use torii::etl::TypeId;
 use torii::EtlConcurrencyConfig;
 use torii_arcade_sink::proto::arcade::arcade_server::ArcadeServer;
 use torii_arcade_sink::{ArcadeSink, FILE_DESCRIPTOR_SET as ARCADE_DESCRIPTOR_SET};
@@ -46,6 +49,92 @@ use torii_sqlite::{is_sqlite_memory_path, sqlite_connect_options};
 
 type StarknetProvider =
     starknet::providers::jsonrpc::JsonRpcClient<starknet::providers::jsonrpc::HttpTransport>;
+
+struct ArcadeProjectionPipeline {
+    introspect_sink: Box<dyn Sink>,
+    arcade_sink: Box<dyn Sink>,
+}
+
+impl ArcadeProjectionPipeline {
+    fn new(introspect_sink: Box<dyn Sink>, arcade_sink: Box<dyn Sink>) -> Self {
+        Self {
+            introspect_sink,
+            arcade_sink,
+        }
+    }
+
+    fn abort_on_sink_failure(stage: &str, sink_name: &str, error: anyhow::Error) -> ! {
+        tracing::error!(
+            target: "torii_arcade",
+            stage,
+            sink = sink_name,
+            error = %error,
+            "Fatal arcade projection pipeline failure"
+        );
+        std::process::abort();
+    }
+}
+
+#[torii::async_trait]
+impl Sink for ArcadeProjectionPipeline {
+    fn name(&self) -> &str {
+        "arcade-projection-pipeline"
+    }
+
+    fn interested_types(&self) -> Vec<TypeId> {
+        let mut seen = HashSet::new();
+        let mut interested = Vec::new();
+        for type_id in self
+            .introspect_sink
+            .interested_types()
+            .into_iter()
+            .chain(self.arcade_sink.interested_types())
+        {
+            if seen.insert(type_id) {
+                interested.push(type_id);
+            }
+        }
+        interested
+    }
+
+    async fn process(
+        &self,
+        envelopes: &[torii::etl::Envelope],
+        batch: &torii::etl::extractor::ExtractionBatch,
+    ) -> anyhow::Result<()> {
+        if let Err(error) = self.introspect_sink.process(envelopes, batch).await {
+            Self::abort_on_sink_failure("process", self.introspect_sink.name(), error);
+        }
+        if let Err(error) = self.arcade_sink.process(envelopes, batch).await {
+            Self::abort_on_sink_failure("process", self.arcade_sink.name(), error);
+        }
+        Ok(())
+    }
+
+    fn topics(&self) -> Vec<TopicInfo> {
+        let mut topics = self.introspect_sink.topics();
+        topics.extend(self.arcade_sink.topics());
+        topics
+    }
+
+    fn build_routes(&self) -> Router {
+        self.introspect_sink
+            .build_routes()
+            .merge(self.arcade_sink.build_routes())
+    }
+
+    async fn initialize(
+        &mut self,
+        event_bus: Arc<EventBus>,
+        context: &SinkContext,
+    ) -> anyhow::Result<()> {
+        self.introspect_sink
+            .initialize(event_bus.clone(), context)
+            .await?;
+        self.arcade_sink.initialize(event_bus, context).await?;
+        Ok(())
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -112,7 +201,10 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("ERC1155 contracts: {}", erc1155_addresses.len());
     tracing::info!(
         "Total configured targets: {}",
-        dojo_event_contracts.len() + erc20_addresses.len() + erc721_addresses.len() + erc1155_addresses.len()
+        dojo_event_contracts.len()
+            + erc20_addresses.len()
+            + erc721_addresses.len()
+            + erc1155_addresses.len()
     );
     tracing::info!("From block: {}", config.from_block);
     if let Some(to_block) = config.to_block {
@@ -181,9 +273,7 @@ async fn run_indexer(config: Config) -> Result<()> {
             let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), (*provider).clone());
             let sink = IntrospectPgDb::new(pool.clone(), ());
             decoder.store.initialize().await?;
-            sink.initialize_introspect_pg_sink().await?;
             decoder.load_tables(&[]).await?;
-            sink.load_tables_no_commit(decoder.get_tables()?)?;
 
             (
                 Arc::new(decoder) as Arc<dyn torii::etl::Decoder>,
@@ -214,8 +304,7 @@ async fn run_indexer(config: Config) -> Result<()> {
                 .execute(pool.as_ref())
                 .await?;
 
-            let decoder =
-                DojoDecoder::<SqliteStore<_>, _>::new(pool.clone(), (*provider).clone());
+            let decoder = DojoDecoder::<SqliteStore<_>, _>::new(pool.clone(), (*provider).clone());
             decoder.store.initialize().await?;
             decoder.load_tables(&[]).await?;
 
@@ -228,14 +317,21 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     let ecs_sink = EcsSink::new(&storage_database_url, config.max_db_connections).await?;
     let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
-    let arcade_sink =
-        ArcadeSink::new(&storage_database_url, &erc721_db_url, config.max_db_connections).await?;
+    let arcade_sink = ArcadeSink::new(
+        &storage_database_url,
+        &erc721_db_url,
+        config.max_db_connections,
+    )
+    .await?;
     let arcade_grpc_service = arcade_sink.get_grpc_service_impl();
 
     let mut reflection_builder = ReflectionBuilder::configure()
         .register_encoded_file_descriptor_set(torii::TORII_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(ECS_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(ARCADE_DESCRIPTOR_SET);
+
+    let arcade_projection_pipeline =
+        ArcadeProjectionPipeline::new(introspect_sink, Box::new(arcade_sink));
 
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
@@ -246,9 +342,8 @@ async fn run_indexer(config: Config) -> Result<()> {
         .engine_database_url(engine_database_url)
         .with_extractor(extractor)
         .add_decoder(dojo_decoder)
-        .add_sink_boxed(introspect_sink)
         .add_sink_boxed(Box::new(ecs_sink))
-        .add_sink_boxed(Box::new(arcade_sink));
+        .add_sink_boxed(Box::new(arcade_projection_pipeline));
 
     if !excluded_dojo_contracts.is_empty() {
         torii_config = torii_config.blacklist_contracts(excluded_dojo_contracts.clone());

@@ -112,6 +112,7 @@ message ListEditionsRequest {
   bool include_unpublished = 2;
   bool include_unwhitelisted = 3;
   uint32 limit = 4;
+  bytes collection_id = 5;
 }
 
 message ListEditionsResponse {

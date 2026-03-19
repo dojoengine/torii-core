@@ -5,9 +5,10 @@ use std::path::Path;
 
 const DEFAULT_RPC_URL: &str = "https://api.cartridge.gg/x/starknet/mainnet";
 const DEFAULT_WORLD_ADDRESS: &str =
-    "0x2d26295d6c541d64740e1ae56abc079b82b22c35ab83985ef8bd15dc0f9edfb";
+    "0x07a079295990e43441a7389fdc3b9ba063c6cd6aee16fb846f598c42a9f04ff7";
 
 const DEFAULT_DOJO_CONTRACTS: &[&str] = &[
+    "0x07a079295990e43441a7389fdc3b9ba063c6cd6aee16fb846f598c42a9f04ff7",
     "0x5c6d0020a9927edca9ddc984b97305439c0b32a1ec8d3f0eaf6291074cc9799",
     "0x04f3dccb47477c087ad9c76b8067b8aadded57f8df7f2d7543e6066bcb25332c",
     "0x6a9e4c6f0799160ea8ddc43ff982a5f83d7f633e9732ce42701de1288ff705f",
@@ -19,9 +20,8 @@ const DEFAULT_DOJO_CONTRACTS: &[&str] = &[
     "0x30d5d5c610dd736faea146b20b850af64e34ca6e5c5a66462f76f32f48dd997",
 ];
 
-const DEFAULT_ERC1155_CONTRACTS: &[&str] = &[
-    "0x048089694913599fb5e23e3e9ee01287c5ea9a54d7d48b08cbbf0091995d502e",
-];
+const DEFAULT_ERC1155_CONTRACTS: &[&str] =
+    &["0x048089694913599fb5e23e3e9ee01287c5ea9a54d7d48b08cbbf0091995d502e"];
 
 const DEFAULT_ERC721_CONTRACTS: &[&str] = &[
     "0x1e1c477f2ef896fd638b50caa31e3aa8f504d5c6cb3c09c99cd0b72523f07f7",
@@ -191,7 +191,10 @@ impl Config {
         let mut contracts = Vec::with_capacity(self.dojo_contracts.len() + 1);
         push_unique_felt(&mut contracts, self.world_address()?);
         for contract in &self.dojo_contracts {
-            push_unique_felt(&mut contracts, Self::parse_address(contract, "Dojo contract")?);
+            push_unique_felt(
+                &mut contracts,
+                Self::parse_address(contract, "Dojo contract")?,
+            );
         }
         Ok(contracts)
     }
@@ -362,11 +365,9 @@ mod tests {
         );
         assert_eq!(dojo.len(), 10);
         assert_eq!(introspect.len(), 9);
-        assert!(!introspect.contains(
-            &Felt::from_hex_unchecked(
-                "0x2d26295d6c541d64740e1ae56abc079b82b22c35ab83985ef8bd15dc0f9edfb"
-            )
-        ));
+        assert!(!introspect.contains(&Felt::from_hex_unchecked(
+            "0x2d26295d6c541d64740e1ae56abc079b82b22c35ab83985ef8bd15dc0f9edfb"
+        )));
         assert_eq!(erc721.len(), 17);
         assert_eq!(erc20.len(), 46);
         assert_eq!(erc1155.len(), 1);
@@ -382,11 +383,9 @@ mod tests {
 
         let introspect = cfg.introspect_contract_addresses().unwrap();
         assert_eq!(introspect.len(), 2);
-        assert!(introspect.contains(
-            &Felt::from_hex_unchecked(
-                "0x2d26295d6c541d64740e1ae56abc079b82b22c35ab83985ef8bd15dc0f9edfb"
-            )
-        ));
+        assert!(introspect.contains(&Felt::from_hex_unchecked(
+            "0x2d26295d6c541d64740e1ae56abc079b82b22c35ab83985ef8bd15dc0f9edfb"
+        )));
     }
 
     #[test]
