@@ -39,6 +39,7 @@ enum TrackedTable {
     Game,
     Edition,
     Collection,
+    CollectionEdition,
     Listing,
     Sale,
 }
@@ -77,7 +78,8 @@ impl TrackedTable {
         match table_name {
             "ARCADE-Game" => Some(Self::Game),
             "ARCADE-Edition" => Some(Self::Edition),
-            "ARCADE-Collection" | "ARCADE-CollectionEdition" => Some(Self::Collection),
+            "ARCADE-Collection" => Some(Self::Collection),
+            "ARCADE-CollectionEdition" => Some(Self::CollectionEdition),
             "ARCADE-Order" | "ARCADE-Listing" => Some(Self::Listing),
             "ARCADE-Sale" => Some(Self::Sale),
             _ => None,
@@ -89,6 +91,7 @@ impl TrackedTable {
             Self::Game => service.refresh_game(entity_id).await,
             Self::Edition => service.refresh_edition(entity_id).await,
             Self::Collection => service.refresh_collection(entity_id).await,
+            Self::CollectionEdition => service.rebuild_collections_projection().await,
             Self::Listing => service.refresh_listing(entity_id).await,
             Self::Sale => service.refresh_sale(entity_id).await,
         }
@@ -99,6 +102,7 @@ impl TrackedTable {
             Self::Game => service.delete_game(entity_id).await,
             Self::Edition => service.delete_edition(entity_id).await,
             Self::Collection => service.delete_collection(entity_id).await,
+            Self::CollectionEdition => service.rebuild_collections_projection().await,
             Self::Listing => service.delete_listing(entity_id).await,
             Self::Sale => service.delete_sale(entity_id).await,
         }
@@ -365,17 +369,23 @@ impl Sink for ArcadeSink {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::str::FromStr;
 
     use anyhow::Result;
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use starknet::core::types::Felt;
     use torii::etl::{Envelope, MetaData};
+    use torii::etl::extractor::ExtractionBatch;
     use torii_introspect::events::{
         InsertsFields, IntrospectBody, IntrospectMsg, Record, RenamePrimary,
     };
+    use tempfile::tempdir;
 
     use super::*;
 
     const GAME_TABLE_ID: &str = "0x6143bc86ed1a08df992c568392c454a92ef7e7b5ba08e9bf75643cf5cfc8b14";
+    const COLLECTION_EDITION_TABLE_ID: &str =
+        "0x8c6f6a3efadfd0f4a8408d7ad1b4e37f4f733fe10b8a5ef9a76fd4d8be3b5b";
 
     fn introspect_envelope(msg: IntrospectMsg) -> Envelope {
         Envelope::from(IntrospectBody {
@@ -433,6 +443,110 @@ mod tests {
         );
 
         assert!(plan.requires_full_rebuild);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn collection_edition_insert_rebuilds_collection_projection() -> Result<()> {
+        let temp_dir = tempdir()?;
+        let source_db = temp_dir.path().join("source.db");
+        let erc721_db = temp_dir.path().join("erc721.db");
+        let source_url = source_db.to_string_lossy().to_string();
+        let source_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::from_str(&format!("sqlite://{source_url}"))?
+                    .create_if_missing(true),
+            )
+            .await?;
+
+        sqlx::query(
+            r#"CREATE TABLE "ARCADE-Collection" (
+                "entity_id" TEXT PRIMARY KEY,
+                "id" TEXT,
+                "uuid" TEXT,
+                "contract_address" TEXT
+            )"#,
+        )
+        .execute(&source_pool)
+        .await?;
+
+        sqlx::query(
+            r#"CREATE TABLE "ARCADE-CollectionEdition" (
+                "entity_id" TEXT PRIMARY KEY,
+                "collection" TEXT,
+                "edition" TEXT,
+                "active" TEXT
+            )"#,
+        )
+        .execute(&source_pool)
+        .await?;
+
+        sqlx::query(
+            r#"INSERT INTO "ARCADE-Collection" (entity_id, id, uuid, contract_address)
+               VALUES (?1, ?2, ?3, ?4)"#,
+        )
+        .bind("0x0022222222222222222222222222222222222222222222222222222222222222")
+        .bind("0x046da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4")
+        .bind("0x0999")
+        .bind("0x046da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4")
+        .execute(&source_pool)
+        .await?;
+
+        let sink = ArcadeSink::new(&source_url, &erc721_db.to_string_lossy(), Some(1)).await?;
+
+        {
+            let mut tracked_tables = sink
+                .tracked_tables
+                .write()
+                .expect("tracked table map lock poisoned");
+            tracked_tables.insert(
+                COLLECTION_EDITION_TABLE_ID.to_string(),
+                TrackedTable::CollectionEdition,
+            );
+        }
+
+        let initial_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM torii_arcade_collections")
+                .fetch_one(&source_pool)
+                .await?;
+        assert_eq!(initial_count, 0);
+
+        sqlx::query(
+            r#"INSERT INTO "ARCADE-CollectionEdition" (entity_id, collection, edition, active)
+               VALUES (?1, ?2, ?3, ?4)"#,
+        )
+        .bind("0x0033333333333333333333333333333333333333333333333333333333333333")
+        .bind("0x046da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4")
+        .bind("0x0000000000000000000000000000000000000000000000000000000000000002")
+        .bind("true")
+        .execute(&source_pool)
+        .await?;
+
+        // Relation inserts may not carry the collection entity id as the record id in live
+        // introspect envelopes, so the projection update must not depend on that assumption.
+        let envelope = introspect_envelope(IntrospectMsg::InsertsFields(InsertsFields {
+            table: Felt::from_hex_unchecked(COLLECTION_EDITION_TABLE_ID),
+            columns: vec![],
+            records: vec![Record {
+                id: Felt::from_hex_unchecked("0xdeadbeef").to_bytes_be(),
+                values: Vec::new(),
+            }],
+        }));
+
+        sink.process(&[envelope], &ExtractionBatch::empty()).await?;
+
+        let projected_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM torii_arcade_collections")
+                .fetch_one(&source_pool)
+                .await?;
+        let projected_edition_id: Option<String> =
+            sqlx::query_scalar("SELECT edition_id FROM torii_arcade_collections LIMIT 1")
+                .fetch_optional(&source_pool)
+                .await?;
+
+        assert_eq!(projected_count, 1);
+        assert_eq!(projected_edition_id.as_deref(), Some("0x2"));
         Ok(())
     }
 }

@@ -251,6 +251,11 @@ impl ArcadeService {
         self.delete_collection_rows_for_entity(entity_id).await
     }
 
+    pub async fn rebuild_collections_projection(&self) -> Result<()> {
+        self.clear_projection_table("torii_arcade_collections").await?;
+        self.bootstrap_collections().await
+    }
+
     pub async fn delete_listing(&self, entity_id: Felt) -> Result<()> {
         self.delete_by_entity("torii_arcade_listings", entity_id)
             .await
@@ -278,10 +283,15 @@ impl ArcadeService {
             "torii_arcade_listings",
             "torii_arcade_sales",
         ] {
-            sqlx::query(&format!("DELETE FROM {table}"))
-                .execute(&self.state.pool)
-                .await?;
+            self.clear_projection_table(table).await?;
         }
+        Ok(())
+    }
+
+    async fn clear_projection_table(&self, table: &str) -> Result<()> {
+        sqlx::query(&format!("DELETE FROM {table}"))
+            .execute(&self.state.pool)
+            .await?;
         Ok(())
     }
 
