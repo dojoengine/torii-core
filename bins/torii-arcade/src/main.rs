@@ -19,11 +19,8 @@ use torii_arcade_sink::proto::arcade::arcade_server::ArcadeServer;
 use torii_arcade_sink::{ArcadeSink, FILE_DESCRIPTOR_SET as ARCADE_DESCRIPTOR_SET};
 use torii_common::{MetadataFetcher, TokenUriService};
 use torii_dojo::decoder::DojoDecoder;
-use torii_dojo::manager::{
-    DojoTableStore, MergedStore, PostgresStore, SchemaBootstrapPoint, SqliteStore,
-};
-use torii_dojo::store::postgres::initialize_dojo_schema;
-use torii_dojo::store::DojoStoreTrait;
+use torii_dojo::store::postgres::PgStore;
+use torii_dojo::store::sqlite::SqliteStore;
 use torii_ecs_sink::proto::world::world_server::WorldServer;
 use torii_ecs_sink::{EcsSink, FILE_DESCRIPTOR_SET as ECS_DESCRIPTOR_SET};
 use torii_erc1155::proto::erc1155_server::Erc1155Server;
@@ -41,7 +38,8 @@ use torii_erc721::{
     Erc721Decoder, Erc721Service, Erc721Sink, Erc721Storage,
     FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
 };
-use torii_introspect_postgres_sink::IntrospectPostgresSink;
+use torii_introspect_postgres_sink::processor::IntrospectPgDb;
+use torii_introspect_sqlite_sink::processor::IntrospectSqliteDb;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DbBackend {
@@ -183,98 +181,59 @@ async fn run_indexer(config: Config) -> Result<()> {
         &config,
     );
 
-    let bootstrap_points = resolve_bootstrap_points(
-        &storage_database_url,
-        &introspect_contracts,
-        config.from_block,
-        config.ignore_saved_state,
-    )
-    .await?;
-    for point in &bootstrap_points {
-        tracing::info!(
-            target: "torii::dojo::metadata",
-            owner = %point.owner,
-            block_number = point.block_number,
-            had_saved_state = point.had_saved_state,
-            "Resolved Dojo schema bootstrap point"
-        );
-    }
-
-    let (dojo_decoder, bootstrap_tables): (Arc<dyn torii::etl::Decoder>, Vec<_>) = match backend {
+    let (dojo_decoder, introspect_sink): (
+        Arc<dyn torii::etl::Decoder>,
+        Box<dyn torii::etl::sink::Sink>,
+    ) = match backend {
         DbBackend::Postgres => {
-            let primary_store = PostgresStore::new(&storage_database_url).await?;
-            let historical_bootstrap = primary_store
-                .load_historical_bootstrap(&bootstrap_points)
-                .await?;
-            if !historical_bootstrap.unsafe_owners.is_empty()
-                && !config.allow_unsafe_latest_schema_bootstrap
-            {
-                anyhow::bail!(
-                    "historical Dojo schema bootstrap is unavailable for contract(s): {}. re-run with --ignore-saved-state, use a fresh database, or pass --allow-unsafe-latest-schema-bootstrap",
-                    historical_bootstrap
-                        .unsafe_owners
-                        .iter()
-                        .map(|owner| format!("{owner:#x}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
+            let max_db_connections = config.max_db_connections.unwrap_or(5);
+            let pool = Arc::new(
+                PgPoolOptions::new()
+                    .max_connections(max_db_connections)
+                    .connect(&storage_database_url)
+                    .await?,
+            );
 
-            let secondary_store = PgPoolOptions::new()
-                .max_connections(5)
-                .connect(&storage_database_url)
-                .await?;
-            initialize_dojo_schema(&secondary_store).await?;
-            let merged_store = MergedStore::new(primary_store, secondary_store);
-            let preloaded_tables = if historical_bootstrap.unsafe_owners.is_empty() {
-                historical_bootstrap.tables
-            } else {
-                merged_store.load_tables(&[]).await?
-            };
-            let metadata_store =
-                DojoTableStore::from_loaded_tables(merged_store, preloaded_tables.clone());
-            let bootstrap_tables = metadata_store.create_table_messages()?;
-            let decoder: DojoDecoder<
-                DojoTableStore<MergedStore<PostgresStore, sqlx::Pool<sqlx::Postgres>>>,
-                _,
-            > = DojoDecoder::with_tables(metadata_store, (*provider).clone(), preloaded_tables);
+            let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), (*provider).clone());
+            let sink = IntrospectPgDb::new(pool.clone(), ());
+            decoder.store.initialize().await?;
+            sink.initialize_introspect_pg_sink().await?;
+            decoder.load_tables(&[]).await?;
+            sink.load_tables_no_commit(decoder.get_tables()?)?;
+
             (
                 Arc::new(decoder) as Arc<dyn torii::etl::Decoder>,
-                bootstrap_tables,
+                Box::new(sink),
             )
         }
         DbBackend::Sqlite => {
-            let metadata_store = SqliteStore::new(&storage_database_url).await?;
-            let historical_bootstrap = metadata_store
-                .load_historical_bootstrap(&bootstrap_points)
-                .await?;
-            if !historical_bootstrap.unsafe_owners.is_empty()
-                && !config.allow_unsafe_latest_schema_bootstrap
-            {
-                anyhow::bail!(
-                    "historical Dojo schema bootstrap is unavailable for contract(s): {}. re-run with --ignore-saved-state, use a fresh database, or pass --allow-unsafe-latest-schema-bootstrap",
-                    historical_bootstrap
-                        .unsafe_owners
-                        .iter()
-                        .map(|owner| format!("{owner:#x}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
+            let options = sqlite_connect_options(&storage_database_url)?;
+            let max_db_connections = config.max_db_connections.unwrap_or(1).max(1);
+            let pool = Arc::new(
+                SqlitePoolOptions::new()
+                    .max_connections(max_db_connections)
+                    .connect_with(options)
+                    .await?,
+            );
 
-            let preloaded_tables = if historical_bootstrap.unsafe_owners.is_empty() {
-                historical_bootstrap.tables
-            } else {
-                metadata_store.load_tables(&[]).await?
-            };
-            let metadata_store =
-                DojoTableStore::from_loaded_tables(metadata_store, preloaded_tables.clone());
-            let bootstrap_tables = metadata_store.create_table_messages()?;
-            let decoder: DojoDecoder<DojoTableStore<SqliteStore>, _> =
-                DojoDecoder::with_tables(metadata_store, (*provider).clone(), preloaded_tables);
+            sqlx::query("PRAGMA journal_mode=WAL")
+                .execute(pool.as_ref())
+                .await?;
+            sqlx::query("PRAGMA synchronous=NORMAL")
+                .execute(pool.as_ref())
+                .await?;
+            sqlx::query("PRAGMA foreign_keys=ON")
+                .execute(pool.as_ref())
+                .await?;
+
+            let decoder =
+                DojoDecoder::<SqliteStore<_>, _>::new(pool.clone(), (*provider).clone());
+            decoder.store.initialize().await?;
+            decoder.load_tables(&[]).await?;
+
             (
                 Arc::new(decoder) as Arc<dyn torii::etl::Decoder>,
-                bootstrap_tables,
+                Box::new(IntrospectSqliteDb::new(pool.clone(), ())),
             )
         }
     };
@@ -296,10 +255,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         .engine_database_url(engine_database_url)
         .with_extractor(extractor)
         .add_decoder(dojo_decoder)
-        .add_sink_boxed(Box::new(
-            IntrospectPostgresSink::new(storage_database_url.clone(), config.max_db_connections)
-                .with_bootstrap_tables(bootstrap_tables),
-        ))
+        .add_sink_boxed(introspect_sink)
         .add_sink_boxed(Box::new(ecs_sink))
         .add_sink_boxed(Box::new(arcade_sink));
 
@@ -548,6 +504,7 @@ fn build_extractor(
             block_batch_size: config.event_block_batch_size,
             retry_policy: RetryPolicy::default(),
             ignore_saved_state: config.ignore_saved_state,
+            rpc_parallelism: 0,
         },
     )));
 
@@ -572,6 +529,7 @@ fn build_extractor(
                 block_batch_size: config.event_block_batch_size,
                 retry_policy: RetryPolicy::default(),
                 ignore_saved_state: config.ignore_saved_state,
+                rpc_parallelism: 0,
             },
         )));
     }
@@ -581,147 +539,6 @@ fn build_extractor(
     } else {
         Box::new(CompositeExtractor::new(extractors))
     }
-}
-
-async fn resolve_bootstrap_points(
-    database_url: &str,
-    contracts: &[Felt],
-    from_block: u64,
-    ignore_saved_state: bool,
-) -> Result<Vec<SchemaBootstrapPoint>> {
-    if ignore_saved_state {
-        return Ok(contracts
-            .iter()
-            .copied()
-            .map(|owner| SchemaBootstrapPoint {
-                owner,
-                block_number: from_block,
-                had_saved_state: false,
-            })
-            .collect());
-    }
-
-    match detect_database_backend(database_url) {
-        DbBackend::Postgres => {
-            let pool = PgPoolOptions::new()
-                .max_connections(1)
-                .connect(database_url)
-                .await?;
-
-            let engine_table_exists: bool = sqlx::query_scalar(
-                r"
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM information_schema.tables
-                    WHERE table_schema = 'engine' AND table_name = 'extractor_state'
-                )
-                ",
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap_or(false);
-
-            if !engine_table_exists {
-                return Ok(default_bootstrap_points(contracts, from_block));
-            }
-
-            let mut points = Vec::with_capacity(contracts.len());
-            for owner in contracts {
-                let state_key = format!("{owner:#x}");
-                let saved_state: Option<String> = sqlx::query_scalar(
-                    r"
-                    SELECT state_value
-                    FROM engine.extractor_state
-                    WHERE extractor_type = 'event' AND state_key = $1
-                    ",
-                )
-                .bind(&state_key)
-                .fetch_optional(&pool)
-                .await?;
-
-                points.push(SchemaBootstrapPoint {
-                    owner: *owner,
-                    block_number: saved_state
-                        .as_deref()
-                        .and_then(parse_saved_state_block)
-                        .unwrap_or(from_block),
-                    had_saved_state: saved_state.is_some(),
-                });
-            }
-
-            Ok(points)
-        }
-        DbBackend::Sqlite => {
-            let options = sqlite_connect_options(database_url)?;
-            let pool = SqlitePoolOptions::new()
-                .max_connections(1)
-                .connect_with(options)
-                .await?;
-
-            let engine_table_exists: bool = sqlx::query_scalar(
-                r#"
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM sqlite_master
-                    WHERE type = 'table' AND name = 'extractor_state'
-                )
-                "#,
-            )
-            .fetch_one(&pool)
-            .await
-            .unwrap_or(false);
-
-            if !engine_table_exists {
-                return Ok(default_bootstrap_points(contracts, from_block));
-            }
-
-            let mut points = Vec::with_capacity(contracts.len());
-            for owner in contracts {
-                let state_key = format!("{owner:#x}");
-                let saved_state: Option<String> = sqlx::query_scalar(
-                    r#"
-                    SELECT state_value
-                    FROM extractor_state
-                    WHERE extractor_type = 'event' AND state_key = ?1
-                    "#,
-                )
-                .bind(&state_key)
-                .fetch_optional(&pool)
-                .await?;
-
-                points.push(SchemaBootstrapPoint {
-                    owner: *owner,
-                    block_number: saved_state
-                        .as_deref()
-                        .and_then(parse_saved_state_block)
-                        .unwrap_or(from_block),
-                    had_saved_state: saved_state.is_some(),
-                });
-            }
-
-            Ok(points)
-        }
-    }
-}
-
-fn default_bootstrap_points(contracts: &[Felt], from_block: u64) -> Vec<SchemaBootstrapPoint> {
-    contracts
-        .iter()
-        .copied()
-        .map(|owner| SchemaBootstrapPoint {
-            owner,
-            block_number: from_block,
-            had_saved_state: false,
-        })
-        .collect()
-}
-
-fn parse_saved_state_block(saved_state: &str) -> Option<u64> {
-    saved_state
-        .split('|')
-        .next()
-        .and_then(|part| part.strip_prefix("block:"))
-        .and_then(|block| block.parse::<u64>().ok())
 }
 
 fn validate_backend_consistency(

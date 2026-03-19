@@ -18,6 +18,7 @@ torii-erc20 = { path = "../../crates/torii-erc20" }
 torii-erc721 = { path = "../../crates/torii-erc721" }
 torii-erc1155 = { path = "../../crates/torii-erc1155" }
 torii-introspect-postgres-sink = { path = "../../crates/introspect-postgres-sink" }
+torii-introspect-sqlite-sink = { path = "../../crates/introspect-sqlite-sink" }
 
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

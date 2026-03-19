@@ -4654,6 +4654,7 @@ dependencies = [
  "torii-erc20",
  "torii-erc721",
  "torii-introspect-postgres-sink",
+ "torii-introspect-sqlite-sink",
  "tracing",
  "tracing-subscriber",
  "url",
