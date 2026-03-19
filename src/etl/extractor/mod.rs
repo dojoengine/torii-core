@@ -15,8 +15,7 @@ pub mod synthetic_erc20;
 use crate::etl::engine_db::EngineDb;
 use anyhow::Result;
 use async_trait::async_trait;
-use starknet::core::types::{EmittedEvent, Felt};
-use std::collections::HashMap;
+use starknet::core::types::{BlockWithTxs, EmittedEvent, Felt};
 use std::sync::Arc;
 
 pub use block_range::{BlockRangeConfig, BlockRangeExtractor};
@@ -82,7 +81,8 @@ pub struct BlockData {
 }
 
 pub struct EventBatch {
-    pub contract_transactions: HashMap<Felt, Vec<Transaction>>,
+    pub transactions: Vec<ContractTransactions>,
+    pub blocks: Vec<BlockWithTxs>,
 }
 
 pub struct ContractTransactions {
@@ -109,194 +109,197 @@ struct Event {
     pub data: Vec<Felt>,
 }
 
-impl ExtractionBatch {
-    /// Create an empty batch
-    pub fn empty() -> Self {
-        Self {
-            events: Vec::new(),
-            blocks: HashMap::new(),
-            transactions: HashMap::new(),
-            declared_classes: Vec::new(),
-            deployed_contracts: Vec::new(),
-            cursor: None,
-            chain_head: None,
-        }
-    }
-    // Create a batch with pre-allocated capacities for vectors and hashmaps 0 for unallocated
-    pub fn with_capacities(
-        events: usize,
-        blocks: usize,
-        transactions: usize,
-        declared_classes: usize,
-        deployed_contracts: usize,
-    ) -> Self {
-        Self {
-            events: Vec::with_capacity(events),
-            blocks: HashMap::with_capacity(blocks),
-            transactions: HashMap::with_capacity(transactions),
-            declared_classes: Vec::with_capacity(declared_classes),
-            deployed_contracts: Vec::with_capacity(deployed_contracts),
-            cursor: None,
-            chain_head: None,
-        }
-    }
+// impl ExtractionBatch {
+//     /// Create an empty batch
+//     pub fn empty() -> Self {
+//         Self {
+//             events: Vec::new(),
+//             blocks: HashMap::new(),
+//             transactions: HashMap::new(),
+//             declared_classes: Vec::new(),
+//             deployed_contracts: Vec::new(),
+//             cursor: None,
+//             chain_head: None,
+//         }
+//     }
+//     // Create a batch with pre-allocated capacities for vectors and hashmaps 0 for unallocated
+//     pub fn with_capacities(
+//         events: usize,
+//         blocks: usize,
+//         transactions: usize,
+//         declared_classes: usize,
+//         deployed_contracts: usize,
+//     ) -> Self {
+//         Self {
+//             events: Vec::with_capacity(events),
+//             blocks: HashMap::with_capacity(blocks),
+//             transactions: HashMap::with_capacity(transactions),
+//             declared_classes: Vec::with_capacity(declared_classes),
+//             deployed_contracts: Vec::with_capacity(deployed_contracts),
+//             cursor: None,
+//             chain_head: None,
+//         }
+//     }
 
-    /// Check if batch is empty
-    pub fn is_empty(&self) -> bool {
-        self.events.is_empty()
-    }
+//     /// Check if batch is empty
+//     pub fn is_empty(&self) -> bool {
+//         self.events.is_empty()
+//     }
 
-    /// Get number of events
-    pub fn len(&self) -> usize {
-        self.events.len()
-    }
+//     /// Get number of events
+//     pub fn len(&self) -> usize {
+//         self.events.len()
+//     }
 
-    /// Get the maximum block number in this batch.
-    pub fn max_block(&self) -> Option<u64> {
-        self.blocks.keys().max().copied()
-    }
+//     /// Get the maximum block number in this batch.
+//     pub fn max_block(&self) -> Option<u64> {
+//         self.blocks.keys().max().copied()
+//     }
 
-    /// Check if this batch is "live" (near chain head).
-    ///
-    /// Returns true if:
-    /// - chain_head is known AND
-    /// - the max block in this batch is within `threshold` blocks of chain_head
-    ///
-    /// This is useful for sinks to decide whether to broadcast events to real-time
-    /// subscribers. During historical indexing, broadcasting millions of events
-    /// would overwhelm clients and slow down the indexer.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Only broadcast if within 100 blocks of chain head
-    /// if batch.is_live(100) {
-    ///     grpc_service.broadcast_transfer(proto_transfer);
-    /// }
-    /// ```
-    pub fn is_live(&self, threshold: u64) -> bool {
-        match (self.chain_head, self.max_block()) {
-            (Some(head), Some(max_block)) => head.saturating_sub(max_block) <= threshold,
-            // If we don't know chain head, assume not live (safer for historical indexing)
-            _ => false,
-        }
-    }
-    // Add block context to the batch
-    pub fn add_block_context(
-        &mut self,
-        number: u64,
-        hash: Felt,
-        parent_hash: Felt,
-        timestamp: u64,
-    ) {
-        self.blocks.insert(
-            number,
-            Arc::new(BlockContext {
-                number,
-                hash,
-                parent_hash,
-                timestamp,
-            }),
-        );
-    }
-    // Add transaction context to the batch
-    pub fn add_transaction_context(
-        &mut self,
-        hash: Felt,
-        block_number: u64,
-        sender_address: Option<Felt>,
-        calldata: Vec<Felt>,
-    ) {
-        self.transactions.insert(
-            hash,
-            Arc::new(TransactionContext {
-                hash,
-                block_number,
-                sender_address,
-                calldata,
-            }),
-        );
-    }
-    // Add an event to the batch
-    pub fn add_event(&mut self, event: EmittedEvent) {
-        self.events.push(event);
-    }
-    // Add an event with transaction context (block_number and sender_address) to the batch
-    // Returns None if block_number is missing from event and does not updated, since we need it to add transaction context
-    pub fn add_event_with_tx_context(
-        &mut self,
-        event: EmittedEvent,
-        sender_address: Option<Felt>,
-        calldata: Vec<Felt>,
-    ) -> Option<()> {
-        self.add_transaction_context(
-            event.transaction_hash,
-            event.block_number?,
-            sender_address,
-            calldata,
-        );
-        self.events.push(event);
-        Some(())
-    }
+//     /// Check if this batch is "live" (near chain head).
+//     ///
+//     /// Returns true if:
+//     /// - chain_head is known AND
+//     /// - the max block in this batch is within `threshold` blocks of chain_head
+//     ///
+//     /// This is useful for sinks to decide whether to broadcast events to real-time
+//     /// subscribers. During historical indexing, broadcasting millions of events
+//     /// would overwhelm clients and slow down the indexer.
+//     ///
+//     /// # Example
+//     /// ```ignore
+//     /// // Only broadcast if within 100 blocks of chain head
+//     /// if batch.is_live(100) {
+//     ///     grpc_service.broadcast_transfer(proto_transfer);
+//     /// }
+//     /// ```
+//     pub fn is_live(&self, threshold: u64) -> bool {
+//         match (self.chain_head, self.max_block()) {
+//             (Some(head), Some(max_block)) => head.saturating_sub(max_block) <= threshold,
+//             // If we don't know chain head, assume not live (safer for historical indexing)
+//             _ => false,
+//         }
+//     }
+//     // Add block context to the batch
+//     pub fn add_block_context(
+//         &mut self,
+//         number: u64,
+//         hash: Felt,
+//         parent_hash: Felt,
+//         timestamp: u64,
+//     ) {
+//         self.blocks.insert(
+//             number,
+//             Arc::new(BlockContext {
+//                 number,
+//                 hash,
+//                 parent_hash,
+//                 timestamp,
+//             }),
+//         );
+//     }
+//     // Add transaction context to the batch
+//     pub fn add_transaction_context(
+//         &mut self,
+//         hash: Felt,
+//         block_number: u64,
+//         sender_address: Option<Felt>,
+//         calldata: Vec<Felt>,
+//     ) {
+//         self.transactions.insert(
+//             hash,
+//             Arc::new(TransactionContext {
+//                 hash,
+//                 block_number,
+//                 sender_address,
+//                 calldata,
+//             }),
+//         );
+//     }
+//     // Add an event to the batch
+//     pub fn add_event(&mut self, event: EmittedEvent) {
+//         self.events.push(event);
+//     }
+//     // Add an event with transaction context (block_number and sender_address) to the batch
+//     // Returns None if block_number is missing from event and does not updated, since we need it to add transaction context
+//     pub fn add_event_with_tx_context(
+//         &mut self,
+//         event: EmittedEvent,
+//         sender_address: Option<Felt>,
+//         calldata: Vec<Felt>,
+//     ) -> Option<()> {
+//         self.add_transaction_context(
+//             event.transaction_hash,
+//             event.block_number?,
+//             sender_address,
+//             calldata,
+//         );
+//         self.events.push(event);
+//         Some(())
+//     }
 
-    // Add multiple events to the batch
-    pub fn add_events(&mut self, events: Vec<EmittedEvent>) {
-        self.events.extend(events);
-    }
-    // add a declared class to the batch
-    pub fn add_declared_class(
-        &mut self,
-        class_hash: Felt,
-        compiled_class_hash: Option<Felt>,
-        transaction_hash: Felt,
-    ) {
-        self.declared_classes.push(Arc::new(DeclaredClass {
-            class_hash,
-            compiled_class_hash,
-            transaction_hash,
-        }));
-    }
-    // add a deployed contract to the batch
-    pub fn add_deployed_contract(
-        &mut self,
-        contract_address: Felt,
-        class_hash: Felt,
-        transaction_hash: Felt,
-    ) {
-        self.deployed_contracts.push(Arc::new(DeployedContract {
-            contract_address,
-            class_hash,
-            transaction_hash,
-        }));
-    }
+//     // Add multiple events to the batch
+//     pub fn add_events(&mut self, events: Vec<EmittedEvent>) {
+//         self.events.extend(events);
+//     }
+//     // add a declared class to the batch
+//     pub fn add_declared_class(
+//         &mut self,
+//         class_hash: Felt,
+//         compiled_class_hash: Option<Felt>,
+//         transaction_hash: Felt,
+//     ) {
+//         self.declared_classes.push(Arc::new(DeclaredClass {
+//             class_hash,
+//             compiled_class_hash,
+//             transaction_hash,
+//         }));
+//     }
+//     // add a deployed contract to the batch
+//     pub fn add_deployed_contract(
+//         &mut self,
+//         contract_address: Felt,
+//         class_hash: Felt,
+//         transaction_hash: Felt,
+//     ) {
+//         self.deployed_contracts.push(Arc::new(DeployedContract {
+//             contract_address,
+//             class_hash,
+//             transaction_hash,
+//         }));
+//     }
 
-    // Set the cursor
-    pub fn set_cursor(&mut self, cursor: String) {
-        self.cursor = Some(cursor);
-    }
-    // Set the chain head block number
-    pub fn set_chain_head(&mut self, chain_head: u64) {
-        self.chain_head = Some(chain_head);
-    }
+//     // Set the cursor
+//     pub fn set_cursor(&mut self, cursor: String) {
+//         self.cursor = Some(cursor);
+//     }
+//     // Set the chain head block number
+//     pub fn set_chain_head(&mut self, chain_head: u64) {
+//         self.chain_head = Some(chain_head);
+//     }
 
-    pub fn remove_cursor(&mut self) {
-        self.cursor = None;
-    }
+//     pub fn remove_cursor(&mut self) {
+//         self.cursor = None;
+//     }
 
-    pub fn remove_chain_head(&mut self) {
-        self.chain_head = None;
-    }
+//     pub fn remove_chain_head(&mut self) {
+//         self.chain_head = None;
+//     }
 
-    pub fn get_event_context(&self, tx_hash: &Felt, from_address: Felt) -> Option<EventContext> {
-        let transaction = self.transactions.get(tx_hash)?.clone();
-        let block = self.blocks.get(&transaction.block_number)?.clone();
+//     pub fn get_event_context(&self, tx_hash: &Felt, from_address: Felt) -> Option<EventContext> {
+//         let transaction = self.transactions.get(tx_hash)?.clone();
+//         let block = self.blocks.get(&transaction.block_number)?.clone();
 
-        Some(EventContext {
-            from_address,
-            transaction,
-            block,
-        })
-    }
-}
+//         Some(EventContext {
+//             from_address,
+//             transaction,
+//             block,
+//         })
+//     }
+// }
+
+
+pub trait Extractor
 
 /// Extractor trait for fetching enriched event batches
 #[async_trait]
