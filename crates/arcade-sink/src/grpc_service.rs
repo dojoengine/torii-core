@@ -307,9 +307,7 @@ impl ArcadeService {
         field: &str,
         value: &str,
     ) -> Result<Option<sqlx::any::AnyRow>> {
-        let padded = felt_from_hex(value)
-            .map(felt_hex_padded)
-            .unwrap_or_else(|_| value.to_string());
+        let padded = felt_from_hex(value).map_or_else(|_| value.to_string(), felt_hex_padded);
         let sql = select_by_field_match_sql(self.state.backend, table, field, "SELECT * FROM");
         let row = sqlx::query(&sql)
             .bind(value)
@@ -325,9 +323,7 @@ impl ArcadeService {
         field: &str,
         value: &str,
     ) -> Result<Vec<sqlx::any::AnyRow>> {
-        let padded = felt_from_hex(value)
-            .map(felt_hex_padded)
-            .unwrap_or_else(|_| value.to_string());
+        let padded = felt_from_hex(value).map_or_else(|_| value.to_string(), felt_hex_padded);
         let sql = select_by_field_match_sql(self.state.backend, table, field, "SELECT * FROM");
         let rows = sqlx::query(&sql)
             .bind(value)
@@ -831,7 +827,7 @@ impl ArcadeService {
             .bind(parsed.expiration as i64)
             .bind(parsed.status as i64)
             .bind(parsed.category as i64)
-            .bind(if parsed.royalties { 1_i64 } else { 0_i64 })
+            .bind(i64::from(parsed.royalties))
             .bind(parsed.time as i64)
             .execute(&self.state.pool)
             .await?;
@@ -898,7 +894,7 @@ impl ArcadeService {
             .bind(parsed.expiration as i64)
             .bind(parsed.status as i64)
             .bind(parsed.category as i64)
-            .bind(if parsed.royalties { 1_i64 } else { 0_i64 })
+            .bind(i64::from(parsed.royalties))
             .bind(parsed.time as i64)
             .execute(&self.state.pool)
             .await?;
@@ -969,7 +965,7 @@ impl Arcade for ArcadeService {
             .map_err(internal_status)?;
         let games = rows
             .into_iter()
-            .map(|row| Ok(game_from_row(&row)?))
+            .map(|row| game_from_row(&row))
             .collect::<Result<Vec<_>>>()
             .map_err(internal_status)?;
 
@@ -1018,7 +1014,7 @@ impl Arcade for ArcadeService {
             .map_err(internal_status)?;
         let editions = rows
             .into_iter()
-            .map(|row| Ok(edition_from_row(&row)?))
+            .map(|row| edition_from_row(&row))
             .collect::<Result<Vec<_>>>()
             .map_err(internal_status)?;
 
@@ -1869,7 +1865,7 @@ fn felt_hex(value: Felt) -> String {
 }
 
 fn felt_hex_padded(value: Felt) -> String {
-    format!("{:#066x}", value)
+    format!("{value:#066x}")
 }
 
 fn felt_from_hex(value: &str) -> Result<Felt> {

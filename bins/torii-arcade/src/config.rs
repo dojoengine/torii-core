@@ -104,6 +104,7 @@ pub enum MetadataMode {
     about = "Arcade-dedicated Torii backend with Dojo introspect, ECS, and token services",
     long_about = None
 )]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     #[arg(long, env = "STARKNET_RPC_URL", default_value = DEFAULT_RPC_URL)]
     pub rpc_url: String,
@@ -360,13 +361,13 @@ mod tests {
         assert_eq!(
             dojo[0],
             Felt::from_hex_unchecked(
-                "0x2d26295d6c541d64740e1ae56abc079b82b22c35ab83985ef8bd15dc0f9edfb"
+                "0x07a079295990e43441a7389fdc3b9ba063c6cd6aee16fb846f598c42a9f04ff7"
             )
         );
         assert_eq!(dojo.len(), 10);
-        assert_eq!(introspect.len(), 9);
-        assert!(!introspect.contains(&Felt::from_hex_unchecked(
-            "0x2d26295d6c541d64740e1ae56abc079b82b22c35ab83985ef8bd15dc0f9edfb"
+        assert_eq!(introspect.len(), 10);
+        assert!(introspect.contains(&Felt::from_hex_unchecked(
+            "0x07a079295990e43441a7389fdc3b9ba063c6cd6aee16fb846f598c42a9f04ff7"
         )));
         assert_eq!(erc721.len(), 17);
         assert_eq!(erc20.len(), 46);

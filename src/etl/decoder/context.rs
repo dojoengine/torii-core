@@ -239,8 +239,7 @@ impl DecoderContext {
                         let selector = event
                             .keys
                             .first()
-                            .map(|felt| format!("{felt:#x}"))
-                            .unwrap_or_else(|| "<missing>".to_string());
+                            .map_or_else(|| "<missing>".to_string(), |felt| format!("{felt:#x}"));
                         let preview = event_preview(event);
                         tracing::warn!(
                             target: "torii::etl::decoder_context",
@@ -293,8 +292,7 @@ impl DecoderContext {
                     let selector = event
                         .keys
                         .first()
-                        .map(|felt| format!("{felt:#x}"))
-                        .unwrap_or_else(|| "<missing>".to_string());
+                        .map_or_else(|| "<missing>".to_string(), |felt| format!("{felt:#x}"));
                     let preview = event_preview(event);
                     tracing::warn!(
                         target: "torii::etl::decoder_context",

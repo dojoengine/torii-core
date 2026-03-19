@@ -77,7 +77,7 @@ impl ArcadeProjectionPipeline {
 
 #[torii::async_trait]
 impl Sink for ArcadeProjectionPipeline {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "arcade-projection-pipeline"
     }
 
