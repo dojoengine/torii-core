@@ -33,3 +33,4 @@ itertools.workspace = true
 # Local crates
 torii-introspect.workspace = true
 torii-postgres.workspace = true
+torii-common.workspace = true

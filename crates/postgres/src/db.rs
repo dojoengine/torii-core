@@ -1,11 +1,9 @@
-use std::ops::Deref;
-
-pub use async_trait::async_trait;
-use sqlx::Postgres;
-use sqlx::{migrate::Migrator, Executor};
+use crate::migration::SchemaMigrator;
+use async_trait::async_trait;
+use sqlx::{migrate::Migrator, Postgres};
 pub use sqlx::{PgPool, Transaction};
-
-use crate::{migration::SchemaMigrator, SqlxResult};
+use std::ops::Deref;
+use torii_common::sql::{Executable, SqlxResult};
 
 #[async_trait]
 pub trait PostgresConnection {
@@ -21,11 +19,9 @@ pub trait PostgresConnection {
         };
         Ok(result?)
     }
-    async fn execute_queries(&self, queries: &[String]) -> SqlxResult<()> {
+    async fn execute_queries(&self, queries: impl Executable<Postgres> + Send) -> SqlxResult<()> {
         let mut transaction = self.begin().await?;
-        for query in queries {
-            transaction.execute(query.as_str()).await?;
-        }
+        queries.execute(&mut transaction).await?;
         transaction.commit().await
     }
 }

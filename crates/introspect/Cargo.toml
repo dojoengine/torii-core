@@ -27,6 +27,8 @@ sqlx = { workspace = true, features = [
 async-trait.workspace = true
 bigdecimal.workspace = true
 
+torii-common.workspace = true
+
 [build-dependencies]
 tonic-build = "0.12"
 

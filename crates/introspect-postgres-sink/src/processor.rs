@@ -1,11 +1,10 @@
 use crate::json::PostgresJsonSerializer;
-use crate::query::CreatePgTable;
+use crate::query::{fetch_columns, fetch_dead_fields, fetch_tables, CreatePgTable};
 use crate::table::{DeadField, PgTable};
 use crate::{PgDbError, PgDbResult, PgSchema, INTROSPECT_PG_SINK_MIGRATIONS};
-use introspect_types::{ColumnInfo, ResultInto, TypeDef};
+use introspect_types::ColumnInfo;
 use serde_json::Serializer as JsonSerializer;
-use sqlx::types::Json;
-use sqlx::{FromRow, PgPool};
+use sqlx::PgPool;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::io::Write;
@@ -13,15 +12,16 @@ use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::RwLock;
 use torii::etl::envelope::MetaData;
+use torii_common::sql::{PgQuery, Queries};
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
-use torii_introspect::postgres::types::Uint128;
-use torii_introspect::postgres::PgFelt;
 use torii_introspect::schema::TableSchema;
 use torii_introspect::InsertsFields;
 use torii_postgres::PostgresConnection;
 
 pub const COMMIT_CMD: &str = "--COMMIT";
-pub const DEAD_MEMBERS_TABLE: &str = "__torii_dead_fields";
+pub const DEAD_MEMBERS_TABLE: &str = "__introspect_dead_fields";
+pub const TABLES_TABLE: &str = "__introspect_tables";
+pub const COLUMNS_TABLE: &str = "__introspect_columns";
 pub const METADATA_CONFLICTS: &str = "__updated_at = NOW(), __updated_block = EXCLUDED.__updated_block, __updated_tx = EXCLUDED.__updated_tx";
 
 #[derive(Debug, Default)]
@@ -87,29 +87,47 @@ impl PostgresTables {
         &self,
         schema: &Rc<PgSchema>,
         to_table: impl Into<TableSchema>,
-        queries: &mut Vec<String>,
+        metadata: &MetaData,
+        queries: &mut Vec<PgQuery>,
     ) -> PgDbResult<()> {
         let (id, table) = Into::<TableSchema>::into(to_table).into();
         self.assert_table_not_exists(&id, &table.name)?;
         CreatePgTable::new(schema, &id, &table)?.make_queries(queries);
+        let table = PgTable::new(schema, table, None);
+        table.insert_queries(
+            &id,
+            None,
+            metadata.block_number.unwrap_or_default(),
+            metadata.transaction_hash,
+            queries,
+        )?;
         let mut tables: std::sync::RwLockWriteGuard<'_, HashMap<Felt, PgTable>> = self.write()?;
-        tables.insert(id, PgTable::new(schema, table, None));
+        tables.insert(id, table);
         Ok(())
     }
 
     pub fn update_table(
         &self,
         to_table: impl Into<TableSchema>,
-        queries: &mut Vec<String>,
+        metadata: &MetaData,
+        queries: &mut Vec<PgQuery>,
     ) -> PgDbResult<()> {
+        let tx_hash = &metadata.transaction_hash;
+        let block_number = metadata.block_number.unwrap_or_default();
         let (id, table) = Into::<TableSchema>::into(to_table).into();
         let mut tables = self.write()?;
         let existing = tables
             .get_mut(&id)
             .ok_or_else(|| PgDbError::TableNotFound(id))?;
         let upgrades = existing.update_from_info(&id, &table)?;
-        upgrades.to_queries(&id, queries);
-        Ok(())
+        upgrades.to_queries(&id, block_number, tx_hash, queries)?;
+        existing.insert_queries(
+            &id,
+            Some(&upgrades.columns_upgraded),
+            block_number,
+            metadata.transaction_hash,
+            queries,
+        )
     }
 
     pub fn assert_table_not_exists(&self, id: &Felt, name: &str) -> PgDbResult<()> {
@@ -138,7 +156,7 @@ impl PostgresTables {
         &self,
         event: &InsertsFields,
         context: &MetaData,
-        queries: &mut Vec<String>,
+        queries: &mut Vec<PgQuery>,
     ) -> PgDbResult<()> {
         let tables = self.read().unwrap();
         let table = match tables.get(&event.table) {
@@ -178,7 +196,7 @@ impl PostgresTables {
             .unwrap();
         }
         let string = unsafe { String::from_utf8_unchecked(writer) };
-        queries.push(string);
+        queries.add(string);
         Ok(())
     }
 
@@ -187,11 +205,15 @@ impl PostgresTables {
         schema: &Rc<PgSchema>,
         msg: &IntrospectMsg,
         metadata: &MetaData,
-        queries: &mut Vec<String>,
+        queries: &mut Vec<PgQuery>,
     ) -> PgDbResult<()> {
         match msg {
-            IntrospectMsg::CreateTable(event) => self.create_table(schema, event.clone(), queries),
-            IntrospectMsg::UpdateTable(event) => self.update_table(event.clone(), queries),
+            IntrospectMsg::CreateTable(event) => {
+                self.create_table(schema, event.clone(), metadata, queries)
+            }
+            IntrospectMsg::UpdateTable(event) => {
+                self.update_table(event.clone(), metadata, queries)
+            }
             IntrospectMsg::AddColumns(event) => self.set_table_dead(&event.table),
             IntrospectMsg::DropColumns(event) => self.set_table_dead(&event.table),
             IntrospectMsg::RetypeColumns(event) => self.set_table_dead(&event.table),
@@ -206,48 +228,14 @@ impl PostgresTables {
     }
 }
 
-fn make_dead_members_table_query(schema: &PgSchema) -> String {
-    format!(
-        r#"CREATE TABLE IF NOT EXISTS "{schema}"."{DEAD_MEMBERS_TABLE}" (
-            "table" public.felt252,
-            id public.uint128,
-            name TEXT,
-            type_def JSONB,
-            PRIMARY KEY ("table", id)
-        )"#,
-    )
-}
-
 fn make_schema_query(schema: &PgSchema) -> String {
     format!(r#"CREATE SCHEMA IF NOT EXISTS "{schema}""#)
-}
-
-#[derive(Debug, FromRow)]
-pub struct DeadFieldRow {
-    pub table: PgFelt,
-    pub id: Uint128,
-    pub name: String,
-    pub type_def: Json<TypeDef>,
-}
-
-impl From<DeadFieldRow> for (Felt, u128, DeadField) {
-    fn from(value: DeadFieldRow) -> Self {
-        (
-            value.table.into(),
-            value.id.into(),
-            DeadField {
-                name: value.name,
-                type_def: value.type_def.0,
-            },
-        )
-    }
 }
 
 pub struct IntrospectPgDb<T> {
     tables: PostgresTables,
     schema: PgSchema,
     pool: T,
-    dead_fields: DeadFields,
 }
 
 impl<T: PostgresConnection> PostgresConnection for IntrospectPgDb<T> {
@@ -262,60 +250,36 @@ impl<T: PostgresConnection + Send + Sync> IntrospectPgDb<T> {
             tables: PostgresTables::default(),
             schema: schema.into(),
             pool,
-            dead_fields: DeadFields::default(),
         }
     }
 
-    pub async fn read_dead_field_rows(&self) -> PgDbResult<Vec<DeadFieldRow>> {
-        let schema = &self.schema;
-        let query =
-            format!(r#"SELECT "table", id, name, type_def FROM "{schema}"."{DEAD_MEMBERS_TABLE}""#);
-        sqlx::query_as::<_, DeadFieldRow>(&query)
-            .fetch_all(self.pool())
-            .await
-            .err_into()
-    }
-
-    pub async fn load_dead_fields(&self) -> PgDbResult<()> {
-        let mut dead_fields_map: HashMap<Felt, Vec<(u128, DeadField)>> = HashMap::new();
-        for row in self.read_dead_field_rows().await? {
-            let (table, id, dead_field) = row.into();
-            dead_fields_map
-                .entry(table)
-                .or_default()
-                .push((id, dead_field));
-        }
-        let mut tables = self.tables.write()?;
-        let mut dead_fields = self.dead_fields.write()?;
-        for (table, fields) in dead_fields_map {
-            match tables.get_mut(&table) {
-                Some(table) => table.dead.extend(fields),
-                None => dead_fields.entry(table).or_default().extend(fields),
+    pub async fn load_store_data(&self) -> PgDbResult<()> {
+        let mut tables = fetch_tables(self.pool(), &self.schema)
+            .await?
+            .into_iter()
+            .map(|t| t.to_table(&self.schema))
+            .collect::<HashMap<_, _>>();
+        for (table_id, id, column_info) in fetch_columns(self.pool(), &self.schema).await? {
+            if let Some(table) = tables.get_mut(&table_id) {
+                table.columns.insert(id, column_info);
             }
         }
+        for (table_id, id, field) in fetch_dead_fields(self.pool(), &self.schema).await? {
+            if let Some(table) = tables.get_mut(&table_id) {
+                table.dead.insert(id, field);
+            }
+        }
+        let mut tables_map = self.tables.write()?;
+        tables_map.extend(tables);
         Ok(())
     }
 
     pub async fn initialize_introspect_pg_sink(&self) -> PgDbResult<()> {
         self.migrate(Some("introspect"), INTROSPECT_PG_SINK_MIGRATIONS)
             .await?;
-        let queries = [
-            make_schema_query(&self.schema),
-            make_dead_members_table_query(&self.schema),
-        ];
-        self.execute_queries(&queries).await?;
-        self.load_dead_fields().await
-    }
-
-    pub fn load_tables_no_commit(&self, table_schemas: Vec<TableSchema>) -> PgDbResult<()> {
-        let mut tables: std::sync::RwLockWriteGuard<'_, HashMap<Felt, PgTable>> =
-            self.tables.write()?;
-        let mut deads = self.dead_fields.write()?;
-        for table in table_schemas {
-            let (id, table) = table.into();
-            tables.insert(id, PgTable::new(&self.schema, table, deads.remove(&id)));
-        }
-        Ok(())
+        self.execute_queries(make_schema_query(&self.schema))
+            .await?;
+        self.load_store_data().await
     }
 
     pub async fn process_message(
@@ -329,7 +293,7 @@ impl<T: PostgresConnection + Send + Sync> IntrospectPgDb<T> {
             self.tables
                 .handle_message(&schema, msg, metadata, &mut queries)?;
         }
-        self.execute_queries(&queries).await?;
+        self.execute_queries(queries).await?;
         Ok(())
     }
 
@@ -349,14 +313,17 @@ impl<T: PostgresConnection + Send + Sync> IntrospectPgDb<T> {
                 );
             }
         }
-        let mut start = 0;
-        for (n, query) in queries.iter().enumerate() {
-            if query == COMMIT_CMD {
-                self.execute_queries(&queries[start..n]).await?;
-                start = n + 1;
+        let mut batch = Vec::new();
+        for query in queries {
+            if query == *COMMIT_CMD {
+                self.execute_queries(std::mem::take(&mut batch)).await?;
+            } else {
+                batch.push(query);
             }
         }
-        self.execute_queries(&queries[start..]).await?;
+        if !batch.is_empty() {
+            self.execute_queries(batch).await?;
+        }
         Ok(results)
     }
 }

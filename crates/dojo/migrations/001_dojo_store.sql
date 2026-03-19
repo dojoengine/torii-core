@@ -11,18 +11,12 @@ BEGIN
         CREATE DOMAIN uint64 AS NUMERIC(20, 0)
         CHECK (VALUE >= 0 AND VALUE < power(2::numeric, 64));
     END IF;
-
-    IF to_regtype('introspect.attribute') IS NULL THEN
-        CREATE TYPE introspect.attribute AS (
-            name TEXT,
-            data bytea
-        );
-    END IF;
 END $$;
 
 CREATE TABLE IF NOT EXISTS dojo.tables (
     owner felt252,
     id felt252 NOT NULL,
+    block_number uint64 NOT NULL,
     name TEXT NOT NULL,
     attributes TEXT[] NOT NULL DEFAULT '{}',
     keys felt252[] NOT NULL,
@@ -30,21 +24,23 @@ CREATE TABLE IF NOT EXISTS dojo.tables (
     legacy BOOLEAN NOT NULL, 
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_block uint64 NOT NULL,
-    updated_block uint64 NOT NULL,
     created_tx felt252 NOT NULL,
     updated_tx felt252 NOT NULL,
-    PRIMARY KEY (owner, id)
+    PRIMARY KEY (owner, id, block_number)
 );
 
 CREATE TABLE IF NOT EXISTS dojo.columns(
     owner felt252,
     "table" felt252 NOT NULL ,
     id felt252 NOT NULL,
+    block_number uint64 NOT NULL,
     name TEXT NOT NULL,
-    attributes introspect.attribute[] NOT NULL DEFAULT '{}',
+    attributes TEXT[] NOT NULL DEFAULT '{}',
     type_def jsonb NOT NULL,
-    PRIMARY KEY (owner, "table", id),
-    FOREIGN KEY (owner, "table") REFERENCES dojo.tables(owner, id)
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_tx felt252 NOT NULL,
+    updated_tx felt252 NOT NULL,
+    PRIMARY KEY (owner, "table", id, block_number)
 );
 

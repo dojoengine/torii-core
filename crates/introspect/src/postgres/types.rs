@@ -149,6 +149,12 @@ impl From<Felt> for PgFelt {
     }
 }
 
+impl From<&Felt> for PgFelt {
+    fn from(value: &Felt) -> Self {
+        PgFelt(value.to_bytes_be())
+    }
+}
+
 #[derive(sqlx::Type, Debug)]
 #[sqlx(type_name = "introspect.primary_def")]
 pub struct PgPrimary {

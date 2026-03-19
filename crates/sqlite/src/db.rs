@@ -6,9 +6,9 @@ use sqlx::migrate::Migrator;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::Sqlite;
 pub use sqlx::{SqlitePool, Transaction};
+use torii_common::sql::SqlxResult;
 
 use crate::migration::NamespaceMigrator;
-use crate::SqlxResult;
 
 #[async_trait]
 pub trait SqliteConnection {
