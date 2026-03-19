@@ -1,0 +1,25 @@
+[package]
+name = "dojo-introspect-fetcher"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "dojo-introspect-fetcher"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+starknet.workspace = true
+starknet-types-core.workspace = true
+tokio = { workspace = true }
+anyhow.workspace = true
+clap = { version = "4.5", features = ["derive"] }
+
+[[bin]]
+name = "fetch-events"
+path = "src/fetch_events.rs"
+
+
+[lints]
+workspace = true

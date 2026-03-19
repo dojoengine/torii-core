@@ -904,6 +904,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect"
 version = "0.1.0"
+source = "git+https://github.com/dojoengine/dojo-introspect?rev=b4c7148#b4c7148c0814999589c69120219daee333775884"
 dependencies = [
  "async-trait",
  "introspect-rust-macros",
@@ -914,6 +915,19 @@ dependencies = [
  "starknet-crypto",
  "starknet-types-core",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dojo-introspect-fetcher"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "starknet",
+ "starknet-types-core",
+ "tokio",
 ]
 
 [[package]]
@@ -1850,6 +1864,7 @@ dependencies = [
 [[package]]
 name = "introspect-events"
 version = "0.1.2"
+source = "git+https://github.com/cartridge-gg/introspect?rev=60819cb#60819cb4811eaf1aad4ce3c360d59994004076cc"
 dependencies = [
  "cainome-cairo-serde",
  "introspect-types",
@@ -1861,6 +1876,7 @@ dependencies = [
 [[package]]
 name = "introspect-rust-macros"
 version = "0.1.0"
+source = "git+https://github.com/cartridge-gg/introspect?rev=60819cb#60819cb4811eaf1aad4ce3c360d59994004076cc"
 dependencies = [
  "paste",
  "proc-macro2",
@@ -1872,6 +1888,7 @@ dependencies = [
 [[package]]
 name = "introspect-types"
 version = "0.1.2"
+source = "git+https://github.com/cartridge-gg/introspect?rev=60819cb#60819cb4811eaf1aad4ce3c360d59994004076cc"
 dependencies = [
  "blake3",
  "convert_case",
