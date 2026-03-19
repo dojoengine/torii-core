@@ -2,6 +2,7 @@
 
 pub mod block_range;
 pub mod composite;
+pub mod contract;
 pub mod event;
 pub mod event_common;
 pub mod global_event;
@@ -12,10 +13,13 @@ pub mod synthetic;
 pub mod synthetic_adapter;
 pub mod synthetic_erc20;
 
-use crate::etl::engine_db::EngineDb;
+use crate::etl::{cursor::Cursor, engine_db::EngineDb};
 use anyhow::Result;
 use async_trait::async_trait;
-use starknet::core::types::{BlockWithTxs, EmittedEvent, Felt};
+use starknet::core::types::{
+    BlockStatus, BlockWithReceipts, BlockWithTxs, EmittedEvent, Felt, L1DataAvailabilityMode,
+    ResourcePrice,
+};
 use std::sync::Arc;
 
 pub use block_range::{BlockRangeConfig, BlockRangeExtractor};
@@ -82,20 +86,35 @@ pub struct BlockData {
 
 pub struct EventBatch {
     pub transactions: Vec<ContractTransactions>,
-    pub blocks: Vec<BlockWithTxs>,
+    pub blocks: Vec<BlockWithReceipts>,
 }
 
 pub struct ContractTransactions {
     pub contract_address: Felt,
-    pub transactions: Vec<Transaction>,
+    pub transactions: Vec<TransactionEvents>,
 }
 
-pub struct Transaction {
+#[derive(Debug, Clone, Default)]
+pub struct TransactionEvents {
     pub block_number: u64,
-    pub hash: Felt,
-    pub contract_events: Vec<EventData>,
+    pub transaction_hash: Felt,
+    pub events: Vec<EventData>,
 }
 
+impl From<EmittedEvent> for TransactionEvents {
+    fn from(value: EmittedEvent) -> Self {
+        TransactionEvents {
+            block_number: value.block_number.unwrap_or_default(),
+            transaction_hash: value.transaction_hash,
+            events: vec![EventData {
+                keys: value.keys,
+                data: value.data,
+            }],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct EventData {
     pub keys: Vec<Felt>,
     pub data: Vec<Felt>,
@@ -107,6 +126,26 @@ struct Event {
     pub block_number: u64,
     pub keys: Vec<Felt>,
     pub data: Vec<Felt>,
+}
+
+pub struct Block {
+    pub status: BlockStatus,
+    pub block_hash: Felt,
+    pub parent_hash: Felt,
+    pub block_number: u64,
+    pub new_root: Felt,
+    pub timestamp: u64,
+    pub sequencer_address: Felt,
+    pub l1_gas_price: ResourcePrice,
+    pub l2_gas_price: ResourcePrice,
+    pub l1_data_gas_price: ResourcePrice,
+    pub l1_da_mode: L1DataAvailabilityMode,
+    pub starknet_version: String,
+}
+
+pub struct Transaction {
+    pub transaction_hash: Felt,
+    pub sender_address: Felt,
 }
 
 // impl ExtractionBatch {
@@ -297,9 +336,6 @@ struct Event {
 //         })
 //     }
 // }
-
-
-pub trait Extractor
 
 /// Extractor trait for fetching enriched event batches
 #[async_trait]
