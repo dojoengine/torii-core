@@ -5,8 +5,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use sqlx::{
-    any::AnyPoolOptions, sqlite::SqliteConnectOptions, Any, ConnectOptions, Pool, QueryBuilder,
-    Row,
+    any::AnyPoolOptions, sqlite::SqliteConnectOptions, Any, ConnectOptions, Pool, QueryBuilder, Row,
 };
 use starknet::core::types::{Felt, U256};
 use tonic::{Request, Response, Status};
@@ -24,6 +23,7 @@ use crate::proto::arcade::{
 const GAME_TABLE: &str = "ARCADE-Game";
 const EDITION_TABLE: &str = "ARCADE-Edition";
 const COLLECTION_TABLE: &str = "ARCADE-Collection";
+const ORDER_TABLE: &str = "ARCADE-Order";
 const LISTING_TABLE: &str = "ARCADE-Listing";
 const SALE_TABLE: &str = "ARCADE-Sale";
 
@@ -200,10 +200,10 @@ impl ArcadeService {
     }
 
     pub async fn refresh_listing(&self, entity_id: Felt) -> Result<()> {
-        if !self.source_table_exists(LISTING_TABLE).await? {
+        let Some(listing_table) = self.listing_source_table().await? else {
             return Ok(());
-        }
-        let sql = select_by_entity_sql(self.state.backend, LISTING_TABLE);
+        };
+        let sql = select_by_entity_sql(self.state.backend, listing_table);
         if let Some(row) = sqlx::query(&sql)
             .bind(felt_hex(entity_id))
             .fetch_optional(&self.state.pool)
@@ -234,15 +234,18 @@ impl ArcadeService {
     }
 
     pub async fn delete_edition(&self, entity_id: Felt) -> Result<()> {
-        self.delete_by_entity("torii_arcade_editions", entity_id).await
+        self.delete_by_entity("torii_arcade_editions", entity_id)
+            .await
     }
 
     pub async fn delete_collection(&self, entity_id: Felt) -> Result<()> {
-        self.delete_by_entity("torii_arcade_collections", entity_id).await
+        self.delete_by_entity("torii_arcade_collections", entity_id)
+            .await
     }
 
     pub async fn delete_listing(&self, entity_id: Felt) -> Result<()> {
-        self.delete_by_entity("torii_arcade_listings", entity_id).await
+        self.delete_by_entity("torii_arcade_listings", entity_id)
+            .await
     }
 
     pub async fn delete_sale(&self, entity_id: Felt) -> Result<()> {
@@ -301,10 +304,10 @@ impl ArcadeService {
     }
 
     async fn bootstrap_listings(&self) -> Result<()> {
-        if !self.source_table_exists(LISTING_TABLE).await? {
+        let Some(listing_table) = self.listing_source_table().await? else {
             return Ok(());
-        }
-        let rows = sqlx::query(r#"SELECT * FROM "ARCADE-Listing""#)
+        };
+        let rows = sqlx::query(&format!(r#"SELECT * FROM "{listing_table}""#))
             .fetch_all(&self.state.pool)
             .await?;
         for row in rows {
@@ -343,6 +346,45 @@ impl ArcadeService {
             .fetch_one(&self.state.pool)
             .await
             .unwrap_or(false))
+    }
+
+    pub async fn load_tracked_table_names_by_id(&self) -> Result<HashMap<String, String>> {
+        if !self.source_table_exists("dojo_tables").await? {
+            return Ok(HashMap::new());
+        }
+
+        let mut builder: QueryBuilder<Any> =
+            QueryBuilder::new("SELECT id, name FROM dojo_tables WHERE name IN (");
+        let mut separated = builder.separated(", ");
+        for table_name in [
+            GAME_TABLE,
+            EDITION_TABLE,
+            COLLECTION_TABLE,
+            ORDER_TABLE,
+            LISTING_TABLE,
+            SALE_TABLE,
+        ] {
+            separated.push_bind(table_name);
+        }
+        separated.push_unseparated(")");
+
+        let rows = builder.build().fetch_all(&self.state.pool).await?;
+        let mut names_by_id = HashMap::with_capacity(rows.len());
+        for row in rows {
+            names_by_id.insert(row_felt_hex(&row, "id")?, row_string(&row, "name")?);
+        }
+
+        Ok(names_by_id)
+    }
+
+    async fn listing_source_table(&self) -> Result<Option<&'static str>> {
+        for table_name in [ORDER_TABLE, LISTING_TABLE] {
+            if self.source_table_exists(table_name).await? {
+                return Ok(Some(table_name));
+            }
+        }
+
+        Ok(None)
     }
 
     async fn upsert_game_row(&self, row: &sqlx::any::AnyRow) -> Result<()> {
@@ -677,9 +719,7 @@ impl ArcadeService {
             .collect()
     }
 
-    async fn load_collections_by_contract(
-        &self,
-    ) -> Result<HashMap<String, CollectionRecord>> {
+    async fn load_collections_by_contract(&self) -> Result<HashMap<String, CollectionRecord>> {
         Ok(self
             .load_collection_records()
             .await?
@@ -688,9 +728,7 @@ impl ArcadeService {
             .collect())
     }
 
-    async fn load_collections_by_id(
-        &self,
-    ) -> Result<HashMap<String, CollectionRecord>> {
+    async fn load_collections_by_id(&self) -> Result<HashMap<String, CollectionRecord>> {
         Ok(self
             .load_collection_records()
             .await?
@@ -796,10 +834,12 @@ impl Arcade for ArcadeService {
                 .map_err(internal_status)?;
             let (name, symbol, _) = metadata.unwrap_or((None, None, None));
             collections.push(Collection {
-                collection_id: felt_from_hex(&row_string(&row, "collection_id").map_err(internal_status)?)
-                    .map_err(internal_status)?
-                    .to_bytes_be()
-                    .to_vec(),
+                collection_id: felt_from_hex(
+                    &row_string(&row, "collection_id").map_err(internal_status)?,
+                )
+                .map_err(internal_status)?
+                .to_bytes_be()
+                .to_vec(),
                 uuid: row
                     .try_get::<String, _>("uuid")
                     .ok()
@@ -820,37 +860,48 @@ impl Arcade for ArcadeService {
         request: Request<ListListingsRequest>,
     ) -> Result<Response<ListListingsResponse>, Status> {
         let req = request.into_inner();
-        let collections_by_id = self.load_collections_by_id().await.map_err(internal_status)?;
-        let collections_by_contract =
-            self.load_collections_by_contract().await.map_err(internal_status)?;
+        let collections_by_id = self
+            .load_collections_by_id()
+            .await
+            .map_err(internal_status)?;
+        let collections_by_contract = self
+            .load_collections_by_contract()
+            .await
+            .map_err(internal_status)?;
         let collection_id_filter = if req.collection_id.is_empty() {
             None
         } else {
-            Some(felt_hex(felt_from_bytes(&req.collection_id).map_err(internal_status)?))
+            Some(felt_hex(
+                felt_from_bytes(&req.collection_id).map_err(internal_status)?,
+            ))
         };
         let collection_contract_filter = if req.collection_contract.is_empty() {
             None
         } else {
             let felt = felt_from_bytes(&req.collection_contract).map_err(internal_status)?;
             let hex = felt_hex(felt);
-            collections_by_contract.get(&hex).map(|record| record.collection_id.clone())
+            collections_by_contract
+                .get(&hex)
+                .map(|record| record.collection_id.clone())
         };
 
         let mut builder: QueryBuilder<Any> = QueryBuilder::new(
             "SELECT order_id, entity_id, collection_id, token_id, currency, owner, price, quantity, expiration, status, category, royalties, time FROM torii_arcade_listings WHERE 1=1",
         );
         if let Some(collection_id) = collection_id_filter.or(collection_contract_filter) {
-            builder.push(" AND collection_id = ").push_bind(collection_id);
+            builder
+                .push(" AND collection_id = ")
+                .push_bind(collection_id);
         }
         if !req.owner.is_empty() {
-            builder
-                .push(" AND owner = ")
-                .push_bind(felt_hex(felt_from_bytes(&req.owner).map_err(internal_status)?));
+            builder.push(" AND owner = ").push_bind(felt_hex(
+                felt_from_bytes(&req.owner).map_err(internal_status)?,
+            ));
         }
         if !req.currency.is_empty() {
-            builder
-                .push(" AND currency = ")
-                .push_bind(felt_hex(felt_from_bytes(&req.currency).map_err(internal_status)?));
+            builder.push(" AND currency = ").push_bind(felt_hex(
+                felt_from_bytes(&req.currency).map_err(internal_status)?,
+            ));
         }
         if !req.include_inactive {
             builder.push(" AND status = ").push_bind(1_i64);
@@ -895,27 +946,38 @@ impl Arcade for ArcadeService {
         request: Request<ListSalesRequest>,
     ) -> Result<Response<ListSalesResponse>, Status> {
         let req = request.into_inner();
-        let collections_by_id = self.load_collections_by_id().await.map_err(internal_status)?;
-        let collections_by_contract =
-            self.load_collections_by_contract().await.map_err(internal_status)?;
+        let collections_by_id = self
+            .load_collections_by_id()
+            .await
+            .map_err(internal_status)?;
+        let collections_by_contract = self
+            .load_collections_by_contract()
+            .await
+            .map_err(internal_status)?;
         let collection_id_filter = if req.collection_id.is_empty() {
             None
         } else {
-            Some(felt_hex(felt_from_bytes(&req.collection_id).map_err(internal_status)?))
+            Some(felt_hex(
+                felt_from_bytes(&req.collection_id).map_err(internal_status)?,
+            ))
         };
         let collection_contract_filter = if req.collection_contract.is_empty() {
             None
         } else {
             let felt = felt_from_bytes(&req.collection_contract).map_err(internal_status)?;
             let hex = felt_hex(felt);
-            collections_by_contract.get(&hex).map(|record| record.collection_id.clone())
+            collections_by_contract
+                .get(&hex)
+                .map(|record| record.collection_id.clone())
         };
 
         let mut builder: QueryBuilder<Any> = QueryBuilder::new(
             "SELECT order_id, entity_id, collection_id, token_id, currency, seller, buyer, price, quantity, expiration, status, category, royalties, time FROM torii_arcade_sales WHERE 1=1",
         );
         if let Some(collection_id) = collection_id_filter.or(collection_contract_filter) {
-            builder.push(" AND collection_id = ").push_bind(collection_id);
+            builder
+                .push(" AND collection_id = ")
+                .push_bind(collection_id);
         }
         if !req.account.is_empty() {
             let account = felt_hex(felt_from_bytes(&req.account).map_err(internal_status)?);
@@ -970,8 +1032,10 @@ impl Arcade for ArcadeService {
             return Err(Status::invalid_argument("owner is required"));
         }
         let owner = felt_from_bytes(&req.owner).map_err(internal_status)?;
-        let collections_by_contract =
-            self.load_collections_by_contract().await.map_err(internal_status)?;
+        let collections_by_contract = self
+            .load_collections_by_contract()
+            .await
+            .map_err(internal_status)?;
         let token_filter = if req.collection_contract.is_empty() {
             collections_by_contract
                 .keys()
@@ -1232,9 +1296,7 @@ async fn collection_proto(
     let metadata = erc721.get_token_metadata(token).await?;
     let (name, symbol, _) = metadata.unwrap_or((None, None, None));
     Ok(Collection {
-        collection_id: felt_from_hex(&record.collection_id)?
-            .to_bytes_be()
-            .to_vec(),
+        collection_id: felt_from_hex(&record.collection_id)?.to_bytes_be().to_vec(),
         uuid: record
             .uuid
             .as_deref()
@@ -1255,14 +1317,20 @@ fn game_from_row(row: &sqlx::any::AnyRow) -> Result<Game> {
         entity_id: felt_from_hex(&row_string(row, "entity_id")?)?
             .to_bytes_be()
             .to_vec(),
-        name: row.try_get::<Option<String>, _>("name")?.unwrap_or_default(),
+        name: row
+            .try_get::<Option<String>, _>("name")?
+            .unwrap_or_default(),
         description: row
             .try_get::<Option<String>, _>("description")?
             .unwrap_or_default(),
         published: row.try_get::<i64, _>("published")? != 0,
         whitelisted: row.try_get::<i64, _>("whitelisted")? != 0,
-        color: row.try_get::<Option<String>, _>("color")?.unwrap_or_default(),
-        image: row.try_get::<Option<String>, _>("image")?.unwrap_or_default(),
+        color: row
+            .try_get::<Option<String>, _>("color")?
+            .unwrap_or_default(),
+        image: row
+            .try_get::<Option<String>, _>("image")?
+            .unwrap_or_default(),
         external_url: row
             .try_get::<Option<String>, _>("external_url")?
             .unwrap_or_default(),
@@ -1307,7 +1375,9 @@ fn edition_from_row(row: &sqlx::any::AnyRow) -> Result<Edition> {
             .and_then(|value| felt_from_hex(value).ok())
             .map(|felt| felt.to_bytes_be().to_vec())
             .unwrap_or_default(),
-        name: row.try_get::<Option<String>, _>("name")?.unwrap_or_default(),
+        name: row
+            .try_get::<Option<String>, _>("name")?
+            .unwrap_or_default(),
         description: row
             .try_get::<Option<String>, _>("description")?
             .unwrap_or_default(),
@@ -1317,8 +1387,12 @@ fn edition_from_row(row: &sqlx::any::AnyRow) -> Result<Edition> {
         config_json: row
             .try_get::<Option<String>, _>("config_json")?
             .unwrap_or_default(),
-        color: row.try_get::<Option<String>, _>("color")?.unwrap_or_default(),
-        image: row.try_get::<Option<String>, _>("image")?.unwrap_or_default(),
+        color: row
+            .try_get::<Option<String>, _>("color")?
+            .unwrap_or_default(),
+        image: row
+            .try_get::<Option<String>, _>("image")?
+            .unwrap_or_default(),
         external_url: row
             .try_get::<Option<String>, _>("external_url")?
             .unwrap_or_default(),
@@ -1399,6 +1473,20 @@ fn limit_or_default(limit: u32, default: u32) -> u32 {
 fn row_string(row: &sqlx::any::AnyRow, column: &str) -> Result<String> {
     row.try_get::<String, _>(column)
         .map_err(|err| anyhow!("failed to read {column}: {err}"))
+}
+
+fn row_felt_hex(row: &sqlx::any::AnyRow, column: &str) -> Result<String> {
+    if let Ok(bytes) = row.try_get::<Vec<u8>, _>(column) {
+        return Ok(felt_hex(Felt::from_bytes_be_slice(&bytes)));
+    }
+
+    let value = row
+        .try_get::<String, _>(column)
+        .map_err(|err| anyhow!("failed to read {column} as felt bytes or string: {err}"))?;
+    let felt = felt_from_hex(&value)
+        .or_else(|_| Felt::from_hex(&value))
+        .map_err(|err| anyhow!("failed to parse {column} as felt: {err}"))?;
+    Ok(felt_hex(felt))
 }
 
 fn row_opt_string(row: &sqlx::any::AnyRow, column: &str) -> Result<Option<String>> {

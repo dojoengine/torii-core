@@ -141,11 +141,17 @@ pub struct Config {
     #[arg(long)]
     pub observability: bool,
 
-    #[arg(long, default_value = "1000")]
+    #[arg(long, visible_alias = "chunk-size", default_value = "1000")]
     pub event_chunk_size: u64,
 
-    #[arg(long, default_value = "10000")]
+    #[arg(long, visible_alias = "batch-size", default_value = "10000")]
     pub event_block_batch_size: u64,
+
+    #[arg(long, default_value = "2")]
+    pub max_prefetch_batches: usize,
+
+    #[arg(long, default_value = "0")]
+    pub rpc_parallelism: usize,
 
     #[arg(long)]
     pub max_db_connections: Option<u32>,
@@ -409,5 +415,25 @@ mod tests {
             cfg.engine_database_url(),
             "postgres://torii:torii@localhost:5432/torii"
         );
+    }
+
+    #[test]
+    fn concurrency_flags_parse() {
+        let cfg = Config::parse_from([
+            "torii-arcade",
+            "--chunk-size",
+            "777",
+            "--batch-size",
+            "8888",
+            "--max-prefetch-batches",
+            "4",
+            "--rpc-parallelism",
+            "6",
+        ]);
+
+        assert_eq!(cfg.event_chunk_size, 777);
+        assert_eq!(cfg.event_block_batch_size, 8888);
+        assert_eq!(cfg.max_prefetch_batches, 4);
+        assert_eq!(cfg.rpc_parallelism, 6);
     }
 }

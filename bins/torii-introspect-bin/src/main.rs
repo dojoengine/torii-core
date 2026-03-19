@@ -6,11 +6,10 @@ use anyhow::Result;
 use clap::Parser;
 use config::{Config, StorageBackend};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::SqlitePoolOptions;
 use starknet::core::types::Felt;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{
@@ -41,7 +40,7 @@ use torii_erc721::{
 use torii_introspect_postgres_sink::processor::IntrospectPgDb;
 use torii_introspect_sqlite_sink::processor::IntrospectSqliteDb;
 use torii_runtime_common::database::{resolve_token_db_setup, TokenDbSetup};
-use torii_sqlite::is_sqlite_memory_path;
+use torii_sqlite::{is_sqlite_memory_path, sqlite_connect_options};
 
 type StarknetProvider =
     starknet::providers::jsonrpc::JsonRpcClient<starknet::providers::jsonrpc::HttpTransport>;
@@ -77,26 +76,6 @@ struct TokenGrpcServices {
     erc20: Option<Erc20Service>,
     erc721: Option<Erc721Service>,
     erc1155: Option<Erc1155Service>,
-}
-
-fn sqlite_connect_options(path: &str) -> Result<SqliteConnectOptions> {
-    if path == ":memory:" || path == "sqlite::memory:" {
-        return SqliteConnectOptions::from_str("sqlite::memory:")
-            .map_err(|err| anyhow::anyhow!("Failed to parse sqlite URL: {err}"));
-    }
-
-    let options = if path.starts_with("sqlite:") {
-        SqliteConnectOptions::from_str(path)
-            .map_err(|err| anyhow::anyhow!("Failed to parse sqlite URL {path}: {err}"))?
-    } else {
-        SqliteConnectOptions::new().filename(path)
-    };
-
-    if path.starts_with("sqlite:") && path.contains("mode=") {
-        Ok(options)
-    } else {
-        Ok(options.create_if_missing(true))
-    }
 }
 
 fn append_unique_contract_configs(

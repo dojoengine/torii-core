@@ -4,20 +4,21 @@ use anyhow::Result;
 use clap::Parser;
 use config::{Config, MetadataMode};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::SqlitePoolOptions;
 use starknet::core::types::Felt;
+use std::collections::HashSet;
 use std::path::Path;
-use std::str::FromStr;
 use std::sync::Arc;
 use tonic_reflection::server::Builder as ReflectionBuilder;
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{
-    CompositeExtractor, ContractEventConfig, EventExtractor, EventExtractorConfig, Extractor,
-    RetryPolicy,
+    ContractEventConfig, EventExtractor, EventExtractorConfig, Extractor, RetryPolicy,
 };
+use torii::EtlConcurrencyConfig;
 use torii_arcade_sink::proto::arcade::arcade_server::ArcadeServer;
 use torii_arcade_sink::{ArcadeSink, FILE_DESCRIPTOR_SET as ARCADE_DESCRIPTOR_SET};
 use torii_common::{MetadataFetcher, TokenUriService};
+use torii_config_common::apply_observability_env;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::store::sqlite::SqliteStore;
@@ -40,40 +41,11 @@ use torii_erc721::{
 };
 use torii_introspect_postgres_sink::processor::IntrospectPgDb;
 use torii_introspect_sqlite_sink::processor::IntrospectSqliteDb;
+use torii_runtime_common::database::{validate_uniform_backends, DatabaseBackend};
+use torii_sqlite::{is_sqlite_memory_path, sqlite_connect_options};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DbBackend {
-    Postgres,
-    Sqlite,
-}
-
-fn detect_database_backend(database_url: &str) -> DbBackend {
-    if database_url.starts_with("postgres://") || database_url.starts_with("postgresql://") {
-        DbBackend::Postgres
-    } else {
-        DbBackend::Sqlite
-    }
-}
-
-fn sqlite_connect_options(path: &str) -> Result<SqliteConnectOptions> {
-    if path == ":memory:" || path == "sqlite::memory:" {
-        return SqliteConnectOptions::from_str("sqlite::memory:")
-            .map_err(|err| anyhow::anyhow!("Failed to parse sqlite URL: {err}"));
-    }
-
-    let options = if path.starts_with("sqlite:") {
-        SqliteConnectOptions::from_str(path)
-            .map_err(|err| anyhow::anyhow!("Failed to parse sqlite URL {path}: {err}"))?
-    } else {
-        SqliteConnectOptions::new().filename(path)
-    };
-
-    if path.starts_with("sqlite:") && path.contains("mode=") {
-        Ok(options)
-    } else {
-        Ok(options.create_if_missing(true))
-    }
-}
+type StarknetProvider =
+    starknet::providers::jsonrpc::JsonRpcClient<starknet::providers::jsonrpc::HttpTransport>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -90,14 +62,7 @@ async fn main() -> Result<()> {
 
 async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("Starting Torii Arcade backend");
-    std::env::set_var(
-        "TORII_METRICS_ENABLED",
-        if config.observability {
-            "true"
-        } else {
-            "false"
-        },
-    );
+    apply_observability_env(config.observability);
 
     let db_dir = Path::new(&config.db_dir);
     std::fs::create_dir_all(db_dir)?;
@@ -105,13 +70,15 @@ async fn run_indexer(config: Config) -> Result<()> {
     let storage_database_url = config.storage_database_url()?;
     let engine_database_url = config.engine_database_url();
     let (erc20_db_url, erc721_db_url, erc1155_db_url) = config.token_storage_urls()?;
-    let backend = detect_database_backend(&storage_database_url);
-    validate_backend_consistency(
-        &engine_database_url,
-        &storage_database_url,
-        &erc20_db_url,
-        &erc721_db_url,
-        &erc1155_db_url,
+    let backend = validate_uniform_backends(
+        &[
+            ("engine", &engine_database_url),
+            ("storage", &storage_database_url),
+            ("erc20", &erc20_db_url),
+            ("erc721", &erc721_db_url),
+            ("erc1155", &erc1155_db_url),
+        ],
+        "torii-arcade does not support mixed storage backends in one runtime; configure all databases as either SQLite or PostgreSQL",
     )?;
 
     let provider = starknet::providers::jsonrpc::JsonRpcClient::new(
@@ -143,6 +110,10 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("ERC20 contracts: {}", erc20_addresses.len());
     tracing::info!("ERC721 contracts: {}", erc721_addresses.len());
     tracing::info!("ERC1155 contracts: {}", erc1155_addresses.len());
+    tracing::info!(
+        "Total configured targets: {}",
+        dojo_event_contracts.len() + erc20_addresses.len() + erc721_addresses.len() + erc1155_addresses.len()
+    );
     tracing::info!("From block: {}", config.from_block);
     if let Some(to_block) = config.to_block {
         tracing::info!("To block: {}", to_block);
@@ -157,6 +128,19 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("ERC1155 storage URL: {}", erc1155_db_url);
     tracing::info!("Database backend: {:?}", backend);
     tracing::info!("Metadata mode: {:?}", config.metadata_mode);
+    tracing::info!(
+        "ETL concurrency: prefetch_batches={} rpc_parallelism={}",
+        config.max_prefetch_batches,
+        config.rpc_parallelism,
+    );
+    tracing::info!(
+        "Saved state handling: {}",
+        if config.ignore_saved_state {
+            "ignoring persisted extractor state"
+        } else {
+            "resuming from persisted extractor state when available"
+        }
+    );
     tracing::info!(
         "Observability: {}",
         if config.observability {
@@ -185,7 +169,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         Arc<dyn torii::etl::Decoder>,
         Box<dyn torii::etl::sink::Sink>,
     ) = match backend {
-        DbBackend::Postgres => {
+        DatabaseBackend::Postgres => {
             let max_db_connections = config.max_db_connections.unwrap_or(5);
             let pool = Arc::new(
                 PgPoolOptions::new()
@@ -206,9 +190,13 @@ async fn run_indexer(config: Config) -> Result<()> {
                 Box::new(sink),
             )
         }
-        DbBackend::Sqlite => {
+        DatabaseBackend::Sqlite => {
             let options = sqlite_connect_options(&storage_database_url)?;
-            let max_db_connections = config.max_db_connections.unwrap_or(1).max(1);
+            let max_db_connections = match config.max_db_connections {
+                Some(limit) => limit.max(1),
+                None if is_sqlite_memory_path(&storage_database_url) => 1,
+                None => 1,
+            };
             let pool = Arc::new(
                 SqlitePoolOptions::new()
                     .max_connections(max_db_connections)
@@ -252,6 +240,9 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
         .database_root(&config.db_dir)
+        .etl_concurrency(EtlConcurrencyConfig {
+            max_prefetch_batches: config.max_prefetch_batches,
+        })
         .engine_database_url(engine_database_url)
         .with_extractor(extractor)
         .add_decoder(dojo_decoder)
@@ -476,9 +467,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 }
 
 fn build_extractor(
-    provider: Arc<
-        starknet::providers::jsonrpc::JsonRpcClient<starknet::providers::jsonrpc::HttpTransport>,
-    >,
+    provider: Arc<StarknetProvider>,
     dojo_contracts: &[Felt],
     erc20_addresses: &[Felt],
     erc721_addresses: &[Felt],
@@ -486,96 +475,65 @@ fn build_extractor(
     config: &Config,
 ) -> Box<dyn Extractor> {
     let to_block = config.to_block.unwrap_or(u64::MAX);
-    let mut extractors: Vec<Box<dyn Extractor>> = Vec::new();
+    let mut contracts = Vec::new();
+    let mut seen = HashSet::new();
 
-    extractors.push(Box::new(EventExtractor::new(
-        provider.clone(),
+    append_unique_contract_configs(
+        &mut contracts,
+        &mut seen,
+        dojo_contracts,
+        config.from_block,
+        to_block,
+    );
+    append_unique_contract_configs(
+        &mut contracts,
+        &mut seen,
+        erc20_addresses,
+        config.from_block,
+        to_block,
+    );
+    append_unique_contract_configs(
+        &mut contracts,
+        &mut seen,
+        erc721_addresses,
+        config.from_block,
+        to_block,
+    );
+    append_unique_contract_configs(
+        &mut contracts,
+        &mut seen,
+        erc1155_addresses,
+        config.from_block,
+        to_block,
+    );
+
+    Box::new(EventExtractor::new(
+        provider,
         EventExtractorConfig {
-            contracts: dojo_contracts
-                .iter()
-                .copied()
-                .map(|address| ContractEventConfig {
-                    address,
-                    from_block: config.from_block,
-                    to_block,
-                })
-                .collect(),
+            contracts,
             chunk_size: config.event_chunk_size,
             block_batch_size: config.event_block_batch_size,
             retry_policy: RetryPolicy::default(),
             ignore_saved_state: config.ignore_saved_state,
-            rpc_parallelism: 0,
+            rpc_parallelism: config.rpc_parallelism,
         },
-    )));
-
-    let token_contracts: Vec<ContractEventConfig> = erc20_addresses
-        .iter()
-        .chain(erc721_addresses.iter())
-        .chain(erc1155_addresses.iter())
-        .copied()
-        .map(|address| ContractEventConfig {
-            address,
-            from_block: config.from_block,
-            to_block,
-        })
-        .collect();
-
-    if !token_contracts.is_empty() {
-        extractors.push(Box::new(EventExtractor::new(
-            provider,
-            EventExtractorConfig {
-                contracts: token_contracts,
-                chunk_size: config.event_chunk_size,
-                block_batch_size: config.event_block_batch_size,
-                retry_policy: RetryPolicy::default(),
-                ignore_saved_state: config.ignore_saved_state,
-                rpc_parallelism: 0,
-            },
-        )));
-    }
-
-    if extractors.len() == 1 {
-        extractors.pop().expect("extractor exists")
-    } else {
-        Box::new(CompositeExtractor::new(extractors))
-    }
+    ))
 }
 
-fn validate_backend_consistency(
-    engine_database_url: &str,
-    storage_database_url: &str,
-    erc20_db_url: &str,
-    erc721_db_url: &str,
-    erc1155_db_url: &str,
-) -> Result<()> {
-    let engine_backend = detect_database_backend(engine_database_url);
-    let storage_backend = detect_database_backend(storage_database_url);
-    let erc20_backend = detect_database_backend(erc20_db_url);
-    let erc721_backend = detect_database_backend(erc721_db_url);
-    let erc1155_backend = detect_database_backend(erc1155_db_url);
-
-    let backends = [
-        ("engine", engine_backend, engine_database_url),
-        ("storage", storage_backend, storage_database_url),
-        ("erc20", erc20_backend, erc20_db_url),
-        ("erc721", erc721_backend, erc721_db_url),
-        ("erc1155", erc1155_backend, erc1155_db_url),
-    ];
-
-    let expected_backend = engine_backend;
-    if backends
-        .iter()
-        .any(|(_, backend, _)| *backend != expected_backend)
-    {
-        let summary = backends
-            .iter()
-            .map(|(name, backend, url)| format!("{name}={backend:?}({url})"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        anyhow::bail!(
-            "torii-arcade does not support mixed storage backends in one runtime; configure all databases as either SQLite or PostgreSQL. current: {summary}"
-        );
+fn append_unique_contract_configs(
+    configs: &mut Vec<ContractEventConfig>,
+    seen: &mut HashSet<Felt>,
+    addresses: &[Felt],
+    from_block: u64,
+    to_block: u64,
+) {
+    for &address in addresses {
+        if seen.insert(address) {
+            configs.push(ContractEventConfig {
+                address,
+                from_block,
+                to_block,
+            });
+        }
     }
-
-    Ok(())
 }
