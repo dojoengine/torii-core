@@ -204,7 +204,7 @@ impl ArcadeService {
                 .fetch_source_row_by_entity_id(COLLECTION_EDITION_TABLE, entity_id)
                 .await?
             {
-                self.upsert_collection_relation_row(&row).await?;
+                self.refresh_collection_from_row(&row).await?;
                 return Ok(());
             }
         }
@@ -249,11 +249,6 @@ impl ArcadeService {
 
     pub async fn delete_collection(&self, entity_id: Felt) -> Result<()> {
         self.delete_collection_rows_for_entity(entity_id).await
-    }
-
-    pub async fn rebuild_collections_projection(&self) -> Result<()> {
-        self.clear_projection_table("torii_arcade_collections").await?;
-        self.bootstrap_collections().await
     }
 
     pub async fn delete_listing(&self, entity_id: Felt) -> Result<()> {
@@ -367,6 +362,10 @@ impl ArcadeService {
     }
 
     async fn refresh_collection_from_row(&self, row: &sqlx::any::AnyRow) -> Result<()> {
+        if row.try_get_raw("collection").is_ok() && row.try_get_raw("edition").is_ok() {
+            return self.upsert_collection_relation_row(row).await;
+        }
+
         let collection_id = row_felt_hex(row, "id")?;
         let collection_entity_id = row_felt_hex(row, "entity_id")?;
 

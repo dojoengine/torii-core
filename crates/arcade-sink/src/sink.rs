@@ -39,7 +39,6 @@ enum TrackedTable {
     Game,
     Edition,
     Collection,
-    CollectionEdition,
     Listing,
     Sale,
 }
@@ -57,6 +56,10 @@ impl TrackedTable {
             ),
             (
                 "0x61ac61b99b1ae4cb2f06c53e9f5cb7c9ef7638a67d970280f138993d2ddbaa",
+                Self::Collection,
+            ),
+            (
+                "0x3f3039bdaaf02188f4b9d7e611fcecf93dde076f0e998c32738f30d6b812166",
                 Self::Collection,
             ),
             (
@@ -78,8 +81,7 @@ impl TrackedTable {
         match table_name {
             "ARCADE-Game" => Some(Self::Game),
             "ARCADE-Edition" => Some(Self::Edition),
-            "ARCADE-Collection" => Some(Self::Collection),
-            "ARCADE-CollectionEdition" => Some(Self::CollectionEdition),
+            "ARCADE-Collection" | "ARCADE-CollectionEdition" => Some(Self::Collection),
             "ARCADE-Order" | "ARCADE-Listing" => Some(Self::Listing),
             "ARCADE-Sale" => Some(Self::Sale),
             _ => None,
@@ -91,7 +93,6 @@ impl TrackedTable {
             Self::Game => service.refresh_game(entity_id).await,
             Self::Edition => service.refresh_edition(entity_id).await,
             Self::Collection => service.refresh_collection(entity_id).await,
-            Self::CollectionEdition => service.rebuild_collections_projection().await,
             Self::Listing => service.refresh_listing(entity_id).await,
             Self::Sale => service.refresh_sale(entity_id).await,
         }
@@ -102,7 +103,6 @@ impl TrackedTable {
             Self::Game => service.delete_game(entity_id).await,
             Self::Edition => service.delete_edition(entity_id).await,
             Self::Collection => service.delete_collection(entity_id).await,
-            Self::CollectionEdition => service.rebuild_collections_projection().await,
             Self::Listing => service.delete_listing(entity_id).await,
             Self::Sale => service.delete_sale(entity_id).await,
         }
@@ -374,12 +374,12 @@ mod tests {
     use anyhow::Result;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
     use starknet::core::types::Felt;
-    use torii::etl::{Envelope, MetaData};
+    use tempfile::tempdir;
     use torii::etl::extractor::ExtractionBatch;
+    use torii::etl::{Envelope, MetaData};
     use torii_introspect::events::{
         InsertsFields, IntrospectBody, IntrospectMsg, Record, RenamePrimary,
     };
-    use tempfile::tempdir;
 
     use super::*;
 
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn collection_edition_insert_rebuilds_collection_projection() -> Result<()> {
+    async fn collection_edition_insert_refreshes_collection_projection() -> Result<()> {
         let temp_dir = tempdir()?;
         let source_db = temp_dir.path().join("source.db");
         let erc721_db = temp_dir.path().join("erc721.db");
@@ -500,10 +500,7 @@ mod tests {
                 .tracked_tables
                 .write()
                 .expect("tracked table map lock poisoned");
-            tracked_tables.insert(
-                COLLECTION_EDITION_TABLE_ID.to_string(),
-                TrackedTable::CollectionEdition,
-            );
+            tracked_tables.insert(COLLECTION_EDITION_TABLE_ID.to_string(), TrackedTable::Collection);
         }
 
         let initial_count: i64 =
@@ -523,13 +520,14 @@ mod tests {
         .execute(&source_pool)
         .await?;
 
-        // Relation inserts may not carry the collection entity id as the record id in live
-        // introspect envelopes, so the projection update must not depend on that assumption.
         let envelope = introspect_envelope(IntrospectMsg::InsertsFields(InsertsFields {
             table: Felt::from_hex_unchecked(COLLECTION_EDITION_TABLE_ID),
             columns: vec![],
             records: vec![Record {
-                id: Felt::from_hex_unchecked("0xdeadbeef").to_bytes_be(),
+                id: Felt::from_hex_unchecked(
+                    "0x0033333333333333333333333333333333333333333333333333333333333333",
+                )
+                .to_bytes_be(),
                 values: Vec::new(),
             }],
         }));
