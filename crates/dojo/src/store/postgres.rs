@@ -13,8 +13,9 @@ use sqlx::{FromRow, Postgres};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::ops::Deref;
+use torii_common::sql::SqlxResult;
 use torii_introspect::postgres::owned::PgTypeDef;
-use torii_introspect::postgres::{PgFelt, SqlxResult};
+use torii_introspect::postgres::PgFelt;
 use torii_introspect::schema::ColumnKeyTrait;
 use torii_postgres::db::PostgresConnection;
 
@@ -321,7 +322,6 @@ impl<T> Deref for PgStore<T> {
 
 impl<T: PostgresConnection + Send + Sync> PgStore<T> {
     pub async fn initialize(&self) -> SqlxResult<()> {
-        println!("Running Dojo migrations...");
         self.migrate(Some("dojo"), DOJO_STORE_MIGRATIONS).await
     }
 }

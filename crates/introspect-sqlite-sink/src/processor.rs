@@ -2,6 +2,7 @@ use crate::json::SqliteJsonSerializer;
 use crate::table::{SqliteTable, SqliteTableError};
 use crate::INTROSPECT_SQLITE_SINK_MIGRATIONS;
 use serde_json::{Serializer as JsonSerializer, Value};
+use sqlx::Error as SqlxError;
 use sqlx::Row;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
@@ -12,7 +13,7 @@ use torii::etl::envelope::MetaData;
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_introspect::schema::TableSchema;
 use torii_introspect::InsertsFields;
-use torii_sqlite::{SqliteConnection, SqlxError};
+use torii_sqlite::SqliteConnection;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SqliteDbError {

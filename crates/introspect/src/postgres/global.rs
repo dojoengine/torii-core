@@ -6,8 +6,9 @@ use itertools::Itertools;
 use sqlx::types::Json;
 use sqlx::{FromRow, PgPool};
 use starknet_types_core::felt::Felt;
+use torii_common::sql::SqlxResult;
 
-use crate::postgres::{attribute_type, felt252_type, string_type, PgAttribute, PgFelt, SqlxResult};
+use crate::postgres::{attribute_type, felt252_type, string_type, PgAttribute, PgFelt};
 
 #[derive(FromRow)]
 pub struct ColumnRow {

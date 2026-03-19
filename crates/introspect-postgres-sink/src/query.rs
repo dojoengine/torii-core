@@ -6,10 +6,9 @@ use sqlx::Error::Encode as EncodeError;
 use sqlx::{postgres::PgArguments, types::Json};
 use sqlx::{Arguments, Executor, Postgres};
 use starknet_types_core::felt::Felt;
-use torii_common::sql::{PgQuery, Queries};
+use torii_common::sql::{PgQuery, Queries, SqlxResult};
 use torii_introspect::postgres::types::{PgPrimary, Uint128};
 use torii_introspect::postgres::PgFelt;
-use torii_postgres::SqlxResult;
 
 use crate::table::PgTable;
 use crate::{

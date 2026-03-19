@@ -12,9 +12,10 @@ use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::io;
 use std::ops::Deref;
+use torii_common::sql::SqlxResult;
 use torii_common::{blob_to_felt, felt_to_blob};
 use torii_introspect::schema::ColumnKeyTrait;
-use torii_sqlite::{SqliteConnection, SqlxResult};
+use torii_sqlite::SqliteConnection;
 
 pub const DOJO_SQLITE_STORE_MIGRATIONS: Migrator = sqlx::migrate!("./migrations/sqlite");
 

@@ -4850,6 +4850,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tonic-build",
  "torii",
+ "torii-common",
 ]
 
 [[package]]
@@ -5036,6 +5037,7 @@ dependencies = [
  "async-trait",
  "futures",
  "sqlx",
+ "torii-common",
 ]
 
 [[package]]
