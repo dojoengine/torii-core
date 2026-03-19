@@ -1,3 +1,4 @@
+pub mod cursor;
 pub mod decoder;
 pub mod engine_db;
 pub mod envelope;

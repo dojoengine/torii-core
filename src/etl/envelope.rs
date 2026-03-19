@@ -53,6 +53,19 @@ macro_rules! typed_body_impl {
     };
 }
 
+
+struct Transaction {
+    pub events: Vec<Event>,
+    pub block_number: Option<u64>,
+    pub transaction_hash: Felt,
+}
+
+struct Event {
+    pub id: String,
+    pub type_id: TypeId,
+    pub from_address: Felt,
+}
+
 /// Envelope wraps transformed data with metadata
 /// This is the core data structure that flows through the ETL pipeline
 pub struct Envelope {

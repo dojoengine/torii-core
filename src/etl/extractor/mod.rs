@@ -81,55 +81,32 @@ pub struct BlockData {
     pub deployed_contracts: Vec<DeployedContract>,
 }
 
-/// Enriched extraction batch with events and context
-///
-/// This structure optimizes memory by **deduplicating** blocks and transactions:
-/// - Multiple events from the same block share a single `BlockContext`.
-/// - Multiple events from the same transaction share a single `TransactionContext`.
-///
-/// # Memory Optimization Example
-///
-/// For 100 events from 1 block and 10 transactions:
-/// - `events`: 100 items (raw events)
-/// - `blocks`: 1 item (deduplicated)
-/// - `transactions`: 10 items (deduplicated)
-///
-/// Instead of storing block/transaction data 100 times, we store it 11 times total.
-///
-/// # Usage in Sinks
-///
-/// Sinks receive this batch along with decoded envelopes. To access context:
-/// ```rust,ignore
-/// // Fast O(1) lookups via HashMap
-/// let block = &batch.blocks[&block_number];
-/// let tx = &batch.transactions[&tx_hash];
-///
-/// // Slow O(n) - avoid iterating events
-/// for event in &batch.events { /* ... */ }
-/// ```
-#[derive(Debug, Clone)]
-pub struct ExtractionBatch {
-    /// Events extracted (may contain duplicates from same block/tx)
-    pub events: Vec<EmittedEvent>,
+pub struct EventBatch {
+    pub contract_transactions: HashMap<Felt, Vec<Transaction>>,
+}
 
-    /// Block context (deduplicated by block_number for memory efficiency)
-    pub blocks: HashMap<u64, Arc<BlockContext>>,
+pub struct ContractTransactions {
+    pub contract_address: Felt,
+    pub transactions: Vec<Transaction>,
+}
 
-    /// Transaction context (deduplicated by tx_hash for memory efficiency)
-    pub transactions: HashMap<Felt, Arc<TransactionContext>>,
+pub struct Transaction {
+    pub block_number: u64,
+    pub hash: Felt,
+    pub contract_events: Vec<EventData>,
+}
 
-    /// Declared classes from Declare transactions
-    pub declared_classes: Vec<Arc<DeclaredClass>>,
+pub struct EventData {
+    pub keys: Vec<Felt>,
+    pub data: Vec<Felt>,
+}
 
-    /// Deployed contracts from Deploy and DeployAccount transactions
-    pub deployed_contracts: Vec<Arc<DeployedContract>>,
-
-    /// Opaque cursor for pagination (continuation token or cursor string)
-    pub cursor: Option<String>,
-
-    /// Current chain head block number (if known by extractor).
-    /// Used by sinks to determine if events should be broadcast to real-time subscribers.
-    pub chain_head: Option<u64>,
+struct Event {
+    pub from_address: Felt,
+    pub transaction_hash: Felt,
+    pub block_number: u64,
+    pub keys: Vec<Felt>,
+    pub data: Vec<Felt>,
 }
 
 impl ExtractionBatch {
