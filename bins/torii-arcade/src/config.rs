@@ -163,10 +163,10 @@ pub struct Config {
     #[arg(long)]
     pub allow_unsafe_latest_schema_bootstrap: bool,
 
-    #[arg(long, value_enum, default_value = "deferred")]
+    #[arg(long, value_enum, default_value = "inline")]
     pub metadata_mode: MetadataMode,
 
-    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     pub include_well_known: bool,
 
     #[arg(long, value_delimiter = ',', default_values = DEFAULT_ERC721_CONTRACTS)]
@@ -350,7 +350,7 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn defaults_include_arcade_world_and_seed_collection() {
+    fn defaults_enable_inline_metadata_and_well_known_tokens() {
         let cfg = Config::parse_from(["torii-arcade"]);
         let dojo = cfg.dojo_event_contract_addresses().unwrap();
         let introspect = cfg.introspect_contract_addresses().unwrap();
@@ -372,6 +372,8 @@ mod tests {
         assert_eq!(erc721.len(), 17);
         assert_eq!(erc20.len(), 46);
         assert_eq!(erc1155.len(), 1);
+        assert_eq!(cfg.metadata_mode, MetadataMode::Inline);
+        assert!(cfg.include_well_known);
     }
 
     #[test]

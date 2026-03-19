@@ -16,7 +16,10 @@
 - Default Dojo introspect set: upstream `WORLD:*` contracts except the primary world contract
   `0x2d26295d6c541d64740e1ae56abc079b82b22c35ab83985ef8bd15dc0f9edfb`, which is excluded from
   introspect decoding by default because it currently emits incompatible historical Dojo record events
-- Metadata mode: `deferred`
+- Metadata mode: `inline`
+- Well-known ERC20s: enabled by default
+- Token URI + image cache: enabled by default in inline metadata mode, with images cached under
+  `./data/image-cache`
 - DB directory: `./torii-data`
 
 SQLite local defaults:
