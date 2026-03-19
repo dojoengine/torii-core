@@ -1821,8 +1821,9 @@ fn row_bool_i64(row: &sqlx::any::AnyRow, column: &str) -> Result<i64> {
         return Ok(value);
     }
     if let Ok(value) = row.try_get::<String, _>(column) {
-        return Ok(match value.as_str() {
-            "true" | "1" => 1,
+        let normalized = value.trim().to_ascii_lowercase();
+        return Ok(match normalized.as_str() {
+            "true" | "t" | "1" | "yes" | "y" => 1,
             _ => 0,
         });
     }
@@ -2130,7 +2131,7 @@ mod tests {
         .bind("0x0033333333333333333333333333333333333333333333333333333333333333")
         .bind("0x046da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4")
         .bind("0x0000000000000000000000000000000000000000000000000000000000000002")
-        .bind("true")
+        .bind("TRUE")
         .execute(&source_pool)
         .await
         .expect("insert collection edition");
