@@ -122,94 +122,66 @@ impl From<TableRow> for (Felt, Table) {
 }
 
 #[async_trait]
-pub trait PgTypeDef<Key>
+pub trait PgTypeRow
 where
     Self: Sized,
-    Self::Row: for<'r> FromRow<'r, PgRow> + Send + Unpin,
 {
-    type Row;
-    async fn get_rows(
-        pool: &PgPool,
-        query: &'static str,
-        owners: &[Felt],
-    ) -> SqlxResult<Vec<(Key, Self)>>;
     async fn get_pg_rows(
         pool: &PgPool,
         query: &'static str,
         owners: &[Felt],
-    ) -> SqlxResult<Vec<Self::Row>> {
+    ) -> SqlxResult<Vec<Self>>;
+}
+
+#[async_trait]
+impl<T> PgTypeRow for T
+where
+    Self: for<'r> FromRow<'r, PgRow> + Send + Unpin + Sized,
+{
+    async fn get_pg_rows(
+        pool: &PgPool,
+        query: &'static str,
+        owners: &[Felt],
+    ) -> SqlxResult<Vec<Self>> {
         sqlx::query_as(query)
             .bind(owners.iter().copied().map(PgFelt::from).collect_vec())
             .fetch_all(pool)
             .await
     }
-    async fn get_hash_map(
+}
+
+#[async_trait]
+pub trait PgTypeDef<Key> {
+    async fn get_rows<Row>(
+        pool: &PgPool,
+        query: &'static str,
+        owners: &[Felt],
+    ) -> SqlxResult<Vec<(Key, Self)>>
+    where
+        Self: Sized,
+        Row: PgTypeRow + Into<(Key, Self)>,
+    {
+        let pg_rows: Vec<Row> = <Row as PgTypeRow>::get_pg_rows(pool, query, owners).await?;
+        Ok(pg_rows.into_iter().map_into().collect_vec())
+    }
+    async fn get_hash_map<Row>(
         pool: &PgPool,
         query: &'static str,
         owners: &[Felt],
     ) -> SqlxResult<HashMap<Key, Self>>
     where
+        Self: Sized,
         Key: std::hash::Hash + Eq,
+        Row: PgTypeRow + Into<(Key, Self)>,
     {
-        Self::get_rows(pool, query, owners)
+        Self::get_rows::<Row>(pool, query, owners)
             .await
             .map(|rows| rows.into_iter().collect())
     }
 }
 
 #[async_trait]
-impl<K> PgTypeDef<K> for ColumnInfo
-where
-    K: ColumnKeyTrait + Send + Sync,
-{
-    type Row = ColumnRow;
-    async fn get_rows(
-        pool: &PgPool,
-        query: &'static str,
-        owners: &[Felt],
-    ) -> SqlxResult<Vec<(K, Self)>>
-    where
-        Self: Sized,
-    {
-        ColumnDef::get_pg_rows(pool, query, owners)
-            .await
-            .map(|rows| rows.into_iter().map_into().collect_vec())
-    }
-}
-
-#[async_trait]
-impl PgTypeDef<Felt> for ColumnDef {
-    type Row = ColumnRow;
-    async fn get_rows(
-        pool: &PgPool,
-        query: &'static str,
-        owners: &[Felt],
-    ) -> SqlxResult<Vec<(Felt, Self)>>
-    where
-        Self: Sized,
-    {
-        Self::get_pg_rows(pool, query, owners)
-            .await
-            .map(|rows| rows.into_iter().map_into().collect_vec())
-    }
-}
-
-#[async_trait]
-impl PgTypeDef<Felt> for Table {
-    type Row = TableRow;
-    async fn get_rows(
-        pool: &PgPool,
-        query: &'static str,
-        owners: &[Felt],
-    ) -> SqlxResult<Vec<(Felt, Self)>>
-    where
-        Self: Sized,
-    {
-        Self::get_pg_rows(pool, query, owners)
-            .await
-            .map(|rows| rows.into_iter().map_into().collect_vec())
-    }
-}
+impl<Key, T> PgTypeDef<Key> for T {}
 
 pub trait PgColumnTrait {
     fn insert_query(

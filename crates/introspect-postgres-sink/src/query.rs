@@ -1,18 +1,79 @@
-use introspect_types::{MemberDef, TypeDef};
+use introspect_types::{ColumnDef, ColumnInfo, MemberDef, PrimaryDef, TypeDef};
+use itertools::Itertools;
+use sqlx::error::BoxDynError;
+use sqlx::prelude::FromRow;
+use sqlx::Error::Encode as EncodeError;
+use sqlx::{postgres::PgArguments, types::Json};
+use sqlx::{Arguments, Executor, Postgres};
 use starknet_types_core::felt::Felt;
+use torii_common::sql::{PgQuery, Queries};
+use torii_introspect::postgres::types::{PgPrimary, Uint128};
 use torii_introspect::postgres::PgFelt;
+use torii_postgres::SqlxResult;
 
+use crate::table::PgTable;
 use crate::{
-    processor::{COMMIT_CMD, DEAD_MEMBERS_TABLE},
-    table::DeadField,
-    PgSchema, PostgresField, PostgresType, PrimaryKey, SchemaName,
+    processor::COMMIT_CMD, table::DeadField, PgSchema, PostgresField, PostgresType, PrimaryKey,
+    SchemaName,
 };
+use std::collections::HashMap;
 use std::{
     fmt::{Display, Formatter, Result as FmtResult, Write},
     rc::Rc,
 };
 
 const CREATE_METADATA_COLUMNS: &str =  "__created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), __updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), __created_block public.uint64 NOT NULL, __updated_block public.uint64 NOT NULL, __created_tx public.felt252 NOT NULL, __updated_tx public.felt252 NOT NULL);";
+const INSERT_DEAD_MEMBER_QUERY: &str = r#"INSERT INTO introspect.db_dead_fields
+    ("schema", "table", id, name, type_def, updated_at, created_block, updated_block, created_tx, updated_tx)
+    SELECT $1, $2, unnest($3::bigint[]), unnest($4::text[]), unnest($5::jsonb[]), NOW(), $6::uint64, $6::uint64, $7, $7
+    ON CONFLICT ("schema", "table", id) DO UPDATE SET
+    name = EXCLUDED.name, type_def = EXCLUDED.type_def, updated_at = NOW(), updated_block = EXCLUDED.updated_block, updated_tx = EXCLUDED.updated_tx"#;
+const INSERT_TABLE_QUERY: &str = r#"INSERT INTO introspect.db_tables
+    ("schema", id, name, primary_def, updated_at, created_block, updated_block, created_tx, updated_tx)
+    VALUES ($1, $2, $3, $4, NOW(), $5::uint64, $5::uint64, $6, $6)
+    ON CONFLICT ("schema", id) DO UPDATE SET
+    name = EXCLUDED.name, primary_def = EXCLUDED.primary_def, updated_at = NOW(), updated_block = EXCLUDED.updated_block, updated_tx = EXCLUDED.updated_tx"#;
+const INSERT_COLUMN_QUERY: &str = r#"INSERT INTO introspect.db_columns
+    ("schema", "table", id, name, type_def, updated_at, created_block, updated_block, created_tx, updated_tx)
+    SELECT $1, $2, unnest($3::felt252[]), unnest($4::text[]), unnest($5::jsonb[]), NOW(), $6::uint64, $6::uint64, $7, $7
+    ON CONFLICT ("schema", "table", id) DO UPDATE SET
+    name = EXCLUDED.name, type_def = EXCLUDED.type_def, updated_at = NOW(), updated_block = EXCLUDED.updated_block, updated_tx = EXCLUDED.updated_tx"#;
+
+const FETCH_TABLES_QUERY: &str =
+    r#"SELECT id, name, primary_def FROM introspect.db_tables WHERE "schema" = $1"#;
+const FETCH_COLUMNS_QUERY: &str =
+    r#"SELECT "table", id, name, type_def FROM introspect.db_columns WHERE "schema" = $1"#;
+const FETCH_DEAD_FIELDS_QUERY: &str =
+    r#"SELECT "table", id, name, type_def FROM introspect.db_dead_fields WHERE "schema" = $1"#;
+
+#[derive(FromRow)]
+pub struct TableRow {
+    pub id: PgFelt,
+    pub name: String,
+    pub primary_def: PgPrimary,
+}
+
+#[derive(FromRow)]
+pub struct ColumnRow {
+    pub table: PgFelt,
+    pub id: PgFelt,
+    pub name: String,
+    pub type_def: Json<TypeDef>,
+}
+
+#[derive(FromRow)]
+pub struct DeadFieldRow {
+    pub table: PgFelt,
+    pub id: Uint128,
+    pub name: String,
+    pub type_def: Json<TypeDef>,
+}
+
+pub struct PgTableHead {
+    id: Felt,
+    name: String,
+    primary: PrimaryDef,
+}
 
 #[derive(Debug)]
 pub struct CreatePgTable {
@@ -30,6 +91,7 @@ pub struct TableUpgrade {
     pub atomic: Vec<TypeMod>,
     pub alters: Vec<StructAlter>,
     pub columns: Vec<ColumnMod>,
+    pub columns_upgraded: Vec<Felt>,
     pub dead: Vec<DeadFieldWithId>,
     pub col_alters: Vec<PostgresField>,
 }
@@ -40,6 +102,7 @@ pub struct ColumnUpgrade {
     pub alters: Vec<StructAlter>,
     pub dead: Vec<DeadFieldWithId>,
     pub altered: bool,
+    pub upgraded: bool,
 }
 
 #[derive(Debug)]
@@ -209,17 +272,20 @@ impl TableUpgrade {
             name: name.into(),
             old_name: None,
             columns: Vec::new(),
+            columns_upgraded: Vec::new(),
             alters: Vec::new(),
             atomic: Vec::new(),
             dead: Vec::new(),
             col_alters: Vec::new(),
         }
     }
-    pub fn rename_column(&mut self, old: &mut String, new: &str) {
-        if old != new {
+    pub fn rename_column(&mut self, old: &mut String, new: &str) -> bool {
+        let renamed = old != new;
+        if renamed {
             let old = std::mem::replace(old, new.to_string());
             self.columns.push(ColumnMod::Rename(old, new.to_string()));
         }
+        renamed
     }
     pub fn rename_table(&mut self, new: &str) {
         if self.name != new {
@@ -233,46 +299,65 @@ impl TableUpgrade {
     }
     pub fn retype_column(
         &mut self,
-        name: &str,
+        column: &ColumnDef,
         pg_type: Option<PostgresType>,
         upgrade: ColumnUpgrade,
         field: PostgresType,
     ) {
         if let Some(pg_type) = pg_type {
-            self.columns.push(ColumnMod::Alter(pg_type.to_field(name)));
+            self.columns
+                .push(ColumnMod::Alter(pg_type.to_field(&column.name)));
         }
         if upgrade.altered {
-            self.col_alters.push(field.to_field(name));
+            self.col_alters.push(field.to_field(&column.name));
+        }
+        if upgrade.upgraded {
+            self.columns_upgraded.push(column.id);
         }
         self.atomic = upgrade.atomic;
         self.alters = upgrade.alters;
         self.dead = upgrade.dead;
     }
 
-    pub fn add_column(&mut self, name: &str, pg_type: PostgresType) {
+    pub fn add_column(&mut self, id: Felt, name: &str, pg_type: PostgresType) {
         self.columns.push(ColumnMod::Add(PostgresField::new(
             name.to_string(),
             pg_type,
         )));
+        self.columns_upgraded.push(id);
     }
 
-    pub fn column_upgrade(&mut self) -> ColumnUpgrade {
+    pub fn column_upgrade(&mut self, upgraded: bool) -> ColumnUpgrade {
         ColumnUpgrade {
             atomic: std::mem::take(&mut self.atomic),
             alters: std::mem::take(&mut self.alters),
             dead: std::mem::take(&mut self.dead),
             altered: false,
+            upgraded,
         }
     }
 
-    pub fn to_queries(&self, table_id: &Felt, queries: &mut Vec<String>) {
+    pub fn to_queries(
+        &self,
+        table_id: &Felt,
+        block_number: u64,
+        transaction_hash: &Felt,
+        queries: &mut Vec<PgQuery>,
+    ) -> SqlxResult<()> {
         let schema = &self.schema;
         let name = &self.name;
-        if let Some(query) = insert_dead_member_query(&self.schema, table_id, &self.dead) {
-            queries.push(query);
-        }
+        queries.add(
+            insert_dead_member_query(
+                &self.schema,
+                table_id,
+                &self.dead,
+                block_number,
+                transaction_hash,
+            )
+            .map_err(EncodeError)?,
+        );
         if let Some(old_name) = &self.old_name {
-            queries.push(format!(
+            queries.add(format!(
                 r#"ALTER TABLE "{schema}"."{old_name}" RENAME TO "{name}";"#
             ));
         }
@@ -283,12 +368,13 @@ impl TableUpgrade {
                 .iter()
                 .for_each(|m| write!(alterations, "{m}, ").unwrap());
             write!(alterations, "{last};").unwrap();
-            queries.push(alterations);
+            queries.add(alterations);
         }
         self.alter_queries(queries);
+        Ok(())
     }
 
-    fn alter_queries(&self, queries: &mut Vec<String>) {
+    fn alter_queries(&self, queries: &mut Vec<PgQuery>) {
         if let Some((last, others)) = self.col_alters.split_last() {
             let (schema, name) = (&self.schema, &self.name);
             let mut forward = format!(r#"ALTER TABLE "{schema}"."{name}" "#);
@@ -316,9 +402,9 @@ impl TableUpgrade {
                 r#"ALTER COLUMN "{col}" TYPE {pg_type} USING jsonb_populate_record(null::{pg_type}, "{col}");"#
             )
             .unwrap();
-            queries.push(forward);
-            self.alters.iter().for_each(|a| queries.push(a.to_string()));
-            queries.push(reverse);
+            queries.add(forward);
+            self.alters.iter().for_each(|a| queries.add(a.to_string()));
+            queries.add(reverse);
         }
     }
 }
@@ -336,11 +422,11 @@ impl Display for ColumnMod {
 }
 
 impl StructUpgrade {
-    fn to_queries(&self, queries: &mut Vec<String>) {
+    fn to_queries(&self, queries: &mut Vec<PgQuery>) {
         let name = &self.name;
         self.mods
             .iter()
-            .for_each(|m| queries.push(format!("ALTER TYPE {name} {m};")));
+            .for_each(|m| queries.add(format!("ALTER TYPE {name} {m};")));
     }
 }
 
@@ -364,26 +450,26 @@ impl Display for StructAlter {
 }
 
 impl EnumUpgrade {
-    fn to_queries(&self, queries: &mut Vec<String>) {
+    fn to_queries(&self, queries: &mut Vec<PgQuery>) {
         let name = &self.name;
         for (old, new) in &self.rename {
-            queries.push(format!(
+            queries.add(format!(
                 r#"ALTER TYPE {name} RENAME VALUE '{old}' TO '{new}';"#
             ));
         }
         for variant in &self.add {
-            queries.push(format!(r#"ALTER TYPE {name} ADD VALUE '{variant}';"#));
+            queries.add(format!(r#"ALTER TYPE {name} ADD VALUE '{variant}';"#));
         }
-        queries.push(COMMIT_CMD.to_string());
+        queries.add(COMMIT_CMD);
     }
 }
 
 impl TypeMod {
-    fn to_queries(&self, queries: &mut Vec<String>) {
+    fn to_queries(&self, queries: &mut Vec<PgQuery>) {
         match self {
             TypeMod::Struct(upgrade) => upgrade.to_queries(queries),
             TypeMod::Enum(upgrade) => upgrade.to_queries(queries),
-            TypeMod::Create(create) => queries.push(create.to_string()),
+            TypeMod::Create(create) => queries.add(create.to_string()),
         }
     }
 }
@@ -422,6 +508,7 @@ impl ColumnUpgrade {
                 field: field.to_string(),
                 pg_type,
             });
+            self.upgraded = true;
         }
     }
 
@@ -432,6 +519,7 @@ impl ColumnUpgrade {
         mods: Vec<StructMod>,
     ) {
         if !mods.is_empty() {
+            self.upgraded = true;
             self.atomic.push(TypeMod::Struct(StructUpgrade {
                 name: SchemaName::new(schema, name),
                 mods,
@@ -446,6 +534,8 @@ impl ColumnUpgrade {
         add: Vec<String>,
     ) {
         if !rename.is_empty() || !add.is_empty() {
+            self.upgraded = true;
+
             self.atomic.push(TypeMod::Enum(EnumUpgrade {
                 name: SchemaName::new(schema, name),
                 rename,
@@ -454,6 +544,7 @@ impl ColumnUpgrade {
         }
     }
     pub fn add_dead_member(&mut self, id: u128, member: &MemberDef) {
+        self.upgraded = true;
         self.dead.push(DeadFieldWithId {
             id,
             name: member.name.clone(),
@@ -487,35 +578,151 @@ impl From<CreatesType> for TypeMod {
     }
 }
 
+impl From<ColumnRow> for (Felt, Felt, ColumnInfo) {
+    fn from(value: ColumnRow) -> Self {
+        (
+            value.table.into(),
+            value.id.into(),
+            ColumnInfo {
+                name: value.name,
+                attributes: Vec::new(),
+                type_def: value.type_def.0,
+            },
+        )
+    }
+}
+
+impl From<DeadFieldRow> for (Felt, u128, DeadField) {
+    fn from(value: DeadFieldRow) -> Self {
+        (
+            value.table.into(),
+            value.id.into(),
+            DeadField {
+                name: value.name,
+                type_def: value.type_def.0,
+            },
+        )
+    }
+}
+
+impl From<TableRow> for PgTableHead {
+    fn from(value: TableRow) -> Self {
+        let row = value;
+        PgTableHead {
+            id: row.id.into(),
+            name: row.name,
+            primary: row.primary_def.into(),
+        }
+    }
+}
+
+impl PgTableHead {
+    pub fn to_table(self, schema: &PgSchema) -> (Felt, PgTable) {
+        (
+            self.id,
+            PgTable {
+                schema: schema.clone(),
+                name: self.name,
+                primary: self.primary,
+                columns: HashMap::new(),
+                alive: true,
+                dead: HashMap::new(),
+            },
+        )
+    }
+}
+
 fn insert_dead_member_query(
     schema: &PgSchema,
     table: &Felt,
     fields: &[DeadFieldWithId],
-) -> Option<String> {
-    fn write(w: &mut String, table: &PgFelt, field: &DeadFieldWithId) {
-        let type_def = serde_json::to_string(&field.type_def).unwrap();
-        let name = field.name.replace('\'', "''");
-        write!(
-            w,
-            "({table}, {id}, '{name}', '{type_def}'::jsonb)",
-            id = field.id,
-        )
-        .unwrap();
-    }
-    let table: PgFelt = (*table).into();
-    let (last, rest) = fields.split_last()?;
-    let mut query = format!(
-        r#"INSERT INTO "{schema}"."{DEAD_MEMBERS_TABLE}" ("table", id, name, type_def) VALUES "#
-    );
+    block_number: u64,
+    transaction_hash: &Felt,
+) -> Result<PgQuery, BoxDynError> {
+    let mut args = PgArguments::default();
+    args.add(schema.to_string())?;
+    args.add(PgFelt::from(*table))?;
+    args.add(fields.iter().map(|f| f.id.to_string()).collect::<Vec<_>>())?;
+    args.add(fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>())?;
+    args.add(fields.iter().map(|f| Json(&f.type_def)).collect::<Vec<_>>())?;
+    args.add(block_number.to_string())?;
+    args.add(PgFelt::from(*transaction_hash))?;
 
-    for field in rest {
-        write(&mut query, &table, field);
-        query.push_str(", ");
-    }
-    write(&mut query, &table, last);
-    query
-        .push_str(
-            r#" ON CONFLICT ("table", id) DO UPDATE SET name = EXCLUDED.name, type_def = EXCLUDED.type_def"#,
-        );
-    Some(query)
+    Ok(PgQuery::new(INSERT_DEAD_MEMBER_QUERY, args))
+}
+
+pub fn insert_columns_query(
+    schema: &PgSchema,
+    table: &Felt,
+    columns: Vec<(&Felt, &ColumnInfo)>,
+    block_number: u64,
+    transaction_hash: &Felt,
+) -> Result<PgQuery, BoxDynError> {
+    let mut args = PgArguments::default();
+    args.add(schema.to_string())?;
+    args.add(PgFelt::from(*table))?;
+    args.add(
+        columns
+            .iter()
+            .map(|(id, _)| PgFelt::from(*id))
+            .collect_vec(),
+    )?;
+    args.add(columns.iter().map(|(_, c)| c.name.clone()).collect_vec())?;
+    args.add(columns.iter().map(|(_, c)| Json(&c.type_def)).collect_vec())?;
+    args.add(block_number.to_string())?;
+    args.add(PgFelt::from(*transaction_hash))?;
+
+    Ok(PgQuery::new(INSERT_COLUMN_QUERY, args))
+}
+
+pub fn insert_table_query(
+    schema: &PgSchema,
+    id: &Felt,
+    name: &str,
+    primary_def: &PrimaryDef,
+    block_number: u64,
+    transaction_hash: &Felt,
+) -> Result<PgQuery, BoxDynError> {
+    let mut args = PgArguments::default();
+    args.add(schema.to_string())?;
+    args.add(PgFelt::from(*id))?;
+    args.add(name.to_owned())?;
+    args.add(PgPrimary::from(primary_def))?;
+    args.add(block_number.to_string())?;
+    args.add(PgFelt::from(*transaction_hash))?;
+
+    Ok(PgQuery::new(INSERT_TABLE_QUERY, args))
+}
+
+pub async fn fetch_tables<'e, 'c, E: 'e + Executor<'c, Database = Postgres>>(
+    conn: E,
+    schema: &PgSchema,
+) -> SqlxResult<Vec<PgTableHead>> {
+    sqlx::query_as::<_, TableRow>(FETCH_TABLES_QUERY)
+        .bind(schema.to_string())
+        .fetch_all(conn)
+        .await
+        .map(|rows| rows.into_iter().map_into().collect())
+}
+
+pub async fn fetch_columns<'e, 'c, E: 'e + Executor<'c, Database = Postgres>>(
+    conn: E,
+    schema: &PgSchema,
+) -> SqlxResult<Vec<(Felt, Felt, ColumnInfo)>> {
+    sqlx::query_as::<_, ColumnRow>(FETCH_COLUMNS_QUERY)
+        .bind(schema.to_string())
+        .fetch_all(conn)
+        .await
+        .map(|rows| rows.into_iter().map_into().collect())
+}
+
+pub async fn fetch_dead_fields<'e, 'c, E: 'e + Executor<'c, Database = Postgres>>(
+    conn: E,
+    schema: &PgSchema,
+) -> SqlxResult<Vec<(Felt, u128, DeadField)>> {
+    sqlx::query_as::<_, DeadFieldRow>(FETCH_DEAD_FIELDS_QUERY)
+        .bind(schema.to_string())
+        .fetch_all(conn)
+        .await
+        .map(|rows| rows.into_iter().map_into().collect())
 }

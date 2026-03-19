@@ -26,3 +26,6 @@ starknet-types-core.workspace = true
 thiserror.workspace = true
 futures.workspace = true
 crc.workspace = true
+
+
+torii-common.workspace = true

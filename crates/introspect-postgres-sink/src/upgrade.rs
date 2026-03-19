@@ -37,8 +37,8 @@ impl PgTable {
         for column in columns {
             let branch = branch.branch(&column.id);
             if let Some(current) = self.columns.get_mut(&column.id) {
-                table_mod.rename_column(&mut current.name, &column.name);
-                let mut column_upgrade = table_mod.column_upgrade();
+                let upgraded = table_mod.rename_column(&mut current.name, &column.name);
+                let mut column_upgrade = table_mod.column_upgrade(upgraded);
                 let pg_type = current
                     .type_def
                     .compare_type(
@@ -50,7 +50,7 @@ impl PgTable {
                     )
                     .to_table_result(&self.name, &current.name)?;
                 let type_name = current.type_def.get_pg_type(&schema, &branch)?;
-                table_mod.retype_column(&current.name, pg_type, column_upgrade, type_name);
+                table_mod.retype_column(column, pg_type, column_upgrade, type_name);
             } else {
                 let (column_id, info) = column.clone().into();
                 self.columns.insert(column_id, info);
@@ -58,7 +58,7 @@ impl PgTable {
                     column
                         .type_def
                         .extract_type(&schema, &branch, &mut table_mod.atomic)?;
-                table_mod.add_column(&column.name, pg_type);
+                table_mod.add_column(column_id, &column.name, pg_type);
             }
         }
         Ok(table_mod)

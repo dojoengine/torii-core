@@ -8,11 +8,11 @@ use torii_introspect_postgres_sink::IntrospectPgDb;
 use torii_test_utils::{resolve_path_like, EventIterator, FakeProvider};
 
 const DB_URL: &str = "postgres://torii:torii@localhost:5432/torii";
-const CHAIN_DATA_PATH: &str = "~/tc-tests/pistols-2";
-const SCHEMA_NAME: &str = "pistols";
-// const CHAIN_DATA_PATH: &str = "~/tc-tests/blob-arena";
-// const SCHEMA_NAME: &str = "blob_arena";
-const BATCH_SIZE: usize = 1000;
+// const CHAIN_DATA_PATH: &str = "~/tc-tests/pistols-2";
+// const SCHEMA_NAME: &str = "pistols";
+const CHAIN_DATA_PATH: &str = "~/tc-tests/blob-arena-2";
+const SCHEMA_NAME: &str = "blob_arena";
+const BATCH_SIZE: usize = 10000;
 
 async fn run_events(
     events: &mut EventIterator,
@@ -27,8 +27,6 @@ async fn run_events(
     decoder.store.initialize().await.unwrap();
     decoder.load_tables(&[]).await.unwrap();
     db.initialize_introspect_pg_sink().await.unwrap();
-    db.load_tables_no_commit(decoder.get_tables().unwrap())
-        .unwrap();
     let mut running = true;
     let mut this_run = 0;
     while running {
@@ -86,7 +84,7 @@ async fn main() {
         &mut event_iterator,
         provider.clone(),
         pool.clone(),
-        Some(50000),
+        Some(500000),
         &mut event_n,
         &mut success,
     )

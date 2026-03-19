@@ -11,6 +11,7 @@ use introspect_types::{
 use itertools::Itertools;
 use starknet_types_core::felt::Felt;
 use std::rc::Rc;
+use torii_common::sql::{PgQuery, Queries};
 use torii_introspect::schema::TableInfo;
 use xxhash_rust::xxh3::Xxh3;
 
@@ -309,12 +310,12 @@ impl CreatePgTable {
             pg_types: creates,
         })
     }
-    pub fn make_queries(&self, queries: &mut Vec<String>) {
+    pub fn make_queries(&self, queries: &mut Vec<PgQuery>) {
         for pg_type in &self.pg_types {
-            queries.push(pg_type.to_string());
+            queries.add(pg_type.to_string());
         }
-        queries.push(self.to_string());
-        queries.push(format!(
+        queries.add(self.to_string());
+        queries.add(format!(
             r#"CREATE TRIGGER set_timestamps BEFORE INSERT ON {} FOR EACH ROW EXECUTE FUNCTION introspect.set_default_timestamps();"#,
             self.name
         ));

@@ -429,7 +429,6 @@ async fn run_with_postgres(
     decoder.store.initialize().await?;
     sink.initialize_introspect_pg_sink().await?;
     decoder.load_tables(&[]).await?;
-    sink.load_tables_no_commit(decoder.get_tables()?)?;
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
 
