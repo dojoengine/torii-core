@@ -372,7 +372,10 @@ mod tests {
     use std::str::FromStr;
 
     use anyhow::Result;
-    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use sqlx::{
+        sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+        Row,
+    };
     use starknet::core::types::Felt;
     use tempfile::tempdir;
     use torii::etl::extractor::ExtractionBatch;
@@ -500,7 +503,10 @@ mod tests {
                 .tracked_tables
                 .write()
                 .expect("tracked table map lock poisoned");
-            tracked_tables.insert(COLLECTION_EDITION_TABLE_ID.to_string(), TrackedTable::Collection);
+            tracked_tables.insert(
+                COLLECTION_EDITION_TABLE_ID.to_string(),
+                TrackedTable::Collection,
+            );
         }
 
         let initial_count: i64 =
@@ -545,6 +551,93 @@ mod tests {
 
         assert_eq!(projected_count, 1);
         assert_eq!(projected_edition_id.as_deref(), Some("0x2"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn collection_edition_insert_without_collection_table_refreshes_projection() -> Result<()>
+    {
+        let temp_dir = tempdir()?;
+        let source_db = temp_dir.path().join("source.db");
+        let erc721_db = temp_dir.path().join("erc721.db");
+        let source_url = source_db.to_string_lossy().to_string();
+        let source_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::from_str(&format!("sqlite://{source_url}"))?
+                    .create_if_missing(true),
+            )
+            .await?;
+
+        sqlx::query(
+            r#"CREATE TABLE "ARCADE-CollectionEdition" (
+                "entity_id" TEXT PRIMARY KEY,
+                "collection" TEXT,
+                "edition" TEXT,
+                "active" TEXT
+            )"#,
+        )
+        .execute(&source_pool)
+        .await?;
+
+        let sink = ArcadeSink::new(&source_url, &erc721_db.to_string_lossy(), Some(1)).await?;
+
+        {
+            let mut tracked_tables = sink
+                .tracked_tables
+                .write()
+                .expect("tracked table map lock poisoned");
+            tracked_tables.insert(
+                COLLECTION_EDITION_TABLE_ID.to_string(),
+                TrackedTable::Collection,
+            );
+        }
+
+        sqlx::query(
+            r#"INSERT INTO "ARCADE-CollectionEdition" (entity_id, collection, edition, active)
+               VALUES (?1, ?2, ?3, ?4)"#,
+        )
+        .bind("0x0033333333333333333333333333333333333333333333333333333333333333")
+        .bind("0x046da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4")
+        .bind("0x0000000000000000000000000000000000000000000000000000000000000002")
+        .bind("TRUE")
+        .execute(&source_pool)
+        .await?;
+
+        let envelope = introspect_envelope(IntrospectMsg::InsertsFields(InsertsFields {
+            table: Felt::from_hex_unchecked(COLLECTION_EDITION_TABLE_ID),
+            columns: vec![],
+            records: vec![Record {
+                id: Felt::from_hex_unchecked(
+                    "0x0033333333333333333333333333333333333333333333333333333333333333",
+                )
+                .to_bytes_be(),
+                values: Vec::new(),
+            }],
+        }));
+
+        sink.process(&[envelope], &ExtractionBatch::empty()).await?;
+
+        let projected = sqlx::query(
+            "SELECT collection_id, edition_id, uuid, contract_address
+             FROM torii_arcade_collections
+             LIMIT 1",
+        )
+        .fetch_one(&source_pool)
+        .await?;
+
+        let collection_id: String = projected.try_get("collection_id")?;
+        let edition_id: String = projected.try_get("edition_id")?;
+        let uuid: Option<String> = projected.try_get("uuid")?;
+        let contract_address: String = projected.try_get("contract_address")?;
+
+        assert_eq!(
+            collection_id,
+            "0x46da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4"
+        );
+        assert_eq!(edition_id, "0x2");
+        assert_eq!(uuid, None);
+        assert_eq!(contract_address, collection_id);
         Ok(())
     }
 }

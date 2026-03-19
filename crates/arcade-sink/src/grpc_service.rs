@@ -411,17 +411,19 @@ impl ArcadeService {
     }
 
     async fn bootstrap_collections(&self) -> Result<()> {
-        if !self.source_table_exists(COLLECTION_TABLE).await? {
+        let collection_table_exists = self.source_table_exists(COLLECTION_TABLE).await?;
+        let relation_table_exists = self.source_table_exists(COLLECTION_EDITION_TABLE).await?;
+        if !collection_table_exists && !relation_table_exists {
             return Ok(());
         }
-        if self.source_table_exists(COLLECTION_EDITION_TABLE).await? {
+        if relation_table_exists {
             let rows = sqlx::query(r#"SELECT * FROM "ARCADE-CollectionEdition""#)
                 .fetch_all(&self.state.pool)
                 .await?;
             for row in rows {
                 self.upsert_collection_relation_row(&row).await?;
             }
-        } else {
+        } else if collection_table_exists {
             let rows = sqlx::query(r#"SELECT * FROM "ARCADE-Collection""#)
                 .fetch_all(&self.state.pool)
                 .await?;
@@ -673,45 +675,15 @@ impl ArcadeService {
         let collection_id = row_felt_hex(row, "id")?;
         let entity_id = row_felt_hex(row, "entity_id")?;
         let contract_address = row_felt_hex(row, "contract_address")?;
-        let sql = match self.state.backend {
-            DbBackend::Sqlite => {
-                "INSERT INTO torii_arcade_collections (
-                    entity_id, collection_entity_id, collection_id, edition_id, uuid,
-                    contract_address, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now'))
-                 ON CONFLICT(entity_id) DO UPDATE SET
-                    collection_entity_id = excluded.collection_entity_id,
-                    collection_id = excluded.collection_id,
-                    edition_id = excluded.edition_id,
-                    uuid = excluded.uuid,
-                    contract_address = excluded.contract_address,
-                    updated_at = excluded.updated_at"
-            }
-            DbBackend::Postgres => {
-                "INSERT INTO torii_arcade_collections (
-                    entity_id, collection_entity_id, collection_id, edition_id, uuid,
-                    contract_address, updated_at
-                 ) VALUES ($1, $2, $3, $4, $5, $6, EXTRACT(EPOCH FROM NOW())::BIGINT)
-                 ON CONFLICT(entity_id) DO UPDATE SET
-                    collection_entity_id = EXCLUDED.collection_entity_id,
-                    collection_id = EXCLUDED.collection_id,
-                    edition_id = EXCLUDED.edition_id,
-                    uuid = EXCLUDED.uuid,
-                    contract_address = EXCLUDED.contract_address,
-                    updated_at = EXCLUDED.updated_at"
-            }
-        };
-
-        sqlx::query(sql)
-            .bind(entity_id.clone())
-            .bind(entity_id.clone())
-            .bind(collection_id.clone())
-            .bind(Option::<String>::None)
-            .bind(row_opt_felt_hex(row, "uuid")?)
-            .bind(contract_address.clone())
-            .execute(&self.state.pool)
-            .await?;
-        Ok(())
+        self.upsert_collection_projection(
+            entity_id.clone(),
+            entity_id,
+            collection_id,
+            None,
+            row_opt_felt_hex(row, "uuid")?,
+            contract_address,
+        )
+        .await
     }
 
     async fn upsert_collection_relation_row(&self, relation_row: &sqlx::any::AnyRow) -> Result<()> {
@@ -729,15 +701,46 @@ impl ArcadeService {
             return Ok(());
         }
 
-        let Some(collection_row) = self
-            .fetch_source_row_by_field(COLLECTION_TABLE, "id", &collection_id)
-            .await?
-        else {
-            return Ok(());
-        };
+        let (collection_entity_id, uuid, contract_address) =
+            if self.source_table_exists(COLLECTION_TABLE).await? {
+                if let Some(collection_row) = self
+                    .fetch_source_row_by_field(COLLECTION_TABLE, "id", &collection_id)
+                    .await?
+                {
+                    (
+                        row_felt_hex(&collection_row, "entity_id")?,
+                        row_opt_felt_hex(&collection_row, "uuid")?,
+                        row_felt_hex(&collection_row, "contract_address")?,
+                    )
+                } else {
+                    // In Arcade, CollectionEdition.collection is already the collection address.
+                    (relation_entity_id.clone(), None, collection_id.clone())
+                }
+            } else {
+                // In Arcade, CollectionEdition.collection is already the collection address.
+                (relation_entity_id.clone(), None, collection_id.clone())
+            };
 
-        let collection_entity_id = row_felt_hex(&collection_row, "entity_id")?;
-        let contract_address = row_felt_hex(&collection_row, "contract_address")?;
+        self.upsert_collection_projection(
+            relation_entity_id,
+            collection_entity_id,
+            collection_id,
+            Some(edition_id),
+            uuid,
+            contract_address,
+        )
+        .await
+    }
+
+    async fn upsert_collection_projection(
+        &self,
+        entity_id: String,
+        collection_entity_id: String,
+        collection_id: String,
+        edition_id: Option<String>,
+        uuid: Option<String>,
+        contract_address: String,
+    ) -> Result<()> {
         let sql = match self.state.backend {
             DbBackend::Sqlite => {
                 "INSERT INTO torii_arcade_collections (
@@ -768,12 +771,12 @@ impl ArcadeService {
         };
 
         sqlx::query(sql)
-            .bind(relation_entity_id.clone())
-            .bind(collection_entity_id.clone())
-            .bind(collection_id.clone())
-            .bind(edition_id.clone())
-            .bind(row_opt_felt_hex(&collection_row, "uuid")?)
-            .bind(contract_address.clone())
+            .bind(entity_id)
+            .bind(collection_entity_id)
+            .bind(collection_id)
+            .bind(edition_id)
+            .bind(uuid)
+            .bind(contract_address)
             .execute(&self.state.pool)
             .await?;
         Ok(())
@@ -2209,5 +2212,79 @@ mod tests {
             felt_hex(felt_from_bytes(&editions[0].edition_id).expect("edition id bytes"),),
             "0x2"
         );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_collection_relations_without_collection_table_populates_projection() {
+        let temp_dir = tempdir().expect("tempdir");
+        let source_db = temp_dir.path().join("source.db");
+        let erc721_db = temp_dir.path().join("erc721.db");
+        let source_url = source_db.to_string_lossy().to_string();
+        let source_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::from_str(&format!("sqlite://{source_url}"))
+                    .expect("sqlite connect options")
+                    .create_if_missing(true),
+            )
+            .await
+            .expect("connect source");
+
+        sqlx::query(
+            r#"CREATE TABLE "ARCADE-CollectionEdition" (
+                "entity_id" TEXT PRIMARY KEY,
+                "collection" TEXT,
+                "edition" TEXT,
+                "active" TEXT
+            )"#,
+        )
+        .execute(&source_pool)
+        .await
+        .expect("create collection edition table");
+
+        sqlx::query(
+            r#"INSERT INTO "ARCADE-CollectionEdition" (entity_id, collection, edition, active)
+               VALUES (?1, ?2, ?3, ?4)"#,
+        )
+        .bind("0x0033333333333333333333333333333333333333333333333333333333333333")
+        .bind("0x046da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4")
+        .bind("0x0000000000000000000000000000000000000000000000000000000000000002")
+        .bind("TRUE")
+        .execute(&source_pool)
+        .await
+        .expect("insert collection edition");
+
+        drop(source_pool);
+
+        let service = ArcadeService::new(&source_url, &erc721_db.to_string_lossy(), Some(1))
+            .await
+            .expect("create arcade service");
+
+        let row = sqlx::query(
+            "SELECT entity_id, collection_entity_id, collection_id, edition_id, uuid, contract_address
+             FROM torii_arcade_collections",
+        )
+        .fetch_one(&service.state.pool)
+        .await
+        .expect("projected collection row");
+
+        let entity_id: String = row.try_get("entity_id").expect("entity_id");
+        let collection_entity_id: String = row
+            .try_get("collection_entity_id")
+            .expect("collection_entity_id");
+        let collection_id: String = row.try_get("collection_id").expect("collection_id");
+        let edition_id: String = row.try_get("edition_id").expect("edition_id");
+        let uuid: Option<String> = row.try_get("uuid").expect("uuid");
+        let contract_address: String = row.try_get("contract_address").expect("contract_address");
+
+        assert!(entity_id.starts_with("0x3"));
+        assert_eq!(collection_entity_id, entity_id);
+        assert_eq!(
+            collection_id,
+            "0x46da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4"
+        );
+        assert_eq!(edition_id, "0x2");
+        assert_eq!(uuid, None);
+        assert_eq!(contract_address, collection_id);
     }
 }
