@@ -21,11 +21,8 @@ use super::{ContractFilter, Decoder, DecoderId};
 use crate::etl::engine_db::EngineDb;
 use crate::etl::envelope::Envelope;
 
-fn event_preview(event: &EmittedEvent) -> String {
-    format!(
-        "contract={:#x} tx={:#x}",
-        event.from_address, event.transaction_hash
-    )
+fn event_preview(from_address: &Felt, transaction_hash: &Felt) -> String {
+    format!("contract={:#x} tx={:#x}", from_address, transaction_hash)
 }
 
 /// DecoderContext manages multiple decoders with contract filtering.
@@ -54,6 +51,11 @@ pub struct DecoderContext {
 
     /// Whether a registry is configured (affects fallback behavior)
     has_registry: bool,
+}
+
+trait Decoders {
+    type Error;
+    fn decode_contract_tx(&self, event: &EmittedEvent) -> Result<Vec<Envelope>, Self::Error>;
 }
 
 impl DecoderContext {
@@ -215,21 +217,28 @@ impl DecoderContext {
     /// Decode an event using specific decoders
     async fn decode_with_decoders(
         &self,
-        event: &EmittedEvent,
+        from_address: &Felt,
+        block_number: u64,
+        tx_hash: &Felt,
+        keys: &[Felt],
+        data: &[Felt],
         decoder_ids: &[DecoderId],
     ) -> anyhow::Result<Vec<Envelope>> {
         let mut all_envelopes = Vec::new();
 
         for decoder_id in decoder_ids {
             if let Some(decoder) = self.decoders.get(decoder_id) {
-                match decoder.decode_event(event).await {
+                match decoder
+                    .decode_event(from_address, block_number, tx_hash, keys, data)
+                    .await
+                {
                     Ok(envelopes) => {
                         if !envelopes.is_empty() {
                             tracing::trace!(
                                 target: "torii::etl::decoder_context",
                                 "Decoder '{}' decoded event from {:#x} into {} envelope(s)",
                                 decoder.decoder_name(),
-                                event.from_address,
+                                from_address,
                                 envelopes.len()
                             );
                         }
@@ -241,7 +250,7 @@ impl DecoderContext {
                             "Decoder '{}' failed: {} | {}",
                             decoder.decoder_name(),
                             e,
-                            event_preview(event)
+                            event_preview(from_address, block_number, tx_hash, keys, data)
                         );
                     }
                 }
@@ -250,7 +259,7 @@ impl DecoderContext {
                     target: "torii::etl::decoder_context",
                     "Decoder ID {:?} not found for contract {:#x}",
                     decoder_id,
-                    event.from_address
+                    from_address
                 );
             }
         }
@@ -261,19 +270,26 @@ impl DecoderContext {
     /// Decode an event using all registered decoders (fallback)
     async fn decode_with_all_decoders(
         &self,
-        event: &EmittedEvent,
+        from_address: &Felt,
+        block_number: u64,
+        tx_hash: &Felt,
+        keys: &[Felt],
+        data: &[Felt],
     ) -> anyhow::Result<Vec<Envelope>> {
         let mut all_envelopes = Vec::new();
 
         for decoder in self.decoders.values() {
-            match decoder.decode_event(event).await {
+            match decoder
+                .decode_event(from_address, block_number, tx_hash, keys, data)
+                .await
+            {
                 Ok(envelopes) => {
                     if !envelopes.is_empty() {
                         tracing::trace!(
                             target: "torii::etl::decoder_context",
                             "Decoder '{}' decoded event from {:#x} into {} envelope(s)",
                             decoder.decoder_name(),
-                            event.from_address,
+                            from_address,
                             envelopes.len()
                         );
                     }
@@ -285,7 +301,7 @@ impl DecoderContext {
                         "Decoder '{}' failed: {} | {}",
                         decoder.decoder_name(),
                         e,
-                        event_preview(event)
+                        event_preview(from_address, tx_hash)
                     );
                 }
             }

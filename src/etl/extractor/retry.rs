@@ -3,6 +3,7 @@
 //! Provides configurable retry logic for network requests and transient failures.
 
 use anyhow::Result;
+use std::fmt::Debug;
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -86,10 +87,11 @@ impl RetryPolicy {
     ///     provider.get_block(block_number).await
     /// }).await?;
     /// ```
-    pub async fn execute<F, Fut, T>(&self, mut operation: F) -> Result<T>
+    pub async fn execute<F, Fut, T, E>(&self, mut operation: F) -> Result<T, E>
     where
         F: FnMut() -> Fut,
-        Fut: Future<Output = Result<T>>,
+        E: Debug,
+        Fut: Future<Output = Result<T, E>>,
     {
         let mut attempts = 0;
         let mut backoff = self.initial_backoff;

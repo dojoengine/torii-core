@@ -53,11 +53,13 @@ macro_rules! typed_body_impl {
     };
 }
 
-
-struct Transaction {
-    pub events: Vec<Event>,
-    pub block_number: Option<u64>,
+pub struct TransactionMsgs {
+    pub type_id: TypeId,
+    pub block_number: u64,
     pub transaction_hash: Felt,
+    pub from_address: Felt,
+    pub msgs: Vec<Box<dyn TypedBody>>,
+    pub timestamp: i64,
 }
 
 struct Event {

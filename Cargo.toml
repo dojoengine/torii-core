@@ -84,6 +84,7 @@ crc = "3.4.0"
 # Hashing
 blake3 = "1.8.3"
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
+ahash = "0.8.12"
 
 # ETL Pipeline dependencies
 async-trait = "0.1"
@@ -196,6 +197,8 @@ tower-http.workspace = true
 tracing.workspace = true
 prost.workspace = true
 xxhash-rust.workspace = true
+ahash.workspace = true
+itertools.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true

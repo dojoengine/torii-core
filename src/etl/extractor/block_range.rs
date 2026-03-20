@@ -18,7 +18,7 @@ use crate::etl::extractor::starknet_helpers::{
     block_into_contexts, block_with_receipts_batch_from_block_range,
 };
 
-use super::{ExtractionBatch, Extractor, RetryPolicy};
+use super::{Extractor, RetryPolicy};
 
 const EXTRACTOR_TYPE: &str = "block_range";
 const STATE_KEY: &str = "last_block";

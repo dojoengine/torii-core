@@ -7,13 +7,14 @@ pub mod extractor;
 pub mod identification;
 pub mod sink;
 
+pub use cursor::Cursor;
 pub use decoder::{Decoder, DecoderContext};
 pub use engine_db::{EngineDb, EngineStats};
 pub use envelope::{Envelope, EventBody, EventMsg, MetaData, TypeId, TypedBody};
 pub use extractor::{
-    BlockContext, ContractAbi, EventContext, ExtractionBatch, Extractor, SampleExtractor,
-    SyntheticErc20Config, SyntheticErc20Extractor, SyntheticExtractor, SyntheticExtractorAdapter,
-    TransactionContext,
+    BlockEvents, BlockTransactionEvents, ContractAbi, ContractEvents, EventData, ExtractedEvents,
+    Extractor, SampleExtractor, SyntheticErc20Config, SyntheticErc20Extractor, SyntheticExtractor,
+    SyntheticExtractorAdapter, TransactionEvents,
 };
 pub use identification::{ContractRegistry, IdentificationRule};
 pub use sink::{MultiSink, Sink};

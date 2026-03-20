@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::etl::engine_db::EngineDb;
-use crate::etl::extractor::{BlockContext, ExtractionBatch, RetryPolicy, TransactionContext};
+use crate::etl::extractor::RetryPolicy;
 
 const RECEIPT_LOOKUP_BATCH_SIZE: usize = 200;
 
@@ -242,68 +242,4 @@ pub(crate) fn filter_events_by_tx_hashes(
         .into_iter()
         .filter(|event| successful_transaction_hashes.contains(&event.transaction_hash))
         .collect()
-}
-
-pub(crate) async fn build_batch(
-    provider: Arc<JsonRpcClient<HttpTransport>>,
-    retry_policy: &RetryPolicy,
-    rpc_parallelism: usize,
-    events: Vec<EmittedEvent>,
-    engine_db: &EngineDb,
-) -> Result<ExtractionBatch> {
-    let block_numbers: Vec<u64> = events
-        .iter()
-        .filter_map(|e| e.block_number)
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
-
-    let timestamps = fetch_block_timestamps(
-        provider,
-        retry_policy,
-        rpc_parallelism,
-        &block_numbers,
-        engine_db,
-    )
-    .await?;
-
-    let mut blocks = HashMap::new();
-    for block_num in block_numbers {
-        let timestamp = timestamps.get(&block_num).copied().unwrap_or(0);
-        blocks.insert(
-            block_num,
-            Arc::new(BlockContext {
-                number: block_num,
-                timestamp,
-                hash: Felt::ZERO,
-                parent_hash: Felt::ZERO,
-            }),
-        );
-    }
-
-    let mut transactions = HashMap::new();
-    for event in &events {
-        if let Some(block_number) = event.block_number {
-            transactions
-                .entry(event.transaction_hash)
-                .or_insert_with(|| {
-                    Arc::new(TransactionContext {
-                        hash: event.transaction_hash,
-                        block_number,
-                        sender_address: None,
-                        calldata: Vec::new(),
-                    })
-                });
-        }
-    }
-
-    Ok(ExtractionBatch {
-        events,
-        blocks,
-        transactions,
-        declared_classes: Vec::new(),
-        deployed_contracts: Vec::new(),
-        cursor: None,
-        chain_head: None,
-    })
 }
