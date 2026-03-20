@@ -38,6 +38,7 @@
 pub mod balance_fetcher;
 pub mod decoder;
 pub mod grpc_service;
+pub mod handlers;
 pub mod identification;
 pub mod sink;
 pub mod storage;
@@ -55,6 +56,7 @@ pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/erc20_descripto
 pub use balance_fetcher::{BalanceFetchRequest, BalanceFetcher};
 pub use decoder::{Approval, Erc20Decoder, Transfer};
 pub use grpc_service::Erc20Service;
+pub use handlers::Erc20MetadataCommandHandler;
 pub use identification::Erc20Rule;
 pub use sink::Erc20Sink;
 pub use storage::{

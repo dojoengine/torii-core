@@ -7,9 +7,9 @@
 //! - Records all adjustments in an audit table for debugging
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, Connection, ToSql};
 use starknet::core::types::{Felt, U256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio_postgres::{types::ToSql as PgToSql, Client, NoTls};
 use torii_common::{
@@ -17,6 +17,10 @@ use torii_common::{
 };
 
 use crate::balance_fetcher::Erc1155BalanceFetchRequest;
+
+const SQLITE_MAX_BIND_VARS: usize = 900;
+const SQLITE_TOKEN_BATCH_SIZE: usize = SQLITE_MAX_BIND_VARS;
+const SQLITE_TOKEN_PAIR_BATCH_SIZE: usize = SQLITE_MAX_BIND_VARS / 2;
 
 /// Maximum value for U256 (2^256 - 1)
 const U256_MAX: U256 = U256::from_words(u128::MAX, u128::MAX);
@@ -1419,6 +1423,35 @@ impl Erc1155Storage {
         Ok(count > 0)
     }
 
+    pub async fn has_token_metadata_batch(&self, tokens: &[Felt]) -> Result<HashSet<Felt>> {
+        if tokens.is_empty() {
+            return Ok(HashSet::new());
+        }
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_has_token_metadata_batch(tokens).await;
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut existing = HashSet::with_capacity(tokens.len());
+
+        for chunk in tokens.chunks(SQLITE_TOKEN_BATCH_SIZE) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let query = format!("SELECT token FROM token_metadata WHERE token IN ({placeholders})");
+            let token_blobs: Vec<Vec<u8>> = chunk.iter().map(|token| felt_to_blob(*token)).collect();
+            let mut stmt = conn.prepare(&query)?;
+            let rows = stmt.query_map(params_from_iter(token_blobs.iter()), |row| {
+                let token_bytes: Vec<u8> = row.get(0)?;
+                Ok(blob_to_felt(&token_bytes))
+            })?;
+
+            for row in rows {
+                existing.insert(row?);
+            }
+        }
+
+        Ok(existing)
+    }
+
     /// Insert or update token metadata
     pub async fn upsert_token_metadata(
         &self,
@@ -1584,6 +1617,42 @@ impl Erc1155Storage {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    pub async fn has_token_uri_batch(&self, tokens: &[(Felt, U256)]) -> Result<HashSet<(Felt, U256)>> {
+        if tokens.is_empty() {
+            return Ok(HashSet::new());
+        }
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_has_token_uri_batch(tokens).await;
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut existing = HashSet::with_capacity(tokens.len());
+
+        for chunk in tokens.chunks(SQLITE_TOKEN_PAIR_BATCH_SIZE) {
+            let predicates = vec!["(token = ? AND token_id = ?)"; chunk.len()].join(" OR ");
+            let query = format!("SELECT token, token_id FROM token_uris WHERE {predicates}");
+            let mut params_vec: Vec<Box<dyn ToSql>> = Vec::with_capacity(chunk.len() * 2);
+            for (token, token_id) in chunk {
+                params_vec.push(Box::new(felt_to_blob(*token)));
+                params_vec.push(Box::new(u256_to_blob(*token_id)));
+            }
+            let params_refs: Vec<&dyn ToSql> =
+                params_vec.iter().map(std::convert::AsRef::as_ref).collect();
+            let mut stmt = conn.prepare(&query)?;
+            let rows = stmt.query_map(params_refs.as_slice(), |row| {
+                let token_bytes: Vec<u8> = row.get(0)?;
+                let token_id_bytes: Vec<u8> = row.get(1)?;
+                Ok((blob_to_felt(&token_bytes), blob_to_u256(&token_id_bytes)))
+            })?;
+
+            for row in rows {
+                existing.insert(row?);
+            }
+        }
+
+        Ok(existing)
     }
 
     /// Returns all token URI rows for a given contract.
@@ -2433,6 +2502,21 @@ impl Erc1155Storage {
         Ok(row.get::<usize, i64>(0) > 0)
     }
 
+    async fn pg_has_token_metadata_batch(&self, tokens: &[Felt]) -> Result<HashSet<Felt>> {
+        let client = self.pg_client().await?;
+        let token_blobs: Vec<Vec<u8>> = tokens.iter().map(|token| felt_to_blob(*token)).collect();
+        let rows = client
+            .query(
+                "SELECT token FROM erc1155.token_metadata WHERE token = ANY($1::bytea[])",
+                &[&token_blobs],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| blob_to_felt(&row.get::<usize, Vec<u8>>(0)))
+            .collect())
+    }
+
     async fn pg_upsert_token_metadata(
         &self,
         token: Felt,
@@ -2562,6 +2646,31 @@ impl Erc1155Storage {
             )
             .await?;
         Ok(row.get::<usize, i64>(0) > 0)
+    }
+
+    async fn pg_has_token_uri_batch(&self, tokens: &[(Felt, U256)]) -> Result<HashSet<(Felt, U256)>> {
+        let client = self.pg_client().await?;
+        let token_blobs: Vec<Vec<u8>> = tokens.iter().map(|(token, _)| felt_to_blob(*token)).collect();
+        let token_id_blobs: Vec<Vec<u8>> =
+            tokens.iter().map(|(_, token_id)| u256_to_blob(*token_id)).collect();
+        let rows = client
+            .query(
+                "SELECT DISTINCT u.token, u.token_id
+                 FROM erc1155.token_uris u
+                 JOIN unnest($1::bytea[], $2::bytea[]) AS i(token, token_id)
+                   ON u.token = i.token AND u.token_id = i.token_id",
+                &[&token_blobs, &token_id_blobs],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    blob_to_felt(&row.get::<usize, Vec<u8>>(0)),
+                    blob_to_u256(&row.get::<usize, Vec<u8>>(1)),
+                )
+            })
+            .collect())
     }
 
     async fn pg_get_token_uris_by_contract(

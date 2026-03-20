@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::envelope::{Envelope, TypeId};
+use crate::command::CommandBusSender;
 use crate::grpc::SubscriptionManager;
 
 pub use multi::MultiSink;
@@ -25,6 +26,8 @@ pub struct SinkContext {
     /// Sinks can create databases at `{database_root}/{sink_name}.db`
     /// to co-locate all Torii databases for easy backup and management.
     pub database_root: PathBuf,
+    /// Command bus sender for background fire-and-forget work.
+    pub command_bus: CommandBusSender,
     // Future extensions:
     // pub metrics: Arc<Metrics>,
     // pub config: Arc<Config>,

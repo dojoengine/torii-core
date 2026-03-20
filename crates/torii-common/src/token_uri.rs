@@ -357,6 +357,68 @@ impl TokenUriService {
     }
 }
 
+pub async fn process_token_uri_request<S: TokenUriStore>(
+    fetcher: &MetadataFetcher,
+    store: &S,
+    request: &TokenUriRequest,
+    image_cache_dir: Option<&Path>,
+) -> anyhow::Result<()> {
+    let uri = fetch_token_uri_with_retry(
+        fetcher,
+        request.contract,
+        request.token_id,
+        request.standard,
+    )
+    .await;
+
+    let uri = uri.map(|u| {
+        if request.standard == TokenStandard::Erc1155 {
+            let token_id_hex = format!("{:064x}", request.token_id);
+            u.replace("{id}", &token_id_hex)
+        } else {
+            u
+        }
+    });
+
+    let metadata_json = if let Some(ref uri_str) = uri {
+        if uri_str.is_empty() {
+            None
+        } else {
+            resolve_metadata(uri_str).await
+        }
+    } else {
+        None
+    };
+
+    let result = TokenUriResult {
+        contract: request.contract,
+        token_id: request.token_id,
+        uri,
+        metadata_json,
+    };
+
+    store.store_token_uri(&result).await?;
+
+    if let (Some(root_dir), Some(meta)) = (image_cache_dir, result.metadata_json.as_ref()) {
+        if let Some(image_uri) = extract_image_uri(meta) {
+            if let Err(error) =
+                cache_image_locally(root_dir, request.contract, request.token_id, &image_uri).await
+            {
+                tracing::debug!(
+                    target: "torii_common::token_uri",
+                    contract = %format!("{:#x}", request.contract),
+                    token_id = %request.token_id,
+                    image_uri = %image_uri,
+                    error = %error,
+                    "Failed to cache image locally"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn extract_image_uri(metadata_json: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(metadata_json).ok()?;
     for key in ["image", "image_url", "imageUrl"] {
@@ -722,6 +784,24 @@ fn sanitize_json_string(s: &str) -> String {
         }
 
         // Inside a string
+        if c == '\n' {
+            result.push_str("\\n");
+            backslash_count = 0;
+            continue;
+        }
+
+        if c == '\r' {
+            result.push_str("\\r");
+            backslash_count = 0;
+            continue;
+        }
+
+        if c == '\t' {
+            result.push_str("\\t");
+            backslash_count = 0;
+            continue;
+        }
+
         if c == '\\' {
             backslash_count += 1;
             result.push('\\');
@@ -801,6 +881,15 @@ mod tests {
         let sanitized = sanitize_json_string(input);
         assert!(!sanitized.contains('\x01'));
         assert!(!sanitized.contains('\x02'));
+    }
+
+    #[test]
+    fn test_sanitize_json_string_escapes_raw_newlines_inside_strings() {
+        let input = "{\"description\":\"line one\nline two\"}";
+        let sanitized = sanitize_json_string(input);
+        assert_eq!(sanitized, "{\"description\":\"line one\\nline two\"}");
+        let parsed: serde_json::Value = serde_json::from_str(&sanitized).unwrap();
+        assert_eq!(parsed["description"], "line one\nline two");
     }
 
     #[test]

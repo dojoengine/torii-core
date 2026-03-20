@@ -4,13 +4,18 @@
 //! Tracks current NFT ownership state (who owns each token).
 
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, params_from_iter, Connection, ToSql};
 use starknet::core::types::{Felt, U256};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio_postgres::{types::ToSql as PgToSql, Client, NoTls};
 use torii_common::{
     blob_to_felt, blob_to_u256, felt_to_blob, u256_to_blob, TokenUriResult, TokenUriStore,
 };
+
+const SQLITE_MAX_BIND_VARS: usize = 900;
+const SQLITE_TOKEN_BATCH_SIZE: usize = SQLITE_MAX_BIND_VARS;
+const SQLITE_TOKEN_PAIR_BATCH_SIZE: usize = SQLITE_MAX_BIND_VARS / 2;
 
 /// Storage for ERC721 NFT data
 pub struct Erc721Storage {
@@ -969,11 +974,54 @@ impl Erc721Storage {
         let conn = self.conn.lock().unwrap();
         let token_blob = felt_to_blob(token);
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM token_metadata WHERE token = ?",
+            "SELECT COUNT(*) FROM token_metadata
+             WHERE token = ?
+               AND name IS NOT NULL
+               AND TRIM(name) <> ''
+               AND symbol IS NOT NULL
+               AND TRIM(symbol) <> ''
+               AND total_supply IS NOT NULL",
             params![&token_blob],
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    pub async fn has_token_metadata_batch(&self, tokens: &[Felt]) -> Result<HashSet<Felt>> {
+        if tokens.is_empty() {
+            return Ok(HashSet::new());
+        }
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_has_token_metadata_batch(tokens).await;
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut existing = HashSet::with_capacity(tokens.len());
+
+        for chunk in tokens.chunks(SQLITE_TOKEN_BATCH_SIZE) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let query = format!(
+                "SELECT token FROM token_metadata
+                 WHERE token IN ({placeholders})
+                   AND name IS NOT NULL
+                   AND TRIM(name) <> ''
+                   AND symbol IS NOT NULL
+                   AND TRIM(symbol) <> ''
+                   AND total_supply IS NOT NULL"
+            );
+            let token_blobs: Vec<Vec<u8>> = chunk.iter().map(|token| felt_to_blob(*token)).collect();
+            let mut stmt = conn.prepare(&query)?;
+            let rows = stmt.query_map(params_from_iter(token_blobs.iter()), |row| {
+                let token_bytes: Vec<u8> = row.get(0)?;
+                Ok(blob_to_felt(&token_bytes))
+            })?;
+
+            for row in rows {
+                existing.insert(row?);
+            }
+        }
+
+        Ok(existing)
     }
 
     /// Insert or update token metadata
@@ -1133,11 +1181,49 @@ impl Erc721Storage {
         let token_blob = felt_to_blob(token);
         let token_id_blob = u256_to_blob(token_id);
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM token_uris WHERE token = ?1 AND token_id = ?2",
+            "SELECT COUNT(*) FROM token_uris
+             WHERE token = ?1
+               AND token_id = ?2",
             params![&token_blob, &token_id_blob],
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    pub async fn has_token_uri_batch(&self, tokens: &[(Felt, U256)]) -> Result<HashSet<(Felt, U256)>> {
+        if tokens.is_empty() {
+            return Ok(HashSet::new());
+        }
+        if self.backend == StorageBackend::Postgres {
+            return self.pg_has_token_uri_batch(tokens).await;
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut existing = HashSet::with_capacity(tokens.len());
+
+        for chunk in tokens.chunks(SQLITE_TOKEN_PAIR_BATCH_SIZE) {
+            let predicates = vec!["(token = ? AND token_id = ?)"; chunk.len()].join(" OR ");
+            let query = format!("SELECT token, token_id FROM token_uris WHERE {predicates}");
+            let mut params_vec: Vec<Box<dyn ToSql>> = Vec::with_capacity(chunk.len() * 2);
+            for (token, token_id) in chunk {
+                params_vec.push(Box::new(felt_to_blob(*token)));
+                params_vec.push(Box::new(u256_to_blob(*token_id)));
+            }
+            let params_refs: Vec<&dyn ToSql> =
+                params_vec.iter().map(std::convert::AsRef::as_ref).collect();
+            let mut stmt = conn.prepare(&query)?;
+            let rows = stmt.query_map(params_refs.as_slice(), |row| {
+                let token_bytes: Vec<u8> = row.get(0)?;
+                let token_id_bytes: Vec<u8> = row.get(1)?;
+                Ok((blob_to_felt(&token_bytes), blob_to_u256(&token_id_bytes)))
+            })?;
+
+            for row in rows {
+                existing.insert(row?);
+            }
+        }
+
+        Ok(existing)
     }
 
     /// Returns all token URI rows for a given contract.
@@ -1731,11 +1817,38 @@ impl Erc721Storage {
         let client = self.pg_client().await?;
         let row = client
             .query_one(
-                "SELECT COUNT(*) FROM erc721.token_metadata WHERE token = $1",
+                "SELECT COUNT(*) FROM erc721.token_metadata
+                 WHERE token = $1
+                   AND name IS NOT NULL
+                   AND BTRIM(name) <> ''
+                   AND symbol IS NOT NULL
+                   AND BTRIM(symbol) <> ''
+                   AND total_supply IS NOT NULL",
                 &[&felt_to_blob(token)],
             )
             .await?;
         Ok(row.get::<usize, i64>(0) > 0)
+    }
+
+    async fn pg_has_token_metadata_batch(&self, tokens: &[Felt]) -> Result<HashSet<Felt>> {
+        let client = self.pg_client().await?;
+        let token_blobs: Vec<Vec<u8>> = tokens.iter().map(|token| felt_to_blob(*token)).collect();
+        let rows = client
+            .query(
+                "SELECT token FROM erc721.token_metadata
+                 WHERE token = ANY($1::bytea[])
+                   AND name IS NOT NULL
+                   AND BTRIM(name) <> ''
+                   AND symbol IS NOT NULL
+                   AND BTRIM(symbol) <> ''
+                   AND total_supply IS NOT NULL",
+                &[&token_blobs],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| blob_to_felt(&row.get::<usize, Vec<u8>>(0)))
+            .collect())
     }
 
     async fn pg_upsert_token_metadata(
@@ -1834,11 +1947,38 @@ impl Erc721Storage {
         let client = self.pg_client().await?;
         let row = client
             .query_one(
-                "SELECT COUNT(*) FROM erc721.token_uris WHERE token = $1 AND token_id = $2",
+                "SELECT COUNT(*) FROM erc721.token_uris
+                 WHERE token = $1
+                   AND token_id = $2",
                 &[&felt_to_blob(token), &u256_to_blob(token_id)],
             )
             .await?;
         Ok(row.get::<usize, i64>(0) > 0)
+    }
+
+    async fn pg_has_token_uri_batch(&self, tokens: &[(Felt, U256)]) -> Result<HashSet<(Felt, U256)>> {
+        let client = self.pg_client().await?;
+        let token_blobs: Vec<Vec<u8>> = tokens.iter().map(|(token, _)| felt_to_blob(*token)).collect();
+        let token_id_blobs: Vec<Vec<u8>> =
+            tokens.iter().map(|(_, token_id)| u256_to_blob(*token_id)).collect();
+        let rows = client
+            .query(
+                "SELECT DISTINCT u.token, u.token_id
+                 FROM erc721.token_uris u
+                 JOIN unnest($1::bytea[], $2::bytea[]) AS i(token, token_id)
+                   ON u.token = i.token AND u.token_id = i.token_id",
+                &[&token_blobs, &token_id_blobs],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    blob_to_felt(&row.get::<usize, Vec<u8>>(0)),
+                    blob_to_u256(&row.get::<usize, Vec<u8>>(1)),
+                )
+            })
+            .collect())
     }
 
     async fn pg_get_token_uris_by_contract(
@@ -1871,8 +2011,13 @@ impl Erc721Storage {
 #[async_trait::async_trait]
 impl TokenUriStore for Erc721Storage {
     async fn store_token_uri(&self, result: &TokenUriResult) -> Result<()> {
+        let expected_attributes = extract_metadata_attributes(result.metadata_json.as_deref());
+
         if self.backend == StorageBackend::Postgres {
             let mut client = self.pg_client().await?;
+            if pg_token_uri_state_matches(&client, result, &expected_attributes).await? {
+                return Ok(());
+            }
             let tx = client.transaction().await?;
 
             let token_blob = felt_to_blob(result.contract);
@@ -1900,38 +2045,14 @@ impl TokenUriStore for Erc721Storage {
             )
             .await?;
 
-            if let Some(metadata_json) = &result.metadata_json {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(metadata_json) {
-                    if let Some(attrs) = value.get("attributes").and_then(|a| a.as_array()) {
-                        for attr in attrs {
-                            let key = attr
-                                .get("trait_type")
-                                .or_else(|| attr.get("key"))
-                                .and_then(|v| v.as_str());
-                            let value = attr.get("value").and_then(|v| {
-                                v.as_str().map(ToOwned::to_owned).or_else(|| {
-                                    if v.is_null() {
-                                        None
-                                    } else {
-                                        Some(v.to_string())
-                                    }
-                                })
-                            });
-
-                            let key = key.and_then(sanitize_metadata_text);
-                            let value = value.and_then(|v| sanitize_metadata_text(&v));
-
-                            if let (Some(key), Some(value)) = (key, value) {
-                                tx.execute(
-                                    "INSERT INTO erc721.token_attributes (token, token_id, key, value)
-                                     VALUES ($1, $2, $3, $4)
-                                     ON CONFLICT (token, token_id, key) DO UPDATE SET value = EXCLUDED.value",
-                                    &[&token_blob, &token_id_blob, &key, &value],
-                                ).await?;
-                            }
-                        }
-                    }
-                }
+            for (key, value) in &expected_attributes {
+                tx.execute(
+                    "INSERT INTO erc721.token_attributes (token, token_id, key, value)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT (token, token_id, key) DO UPDATE SET value = EXCLUDED.value",
+                    &[&token_blob, &token_id_blob, key, value],
+                )
+                .await?;
             }
 
             tx.commit().await?;
@@ -1939,6 +2060,9 @@ impl TokenUriStore for Erc721Storage {
         }
 
         let mut conn = self.conn.lock().unwrap();
+        if sqlite_token_uri_state_matches(&conn, result, &expected_attributes)? {
+            return Ok(());
+        }
         let tx = conn.transaction()?;
 
         let token_blob = felt_to_blob(result.contract);
@@ -1964,37 +2088,14 @@ impl TokenUriStore for Erc721Storage {
             params![&token_blob, &token_id_blob],
         )?;
 
-        if let Some(metadata_json) = &result.metadata_json {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(metadata_json) {
-                if let Some(attrs) = value.get("attributes").and_then(|a| a.as_array()) {
-                    let mut attr_stmt = tx.prepare_cached(
-                        "INSERT OR REPLACE INTO token_attributes (token, token_id, key, value)
-                         VALUES (?1, ?2, ?3, ?4)",
-                    )?;
+        if !expected_attributes.is_empty() {
+            let mut attr_stmt = tx.prepare_cached(
+                "INSERT OR REPLACE INTO token_attributes (token, token_id, key, value)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
 
-                    for attr in attrs {
-                        let key = attr
-                            .get("trait_type")
-                            .or_else(|| attr.get("key"))
-                            .and_then(|v| v.as_str());
-                        let value = attr.get("value").and_then(|v| {
-                            v.as_str().map(ToOwned::to_owned).or_else(|| {
-                                if v.is_null() {
-                                    None
-                                } else {
-                                    Some(v.to_string())
-                                }
-                            })
-                        });
-
-                        let key = key.and_then(sanitize_metadata_text);
-                        let value = value.and_then(|v| sanitize_metadata_text(&v));
-
-                        if let (Some(key), Some(value)) = (key, value) {
-                            attr_stmt.execute(params![&token_blob, &token_id_blob, key, value])?;
-                        }
-                    }
-                }
+            for (key, value) in &expected_attributes {
+                attr_stmt.execute(params![&token_blob, &token_id_blob, key, value])?;
             }
         }
 
@@ -2003,11 +2104,285 @@ impl TokenUriStore for Erc721Storage {
     }
 }
 
+fn extract_metadata_attributes(metadata_json: Option<&str>) -> Vec<(String, String)> {
+    let Some(metadata_json) = metadata_json else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(metadata_json) else {
+        return Vec::new();
+    };
+    let Some(attrs) = value.get("attributes").and_then(|attrs| attrs.as_array()) else {
+        return Vec::new();
+    };
+
+    let mut normalized = BTreeMap::new();
+    for attr in attrs {
+        let key = attr
+            .get("trait_type")
+            .or_else(|| attr.get("key"))
+            .and_then(|value| value.as_str())
+            .and_then(sanitize_metadata_text);
+        let value = attr
+            .get("value")
+            .and_then(|value| {
+                value.as_str().map(ToOwned::to_owned).or_else(|| {
+                    if value.is_null() {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    }
+                })
+            })
+            .and_then(|value| sanitize_metadata_text(&value));
+
+        if let (Some(key), Some(value)) = (key, value) {
+            normalized.insert(key, value);
+        }
+    }
+
+    normalized.into_iter().collect()
+}
+
+fn sqlite_token_uri_state_matches(
+    conn: &Connection,
+    result: &TokenUriResult,
+    expected_attributes: &[(String, String)],
+) -> Result<bool> {
+    let token_blob = felt_to_blob(result.contract);
+    let token_id_blob = u256_to_blob(result.token_id);
+    let row = conn.query_row(
+        "SELECT uri, metadata_json FROM token_uris WHERE token = ?1 AND token_id = ?2",
+        params![&token_blob, &token_id_blob],
+        |row| Ok((row.get::<usize, Option<String>>(0)?, row.get::<usize, Option<String>>(1)?)),
+    );
+    let (existing_uri, existing_metadata_json) = match row {
+        Ok(row) => row,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+
+    if existing_uri.as_deref() != result.uri.as_deref()
+        || existing_metadata_json.as_deref() != result.metadata_json.as_deref()
+    {
+        return Ok(false);
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT key, value FROM token_attributes
+         WHERE token = ?1 AND token_id = ?2
+         ORDER BY key ASC, value ASC",
+    )?;
+    let rows = stmt.query_map(params![&token_blob, &token_id_blob], |row| {
+        Ok((row.get::<usize, String>(0)?, row.get::<usize, String>(1)?))
+    })?;
+    let existing_attributes = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+
+    Ok(existing_attributes == expected_attributes)
+}
+
+async fn pg_token_uri_state_matches(
+    client: &Client,
+    result: &TokenUriResult,
+    expected_attributes: &[(String, String)],
+) -> Result<bool> {
+    let token_blob = felt_to_blob(result.contract);
+    let token_id_blob = u256_to_blob(result.token_id);
+    let row = client
+        .query_opt(
+            "SELECT uri, metadata_json FROM erc721.token_uris WHERE token = $1 AND token_id = $2",
+            &[&token_blob, &token_id_blob],
+        )
+        .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+
+    let existing_uri: Option<String> = row.get(0);
+    let existing_metadata_json: Option<String> = row.get(1);
+    if existing_uri.as_deref() != result.uri.as_deref()
+        || existing_metadata_json.as_deref() != result.metadata_json.as_deref()
+    {
+        return Ok(false);
+    }
+
+    let rows = client
+        .query(
+            "SELECT key, value FROM erc721.token_attributes
+             WHERE token = $1 AND token_id = $2
+             ORDER BY key ASC, value ASC",
+            &[&token_blob, &token_id_blob],
+        )
+        .await?;
+    let existing_attributes: Vec<(String, String)> =
+        rows.into_iter().map(|row| (row.get(0), row.get(1))).collect();
+
+    Ok(existing_attributes == expected_attributes)
+}
+
 fn sanitize_metadata_text(input: &str) -> Option<String> {
     let sanitized = input.replace('\0', "").trim().to_owned();
     if sanitized.is_empty() {
         None
     } else {
         Some(sanitized)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db_path(test_name: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("torii-erc721-{test_name}-{nanos}.db"))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn has_token_metadata_requires_complete_erc721_row() {
+        let db_path = temp_db_path("complete-metadata");
+        let storage = Erc721Storage::new(&db_path).await.expect("create storage");
+        let token = Felt::from_hex_unchecked(
+            "0x046da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4",
+        );
+
+        storage
+            .upsert_token_metadata(token, None, None, Some(U256::from(301u64)))
+            .await
+            .expect("insert partial metadata");
+        assert!(
+            !storage
+                .has_token_metadata(token)
+                .await
+                .expect("check partial metadata")
+        );
+
+        storage
+            .upsert_token_metadata(token, Some("Beasts"), Some("BEAST"), None)
+            .await
+            .expect("complete metadata");
+        assert!(
+            storage
+                .has_token_metadata(token)
+                .await
+                .expect("check complete metadata")
+        );
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn store_token_uri_skips_unchanged_rewrite() {
+        let db_path = temp_db_path("token-uri-noop");
+        let storage = Erc721Storage::new(&db_path).await.expect("create storage");
+        let result = TokenUriResult {
+            contract: Felt::from_hex_unchecked(
+                "0x046da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4",
+            ),
+            token_id: U256::from(1u64),
+            uri: Some("ipfs://beasts/1".to_owned()),
+            metadata_json: Some(
+                r#"{"name":"Beast #1","attributes":[{"trait_type":"Class","value":"Wolf"}]}"#
+                    .to_owned(),
+            ),
+        };
+
+        storage
+            .store_token_uri(&result)
+            .await
+            .expect("insert token uri");
+
+        {
+            let conn = storage.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE token_uris SET updated_at = 123 WHERE token = ?1 AND token_id = ?2",
+                params![felt_to_blob(result.contract), u256_to_blob(result.token_id)],
+            )
+            .expect("set sentinel updated_at");
+        }
+
+        storage
+            .store_token_uri(&result)
+            .await
+            .expect("store unchanged token uri");
+
+        let (updated_at, attr_count): (i64, i64) = {
+            let conn = storage.conn.lock().unwrap();
+            let updated_at: i64 = conn
+                .query_row(
+                    "SELECT updated_at FROM token_uris WHERE token = ?1 AND token_id = ?2",
+                    params![felt_to_blob(result.contract), u256_to_blob(result.token_id)],
+                    |row| row.get(0),
+                )
+                .expect("read updated_at");
+            let attr_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM token_attributes WHERE token = ?1 AND token_id = ?2",
+                    params![felt_to_blob(result.contract), u256_to_blob(result.token_id)],
+                    |row| row.get(0),
+                )
+                .expect("count attributes");
+            (updated_at, attr_count)
+        };
+
+        assert_eq!(updated_at, 123);
+        assert_eq!(attr_count, 1);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn store_token_uri_repairs_missing_attributes_for_same_metadata() {
+        let db_path = temp_db_path("token-uri-backfill");
+        let storage = Erc721Storage::new(&db_path).await.expect("create storage");
+        let result = TokenUriResult {
+            contract: Felt::from_hex_unchecked(
+                "0x046da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4",
+            ),
+            token_id: U256::from(2u64),
+            uri: Some("ipfs://beasts/2".to_owned()),
+            metadata_json: Some(
+                r#"{"name":"Beast #2","attributes":[{"trait_type":"Class","value":"Bear"}]}"#
+                    .to_owned(),
+            ),
+        };
+
+        storage
+            .store_token_uri(&result)
+            .await
+            .expect("insert token uri");
+
+        {
+            let conn = storage.conn.lock().unwrap();
+            conn.execute(
+                "DELETE FROM token_attributes WHERE token = ?1 AND token_id = ?2",
+                params![felt_to_blob(result.contract), u256_to_blob(result.token_id)],
+            )
+            .expect("delete attributes");
+        }
+
+        storage
+            .store_token_uri(&result)
+            .await
+            .expect("repair missing attributes");
+
+        let attr_count: i64 = {
+            let conn = storage.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM token_attributes WHERE token = ?1 AND token_id = ?2",
+                params![felt_to_blob(result.contract), u256_to_blob(result.token_id)],
+                |row| row.get(0),
+            )
+            .expect("count attributes")
+        };
+
+        assert_eq!(attr_count, 1);
+
+        let _ = std::fs::remove_file(db_path);
     }
 }

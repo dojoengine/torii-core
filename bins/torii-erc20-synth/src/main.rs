@@ -6,13 +6,59 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use torii::command::{Command, CommandHandler};
 use torii::etl::decoder::ContractFilter;
 use torii::etl::engine_db::{EngineDb, EngineDbConfig};
 use torii::etl::extractor::{Extractor, SyntheticErc20Config, SyntheticErc20Extractor};
 use torii::etl::sink::Sink;
 use torii::etl::{Decoder, DecoderContext};
+use torii_erc20::handlers::FetchErc20MetadataCommand;
 use torii_erc20::{Erc20Decoder, Erc20Sink, Erc20Storage};
-use torii_runtime_common::sink::{drop_postgres_schemas, initialize_sink};
+use torii_runtime_common::sink::{drop_postgres_schemas, initialize_sink_with_command_handlers};
+
+const SYNTH_COMMAND_QUEUE_SIZE: usize = 4096;
+const SYNTH_METADATA_COMMAND_PARALLELISM: usize = 1;
+const SYNTH_METADATA_MAX_RETRIES: u8 = 1;
+
+struct SyntheticErc20MetadataCommandHandler {
+    storage: Arc<Erc20Storage>,
+}
+
+impl SyntheticErc20MetadataCommandHandler {
+    fn new(storage: Arc<Erc20Storage>) -> Self {
+        Self { storage }
+    }
+
+    fn suffix(token: impl std::fmt::LowerHex) -> String {
+        let token_hex = format!("{token:#x}");
+        let trimmed = token_hex.trim_start_matches("0x");
+        let start = trimmed.len().saturating_sub(6);
+        trimmed[start..].to_uppercase()
+    }
+}
+
+#[torii::async_trait]
+impl CommandHandler for SyntheticErc20MetadataCommandHandler {
+    fn supports(&self, command: &dyn Command) -> bool {
+        command.as_any().is::<FetchErc20MetadataCommand>()
+    }
+
+    async fn handle_command(&self, command: Box<dyn Command>) -> Result<()> {
+        let command = command
+            .into_any()
+            .downcast::<FetchErc20MetadataCommand>()
+            .map_err(|_| anyhow::anyhow!("synthetic ERC20 handler received unexpected command"))?;
+        let command = *command;
+
+        let suffix = Self::suffix(command.token);
+        let name = format!("Synthetic ERC20 {suffix}");
+        let symbol = format!("S{suffix}");
+
+        self.storage
+            .upsert_token_metadata(command.token, Some(&name), Some(&symbol), Some(18))
+            .await
+    }
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "torii-erc20-synth")]
@@ -202,8 +248,20 @@ async fn main() -> Result<()> {
 
     let storage = Arc::new(Erc20Storage::new(&cfg.db_url).await?);
 
-    let mut sink = Erc20Sink::new(storage.clone());
-    initialize_sink(&mut sink, output_dir.clone()).await?;
+    let mut sink = Erc20Sink::new(storage.clone()).with_metadata_pipeline(
+        SYNTH_METADATA_COMMAND_PARALLELISM,
+        SYNTH_COMMAND_QUEUE_SIZE,
+        SYNTH_METADATA_MAX_RETRIES,
+    );
+    let sink_runtime = initialize_sink_with_command_handlers(
+        &mut sink,
+        output_dir.clone(),
+        vec![Box::new(SyntheticErc20MetadataCommandHandler::new(
+            storage.clone(),
+        ))],
+        SYNTH_COMMAND_QUEUE_SIZE,
+    )
+    .await?;
 
     let synthetic_cfg = SyntheticErc20Config {
         from_block: cfg.from_block,
@@ -293,6 +351,8 @@ async fn main() -> Result<()> {
 
     #[cfg(feature = "profiling")]
     write_flamegraph(&output_dir, guard)?;
+
+    sink_runtime.shutdown().await;
 
     tracing::info!(
         run_id = %run_id,

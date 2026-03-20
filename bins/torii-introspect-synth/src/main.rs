@@ -18,6 +18,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+use torii::command::CommandBus;
 use torii::etl::decoder::{ContractFilter, DecoderContext};
 use torii::etl::engine_db::{EngineDb, EngineDbConfig};
 use torii::etl::extractor::{BlockContext, ExtractionBatch, Extractor, TransactionContext};
@@ -425,10 +426,12 @@ async fn main() -> Result<()> {
 
     let started = Instant::now();
     let mut sink = IntrospectPgDb::new(pool.clone(), TABLE_SCHEMA);
+    let command_bus = CommandBus::new(Vec::new(), 1)?;
     sink.initialize(
         Arc::new(EventBus::new(Arc::new(SubscriptionManager::new()))),
         &SinkContext {
             database_root: output_dir.clone(),
+            command_bus: command_bus.sender(),
         },
     )
     .await?;

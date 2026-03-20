@@ -3,6 +3,7 @@
 //! This library aims at providing a modular and high-performance blockchain indexer.
 //! The current implementation is still WIP, but gives a good idea of the architecture and the capabilities.
 
+pub mod command;
 pub mod etl;
 pub mod grpc;
 pub mod http;
@@ -34,6 +35,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 use tower_http::cors::{Any as CorsAny, CorsLayer};
 
+use command::{CommandBus, CommandHandler};
 use etl::decoder::{ContractFilter, DecoderId};
 use etl::extractor::{Extractor, SyntheticExtractor, SyntheticExtractorAdapter};
 use etl::identification::{ContractIdentifier, IdentificationRule};
@@ -180,6 +182,12 @@ pub struct ToriiConfig {
 
     /// ETL concurrency controls.
     pub etl_concurrency: EtlConcurrencyConfig,
+
+    /// Background command handlers registered for the command bus.
+    pub command_handlers: Vec<Box<dyn CommandHandler>>,
+
+    /// Command bus queue size.
+    pub command_bus_queue_size: usize,
 }
 
 impl ToriiConfig {
@@ -215,6 +223,8 @@ pub struct ToriiConfigBuilder {
     contract_identifier: Option<Arc<dyn ContractIdentifier>>,
     shutdown_timeout: Option<u64>,
     etl_concurrency: Option<EtlConcurrencyConfig>,
+    command_handlers: Vec<Box<dyn CommandHandler>>,
+    command_bus_queue_size: Option<usize>,
 }
 
 impl ToriiConfigBuilder {
@@ -514,6 +524,21 @@ impl ToriiConfigBuilder {
         self
     }
 
+    pub fn with_command_handler(mut self, handler: Box<dyn CommandHandler>) -> Self {
+        self.command_handlers.push(handler);
+        self
+    }
+
+    pub fn with_command_handlers(mut self, handlers: Vec<Box<dyn CommandHandler>>) -> Self {
+        self.command_handlers.extend(handlers);
+        self
+    }
+
+    pub fn command_bus_queue_size(mut self, size: usize) -> Self {
+        self.command_bus_queue_size = Some(size.max(1));
+        self
+    }
+
     /// Builds the Torii configuration.
     ///
     /// # Panics
@@ -547,6 +572,8 @@ impl ToriiConfigBuilder {
             contract_identifier: self.contract_identifier,
             shutdown_timeout: self.shutdown_timeout.unwrap_or(30),
             etl_concurrency: self.etl_concurrency.unwrap_or_default(),
+            command_handlers: self.command_handlers,
+            command_bus_queue_size: self.command_bus_queue_size.unwrap_or(4096),
         }
     }
 }
@@ -576,10 +603,15 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
 
     let subscription_manager = Arc::new(SubscriptionManager::new());
     let event_bus = Arc::new(EventBus::new(subscription_manager.clone()));
+    for handler in &config.command_handlers {
+        handler.attach_event_bus(event_bus.clone());
+    }
+    let command_bus = CommandBus::new(config.command_handlers, config.command_bus_queue_size)?;
 
     // Create SinkContext for initialization
     let sink_context = etl::sink::SinkContext {
         database_root: config.database_root.clone(),
+        command_bus: command_bus.sender(),
     };
 
     let mut initialized_sinks: Vec<Arc<dyn Sink>> = Vec::new();
@@ -1163,6 +1195,7 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     tracing::info!(target: "torii::main", "Torii shutdown complete");
+    command_bus.shutdown().await;
 
     Ok(())
 }

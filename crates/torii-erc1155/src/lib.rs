@@ -39,6 +39,7 @@
 pub mod balance_fetcher;
 pub mod decoder;
 pub mod grpc_service;
+pub mod handlers;
 pub mod identification;
 pub mod sink;
 pub mod storage;
@@ -56,6 +57,7 @@ pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/erc1155_descrip
 pub use balance_fetcher::{Erc1155BalanceFetchRequest, Erc1155BalanceFetcher};
 pub use decoder::{Erc1155Decoder, OperatorApproval, TransferBatch, TransferSingle, UriUpdate};
 pub use grpc_service::Erc1155Service;
+pub use handlers::{Erc1155MetadataCommandHandler, Erc1155TokenUriCommandHandler};
 pub use identification::Erc1155Rule;
 pub use sink::Erc1155Sink;
 pub use storage::{

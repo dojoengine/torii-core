@@ -5144,6 +5144,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "torii",
+ "torii-common",
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",
