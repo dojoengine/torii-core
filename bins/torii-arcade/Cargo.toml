@@ -1,0 +1,39 @@
+[package]
+name = "torii-arcade"
+version = "0.1.0"
+edition = "2021"
+description = "Arcade-dedicated Torii backend combining Dojo introspect and token indexing"
+
+[[bin]]
+name = "torii-arcade"
+path = "src/main.rs"
+
+[dependencies]
+torii = { path = "../../" }
+torii-common = { path = "../../crates/torii-common" }
+torii-config-common.workspace = true
+torii-arcade-sink = { path = "../../crates/arcade-sink" }
+torii-dojo = { path = "../../crates/dojo" }
+torii-ecs-sink = { path = "../../crates/torii-ecs-sink" }
+torii-erc20 = { path = "../../crates/torii-erc20" }
+torii-erc721 = { path = "../../crates/torii-erc721" }
+torii-erc1155 = { path = "../../crates/torii-erc1155" }
+torii-introspect-postgres-sink = { path = "../../crates/introspect-postgres-sink" }
+torii-introspect-sqlite-sink = { path = "../../crates/introspect-sqlite-sink" }
+torii-runtime-common.workspace = true
+torii-sqlite.workspace = true
+
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+starknet = "0.17"
+url = "2.5"
+clap = { version = "4.5", features = ["derive", "env"] }
+anyhow = "1.0"
+sqlx = { version = "0.8", features = ["postgres", "sqlite", "runtime-tokio-rustls"] }
+tonic.workspace = true
+tonic-reflection.workspace = true
+tonic-web.workspace = true
+
+[lints]
+workspace = true

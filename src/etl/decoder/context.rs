@@ -236,12 +236,21 @@ impl DecoderContext {
                         all_envelopes.extend(envelopes);
                     }
                     Err(e) => {
+                        let selector = event
+                            .keys
+                            .first()
+                            .map_or_else(|| "<missing>".to_string(), |felt| format!("{felt:#x}"));
+                        let preview = event_preview(event);
                         tracing::warn!(
                             target: "torii::etl::decoder_context",
-                            "Decoder '{}' failed: {} | {}",
+                            contract = %format!("{:#x}", event.from_address),
+                            selector = %selector,
+                            tx_hash = %format!("{:#x}", event.transaction_hash),
+                            block_number = event.block_number,
+                            event = %preview,
+                            "Decoder '{}' failed: {}",
                             decoder.decoder_name(),
-                            e,
-                            event_preview(event)
+                            e
                         );
                     }
                 }
@@ -280,12 +289,21 @@ impl DecoderContext {
                     all_envelopes.extend(envelopes);
                 }
                 Err(e) => {
+                    let selector = event
+                        .keys
+                        .first()
+                        .map_or_else(|| "<missing>".to_string(), |felt| format!("{felt:#x}"));
+                    let preview = event_preview(event);
                     tracing::warn!(
                         target: "torii::etl::decoder_context",
-                        "Decoder '{}' failed: {} | {}",
+                        contract = %format!("{:#x}", event.from_address),
+                        selector = %selector,
+                        tx_hash = %format!("{:#x}", event.transaction_hash),
+                        block_number = event.block_number,
+                        event = %preview,
+                        "Decoder '{}' failed: {}",
                         decoder.decoder_name(),
-                        e,
-                        event_preview(event)
+                        e
                     );
                 }
             }

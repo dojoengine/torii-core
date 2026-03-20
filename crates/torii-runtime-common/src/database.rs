@@ -15,6 +15,30 @@ pub fn backend_from_url_or_path(value: &str) -> DatabaseBackend {
     }
 }
 
+pub fn validate_uniform_backends(
+    named_urls: &[(&str, &str)],
+    mixed_backend_message: &str,
+) -> Result<DatabaseBackend> {
+    let Some((_, first_url)) = named_urls.first() else {
+        bail!("at least one database URL must be provided");
+    };
+
+    let expected_backend = backend_from_url_or_path(first_url);
+    if named_urls
+        .iter()
+        .any(|(_, url)| backend_from_url_or_path(url) != expected_backend)
+    {
+        let summary = named_urls
+            .iter()
+            .map(|(name, url)| format!("{name}={:?}({url})", backend_from_url_or_path(url)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("{mixed_backend_message}. current: {summary}");
+    }
+
+    Ok(expected_backend)
+}
+
 #[derive(Debug, Clone)]
 pub struct SingleDbSetup {
     pub storage_url: String,
@@ -166,5 +190,33 @@ mod tests {
         .unwrap();
         assert_eq!(setup.engine_backend, DatabaseBackend::Postgres);
         assert_eq!(setup.erc721_backend, DatabaseBackend::Postgres);
+    }
+
+    #[test]
+    fn validate_uniform_backends_accepts_matching_backends() {
+        let backend = validate_uniform_backends(
+            &[
+                ("engine", "postgres://localhost/torii"),
+                ("storage", "postgres://localhost/torii"),
+            ],
+            "mixed backends",
+        )
+        .unwrap();
+        assert_eq!(backend, DatabaseBackend::Postgres);
+    }
+
+    #[test]
+    fn validate_uniform_backends_rejects_mixed_backends() {
+        let err = validate_uniform_backends(
+            &[
+                ("engine", "postgres://localhost/torii"),
+                ("storage", "./torii-data/introspect.db"),
+            ],
+            "mixed backends",
+        )
+        .expect_err("expected mixed backend error");
+        assert!(err.to_string().contains("mixed backends"));
+        assert!(err.to_string().contains("engine=Postgres"));
+        assert!(err.to_string().contains("storage=Sqlite"));
     }
 }
