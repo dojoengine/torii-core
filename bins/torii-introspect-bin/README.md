@@ -1,11 +1,11 @@
-# Torii Introspect Bin
+# Torii Server
 
 Dojo introspect and token indexer backed by PostgreSQL or SQLite.
 
 ## Run
 
 ```bash
-cargo run -p torii-introspect-bin -- \
+cargo run --bin torii-server -- \
   --contract 0x123...,0x456... \
   --storage-database-url postgres://torii:torii@localhost:5432/torii
 ```
@@ -13,7 +13,7 @@ cargo run -p torii-introspect-bin -- \
 ## Mixed Dojo + Token Indexing
 
 ```bash
-cargo run -p torii-introspect-bin -- \
+cargo run --bin torii-server -- \
   --from-block 0 \
   --contract 0x0000 \
   --erc20 0x001,0x002 \
@@ -31,7 +31,7 @@ pipeline.
 The introspect indexer now exposes the same core ETL parallelism knobs as `torii-tokens`.
 
 ```bash
-cargo run -p torii-introspect-bin -- \
+cargo run --bin torii-server -- \
   --contract 0x123...,0x456... \
   --storage-database-url postgres://torii:torii@localhost:5432/torii \
   --rpc-parallelism 4 \

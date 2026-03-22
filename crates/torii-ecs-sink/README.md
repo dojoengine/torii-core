@@ -4,7 +4,7 @@
 
 ## What It Serves
 
-The sink mounts these legacy RPCs into `torii-introspect-bin` on the same gRPC port:
+The sink mounts these legacy RPCs into `torii-server` on the same gRPC port:
 
 - `Worlds`
 - `RetrieveEntities`
@@ -26,7 +26,7 @@ The read path is backed by:
 
 ## Manual Validation
 
-With `torii-introspect-bin` running on the default port:
+With `torii-server` running on the default port:
 
 ```bash
 grpcurl -plaintext localhost:3000 list
@@ -58,7 +58,7 @@ By default the script:
 - autodiscovers one world that has both `entity` and `event_message` models
 - validates reflection, `Worlds`, `RetrieveEntities`, `RetrieveEventMessages`, and `RetrieveEvents`
 
-For Postgres-backed deployments, set `DB_URL` or `DATABASE_URL` to the same storage database used by `torii-introspect-bin`. The script will use `psql` for metadata discovery instead of `sqlite3`.
+For Postgres-backed deployments, set `DB_URL` or `DATABASE_URL` to the same storage database used by `torii-server`. The script will use `psql` for metadata discovery instead of `sqlite3`.
 
 ### Environment Overrides
 

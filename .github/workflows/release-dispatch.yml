@@ -9,6 +9,8 @@ on:
         type: choice
         options:
           - torii-tokens
+          - torii-arcade
+          - torii-server
           - torii-erc20
       version:
         description: 'Release version (e.g., "1.0.0" or "v1.0.0")'
@@ -40,19 +42,56 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "Preparing release for ${{ inputs.binary }} version: $VERSION"
 
+      - name: Resolve release target
+        id: release-target
+        run: |
+          RELEASE_TARGET="${{ inputs.binary }}"
+
+          case "$RELEASE_TARGET" in
+            torii-tokens)
+              PACKAGE_NAME="torii-tokens"
+              PACKAGE_ENTRY="bins/torii-tokens"
+              BINARY_NAME="torii-tokens"
+              ;;
+            torii-arcade)
+              PACKAGE_NAME="torii-arcade"
+              PACKAGE_ENTRY="bins/torii-arcade"
+              BINARY_NAME="torii-arcade"
+              ;;
+            torii-server)
+              PACKAGE_NAME="torii-introspect-bin"
+              PACKAGE_ENTRY="bins/torii-introspect-bin"
+              BINARY_NAME="torii-server"
+              ;;
+            torii-erc20)
+              PACKAGE_NAME="torii-erc20-bin"
+              PACKAGE_ENTRY="bins/torii-erc20"
+              BINARY_NAME="torii-erc20"
+              ;;
+            *)
+              echo "Error: Unknown release target: $RELEASE_TARGET"
+              exit 1
+              ;;
+          esac
+
+          echo "RELEASE_TARGET=$RELEASE_TARGET" >> $GITHUB_OUTPUT
+          echo "PACKAGE_NAME=$PACKAGE_NAME" >> $GITHUB_OUTPUT
+          echo "PACKAGE_ENTRY=$PACKAGE_ENTRY" >> $GITHUB_OUTPUT
+          echo "BINARY_NAME=$BINARY_NAME" >> $GITHUB_OUTPUT
+
       - name: Bump binary version
         run: |
-          cargo release version ${{ steps.version.outputs.VERSION }} --execute --no-confirm -p ${{ inputs.binary }}
-          cargo release replace --execute --no-confirm -p ${{ inputs.binary }}
+          cargo release version ${{ steps.version.outputs.VERSION }} --execute --no-confirm -p ${{ steps.release-target.outputs.PACKAGE_NAME }}
+          cargo release replace --execute --no-confirm -p ${{ steps.release-target.outputs.PACKAGE_NAME }}
 
       - name: Extract new version
         id: release-info
         run: |
-          NEW_VERSION=$(cargo get package.version --entry bins/${{ inputs.binary }})
+          NEW_VERSION=$(cargo get package.version --entry ${{ steps.release-target.outputs.PACKAGE_ENTRY }})
           echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_OUTPUT
-          echo "BINARY=${{ inputs.binary }}" >> $GITHUB_OUTPUT
-          echo "BRANCH_NAME=prepare-release-${{ inputs.binary }}" >> $GITHUB_OUTPUT
-          echo "Version bumped to: $NEW_VERSION for ${{ inputs.binary }}"
+          echo "BINARY=${{ steps.release-target.outputs.BINARY_NAME }}" >> $GITHUB_OUTPUT
+          echo "BRANCH_NAME=prepare-release-${{ steps.release-target.outputs.RELEASE_TARGET }}" >> $GITHUB_OUTPUT
+          echo "Version bumped to: $NEW_VERSION for ${{ steps.release-target.outputs.BINARY_NAME }}"
 
       - name: Create Pull Request
         uses: peter-evans/create-pull-request@v7

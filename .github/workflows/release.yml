@@ -12,6 +12,8 @@ on:
         type: choice
         options:
           - torii-tokens
+          - torii-arcade
+          - torii-server
           - torii-erc20
 
 env:
@@ -38,18 +40,16 @@ jobs:
       - name: Extract release info
         id: release-info
         run: |
-          # Determine binary name
+          # Determine release target
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # Manual trigger - use workflow input
-            BINARY_NAME="${{ inputs.binary }}"
-            echo "Manual trigger for binary: $BINARY_NAME"
+            RELEASE_TARGET="${{ inputs.binary }}"
+            echo "Manual trigger for binary: $RELEASE_TARGET"
           else
-            # PR-based trigger - extract from branch name
             BRANCH_REF="${{ github.event.pull_request.head.ref }}"
 
             if [[ "$BRANCH_REF" =~ ^prepare-release-(.+)$ ]]; then
-              BINARY_NAME="${BASH_REMATCH[1]}"
-              echo "PR-based trigger for binary: $BINARY_NAME"
+              RELEASE_TARGET="${BASH_REMATCH[1]}"
+              echo "PR-based trigger for binary: $RELEASE_TARGET"
             else
               echo "Error: Unknown release branch format: $BRANCH_REF"
               echo "Expected: prepare-release-<binary-name>"
@@ -57,8 +57,30 @@ jobs:
             fi
           fi
 
-          # Always read version from Cargo.toml (already bumped by release-dispatch)
-          VERSION=$(cargo get package.version --entry bins/$BINARY_NAME)
+          case "$RELEASE_TARGET" in
+            torii-tokens)
+              PACKAGE_ENTRY="bins/torii-tokens"
+              BINARY_NAME="torii-tokens"
+              ;;
+            torii-arcade)
+              PACKAGE_ENTRY="bins/torii-arcade"
+              BINARY_NAME="torii-arcade"
+              ;;
+            torii-server)
+              PACKAGE_ENTRY="bins/torii-introspect-bin"
+              BINARY_NAME="torii-server"
+              ;;
+            torii-erc20)
+              PACKAGE_ENTRY="bins/torii-erc20"
+              BINARY_NAME="torii-erc20"
+              ;;
+            *)
+              echo "Error: Unknown release target: $RELEASE_TARGET"
+              exit 1
+              ;;
+          esac
+
+          VERSION=$(cargo get package.version --entry "$PACKAGE_ENTRY")
           TAG_NAME="${BINARY_NAME}-v${VERSION}"
 
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
