@@ -1,0 +1,23 @@
+FROM debian:trixie-slim
+
+# Install runtime dependencies
+RUN apt-get update && \
+  apt-get install -y --no-install-recommends \
+  ca-certificates \
+  tini && \
+  rm -rf /var/lib/apt/lists/*
+
+ARG TARGETPLATFORM
+WORKDIR /app
+
+# Docker build context will have: linux/amd64/torii-arcade, linux/arm64/torii-arcade
+COPY ${TARGETPLATFORM}/torii-arcade /usr/local/bin/torii-arcade
+RUN chmod +x /usr/local/bin/torii-arcade
+
+# Labels
+LABEL org.opencontainers.image.title="torii-arcade" \
+  org.opencontainers.image.description="Arcade-dedicated Torii backend with Dojo introspect, ECS, and token services" \
+  org.opencontainers.image.source="https://github.com/dojoengine/torii-core" \
+  org.opencontainers.image.licenses="MIT"
+
+ENTRYPOINT ["/usr/bin/tini", "--"]

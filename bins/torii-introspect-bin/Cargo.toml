@@ -5,7 +5,7 @@ edition = "2021"
 description = "Dojo introspect indexer for PostgreSQL or SQLite"
 
 [[bin]]
-name = "torii-introspect-bin"
+name = "torii-server"
 path = "src/main.rs"
 
 [dependencies]

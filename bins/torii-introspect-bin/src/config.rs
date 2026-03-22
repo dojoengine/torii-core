@@ -14,7 +14,7 @@ pub enum StorageBackend {
 /// This binary targets explicitly configured Dojo contracts and persists the
 /// decoded introspect messages into SQL tables.
 #[derive(Parser, Debug)]
-#[command(name = "torii-introspect-bin")]
+#[command(name = "torii-server")]
 #[command(
     about = "Index Dojo introspect events and token transfers into PostgreSQL or SQLite",
     long_about = None
@@ -175,25 +175,20 @@ mod tests {
 
     #[test]
     fn observability_defaults_to_disabled() {
-        let cfg = Config::parse_from(["torii-introspect-bin", "--contract", "0x1"]);
+        let cfg = Config::parse_from(["torii-server", "--contract", "0x1"]);
         assert!(!cfg.observability);
     }
 
     #[test]
     fn observability_flag_enables_metrics() {
-        let cfg = Config::parse_from([
-            "torii-introspect-bin",
-            "--contract",
-            "0x1",
-            "--observability",
-        ]);
+        let cfg = Config::parse_from(["torii-server", "--contract", "0x1", "--observability"]);
         assert!(cfg.observability);
     }
 
     #[test]
     fn storage_database_url_accepts_sqlite() {
         let cfg = Config::parse_from([
-            "torii-introspect-bin",
+            "torii-server",
             "--contract",
             "0x1",
             "--storage-database-url",
@@ -205,7 +200,7 @@ mod tests {
 
     #[test]
     fn sqlite_is_default_when_storage_database_url_is_omitted() {
-        let cfg = Config::parse_from(["torii-introspect-bin", "--contract", "0x1"]);
+        let cfg = Config::parse_from(["torii-server", "--contract", "0x1"]);
 
         assert_eq!(cfg.storage_backend(), StorageBackend::Sqlite);
         assert!(cfg
@@ -216,7 +211,7 @@ mod tests {
 
     #[test]
     fn contract_addresses_parse_from_hex() {
-        let cfg = Config::parse_from(["torii-introspect-bin", "--contract", "0x1,0x2"]);
+        let cfg = Config::parse_from(["torii-server", "--contract", "0x1,0x2"]);
 
         let contracts = cfg.contract_addresses().unwrap();
         assert_eq!(contracts.len(), 2);
@@ -227,7 +222,7 @@ mod tests {
     #[test]
     fn concurrency_flags_parse() {
         let cfg = Config::parse_from([
-            "torii-introspect-bin",
+            "torii-server",
             "--contract",
             "0x1",
             "--chunk-size",
@@ -249,7 +244,7 @@ mod tests {
     #[test]
     fn token_flags_parse() {
         let cfg = Config::parse_from([
-            "torii-introspect-bin",
+            "torii-server",
             "--erc20",
             "0x1,0x2",
             "--erc721",
