@@ -6,7 +6,7 @@
 use anyhow::Result;
 use rusqlite::{params, params_from_iter, Connection, ToSql};
 use starknet::core::types::{Felt, U256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio_postgres::{types::ToSql as PgToSql, Client, NoTls};
 use torii_common::{
@@ -2325,6 +2325,14 @@ impl TokenUriStore for Erc721Storage {
             .iter()
             .map(|result| extract_metadata_attributes(result.metadata_json.as_deref()))
             .collect::<Vec<_>>();
+        let token_blobs = results
+            .iter()
+            .map(|result| felt_to_blob(result.contract))
+            .collect::<Vec<_>>();
+        let token_id_blobs = results
+            .iter()
+            .map(|result| u256_to_blob(result.token_id))
+            .collect::<Vec<_>>();
 
         if self.backend == StorageBackend::Postgres {
             let mut client = self.pg_client().await?;
@@ -2336,6 +2344,18 @@ impl TokenUriStore for Erc721Storage {
             }
 
             if changed_indexes.is_empty() {
+                let facet_inputs = results
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, _)| FacetSyncInput {
+                        token_blob: token_blobs[idx].clone(),
+                        token_id_blob: token_id_blobs[idx].clone(),
+                        attributes: &expected_attributes[idx],
+                    })
+                    .collect::<Vec<_>>();
+                let tx = client.transaction().await?;
+                pg_sync_facets_for_tokens(&tx, &facet_inputs).await?;
+                tx.commit().await?;
                 return Ok(());
             }
 
@@ -2344,8 +2364,8 @@ impl TokenUriStore for Erc721Storage {
             for idx in changed_indexes {
                 let result = &results[idx];
                 let attrs = &expected_attributes[idx];
-                let token_blob = felt_to_blob(result.contract);
-                let token_id_blob = u256_to_blob(result.token_id);
+                let token_blob = &token_blobs[idx];
+                let token_id_blob = &token_id_blobs[idx];
 
                 tx.execute(
                     "INSERT INTO erc721.token_uris (token, token_id, uri, metadata_json, updated_at)
@@ -2378,10 +2398,18 @@ impl TokenUriStore for Erc721Storage {
                     )
                     .await?;
                 }
-
-                pg_sync_facets_for_token(&tx, result.contract, result.token_id, attrs).await?;
             }
 
+            let facet_inputs = results
+                .iter()
+                .enumerate()
+                .map(|(idx, _)| FacetSyncInput {
+                    token_blob: token_blobs[idx].clone(),
+                    token_id_blob: token_id_blobs[idx].clone(),
+                    attributes: &expected_attributes[idx],
+                })
+                .collect::<Vec<_>>();
+            pg_sync_facets_for_tokens(&tx, &facet_inputs).await?;
             tx.commit().await?;
             return Ok(());
         }
@@ -2395,6 +2423,18 @@ impl TokenUriStore for Erc721Storage {
         }
 
         if changed_indexes.is_empty() {
+            let facet_inputs = results
+                .iter()
+                .enumerate()
+                .map(|(idx, _)| FacetSyncInput {
+                    token_blob: token_blobs[idx].clone(),
+                    token_id_blob: token_id_blobs[idx].clone(),
+                    attributes: &expected_attributes[idx],
+                })
+                .collect::<Vec<_>>();
+            let tx = conn.transaction()?;
+            sqlite_sync_facets_for_tokens(&tx, &facet_inputs)?;
+            tx.commit()?;
             return Ok(());
         }
 
@@ -2419,25 +2459,33 @@ impl TokenUriStore for Erc721Storage {
             for idx in changed_indexes {
                 let result = &results[idx];
                 let attrs = &expected_attributes[idx];
-                let token_blob = felt_to_blob(result.contract);
-                let token_id_blob = u256_to_blob(result.token_id);
+                let token_blob = &token_blobs[idx];
+                let token_id_blob = &token_id_blobs[idx];
 
                 upsert_stmt.execute(params![
-                    &token_blob,
-                    &token_id_blob,
+                    token_blob,
+                    token_id_blob,
                     result.uri.as_deref(),
                     result.metadata_json.as_deref()
                 ])?;
-                delete_attrs_stmt.execute(params![&token_blob, &token_id_blob])?;
+                delete_attrs_stmt.execute(params![token_blob, token_id_blob])?;
 
                 for (key, value) in attrs {
-                    insert_attr_stmt.execute(params![&token_blob, &token_id_blob, key, value])?;
+                    insert_attr_stmt.execute(params![token_blob, token_id_blob, key, value])?;
                 }
-
-                sqlite_sync_facets_for_token(&tx, result.contract, result.token_id, attrs)?;
             }
         }
 
+        let facet_inputs = results
+            .iter()
+            .enumerate()
+            .map(|(idx, _)| FacetSyncInput {
+                token_blob: token_blobs[idx].clone(),
+                token_id_blob: token_id_blobs[idx].clone(),
+                attributes: &expected_attributes[idx],
+            })
+            .collect::<Vec<_>>();
+        sqlite_sync_facets_for_tokens(&tx, &facet_inputs)?;
         tx.commit()?;
         Ok(())
     }
@@ -2482,149 +2530,391 @@ fn extract_metadata_attributes(metadata_json: Option<&str>) -> Vec<(String, Stri
     normalized.into_iter().collect()
 }
 
-fn sqlite_sync_facets_for_token(
-    tx: &rusqlite::Transaction<'_>,
-    token: Felt,
-    token_id: U256,
-    attributes: &[(String, String)],
-) -> Result<()> {
-    let token_blob = felt_to_blob(token);
-    let token_id_blob = u256_to_blob(token_id);
+type TokenFacetKey = (Vec<u8>, Vec<u8>);
+type FacetAssignmentMap = BTreeMap<i64, i64>;
 
-    let existing_rows = {
-        let mut stmt = tx.prepare(
-            "SELECT facet_value_id FROM facet_token_map WHERE token = ?1 AND token_id = ?2",
-        )?;
-        let rows = stmt.query_map(params![&token_blob, &token_id_blob], |row| {
-            row.get::<_, i64>(0)
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()?
-    };
+struct FacetSyncInput<'a> {
+    token_blob: Vec<u8>,
+    token_id_blob: Vec<u8>,
+    attributes: &'a [(String, String)],
+}
 
-    for facet_value_id in existing_rows {
-        tx.execute(
-            "UPDATE facet_values
-             SET token_count = CASE WHEN token_count > 0 THEN token_count - 1 ELSE 0 END
-             WHERE id = ?1",
-            params![facet_value_id],
-        )?;
+#[derive(Default)]
+struct FacetSyncPlan {
+    deletes: Vec<(Vec<u8>, Vec<u8>, i64)>,
+    inserts: Vec<(Vec<u8>, Vec<u8>, i64, i64)>,
+    count_deltas: HashMap<i64, i64>,
+}
+
+fn build_facet_sync_plan(
+    entries: &[FacetSyncInput<'_>],
+    existing: &HashMap<TokenFacetKey, FacetAssignmentMap>,
+    desired: &HashMap<TokenFacetKey, FacetAssignmentMap>,
+) -> FacetSyncPlan {
+    let mut plan = FacetSyncPlan::default();
+
+    for entry in entries {
+        let token_key = (entry.token_blob.clone(), entry.token_id_blob.clone());
+        let existing_map = existing.get(&token_key).cloned().unwrap_or_default();
+        let desired_map = desired.get(&token_key).cloned().unwrap_or_default();
+
+        if existing_map == desired_map {
+            continue;
+        }
+
+        for (facet_key_id, existing_value_id) in &existing_map {
+            if desired_map.get(facet_key_id) != Some(existing_value_id) {
+                plan.deletes.push((
+                    entry.token_blob.clone(),
+                    entry.token_id_blob.clone(),
+                    *facet_key_id,
+                ));
+                *plan.count_deltas.entry(*existing_value_id).or_insert(0) -= 1;
+            }
+        }
+
+        for (facet_key_id, desired_value_id) in &desired_map {
+            if existing_map.get(facet_key_id) != Some(desired_value_id) {
+                plan.inserts.push((
+                    entry.token_blob.clone(),
+                    entry.token_id_blob.clone(),
+                    *facet_key_id,
+                    *desired_value_id,
+                ));
+                *plan.count_deltas.entry(*desired_value_id).or_insert(0) += 1;
+            }
+        }
     }
-    tx.execute(
-        "DELETE FROM facet_token_map WHERE token = ?1 AND token_id = ?2",
-        params![&token_blob, &token_id_blob],
+
+    plan.count_deltas.retain(|_, delta| *delta != 0);
+    plan
+}
+
+fn sqlite_sync_facets_for_tokens(
+    tx: &rusqlite::Transaction<'_>,
+    entries: &[FacetSyncInput<'_>],
+) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let existing = sqlite_load_existing_facet_assignments(tx, entries)?;
+    let desired = sqlite_resolve_desired_facet_assignments(tx, entries)?;
+    let plan = build_facet_sync_plan(entries, &existing, &desired);
+    sqlite_apply_facet_sync_plan(tx, &plan)
+}
+
+fn sqlite_load_existing_facet_assignments(
+    tx: &rusqlite::Transaction<'_>,
+    entries: &[FacetSyncInput<'_>],
+) -> Result<HashMap<TokenFacetKey, FacetAssignmentMap>> {
+    let mut assignments: HashMap<TokenFacetKey, FacetAssignmentMap> = HashMap::new();
+
+    for chunk in entries.chunks(SQLITE_TOKEN_PAIR_BATCH_SIZE) {
+        let conditions = vec!["(token = ? AND token_id = ?)"; chunk.len()].join(" OR ");
+        let query = format!(
+            "SELECT token, token_id, facet_key_id, facet_value_id
+             FROM facet_token_map
+             WHERE {conditions}"
+        );
+
+        let mut params: Vec<&dyn ToSql> = Vec::with_capacity(chunk.len() * 2);
+        for entry in chunk {
+            params.push(&entry.token_blob);
+            params.push(&entry.token_id_blob);
+        }
+
+        let mut stmt = tx.prepare(&query)?;
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok((
+                row.get::<usize, Vec<u8>>(0)?,
+                row.get::<usize, Vec<u8>>(1)?,
+                row.get::<usize, i64>(2)?,
+                row.get::<usize, i64>(3)?,
+            ))
+        })?;
+
+        for row in rows {
+            let (token_blob, token_id_blob, facet_key_id, facet_value_id) = row?;
+            assignments
+                .entry((token_blob, token_id_blob))
+                .or_default()
+                .insert(facet_key_id, facet_value_id);
+        }
+    }
+
+    Ok(assignments)
+}
+
+fn sqlite_resolve_desired_facet_assignments(
+    tx: &rusqlite::Transaction<'_>,
+    entries: &[FacetSyncInput<'_>],
+) -> Result<HashMap<TokenFacetKey, FacetAssignmentMap>> {
+    let mut desired: HashMap<TokenFacetKey, FacetAssignmentMap> = HashMap::new();
+    let mut key_cache: HashMap<(Vec<u8>, String), i64> = HashMap::new();
+    let mut value_cache: HashMap<(Vec<u8>, i64, String), i64> = HashMap::new();
+
+    let mut insert_key_stmt = tx.prepare_cached(
+        "INSERT INTO facet_keys (token, key_norm, key_display)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(token, key_norm) DO UPDATE SET key_display = excluded.key_display",
+    )?;
+    let mut select_key_stmt =
+        tx.prepare_cached("SELECT id FROM facet_keys WHERE token = ?1 AND key_norm = ?2")?;
+    let mut insert_value_stmt = tx.prepare_cached(
+        "INSERT INTO facet_values (token, facet_key_id, value_norm, value_display)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(token, facet_key_id, value_norm) DO UPDATE SET value_display = excluded.value_display",
+    )?;
+    let mut select_value_stmt = tx.prepare_cached(
+        "SELECT id FROM facet_values WHERE token = ?1 AND facet_key_id = ?2 AND value_norm = ?3",
     )?;
 
-    for (key, value) in attributes {
-        tx.execute(
-            "INSERT INTO facet_keys (token, key_norm, key_display)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(token, key_norm) DO UPDATE SET key_display = excluded.key_display",
-            params![&token_blob, key, key],
-        )?;
-        let facet_key_id: i64 = tx.query_row(
-            "SELECT id FROM facet_keys WHERE token = ?1 AND key_norm = ?2",
-            params![&token_blob, key],
-            |row| row.get(0),
-        )?;
+    for entry in entries {
+        let mut assignments = BTreeMap::new();
 
-        tx.execute(
-            "INSERT INTO facet_values (token, facet_key_id, value_norm, value_display)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(token, facet_key_id, value_norm) DO UPDATE SET value_display = excluded.value_display",
-            params![&token_blob, facet_key_id, value, value],
-        )?;
-        let facet_value_id: i64 = tx.query_row(
-            "SELECT id FROM facet_values WHERE token = ?1 AND facet_key_id = ?2 AND value_norm = ?3",
-            params![&token_blob, facet_key_id, value],
-            |row| row.get(0),
-        )?;
+        for (key, value) in entry.attributes {
+            let key_cache_key = (entry.token_blob.clone(), key.clone());
+            let facet_key_id = if let Some(facet_key_id) = key_cache.get(&key_cache_key) {
+                *facet_key_id
+            } else {
+                insert_key_stmt.execute(params![&entry.token_blob, key, key])?;
+                let facet_key_id = select_key_stmt
+                    .query_row(params![&entry.token_blob, key], |row| {
+                        row.get::<usize, i64>(0)
+                    })?;
+                key_cache.insert(key_cache_key, facet_key_id);
+                facet_key_id
+            };
 
-        tx.execute(
-            "INSERT OR REPLACE INTO facet_token_map (token, token_id, facet_key_id, facet_value_id)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![&token_blob, &token_id_blob, facet_key_id, facet_value_id],
-        )?;
-        tx.execute(
-            "UPDATE facet_values SET token_count = token_count + 1 WHERE id = ?1",
-            params![facet_value_id],
-        )?;
+            let value_cache_key = (entry.token_blob.clone(), facet_key_id, value.clone());
+            let facet_value_id = if let Some(facet_value_id) = value_cache.get(&value_cache_key) {
+                *facet_value_id
+            } else {
+                insert_value_stmt.execute(params![
+                    &entry.token_blob,
+                    facet_key_id,
+                    value,
+                    value
+                ])?;
+                let facet_value_id = select_value_stmt
+                    .query_row(params![&entry.token_blob, facet_key_id, value], |row| {
+                        row.get::<usize, i64>(0)
+                    })?;
+                value_cache.insert(value_cache_key, facet_value_id);
+                facet_value_id
+            };
+
+            assignments.insert(facet_key_id, facet_value_id);
+        }
+
+        desired.insert(
+            (entry.token_blob.clone(), entry.token_id_blob.clone()),
+            assignments,
+        );
+    }
+
+    Ok(desired)
+}
+
+fn sqlite_apply_facet_sync_plan(
+    tx: &rusqlite::Transaction<'_>,
+    plan: &FacetSyncPlan,
+) -> Result<()> {
+    if plan.deletes.is_empty() && plan.inserts.is_empty() && plan.count_deltas.is_empty() {
+        return Ok(());
+    }
+
+    let mut delete_stmt = tx.prepare_cached(
+        "DELETE FROM facet_token_map WHERE token = ?1 AND token_id = ?2 AND facet_key_id = ?3",
+    )?;
+    let mut insert_stmt = tx.prepare_cached(
+        "INSERT OR REPLACE INTO facet_token_map (token, token_id, facet_key_id, facet_value_id)
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    let mut update_count_stmt = tx.prepare_cached(
+        "UPDATE facet_values
+         SET token_count = MAX(token_count + ?2, 0)
+         WHERE id = ?1",
+    )?;
+
+    for (token_blob, token_id_blob, facet_key_id) in &plan.deletes {
+        delete_stmt.execute(params![token_blob, token_id_blob, facet_key_id])?;
+    }
+
+    for (token_blob, token_id_blob, facet_key_id, facet_value_id) in &plan.inserts {
+        insert_stmt.execute(params![
+            token_blob,
+            token_id_blob,
+            facet_key_id,
+            facet_value_id
+        ])?;
+    }
+
+    for (facet_value_id, delta) in &plan.count_deltas {
+        update_count_stmt.execute(params![facet_value_id, delta])?;
     }
 
     Ok(())
 }
 
-async fn pg_sync_facets_for_token(
+async fn pg_sync_facets_for_tokens(
     tx: &tokio_postgres::Transaction<'_>,
-    token: Felt,
-    token_id: U256,
-    attributes: &[(String, String)],
+    entries: &[FacetSyncInput<'_>],
 ) -> Result<()> {
-    let token_blob = felt_to_blob(token);
-    let token_id_blob = u256_to_blob(token_id);
+    if entries.is_empty() {
+        return Ok(());
+    }
 
-    let existing_rows = tx
-        .query(
-            "SELECT facet_value_id FROM erc721.facet_token_map WHERE token = $1 AND token_id = $2",
-            &[&token_blob, &token_id_blob],
-        )
-        .await?;
-    for row in existing_rows {
-        let facet_value_id: i64 = row.get(0);
+    let existing = pg_load_existing_facet_assignments(tx, entries).await?;
+    let desired = pg_resolve_desired_facet_assignments(tx, entries).await?;
+    let plan = build_facet_sync_plan(entries, &existing, &desired);
+    pg_apply_facet_sync_plan(tx, &plan).await
+}
+
+async fn pg_load_existing_facet_assignments(
+    tx: &tokio_postgres::Transaction<'_>,
+    entries: &[FacetSyncInput<'_>],
+) -> Result<HashMap<TokenFacetKey, FacetAssignmentMap>> {
+    let mut assignments: HashMap<TokenFacetKey, FacetAssignmentMap> = HashMap::new();
+
+    for chunk in entries.chunks(SQLITE_TOKEN_PAIR_BATCH_SIZE) {
+        let mut query = String::from(
+            "SELECT token, token_id, facet_key_id, facet_value_id
+             FROM erc721.facet_token_map
+             WHERE ",
+        );
+        let mut params: Vec<&(dyn PgToSql + Sync)> = Vec::with_capacity(chunk.len() * 2);
+
+        for (idx, entry) in chunk.iter().enumerate() {
+            if idx > 0 {
+                query.push_str(" OR ");
+            }
+            let token_param = params.len() + 1;
+            let token_id_param = params.len() + 2;
+            query.push_str(&format!(
+                "(token = ${token_param} AND token_id = ${token_id_param})"
+            ));
+            params.push(&entry.token_blob);
+            params.push(&entry.token_id_blob);
+        }
+
+        let rows = tx.query(&query, &params).await?;
+        for row in rows {
+            let token_blob: Vec<u8> = row.get(0);
+            let token_id_blob: Vec<u8> = row.get(1);
+            let facet_key_id: i64 = row.get(2);
+            let facet_value_id: i64 = row.get(3);
+            assignments
+                .entry((token_blob, token_id_blob))
+                .or_default()
+                .insert(facet_key_id, facet_value_id);
+        }
+    }
+
+    Ok(assignments)
+}
+
+async fn pg_resolve_desired_facet_assignments(
+    tx: &tokio_postgres::Transaction<'_>,
+    entries: &[FacetSyncInput<'_>],
+) -> Result<HashMap<TokenFacetKey, FacetAssignmentMap>> {
+    let mut desired: HashMap<TokenFacetKey, FacetAssignmentMap> = HashMap::new();
+    let mut key_cache: HashMap<(Vec<u8>, String), i64> = HashMap::new();
+    let mut value_cache: HashMap<(Vec<u8>, i64, String), i64> = HashMap::new();
+
+    for entry in entries {
+        let mut assignments = BTreeMap::new();
+
+        for (key, value) in entry.attributes {
+            let key_cache_key = (entry.token_blob.clone(), key.clone());
+            let facet_key_id = if let Some(facet_key_id) = key_cache.get(&key_cache_key) {
+                *facet_key_id
+            } else {
+                tx.execute(
+                    "INSERT INTO erc721.facet_keys (token, key_norm, key_display)
+                     VALUES ($1, $2, $3)
+                     ON CONFLICT(token, key_norm) DO UPDATE SET key_display = EXCLUDED.key_display",
+                    &[&entry.token_blob, key, key],
+                )
+                .await?;
+                let facet_key_id = tx
+                    .query_one(
+                        "SELECT id FROM erc721.facet_keys WHERE token = $1 AND key_norm = $2",
+                        &[&entry.token_blob, key],
+                    )
+                    .await?
+                    .get(0);
+                key_cache.insert(key_cache_key, facet_key_id);
+                facet_key_id
+            };
+
+            let value_cache_key = (entry.token_blob.clone(), facet_key_id, value.clone());
+            let facet_value_id = if let Some(facet_value_id) = value_cache.get(&value_cache_key) {
+                *facet_value_id
+            } else {
+                tx.execute(
+                    "INSERT INTO erc721.facet_values (token, facet_key_id, value_norm, value_display)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT(token, facet_key_id, value_norm) DO UPDATE SET value_display = EXCLUDED.value_display",
+                    &[&entry.token_blob, &facet_key_id, value, value],
+                )
+                .await?;
+                let facet_value_id = tx
+                    .query_one(
+                        "SELECT id FROM erc721.facet_values WHERE token = $1 AND facet_key_id = $2 AND value_norm = $3",
+                        &[&entry.token_blob, &facet_key_id, value],
+                    )
+                    .await?
+                    .get(0);
+                value_cache.insert(value_cache_key, facet_value_id);
+                facet_value_id
+            };
+
+            assignments.insert(facet_key_id, facet_value_id);
+        }
+
+        desired.insert(
+            (entry.token_blob.clone(), entry.token_id_blob.clone()),
+            assignments,
+        );
+    }
+
+    Ok(desired)
+}
+
+async fn pg_apply_facet_sync_plan(
+    tx: &tokio_postgres::Transaction<'_>,
+    plan: &FacetSyncPlan,
+) -> Result<()> {
+    if plan.deletes.is_empty() && plan.inserts.is_empty() && plan.count_deltas.is_empty() {
+        return Ok(());
+    }
+
+    for (token_blob, token_id_blob, facet_key_id) in &plan.deletes {
         tx.execute(
-            "UPDATE erc721.facet_values
-             SET token_count = GREATEST(token_count - 1, 0)
-             WHERE id = $1",
-            &[&facet_value_id],
+            "DELETE FROM erc721.facet_token_map WHERE token = $1 AND token_id = $2 AND facet_key_id = $3",
+            &[token_blob, token_id_blob, facet_key_id],
         )
         .await?;
     }
-    tx.execute(
-        "DELETE FROM erc721.facet_token_map WHERE token = $1 AND token_id = $2",
-        &[&token_blob, &token_id_blob],
-    )
-    .await?;
 
-    for (key, value) in attributes {
-        tx.execute(
-            "INSERT INTO erc721.facet_keys (token, key_norm, key_display)
-             VALUES ($1, $2, $3)
-             ON CONFLICT(token, key_norm) DO UPDATE SET key_display = EXCLUDED.key_display",
-            &[&token_blob, key, key],
-        )
-        .await?;
-        let facet_key_id: i64 = tx
-            .query_one(
-                "SELECT id FROM erc721.facet_keys WHERE token = $1 AND key_norm = $2",
-                &[&token_blob, key],
-            )
-            .await?
-            .get(0);
-
-        tx.execute(
-            "INSERT INTO erc721.facet_values (token, facet_key_id, value_norm, value_display)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT(token, facet_key_id, value_norm) DO UPDATE SET value_display = EXCLUDED.value_display",
-            &[&token_blob, &facet_key_id, value, value],
-        )
-        .await?;
-        let facet_value_id: i64 = tx
-            .query_one(
-                "SELECT id FROM erc721.facet_values WHERE token = $1 AND facet_key_id = $2 AND value_norm = $3",
-                &[&token_blob, &facet_key_id, value],
-            )
-            .await?
-            .get(0);
-
+    for (token_blob, token_id_blob, facet_key_id, facet_value_id) in &plan.inserts {
         tx.execute(
             "INSERT INTO erc721.facet_token_map (token, token_id, facet_key_id, facet_value_id)
              VALUES ($1, $2, $3, $4)
              ON CONFLICT(token, token_id, facet_key_id) DO UPDATE SET facet_value_id = EXCLUDED.facet_value_id",
-            &[&token_blob, &token_id_blob, &facet_key_id, &facet_value_id],
+            &[token_blob, token_id_blob, facet_key_id, facet_value_id],
         )
         .await?;
+    }
+
+    for (facet_value_id, delta) in &plan.count_deltas {
         tx.execute(
-            "UPDATE erc721.facet_values SET token_count = token_count + 1 WHERE id = $1",
-            &[&facet_value_id],
+            "UPDATE erc721.facet_values
+             SET token_count = GREATEST(token_count + $2, 0)
+             WHERE id = $1",
+            &[facet_value_id, delta],
         )
         .await?;
     }
@@ -2874,6 +3164,73 @@ mod tests {
         };
 
         assert_eq!(attr_count, 1);
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn store_token_uri_repairs_missing_facets_for_same_metadata() {
+        let db_path = temp_db_path("token-uri-facet-backfill");
+        let storage = Erc721Storage::new(&db_path).await.expect("create storage");
+        let result = TokenUriResult {
+            contract: Felt::from_hex_unchecked(
+                "0x046da8955829adf2bda310099a0063451923f02e648cf25a1203aac6335cf0e4",
+            ),
+            token_id: U256::from(3u64),
+            uri: Some("ipfs://beasts/3".to_owned()),
+            metadata_json: Some(
+                r#"{"name":"Beast #3","attributes":[{"trait_type":"Class","value":"Wolf"},{"trait_type":"Color","value":"Red"}]}"#
+                    .to_owned(),
+            ),
+        };
+
+        storage
+            .store_token_uri(&result)
+            .await
+            .expect("insert token uri");
+
+        {
+            let conn = storage.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE facet_values SET token_count = 0 WHERE id IN (
+                    SELECT facet_value_id FROM facet_token_map WHERE token = ?1 AND token_id = ?2
+                )",
+                params![felt_to_blob(result.contract), u256_to_blob(result.token_id)],
+            )
+            .expect("zero facet counts");
+            conn.execute(
+                "DELETE FROM facet_token_map WHERE token = ?1 AND token_id = ?2",
+                params![felt_to_blob(result.contract), u256_to_blob(result.token_id)],
+            )
+            .expect("delete facet mappings");
+        }
+
+        storage
+            .store_token_uri(&result)
+            .await
+            .expect("repair missing facets");
+
+        let (facet_map_count, positive_counts): (i64, i64) = {
+            let conn = storage.conn.lock().unwrap();
+            let facet_map_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM facet_token_map WHERE token = ?1 AND token_id = ?2",
+                    params![felt_to_blob(result.contract), u256_to_blob(result.token_id)],
+                    |row| row.get(0),
+                )
+                .expect("count facet mappings");
+            let positive_counts: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM facet_values WHERE token_count > 0",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("count positive facet values");
+            (facet_map_count, positive_counts)
+        };
+
+        assert_eq!(facet_map_count, 2);
+        assert_eq!(positive_counts, 2);
 
         let _ = std::fs::remove_file(db_path);
     }
