@@ -16,6 +16,7 @@ use torii::etl::extractor::{
     ContractEventConfig, EventExtractor, EventExtractorConfig, Extractor, RetryPolicy,
 };
 use torii::{EtlConcurrencyConfig, ToriiConfigBuilder};
+use torii_common::{MetadataFetcher, TokenUriService};
 use torii_config_common::apply_observability_env;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::postgres::PgStore;
@@ -24,8 +25,7 @@ use torii_ecs_sink::proto::world::world_server::WorldServer;
 use torii_ecs_sink::{EcsSink, FILE_DESCRIPTOR_SET as ECS_DESCRIPTOR_SET};
 use torii_erc1155::proto::erc1155_server::Erc1155Server;
 use torii_erc1155::{
-    Erc1155Decoder, Erc1155MetadataCommandHandler, Erc1155Service, Erc1155Sink,
-    Erc1155Storage, Erc1155TokenUriCommandHandler,
+    Erc1155Decoder, Erc1155MetadataCommandHandler, Erc1155Service, Erc1155Sink, Erc1155Storage,
     FILE_DESCRIPTOR_SET as ERC1155_DESCRIPTOR_SET,
 };
 use torii_erc20::proto::erc20_server::Erc20Server;
@@ -36,7 +36,6 @@ use torii_erc20::{
 use torii_erc721::proto::erc721_server::Erc721Server;
 use torii_erc721::{
     Erc721Decoder, Erc721MetadataCommandHandler, Erc721Service, Erc721Sink, Erc721Storage,
-    Erc721TokenUriCommandHandler,
     FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
 };
 use torii_introspect_postgres_sink::processor::IntrospectPgDb;
@@ -51,6 +50,7 @@ type ReflectionBuilder = tonic_reflection::server::Builder<'static>;
 const TOKEN_COMMAND_QUEUE_SIZE: usize = 4096;
 const TOKEN_METADATA_COMMAND_PARALLELISM: usize = 1;
 const TOKEN_METADATA_MAX_RETRIES: u8 = 3;
+const TOKEN_URI_FETCH_PARALLELISM: usize = 8;
 
 #[derive(Clone, Debug, Default)]
 struct TokenTargets {
@@ -156,11 +156,22 @@ async fn configure_token_support(
     provider: Arc<StarknetProvider>,
     mut torii_config: ToriiConfigBuilder,
     mut reflection_builder: ReflectionBuilder,
-) -> Result<(ToriiConfigBuilder, ReflectionBuilder, TokenGrpcServices)> {
+) -> Result<(
+    ToriiConfigBuilder,
+    ReflectionBuilder,
+    TokenGrpcServices,
+    Vec<TokenUriService>,
+)> {
     let mut services = TokenGrpcServices::default();
+    let mut token_uri_services = Vec::new();
 
     if !token_targets.has_any() {
-        return Ok((torii_config, reflection_builder, services));
+        return Ok((
+            torii_config,
+            reflection_builder,
+            services,
+            token_uri_services,
+        ));
     }
 
     let db_setup =
@@ -204,11 +215,20 @@ async fn configure_token_support(
         torii_config = torii_config.add_decoder(decoder);
 
         let grpc_service = Erc721Service::new(storage.clone());
+        let (token_uri_sender, token_uri_service) = TokenUriService::spawn_with_image_cache(
+            Arc::new(MetadataFetcher::new(provider.clone())),
+            storage.clone(),
+            TOKEN_COMMAND_QUEUE_SIZE,
+            TOKEN_URI_FETCH_PARALLELISM,
+            Some(Path::new("./data").join("image-cache")),
+            4,
+        );
+        token_uri_services.push(token_uri_service);
         let sink = Box::new(
             Erc721Sink::new(storage.clone())
                 .with_grpc_service(grpc_service.clone())
                 .with_metadata_commands()
-                .with_token_uri_commands(),
+                .with_token_uri_sender(token_uri_sender),
         );
         torii_config = torii_config
             .add_sink_boxed(sink)
@@ -216,11 +236,6 @@ async fn configure_token_support(
                 provider.clone(),
                 storage.clone(),
                 TOKEN_METADATA_MAX_RETRIES,
-            )))
-            .with_command_handler(Box::new(Erc721TokenUriCommandHandler::new(
-                provider.clone(),
-                storage,
-                Some(Path::new("./data").join("image-cache")),
             )));
         services.erc721 = Some(grpc_service);
         reflection_builder =
@@ -235,30 +250,39 @@ async fn configure_token_support(
         torii_config = torii_config.add_decoder(decoder);
 
         let grpc_service = Erc1155Service::new(storage.clone());
+        let (token_uri_sender, token_uri_service) = TokenUriService::spawn_with_image_cache(
+            Arc::new(MetadataFetcher::new(provider.clone())),
+            storage.clone(),
+            TOKEN_COMMAND_QUEUE_SIZE,
+            TOKEN_URI_FETCH_PARALLELISM,
+            Some(Path::new("./data").join("image-cache")),
+            4,
+        );
+        token_uri_services.push(token_uri_service);
         let sink = Box::new(
             Erc1155Sink::new(storage.clone())
                 .with_grpc_service(grpc_service.clone())
                 .with_balance_tracking(provider.clone())
                 .with_metadata_commands()
-                .with_token_uri_commands(),
+                .with_token_uri_sender(token_uri_sender),
         );
         torii_config = torii_config
             .add_sink_boxed(sink)
             .with_command_handler(Box::new(Erc1155MetadataCommandHandler::new(
                 provider.clone(),
                 storage.clone(),
-            )))
-            .with_command_handler(Box::new(Erc1155TokenUriCommandHandler::new(
-                provider,
-                storage,
-                Some(Path::new("./data").join("image-cache")),
             )));
         services.erc1155 = Some(grpc_service);
         reflection_builder =
             reflection_builder.register_encoded_file_descriptor_set(ERC1155_DESCRIPTOR_SET);
     }
 
-    Ok((torii_config, reflection_builder, services))
+    Ok((
+        torii_config,
+        reflection_builder,
+        services,
+        token_uri_services,
+    ))
 }
 
 #[tokio::main]
@@ -476,14 +500,15 @@ async fn run_with_postgres(
         .add_sink_boxed(Box::new(ecs_sink))
         .add_sink_boxed(Box::new(sink));
 
-    let (torii_config, reflection_builder, token_services) = configure_token_support(
-        &token_targets,
-        token_db_setup.as_ref(),
-        token_provider,
-        torii_config,
-        reflection_builder,
-    )
-    .await?;
+    let (torii_config, reflection_builder, token_services, _token_uri_services) =
+        configure_token_support(
+            &token_targets,
+            token_db_setup.as_ref(),
+            token_provider,
+            torii_config,
+            reflection_builder,
+        )
+        .await?;
 
     let reflection = reflection_builder
         .build_v1()
@@ -614,14 +639,15 @@ async fn run_with_sqlite(
         .add_sink_boxed(Box::new(ecs_sink))
         .add_sink_boxed(Box::new(IntrospectSqliteDb::new(pool.clone(), ())));
 
-    let (torii_config, reflection_builder, token_services) = configure_token_support(
-        &token_targets,
-        token_db_setup.as_ref(),
-        token_provider,
-        torii_config,
-        reflection_builder,
-    )
-    .await?;
+    let (torii_config, reflection_builder, token_services, _token_uri_services) =
+        configure_token_support(
+            &token_targets,
+            token_db_setup.as_ref(),
+            token_provider,
+            torii_config,
+            reflection_builder,
+        )
+        .await?;
 
     let reflection = reflection_builder
         .build_v1()

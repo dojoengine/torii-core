@@ -34,7 +34,7 @@ use torii::command::CommandBusSender;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
-use torii_common::{u256_to_bytes, TokenUriSender};
+use torii_common::{u256_to_bytes, TokenStandard, TokenUriRequest, TokenUriSender};
 
 /// Default threshold for "live" detection: 100 blocks from chain head.
 /// Events from blocks older than this won't be broadcast to real-time subscribers.
@@ -62,6 +62,7 @@ pub struct Erc1155Sink {
     token_uri_commands_enabled: bool,
     /// Command bus sender for background metadata and token URI work.
     command_bus: Option<CommandBusSender>,
+    token_uri_sender: Option<TokenUriSender>,
     /// Commands already queued but not yet observed in storage.
     pending_metadata_commands: tokio::sync::Mutex<HashSet<Felt>>,
     pending_token_uri_commands: tokio::sync::Mutex<HashSet<(Felt, U256)>>,
@@ -81,6 +82,7 @@ impl Erc1155Sink {
             metadata_commands_enabled: false,
             token_uri_commands_enabled: false,
             command_bus: None,
+            token_uri_sender: None,
             pending_metadata_commands: tokio::sync::Mutex::new(HashSet::new()),
             pending_token_uri_commands: tokio::sync::Mutex::new(HashSet::new()),
             // Avoid startup full-table COUNT(*) scans on large datasets.
@@ -207,6 +209,32 @@ impl Erc1155Sink {
         }
 
         true
+    }
+
+    fn enqueue_token_uri_request(&self, contract: Felt, token_id: U256) -> bool {
+        if let Some(sender) = &self.token_uri_sender {
+            return sender.request_update(TokenUriRequest {
+                contract,
+                token_id,
+                standard: TokenStandard::Erc1155,
+            });
+        }
+
+        if let Some(command_bus) = &self.command_bus {
+            if let Err(error) =
+                command_bus.dispatch(RefreshErc1155TokenUriCommand { contract, token_id })
+            {
+                tracing::warn!(
+                    target: "torii_erc1155::sink",
+                    error = %error,
+                    "Failed to dispatch ERC1155 token URI command"
+                );
+                return false;
+            }
+            return true;
+        }
+
+        false
     }
 }
 
@@ -339,8 +367,12 @@ impl Sink for Erc1155Sink {
         // Fetch metadata for any new token contracts.
         if self.metadata_commands_enabled {
             if let Some(ref command_bus) = self.command_bus {
-                let candidate_tokens: Vec<Felt> =
-                    transfers.iter().map(|transfer| transfer.token).collect::<HashSet<_>>().into_iter().collect();
+                let candidate_tokens: Vec<Felt> = transfers
+                    .iter()
+                    .map(|transfer| transfer.token)
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
                 let unchecked_tokens = {
                     let pending = self.pending_metadata_commands.lock().await;
                     candidate_tokens
@@ -349,7 +381,11 @@ impl Sink for Erc1155Sink {
                         .collect::<Vec<_>>()
                 };
 
-                match self.storage.has_token_metadata_batch(&unchecked_tokens).await {
+                match self
+                    .storage
+                    .has_token_metadata_batch(&unchecked_tokens)
+                    .await
+                {
                     Ok(existing_tokens) => {
                         let mut pending = self.pending_metadata_commands.lock().await;
                         for token in &existing_tokens {
@@ -389,7 +425,7 @@ impl Sink for Erc1155Sink {
 
         // Request token URI fetches for new token IDs.
         if self.token_uri_commands_enabled {
-            if let Some(ref command_bus) = self.command_bus {
+            if self.token_uri_sender.is_some() || self.command_bus.is_some() {
                 let candidate_tokens: Vec<(Felt, U256)> = transfers
                     .iter()
                     .map(|transfer| (transfer.token, transfer.token_id))
@@ -418,18 +454,8 @@ impl Sink for Erc1155Sink {
                             if !pending.insert((contract, token_id)) {
                                 continue;
                             }
-                            if let Err(error) =
-                                command_bus.dispatch(RefreshErc1155TokenUriCommand {
-                                    contract,
-                                    token_id,
-                                })
-                            {
+                            if !self.enqueue_token_uri_request(contract, token_id) {
                                 pending.remove(&(contract, token_id));
-                                tracing::warn!(
-                                    target: "torii_erc1155::sink",
-                                    error = %error,
-                                    "Failed to dispatch ERC1155 token URI command"
-                                );
                             }
                         }
                     }
@@ -732,7 +758,9 @@ impl Erc1155Sink {
         self
     }
 
-    pub fn with_token_uri_sender(self, _sender: TokenUriSender) -> Self {
-        self.with_token_uri_commands()
+    pub fn with_token_uri_sender(mut self, sender: TokenUriSender) -> Self {
+        self.token_uri_commands_enabled = true;
+        self.token_uri_sender = Some(sender);
+        self
     }
 }

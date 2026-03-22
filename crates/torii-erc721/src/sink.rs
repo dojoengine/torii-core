@@ -22,7 +22,7 @@ use torii::command::CommandBusSender;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
-use torii_common::{u256_to_bytes, TokenUriSender};
+use torii_common::{u256_to_bytes, TokenStandard, TokenUriRequest, TokenUriSender};
 
 /// Default threshold for "live" detection: 100 blocks from chain head.
 /// Events from blocks older than this won't be broadcast to real-time subscribers.
@@ -47,6 +47,7 @@ pub struct Erc721Sink {
     token_uri_commands_enabled: bool,
     /// Command bus sender for background metadata and token URI work.
     command_bus: Option<CommandBusSender>,
+    token_uri_sender: Option<TokenUriSender>,
     /// Commands already queued but not yet observed in storage.
     pending_metadata_commands: tokio::sync::Mutex<HashSet<Felt>>,
     pending_token_uri_commands: tokio::sync::Mutex<HashSet<(Felt, U256)>>,
@@ -64,6 +65,7 @@ impl Erc721Sink {
             metadata_commands_enabled: false,
             token_uri_commands_enabled: false,
             command_bus: None,
+            token_uri_sender: None,
             pending_metadata_commands: tokio::sync::Mutex::new(HashSet::new()),
             pending_token_uri_commands: tokio::sync::Mutex::new(HashSet::new()),
             // Avoid startup full-table COUNT(*) scans on large datasets.
@@ -150,6 +152,66 @@ impl Erc721Sink {
         }
 
         true
+    }
+
+    fn enqueue_token_uri_request(&self, contract: Felt, token_id: U256) -> bool {
+        if let Some(sender) = &self.token_uri_sender {
+            return sender.request_update(TokenUriRequest {
+                contract,
+                token_id,
+                standard: TokenStandard::Erc721,
+            });
+        }
+
+        if let Some(command_bus) = &self.command_bus {
+            if let Err(error) =
+                command_bus.dispatch(RefreshErc721TokenUriCommand { contract, token_id })
+            {
+                tracing::warn!(
+                    target: "torii_erc721::sink",
+                    error = %error,
+                    "Failed to dispatch ERC721 token URI refresh"
+                );
+                return false;
+            }
+            return true;
+        }
+
+        false
+    }
+
+    async fn enqueue_token_uri_range_refresh(
+        &self,
+        contract: Felt,
+        from_token_id: U256,
+        to_token_id: U256,
+    ) {
+        let Ok(uris) = self.storage.get_token_uris_by_contract(contract).await else {
+            return;
+        };
+        let token_ids = uris
+            .into_iter()
+            .map(|(token_id, _, _)| token_id)
+            .filter(|token_id| *token_id >= from_token_id && *token_id <= to_token_id)
+            .collect::<Vec<_>>();
+
+        if let Some(sender) = &self.token_uri_sender {
+            let accepted = sender.request_batch(contract, &token_ids, TokenStandard::Erc721);
+            if accepted != token_ids.len() {
+                tracing::warn!(
+                    target: "torii_erc721::sink",
+                    contract = %format!("{:#x}", contract),
+                    requested = token_ids.len(),
+                    accepted,
+                    "Failed to enqueue some ERC721 batch token URI refreshes"
+                );
+            }
+            return;
+        }
+
+        for token_id in token_ids {
+            self.enqueue_token_uri_request(contract, token_id);
+        }
     }
 }
 
@@ -239,18 +301,7 @@ impl Sink for Erc721Sink {
                     .downcast_ref::<DecodedMetadataUpdate>()
                 {
                     if self.token_uri_commands_enabled {
-                        if let Some(ref command_bus) = self.command_bus {
-                            if let Err(error) = command_bus.dispatch(RefreshErc721TokenUriCommand {
-                                contract: update.token,
-                                token_id: update.token_id,
-                            }) {
-                                tracing::warn!(
-                                    target: "torii_erc721::sink",
-                                    error = %error,
-                                    "Failed to dispatch ERC721 token URI refresh"
-                                );
-                            }
-                        }
+                        self.enqueue_token_uri_request(update.token, update.token_id);
                     }
                 }
             }
@@ -262,32 +313,12 @@ impl Sink for Erc721Sink {
                     .downcast_ref::<DecodedBatchMetadataUpdate>()
                 {
                     if self.token_uri_commands_enabled {
-                        if let Some(ref command_bus) = self.command_bus {
-                            // For batch updates, we need to know which token IDs exist in the range.
-                            // Fetch them from storage and request URI updates for each.
-                            if let Ok(uris) =
-                                self.storage.get_token_uris_by_contract(update.token).await
-                            {
-                                for (token_id, _, _) in &uris {
-                                    if *token_id >= update.from_token_id
-                                        && *token_id <= update.to_token_id
-                                    {
-                                        if let Err(error) =
-                                            command_bus.dispatch(RefreshErc721TokenUriCommand {
-                                                contract: update.token,
-                                                token_id: *token_id,
-                                            })
-                                        {
-                                            tracing::warn!(
-                                                target: "torii_erc721::sink",
-                                                error = %error,
-                                                "Failed to dispatch ERC721 batch token URI refresh"
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        self.enqueue_token_uri_range_refresh(
+                            update.token,
+                            update.from_token_id,
+                            update.to_token_id,
+                        )
+                        .await;
                     }
                 }
             }
@@ -298,8 +329,12 @@ impl Sink for Erc721Sink {
         // Fetch metadata for any new token contracts.
         if self.metadata_commands_enabled {
             if let Some(ref command_bus) = self.command_bus {
-                let candidate_tokens: Vec<Felt> =
-                    transfers.iter().map(|transfer| transfer.token).collect::<HashSet<_>>().into_iter().collect();
+                let candidate_tokens: Vec<Felt> = transfers
+                    .iter()
+                    .map(|transfer| transfer.token)
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
                 let unchecked_tokens = {
                     let pending = self.pending_metadata_commands.lock().await;
                     candidate_tokens
@@ -308,7 +343,11 @@ impl Sink for Erc721Sink {
                         .collect::<Vec<_>>()
                 };
 
-                match self.storage.has_token_metadata_batch(&unchecked_tokens).await {
+                match self
+                    .storage
+                    .has_token_metadata_batch(&unchecked_tokens)
+                    .await
+                {
                     Ok(existing_tokens) => {
                         let mut pending = self.pending_metadata_commands.lock().await;
                         for token in &existing_tokens {
@@ -348,7 +387,7 @@ impl Sink for Erc721Sink {
 
         // Request token URI fetches for new token IDs.
         if self.token_uri_commands_enabled {
-            if let Some(ref command_bus) = self.command_bus {
+            if self.token_uri_sender.is_some() || self.command_bus.is_some() {
                 let candidate_tokens: Vec<(Felt, U256)> = transfers
                     .iter()
                     .map(|transfer| (transfer.token, transfer.token_id))
@@ -377,18 +416,8 @@ impl Sink for Erc721Sink {
                             if !pending.insert((contract, token_id)) {
                                 continue;
                             }
-                            if let Err(error) =
-                                command_bus.dispatch(RefreshErc721TokenUriCommand {
-                                    contract,
-                                    token_id,
-                                })
-                            {
+                            if !self.enqueue_token_uri_request(contract, token_id) {
                                 pending.remove(&(contract, token_id));
-                                tracing::warn!(
-                                    target: "torii_erc721::sink",
-                                    error = %error,
-                                    "Failed to dispatch ERC721 token URI command"
-                                );
                             }
                         }
                     }
@@ -559,7 +588,9 @@ impl Erc721Sink {
         self
     }
 
-    pub fn with_token_uri_sender(self, _sender: TokenUriSender) -> Self {
-        self.with_token_uri_commands()
+    pub fn with_token_uri_sender(mut self, sender: TokenUriSender) -> Self {
+        self.token_uri_commands_enabled = true;
+        self.token_uri_sender = Some(sender);
+        self
     }
 }

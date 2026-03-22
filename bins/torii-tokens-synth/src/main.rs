@@ -17,9 +17,7 @@ use torii::etl::extractor::SyntheticExtractor;
 use torii::etl::sink::Sink;
 use torii::etl::{Decoder, DecoderContext};
 use torii_common::{TokenUriResult, TokenUriStore};
-use torii_erc1155::handlers::{
-    FetchErc1155MetadataCommand, RefreshErc1155TokenUriCommand,
-};
+use torii_erc1155::handlers::{FetchErc1155MetadataCommand, RefreshErc1155TokenUriCommand};
 use torii_erc1155::{
     Erc1155Decoder, Erc1155Sink, Erc1155Storage, SyntheticErc1155Config, SyntheticErc1155Extractor,
 };
@@ -157,7 +155,9 @@ impl CommandHandler for SyntheticErc721TokenUriCommandHandler {
         let command = command
             .into_any()
             .downcast::<RefreshErc721TokenUriCommand>()
-            .map_err(|_| anyhow::anyhow!("synthetic ERC721 URI handler received unexpected command"))?;
+            .map_err(|_| {
+                anyhow::anyhow!("synthetic ERC721 URI handler received unexpected command")
+            })?;
         let command = *command;
 
         self.storage
@@ -184,7 +184,9 @@ impl CommandHandler for SyntheticErc1155MetadataCommandHandler {
         let command = command
             .into_any()
             .downcast::<FetchErc1155MetadataCommand>()
-            .map_err(|_| anyhow::anyhow!("synthetic ERC1155 handler received unexpected command"))?;
+            .map_err(|_| {
+                anyhow::anyhow!("synthetic ERC1155 handler received unexpected command")
+            })?;
         let command = *command;
         let suffix = token_suffix(command.token);
         let name = format!("Synthetic ERC1155 {suffix}");
@@ -210,7 +212,9 @@ impl CommandHandler for SyntheticErc1155TokenUriCommandHandler {
         let command = command
             .into_any()
             .downcast::<RefreshErc1155TokenUriCommand>()
-            .map_err(|_| anyhow::anyhow!("synthetic ERC1155 URI handler received unexpected command"))?;
+            .map_err(|_| {
+                anyhow::anyhow!("synthetic ERC1155 URI handler received unexpected command")
+            })?;
         let command = *command;
 
         self.storage

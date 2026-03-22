@@ -299,7 +299,11 @@ impl Sink for Erc20Sink {
                         .collect::<Vec<_>>()
                 };
 
-                match self.storage.has_token_metadata_batch(&unchecked_tokens).await {
+                match self
+                    .storage
+                    .has_token_metadata_batch(&unchecked_tokens)
+                    .await
+                {
                     Ok(existing_metadata) => {
                         let mut pending = self.pending_metadata_commands.lock().await;
                         for token in &existing_metadata {

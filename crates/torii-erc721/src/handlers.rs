@@ -68,8 +68,13 @@ impl Erc721MetadataCommandHandler {
     }
 
     fn metadata_complete(meta: &torii_common::TokenMetadata) -> bool {
-        meta.name.as_deref().is_some_and(|value| !value.trim().is_empty())
-            && meta.symbol.as_deref().is_some_and(|value| !value.trim().is_empty())
+        meta.name
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+            && meta
+                .symbol
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
             && meta.total_supply.is_some()
     }
 
@@ -131,40 +136,40 @@ impl CommandHandler for Erc721MetadataCommandHandler {
             }
 
             let outcome: Result<()> = async {
-            self.storage
-                .upsert_token_metadata(
-                    command.token,
-                    meta.name.as_deref(),
-                    meta.symbol.as_deref(),
-                    meta.total_supply,
-                )
-                .await?;
+                self.storage
+                    .upsert_token_metadata(
+                        command.token,
+                        meta.name.as_deref(),
+                        meta.symbol.as_deref(),
+                        meta.total_supply,
+                    )
+                    .await?;
 
-            if let Some(event_bus) = self.event_bus.lock().unwrap().clone() {
-                let meta_entry = proto::TokenMetadataEntry {
-                    token: command.token.to_bytes_be().to_vec(),
-                    name: meta.name,
-                    symbol: meta.symbol,
-                    total_supply: meta.total_supply.map(u256_to_bytes),
-                };
+                if let Some(event_bus) = self.event_bus.lock().unwrap().clone() {
+                    let meta_entry = proto::TokenMetadataEntry {
+                        token: command.token.to_bytes_be().to_vec(),
+                        name: meta.name,
+                        symbol: meta.symbol,
+                        total_supply: meta.total_supply.map(u256_to_bytes),
+                    };
 
-                let mut buf = Vec::new();
-                meta_entry.encode(&mut buf)?;
-                let any = Any {
-                    type_url: "type.googleapis.com/torii.sinks.erc721.TokenMetadataEntry"
-                        .to_string(),
-                    value: buf,
-                };
+                    let mut buf = Vec::new();
+                    meta_entry.encode(&mut buf)?;
+                    let any = Any {
+                        type_url: "type.googleapis.com/torii.sinks.erc721.TokenMetadataEntry"
+                            .to_string(),
+                        value: buf,
+                    };
 
-                event_bus.publish_protobuf(
-                    "erc721.metadata",
-                    "erc721.metadata",
-                    &any,
-                    &meta_entry,
-                    UpdateType::Created,
-                    Self::matches_metadata_filters,
-                );
-            }
+                    event_bus.publish_protobuf(
+                        "erc721.metadata",
+                        "erc721.metadata",
+                        &any,
+                        &meta_entry,
+                        UpdateType::Created,
+                        Self::matches_metadata_filters,
+                    );
+                }
 
                 Ok(())
             }

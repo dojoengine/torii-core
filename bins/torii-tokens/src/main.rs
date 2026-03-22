@@ -56,6 +56,7 @@ use torii::etl::extractor::{
 };
 use torii::etl::identification::ContractRegistry;
 use torii::EtlConcurrencyConfig;
+use torii_common::{MetadataFetcher, TokenUriService};
 use torii_config_common::apply_observability_env;
 use torii_runtime_common::database::resolve_token_db_setup;
 #[cfg(feature = "profiling")]
@@ -71,14 +72,14 @@ use torii_erc20::{
 use torii_erc721::proto::erc721_server::Erc721Server;
 use torii_erc721::{
     Erc721Decoder, Erc721MetadataCommandHandler, Erc721Rule, Erc721Service, Erc721Sink,
-    Erc721Storage, Erc721TokenUriCommandHandler, FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
+    Erc721Storage, FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
 };
 
 // Import from ERC1155 library crate
 use torii_erc1155::proto::erc1155_server::Erc1155Server;
 use torii_erc1155::{
     Erc1155Decoder, Erc1155MetadataCommandHandler, Erc1155Rule, Erc1155Service, Erc1155Sink,
-    Erc1155Storage, Erc1155TokenUriCommandHandler, FILE_DESCRIPTOR_SET as ERC1155_DESCRIPTOR_SET,
+    Erc1155Storage, FILE_DESCRIPTOR_SET as ERC1155_DESCRIPTOR_SET,
 };
 
 async fn contracts_from_registry(
@@ -524,6 +525,7 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut erc20_grpc_service: Option<Erc20Service> = None;
     let mut erc721_grpc_service: Option<Erc721Service> = None;
     let mut erc1155_grpc_service: Option<Erc1155Service> = None;
+    let mut token_uri_services = Vec::new();
 
     // Global extraction modes create all token infra for runtime auto-discovery.
     let is_global_mode =
@@ -589,20 +591,26 @@ async fn run_indexer(config: Config) -> Result<()> {
         torii_config = torii_config.add_decoder(decoder);
 
         let grpc_service = Erc721Service::new(storage.clone());
-        torii_config = torii_config
-            .with_command_handler(Box::new(Erc721MetadataCommandHandler::new(
+        torii_config =
+            torii_config.with_command_handler(Box::new(Erc721MetadataCommandHandler::new(
                 provider.clone(),
                 storage.clone(),
                 config.metadata_max_retries,
-            )))
-            .with_command_handler(Box::new(Erc721TokenUriCommandHandler::new(
-                provider.clone(),
-                storage.clone(),
-                Some(Path::new("./data").join("image-cache")),
             )));
         let mut sink = Erc721Sink::new(storage).with_grpc_service(grpc_service.clone());
         if effective_metadata_mode == MetadataMode::Inline {
-            sink = sink.with_metadata_commands().with_token_uri_commands();
+            let (token_uri_sender, token_uri_service) = TokenUriService::spawn_with_image_cache(
+                Arc::new(MetadataFetcher::new(provider.clone())),
+                sink.storage().clone(),
+                config.metadata_queue_capacity,
+                config.metadata_parallelism.max(1),
+                Some(Path::new("./data").join("image-cache")),
+                4,
+            );
+            token_uri_services.push(token_uri_service);
+            sink = sink
+                .with_metadata_commands()
+                .with_token_uri_sender(token_uri_sender);
         } else {
             tracing::info!("ERC721 metadata fetching disabled for throughput (deferred mode)");
         }
@@ -638,21 +646,25 @@ async fn run_indexer(config: Config) -> Result<()> {
         torii_config = torii_config.add_decoder(decoder);
 
         let grpc_service = Erc1155Service::new(storage.clone());
-        torii_config = torii_config
-            .with_command_handler(Box::new(Erc1155MetadataCommandHandler::new(
-                provider.clone(),
-                storage.clone(),
-            )))
-            .with_command_handler(Box::new(Erc1155TokenUriCommandHandler::new(
-                provider.clone(),
-                storage.clone(),
-                Some(Path::new("./data").join("image-cache")),
-            )));
+        torii_config = torii_config.with_command_handler(Box::new(
+            Erc1155MetadataCommandHandler::new(provider.clone(), storage.clone()),
+        ));
         let mut sink = Erc1155Sink::new(storage)
             .with_grpc_service(grpc_service.clone())
             .with_balance_tracking(provider.clone());
         if effective_metadata_mode == MetadataMode::Inline {
-            sink = sink.with_metadata_commands().with_token_uri_commands();
+            let (token_uri_sender, token_uri_service) = TokenUriService::spawn_with_image_cache(
+                Arc::new(MetadataFetcher::new(provider.clone())),
+                sink.storage().clone(),
+                config.metadata_queue_capacity,
+                config.metadata_parallelism.max(1),
+                Some(Path::new("./data").join("image-cache")),
+                4,
+            );
+            token_uri_services.push(token_uri_service);
+            sink = sink
+                .with_metadata_commands()
+                .with_token_uri_sender(token_uri_sender);
         } else {
             tracing::info!("ERC1155 metadata fetching disabled for throughput (deferred mode)");
         }
@@ -751,6 +763,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     torii::run(torii_config)
         .await
         .map_err(|e| anyhow::anyhow!("Torii error: {e}"))?;
+
+    drop(token_uri_services);
 
     tracing::info!("Torii shutdown complete");
 
