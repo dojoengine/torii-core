@@ -10,6 +10,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
+use tonic::codec::CompressionEncoding;
 use tonic::{Request, Response, Status, Streaming};
 
 pub mod proto {
@@ -308,5 +309,5 @@ impl Torii for ToriiService {
 }
 
 pub fn create_grpc_service(state: GrpcState) -> ToriiServer<ToriiService> {
-    ToriiServer::new(ToriiService::new(state))
+    ToriiServer::new(ToriiService::new(state)).accept_compressed(CompressionEncoding::Gzip)
 }

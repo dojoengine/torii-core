@@ -33,6 +33,7 @@ use starknet::core::types::Felt;
 use std::sync::Arc;
 #[cfg(feature = "profiling")]
 use std::time::{SystemTime, UNIX_EPOCH};
+use tonic::codec::CompressionEncoding;
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{BlockRangeConfig, BlockRangeExtractor};
 use torii_runtime_common::database::resolve_single_db_setup;
@@ -132,10 +133,13 @@ async fn main() -> Result<()> {
         .register_encoded_file_descriptor_set(torii::TORII_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
         .build_v1()
-        .expect("Failed to build gRPC reflection service");
+        .expect("Failed to build gRPC reflection service")
+        .accept_compressed(CompressionEncoding::Gzip);
+
+    let grpc_service = Erc20Server::new(grpc_service).accept_compressed(CompressionEncoding::Gzip);
 
     let grpc_router = tonic::transport::Server::builder()
-        .add_service(Erc20Server::new(grpc_service))
+        .add_service(grpc_service)
         .add_service(reflection);
 
     let mut torii_config = torii::ToriiConfig::builder()

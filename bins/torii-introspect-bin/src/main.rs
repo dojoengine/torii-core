@@ -11,6 +11,7 @@ use starknet::core::types::Felt;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use tonic::codec::CompressionEncoding;
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{
     ContractEventConfig, EventExtractor, EventExtractorConfig, Extractor, RetryPolicy,
@@ -512,44 +513,51 @@ async fn run_with_postgres(
 
     let reflection = reflection_builder
         .build_v1()
-        .expect("failed to build reflection service");
+        .expect("failed to build reflection service")
+        .accept_compressed(CompressionEncoding::Gzip);
+
+    let world_server =
+        WorldServer::new((*ecs_grpc_service).clone()).accept_compressed(CompressionEncoding::Gzip);
+    let erc20_server = token_services
+        .erc20
+        .map(|service| Erc20Server::new(service).accept_compressed(CompressionEncoding::Gzip));
+    let erc721_server = token_services
+        .erc721
+        .map(|service| Erc721Server::new(service).accept_compressed(CompressionEncoding::Gzip));
+    let erc1155_server = token_services
+        .erc1155
+        .map(|service| Erc1155Server::new(service).accept_compressed(CompressionEncoding::Gzip));
 
     let grpc_builder = tonic::transport::Server::builder()
         .accept_http1(true)
-        .add_service(tonic_web::enable(WorldServer::new(
-            (*ecs_grpc_service).clone(),
-        )));
-    let grpc_router = match (
-        token_services.erc20,
-        token_services.erc721,
-        token_services.erc1155,
-    ) {
+        .add_service(tonic_web::enable(world_server));
+    let grpc_router = match (erc20_server, erc721_server, erc1155_server) {
         (Some(erc20), Some(erc721), Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (Some(erc20), Some(erc721), None) => grpc_builder
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(reflection.clone())),
         (Some(erc20), None, Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, Some(erc721), Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (Some(erc20), None, None) => grpc_builder
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, Some(erc721), None) => grpc_builder
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, None, Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, None, None) => grpc_builder.add_service(tonic_web::enable(reflection)),
     };
 
@@ -651,44 +659,51 @@ async fn run_with_sqlite(
 
     let reflection = reflection_builder
         .build_v1()
-        .expect("failed to build reflection service");
+        .expect("failed to build reflection service")
+        .accept_compressed(CompressionEncoding::Gzip);
+
+    let world_server =
+        WorldServer::new((*ecs_grpc_service).clone()).accept_compressed(CompressionEncoding::Gzip);
+    let erc20_server = token_services
+        .erc20
+        .map(|service| Erc20Server::new(service).accept_compressed(CompressionEncoding::Gzip));
+    let erc721_server = token_services
+        .erc721
+        .map(|service| Erc721Server::new(service).accept_compressed(CompressionEncoding::Gzip));
+    let erc1155_server = token_services
+        .erc1155
+        .map(|service| Erc1155Server::new(service).accept_compressed(CompressionEncoding::Gzip));
 
     let grpc_builder = tonic::transport::Server::builder()
         .accept_http1(true)
-        .add_service(tonic_web::enable(WorldServer::new(
-            (*ecs_grpc_service).clone(),
-        )));
-    let grpc_router = match (
-        token_services.erc20,
-        token_services.erc721,
-        token_services.erc1155,
-    ) {
+        .add_service(tonic_web::enable(world_server));
+    let grpc_router = match (erc20_server, erc721_server, erc1155_server) {
         (Some(erc20), Some(erc721), Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (Some(erc20), Some(erc721), None) => grpc_builder
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(reflection.clone())),
         (Some(erc20), None, Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, Some(erc721), Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (Some(erc20), None, None) => grpc_builder
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, Some(erc721), None) => grpc_builder
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, None, Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, None, None) => grpc_builder.add_service(tonic_web::enable(reflection)),
     };
 

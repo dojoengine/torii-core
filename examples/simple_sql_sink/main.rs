@@ -9,6 +9,7 @@
 // Then: Open http://localhost:5173 in browser (after starting client)
 
 use std::sync::Arc;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
 use torii::{run, ToriiConfig};
 use torii_sql_sink::{SqlDecoder, SqlSink};
@@ -30,11 +31,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let grpc_router = {
         use torii_sql_sink::proto::sql_sink_server::SqlSinkServer;
 
+        let sql_service = SqlSinkServer::new((*sql_grpc_service).clone())
+            .accept_compressed(CompressionEncoding::Gzip);
+
         Server::builder()
             .accept_http1(true)
-            .add_service(tonic_web::enable(SqlSinkServer::new(
-                (*sql_grpc_service).clone(),
-            )))
+            .add_service(tonic_web::enable(sql_service))
         // Torii will add the core service to this router
     };
 

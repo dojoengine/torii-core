@@ -9,6 +9,7 @@ use starknet::core::types::Felt;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
+use tonic::codec::CompressionEncoding;
 use tonic_reflection::server::Builder as ReflectionBuilder;
 use torii::axum::Router;
 use torii::etl::decoder::DecoderId;
@@ -476,89 +477,65 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     let reflection = reflection_builder
         .build_v1()
-        .expect("failed to build Arcade reflection service");
+        .expect("failed to build Arcade reflection service")
+        .accept_compressed(CompressionEncoding::Gzip);
+
+    let world_server =
+        WorldServer::new((*ecs_grpc_service).clone()).accept_compressed(CompressionEncoding::Gzip);
+    let arcade_server = ArcadeServer::new((*arcade_grpc_service).clone())
+        .accept_compressed(CompressionEncoding::Gzip);
+    let erc20_server = erc20_grpc_service
+        .map(|service| Erc20Server::new(service).accept_compressed(CompressionEncoding::Gzip));
+    let erc721_server = erc721_grpc_service
+        .map(|service| Erc721Server::new(service).accept_compressed(CompressionEncoding::Gzip));
+    let erc1155_server = erc1155_grpc_service
+        .map(|service| Erc1155Server::new(service).accept_compressed(CompressionEncoding::Gzip));
 
     let mut grpc_builder = tonic::transport::Server::builder().accept_http1(true);
-    let grpc_router = match (
-        erc20_grpc_service,
-        erc721_grpc_service,
-        erc1155_grpc_service,
-    ) {
+    let grpc_router = match (erc20_server, erc721_server, erc1155_server) {
         (Some(erc20), Some(erc721), Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(world_server.clone()))
+            .add_service(tonic_web::enable(arcade_server.clone()))
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (Some(erc20), Some(erc721), None) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(world_server.clone()))
+            .add_service(tonic_web::enable(arcade_server.clone()))
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(reflection.clone())),
         (Some(erc20), None, Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(world_server.clone()))
+            .add_service(tonic_web::enable(arcade_server.clone()))
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, Some(erc721), Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(world_server.clone()))
+            .add_service(tonic_web::enable(arcade_server.clone()))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (Some(erc20), None, None) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(world_server.clone()))
+            .add_service(tonic_web::enable(arcade_server.clone()))
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, Some(erc721), None) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(world_server.clone()))
+            .add_service(tonic_web::enable(arcade_server.clone()))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, None, Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(world_server.clone()))
+            .add_service(tonic_web::enable(arcade_server.clone()))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, None, None) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
+            .add_service(tonic_web::enable(world_server))
+            .add_service(tonic_web::enable(arcade_server))
             .add_service(tonic_web::enable(reflection)),
     };
 

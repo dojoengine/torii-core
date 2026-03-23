@@ -47,7 +47,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 
 # gRPC and protobuf
 # Keep older version for now due to some compatibility issues with newer axum: https://github.com/hyperium/tonic/issues/1964.
-tonic = "0.12"
+tonic = { version = "0.12", features = ["gzip"] }
 tonic-reflection = "0.12"
 tonic-web = "0.12"
 prost = "0.13"

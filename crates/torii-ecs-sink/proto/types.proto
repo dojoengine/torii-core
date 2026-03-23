@@ -51,6 +51,23 @@ message EventQuery {
   Pagination pagination = 2;
 }
 
+message Token {
+  optional bytes token_id = 1;
+  bytes contract_address = 2;
+  string name = 3;
+  string symbol = 4;
+  uint32 decimals = 5;
+  bytes metadata = 6;
+  optional bytes total_supply = 7;
+}
+
+message TokenBalance {
+  bytes balance = 1;
+  bytes account_address = 2;
+  bytes contract_address = 3;
+  optional bytes token_id = 4;
+}
+
 message Clause {
   oneof clause_type {
     HashedKeysClause hashed_keys = 1;
@@ -143,6 +160,91 @@ message Pagination {
   repeated OrderBy order_by = 4;
 }
 
+message TokenAttributeFilter {
+  string trait_name = 1;
+  string trait_value = 2;
+}
+
+message TokenQuery {
+  repeated bytes contract_addresses = 1;
+  repeated bytes token_ids = 2;
+  repeated TokenAttributeFilter attribute_filters = 3;
+  Pagination pagination = 4;
+}
+
+message TokenBalanceQuery {
+  repeated bytes account_addresses = 1;
+  repeated bytes contract_addresses = 2;
+  repeated bytes token_ids = 3;
+  Pagination pagination = 4;
+}
+
+message TokenContractQuery {
+  repeated bytes contract_addresses = 1;
+  repeated ContractType contract_types = 2;
+  Pagination pagination = 3;
+}
+
+message TokenTransfer {
+  string id = 1;
+  bytes contract_address = 2;
+  bytes from_address = 3;
+  bytes to_address = 4;
+  bytes amount = 5;
+  optional bytes token_id = 6;
+  uint64 executed_at = 7;
+  optional string event_id = 8;
+}
+
+message TokenTransferQuery {
+  repeated bytes account_addresses = 1;
+  repeated bytes contract_addresses = 2;
+  repeated bytes token_ids = 3;
+  Pagination pagination = 4;
+}
+
+enum CallType {
+  EXECUTE = 0;
+  EXECUTE_FROM_OUTSIDE = 1;
+}
+
+message TransactionCall {
+  bytes contract_address = 1;
+  string entrypoint = 2;
+  repeated bytes calldata = 3;
+  CallType call_type = 4;
+  bytes caller_address = 5;
+}
+
+message Transaction {
+  bytes transaction_hash = 1;
+  bytes sender_address = 2;
+  repeated bytes calldata = 3;
+  bytes max_fee = 4;
+  repeated bytes signature = 5;
+  bytes nonce = 6;
+  uint64 block_number = 7;
+  string transaction_type = 8;
+  uint64 block_timestamp = 9;
+  repeated TransactionCall calls = 10;
+  repeated bytes unique_models = 11;
+}
+
+message TransactionFilter {
+  repeated bytes transaction_hashes = 1;
+  repeated bytes caller_addresses = 2;
+  repeated bytes contract_addresses = 3;
+  repeated string entrypoints = 4;
+  repeated bytes model_selectors = 5;
+  optional uint64 from_block = 6;
+  optional uint64 to_block = 7;
+}
+
+message TransactionQuery {
+  TransactionFilter filter = 1;
+  Pagination pagination = 2;
+}
+
 enum ContractType {
   WORLD = 0;
   ERC20 = 1;
@@ -166,4 +268,38 @@ message Contract {
 message ContractQuery {
   repeated bytes contract_addresses = 1;
   repeated ContractType contract_types = 2;
+}
+
+message SqlValue {
+  oneof value_type {
+    string text = 1;
+    int64 integer = 2;
+    double real = 3;
+    bytes blob = 4;
+    bool null = 5;
+  }
+}
+
+message SqlRow {
+  map<string, SqlValue> fields = 1;
+}
+
+message SqlQueryRequest {
+  string query = 1;
+}
+
+message SqlQueryResponse {
+  repeated SqlRow rows = 1;
+}
+
+message TokenContract {
+  bytes contract_address = 1;
+  ContractType contract_type = 2;
+  string name = 3;
+  string symbol = 4;
+  uint32 decimals = 5;
+  bytes metadata = 6;
+  optional bytes total_supply = 7;
+  string traits = 8;
+  bytes token_metadata = 9;
 }

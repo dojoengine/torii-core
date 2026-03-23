@@ -12,6 +12,7 @@
 //! or also spin up the client and test in the browser (inside `client` directory).
 
 use std::sync::Arc;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
 use torii::{run, ToriiConfig};
 use torii_log_sink::{LogDecoder, LogSink};
@@ -57,25 +58,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .register_encoded_file_descriptor_set(torii_sql_sink::FILE_DESCRIPTOR_SET) // SQL Sink
             .register_encoded_file_descriptor_set(torii_log_sink::FILE_DESCRIPTOR_SET) // Log Sink
             .build_v1()
-            .expect("Failed to build reflection v1");
+            .expect("Failed to build reflection v1")
+            .accept_compressed(CompressionEncoding::Gzip);
 
         let reflection_v1alpha = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(torii::TORII_DESCRIPTOR_SET) // Core Torii
             .register_encoded_file_descriptor_set(torii_sql_sink::FILE_DESCRIPTOR_SET) // SQL Sink
             .register_encoded_file_descriptor_set(torii_log_sink::FILE_DESCRIPTOR_SET) // Log Sink
             .build_v1alpha()
-            .expect("Failed to build reflection v1alpha");
+            .expect("Failed to build reflection v1alpha")
+            .accept_compressed(CompressionEncoding::Gzip);
+
+        let sql_service = SqlSinkServer::new((*sql_grpc_service).clone())
+            .accept_compressed(CompressionEncoding::Gzip);
+        let log_service = LogSinkServer::new((*log_grpc_service).clone())
+            .accept_compressed(CompressionEncoding::Gzip);
 
         Server::builder()
             // Accept HTTP/1.1 requests required for gRPC-Web to work.
             .accept_http1(true)
             // Add sink services.
-            .add_service(tonic_web::enable(SqlSinkServer::new(
-                (*sql_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(LogSinkServer::new(
-                (*log_grpc_service).clone(),
-            )))
+            .add_service(tonic_web::enable(sql_service))
+            .add_service(tonic_web::enable(log_service))
             // Add reflection services with ALL descriptors.
             .add_service(tonic_web::enable(reflection_v1))
             .add_service(tonic_web::enable(reflection_v1alpha))

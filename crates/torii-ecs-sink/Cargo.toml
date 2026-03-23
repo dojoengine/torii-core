@@ -27,6 +27,7 @@ tonic.workspace = true
 tracing.workspace = true
 metrics.workspace = true
 hex.workspace = true
+num-bigint = "0.4"
 
 [build-dependencies]
 tonic-build.workspace = true
