@@ -94,15 +94,14 @@ pub struct TokenUriSender {
 impl TokenUriSender {
     /// Queue a token URI fetch request.
     pub fn request_update(&self, request: TokenUriRequest) -> bool {
-        match self.tx.send(request) {
-            Ok(()) => true,
-            Err(_) => {
-                tracing::warn!(
-                    target: "torii_common::token_uri",
-                    "Failed to send token URI request (channel closed)"
-                );
-                false
-            }
+        if let Err(_error) = self.tx.send(request) {
+            tracing::warn!(
+                target: "torii_common::token_uri",
+                "Failed to send token URI request (channel closed)"
+            );
+            false
+        } else {
+            true
         }
     }
 
@@ -322,20 +321,17 @@ impl TokenUriService {
             }
 
             if pending.is_empty() {
-                match rx.recv().await {
-                    Some(result) => {
-                        pending.insert(
-                            TaskKey {
-                                contract: result.result.contract,
-                                token_id: result.result.token_id,
-                            },
-                            result,
-                        );
-                    }
-                    None => {
-                        closed = true;
-                        continue;
-                    }
+                if let Some(result) = rx.recv().await {
+                    pending.insert(
+                        TaskKey {
+                            contract: result.result.contract,
+                            token_id: result.result.token_id,
+                        },
+                        result,
+                    );
+                } else {
+                    closed = true;
+                    continue;
                 }
             } else {
                 let delay = tokio::time::sleep(WRITE_BATCH_DELAY);
@@ -355,7 +351,7 @@ impl TokenUriService {
                             None => closed = true,
                         }
                     }
-                    _ = &mut delay => {
+                    () = &mut delay => {
                         Self::flush_results(&store, &mut pending, image_cache.clone(), image_semaphore.clone()).await;
                     }
                 }
@@ -383,7 +379,7 @@ impl TokenUriService {
             return;
         }
 
-        let mut drained = pending
+        let drained = pending
             .drain()
             .map(|(_, result)| result)
             .collect::<Vec<_>>();
@@ -402,7 +398,7 @@ impl TokenUriService {
             return;
         }
 
-        for buffered in drained.drain(..) {
+        for buffered in drained {
             tracing::debug!(
                 target: "torii_common::token_uri",
                 contract = %format!("{:#x}", buffered.result.contract),
@@ -509,7 +505,7 @@ impl TokenUriService {
                 join_set.spawn(async move {
                     let result = resolve_token_uri_from_uri(request, raw_uri).await;
                     let image_uri = result.metadata_json.as_deref().and_then(extract_image_uri);
-                    (next_idx, BufferedTokenUriResult { image_uri, result })
+                    (next_idx, BufferedTokenUriResult { result, image_uri })
                 });
                 next_idx += 1;
             }

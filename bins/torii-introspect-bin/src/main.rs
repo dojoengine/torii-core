@@ -234,7 +234,7 @@ async fn configure_token_support(
             .add_sink_boxed(sink)
             .with_command_handler(Box::new(Erc721MetadataCommandHandler::new(
                 provider.clone(),
-                storage.clone(),
+                storage,
                 TOKEN_METADATA_MAX_RETRIES,
             )));
         services.erc721 = Some(grpc_service);
@@ -270,7 +270,7 @@ async fn configure_token_support(
             .add_sink_boxed(sink)
             .with_command_handler(Box::new(Erc1155MetadataCommandHandler::new(
                 provider.clone(),
-                storage.clone(),
+                storage,
             )));
         services.erc1155 = Some(grpc_service);
         reflection_builder =

@@ -426,7 +426,7 @@ async fn run_indexer(config: Config) -> Result<()> {
             .add_sink_boxed(Box::new(sink))
             .with_command_handler(Box::new(Erc721MetadataCommandHandler::new(
                 provider.clone(),
-                storage.clone(),
+                storage,
                 TOKEN_METADATA_MAX_RETRIES,
             )));
         reflection_builder =
@@ -463,7 +463,7 @@ async fn run_indexer(config: Config) -> Result<()> {
             .add_sink_boxed(Box::new(sink))
             .with_command_handler(Box::new(Erc1155MetadataCommandHandler::new(
                 provider.clone(),
-                storage.clone(),
+                storage,
             )));
         reflection_builder =
             reflection_builder.register_encoded_file_descriptor_set(ERC1155_DESCRIPTOR_SET);

@@ -290,7 +290,7 @@ impl Sink for Erc20Sink {
                     new_tokens.insert(approval.token);
                 }
 
-                let candidate_tokens: Vec<Felt> = new_tokens.into_iter().collect();
+                let candidate_tokens = new_tokens.into_iter();
                 let unchecked_tokens = {
                     let pending = self.pending_metadata_commands.lock().await;
                     candidate_tokens

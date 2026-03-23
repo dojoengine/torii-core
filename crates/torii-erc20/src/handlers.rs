@@ -108,7 +108,8 @@ impl CommandHandler for Erc20MetadataCommandHandler {
                     )
                     .await?;
 
-                if let Some(event_bus) = self.event_bus.lock().unwrap().clone() {
+                let event_bus = self.event_bus.lock().unwrap().clone();
+                if let Some(event_bus) = event_bus {
                     let meta_entry = proto::TokenMetadataEntry {
                         token: command.token.to_bytes_be().to_vec(),
                         name: meta.name,

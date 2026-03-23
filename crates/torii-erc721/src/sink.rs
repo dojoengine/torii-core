@@ -132,28 +132,6 @@ impl Erc721Sink {
         true
     }
 
-    /// Filter function for ERC721 token metadata updates.
-    ///
-    /// Supports filters:
-    /// - "token": Filter by token contract address (hex string)
-    fn matches_metadata_filters(
-        metadata: &proto::TokenMetadataEntry,
-        filters: &HashMap<String, String>,
-    ) -> bool {
-        if filters.is_empty() {
-            return true;
-        }
-
-        if let Some(token_filter) = filters.get("token") {
-            let token_hex = format!("0x{}", hex::encode(&metadata.token));
-            if !token_hex.eq_ignore_ascii_case(token_filter) {
-                return false;
-            }
-        }
-
-        true
-    }
-
     fn enqueue_token_uri_request(&self, contract: Felt, token_id: U256) -> bool {
         if let Some(sender) = &self.token_uri_sender {
             return sender.request_update(TokenUriRequest {
@@ -329,12 +307,11 @@ impl Sink for Erc721Sink {
         // Fetch metadata for any new token contracts.
         if self.metadata_commands_enabled {
             if let Some(ref command_bus) = self.command_bus {
-                let candidate_tokens: Vec<Felt> = transfers
+                let candidate_tokens = transfers
                     .iter()
                     .map(|transfer| transfer.token)
                     .collect::<HashSet<_>>()
-                    .into_iter()
-                    .collect();
+                    .into_iter();
                 let unchecked_tokens = {
                     let pending = self.pending_metadata_commands.lock().await;
                     candidate_tokens
@@ -386,48 +363,46 @@ impl Sink for Erc721Sink {
         }
 
         // Request token URI fetches for new token IDs.
-        if self.token_uri_commands_enabled {
-            if self.token_uri_sender.is_some() || self.command_bus.is_some() {
-                let candidate_tokens: Vec<(Felt, U256)> = transfers
-                    .iter()
-                    .map(|transfer| (transfer.token, transfer.token_id))
-                    .collect::<HashSet<_>>()
-                    .into_iter()
-                    .collect();
-                let unchecked_tokens = {
-                    let pending = self.pending_token_uri_commands.lock().await;
-                    candidate_tokens
+        if self.token_uri_commands_enabled
+            && (self.token_uri_sender.is_some() || self.command_bus.is_some())
+        {
+            let candidate_tokens = transfers
+                .iter()
+                .map(|transfer| (transfer.token, transfer.token_id))
+                .collect::<HashSet<_>>()
+                .into_iter();
+            let unchecked_tokens = {
+                let pending = self.pending_token_uri_commands.lock().await;
+                candidate_tokens
+                    .filter(|token| !pending.contains(token))
+                    .collect::<Vec<_>>()
+            };
+
+            match self.storage.has_token_uri_batch(&unchecked_tokens).await {
+                Ok(existing_tokens) => {
+                    let mut pending = self.pending_token_uri_commands.lock().await;
+                    for token in &existing_tokens {
+                        pending.remove(token);
+                    }
+
+                    for (contract, token_id) in unchecked_tokens
                         .into_iter()
-                        .filter(|token| !pending.contains(token))
-                        .collect::<Vec<_>>()
-                };
-
-                match self.storage.has_token_uri_batch(&unchecked_tokens).await {
-                    Ok(existing_tokens) => {
-                        let mut pending = self.pending_token_uri_commands.lock().await;
-                        for token in &existing_tokens {
-                            pending.remove(token);
+                        .filter(|token| !existing_tokens.contains(token))
+                    {
+                        if !pending.insert((contract, token_id)) {
+                            continue;
                         }
-
-                        for (contract, token_id) in unchecked_tokens
-                            .into_iter()
-                            .filter(|token| !existing_tokens.contains(token))
-                        {
-                            if !pending.insert((contract, token_id)) {
-                                continue;
-                            }
-                            if !self.enqueue_token_uri_request(contract, token_id) {
-                                pending.remove(&(contract, token_id));
-                            }
+                        if !self.enqueue_token_uri_request(contract, token_id) {
+                            pending.remove(&(contract, token_id));
                         }
                     }
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "torii_erc721::sink",
-                            error = %error,
-                            "Failed to batch-check token URI existence"
-                        );
-                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "torii_erc721::sink",
+                        error = %error,
+                        "Failed to batch-check token URI existence"
+                    );
                 }
             }
         }
