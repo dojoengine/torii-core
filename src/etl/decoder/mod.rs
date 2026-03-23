@@ -1,16 +1,13 @@
 pub mod context;
 
+use crate::etl::envelope::TransactionMsgs;
+use crate::etl::{EventData, TypedBody};
 use async_trait::async_trait;
+pub use context::DecoderContext;
 use starknet::core::types::Felt;
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use xxhash_rust::const_xxh3::xxh3_64;
-
-use crate::etl::EventData;
-
-use super::envelope::Envelope;
-
-pub use context::DecoderContext;
 
 /// Decoder transforms blockchain events into typed envelopes
 ///
@@ -95,7 +92,7 @@ pub use context::DecoderContext;
 /// - Multiple decoders process the same events without memory duplication.
 ///
 #[async_trait]
-pub trait Decoder: Send + Sync {
+pub trait TransactionDecoder: Send + Sync {
     /// Returns the unique name of this decoder
     ///
     /// This name is used to generate a deterministic `DecoderId` that identifies
@@ -113,9 +110,28 @@ pub trait Decoder: Send + Sync {
     /// ```
     fn decoder_name(&self) -> &str;
 
-    fn cursors(&self) -> Vec<(&Felt, u64)>;
+    /// Decode multiple events into typed envelopes (convenience method)
+    ///
+    /// Default implementation calls `decode_event` for each event.
+    /// Override only if batch processing provides meaningful optimization.
+    ///
+    /// # Arguments
+    /// * `events` - Reference to event slice.
+    ///
+    /// # Returns
+    /// Vector of all envelopes produced from all events.
+    async fn decode_contract_transaction(
+        &self,
+        from_address: Felt,
+        block_number: u64,
+        transaction_hash: Felt,
+        datas: &[EventData],
+    ) -> anyhow::Result<TransactionMsgs>;
+}
 
-    fn update_cursor(&self, from_address: Felt, block_number: u64, tx_hash: Felt);
+#[async_trait]
+pub trait Decoder: Send + Sync {
+    fn decoder_name(&self) -> &str;
     /// Decode a single event into typed envelopes
     ///
     /// This is the primary method that decoders should implement.
@@ -130,43 +146,47 @@ pub trait Decoder: Send + Sync {
         &self,
         from_address: &Felt,
         block_number: u64,
-        tx_hash: &Felt,
+        transaction_hash: &Felt,
         keys: &[Felt],
         data: &[Felt],
-    ) -> anyhow::Result<Vec<Envelope>>;
+    ) -> anyhow::Result<Vec<Box<dyn TypedBody>>>;
+}
 
-    /// Decode multiple events into typed envelopes (convenience method)
-    ///
-    /// Default implementation calls `decode_event` for each event.
-    /// Override only if batch processing provides meaningful optimization.
-    ///
-    /// # Arguments
-    /// * `events` - Reference to event slice.
-    ///
-    /// # Returns
-    /// Vector of all envelopes produced from all events.
-    async fn decode_contract_tx(
+#[async_trait]
+impl<D: Decoder + Send + Sync> TransactionDecoder for D {
+    fn decoder_name(&self) -> &str {
+        self.decoder_name()
+    }
+
+    async fn decode_contract_transaction(
         &self,
         from_address: Felt,
         block_number: u64,
-        tx_hash: Felt,
+        transaction_hash: Felt,
         datas: &[EventData],
-    ) -> anyhow::Result<Vec<Envelope>> {
-        let mut all_envelopes = Vec::new();
-        for event in datas {
-            let envelopes = self
-                .decode_event(
+    ) -> anyhow::Result<TransactionMsgs> {
+        let mut msgs = Vec::new();
+
+        for event_data in datas {
+            msgs.extend(
+                self.decode_event(
                     &from_address,
                     block_number,
-                    &tx_hash,
-                    &event.keys,
-                    &event.data,
+                    &transaction_hash,
+                    &event_data.keys,
+                    &event_data.data,
                 )
-                .await?;
-            all_envelopes.extend(envelopes);
+                .await?,
+            )
         }
-        self.update_cursor(from_address, block_number, tx_hash);
-        Ok(all_envelopes)
+
+        Ok(TransactionMsgs {
+            block_number,
+            transaction_hash,
+            from_address,
+            msgs: msgs,
+            timestamp: chrono::Utc::now().timestamp(),
+        })
     }
 }
 
@@ -268,8 +288,8 @@ impl ContractFilter {
     /// # Returns
     /// - `Some(&Vec<DecoderId>)` if explicit mapping exists (use ONLY these decoders)
     /// - `None` if no mapping exists (try ALL decoders - auto-discovery)
-    pub fn get_decoders(&self, contract: Felt) -> Option<&Vec<DecoderId>> {
-        self.mappings.get(&contract)
+    pub fn get_decoders(&self, contract: &Felt) -> Option<&Vec<DecoderId>> {
+        self.mappings.get(contract)
     }
 
     /// Validate configuration (no contract in both mapping and blacklist)

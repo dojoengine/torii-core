@@ -3,13 +3,52 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use starknet::core::codec::Decode;
-use starknet::core::types::{ByteArray, EmittedEvent, Felt, U256};
+use starknet::core::types::{ByteArray, Felt, U256};
 use starknet::core::utils::parse_cairo_short_string;
 use starknet::macros::selector;
 use std::any::Any;
-use std::collections::HashMap;
-use torii::etl::{Decoder, Envelope, TypedBody};
+use torii::etl::{Decoder, TypedBody};
+use torii::typed_body_impl;
 use torii_common::bytes_to_u256;
+
+pub const ERC1155_TRANSFER_SINGLE_SELECTOR: Felt = selector!("TransferSingle");
+pub const ERC1155_TRANSFER_BATCH_SELECTOR: Felt = selector!("TransferBatch");
+pub const ERC1155_APPROVAL_FOR_ALL_SELECTOR: Felt = selector!("ApprovalForAll");
+pub const ERC1155_URI_SELECTOR: Felt = selector!("URI");
+
+#[derive(Debug, Clone)]
+pub enum Erc1155Msg {
+    TransferSingle(TransferSingle),
+    TransferBatch(TransferBatch),
+    ApprovalForAll(OperatorApproval),
+    UriUpdate(UriUpdate),
+}
+
+typed_body_impl!(Erc1155Msg, "erc1155");
+
+impl From<TransferSingle> for Erc1155Msg {
+    fn from(value: TransferSingle) -> Self {
+        Erc1155Msg::TransferSingle(value)
+    }
+}
+
+impl From<TransferBatch> for Erc1155Msg {
+    fn from(value: TransferBatch) -> Self {
+        Erc1155Msg::TransferBatch(value)
+    }
+}
+
+impl From<OperatorApproval> for Erc1155Msg {
+    fn from(value: OperatorApproval) -> Self {
+        Erc1155Msg::ApprovalForAll(value)
+    }
+}
+
+impl From<UriUpdate> for Erc1155Msg {
+    fn from(value: UriUpdate) -> Self {
+        Erc1155Msg::UriUpdate(value)
+    }
+}
 
 /// TransferSingle event from ERC1155 token
 #[derive(Debug, Clone)]
@@ -139,26 +178,6 @@ impl Erc1155Decoder {
         bytes_to_u256(&felt.to_bytes_be())
     }
 
-    /// TransferSingle event selector: sn_keccak("TransferSingle")
-    fn transfer_single_selector() -> Felt {
-        selector!("TransferSingle")
-    }
-
-    /// TransferBatch event selector: sn_keccak("TransferBatch")
-    fn transfer_batch_selector() -> Felt {
-        selector!("TransferBatch")
-    }
-
-    /// ApprovalForAll event selector: sn_keccak("ApprovalForAll")
-    fn approval_for_all_selector() -> Felt {
-        selector!("ApprovalForAll")
-    }
-
-    /// URI event selector: sn_keccak("URI")
-    fn uri_selector() -> Felt {
-        selector!("URI")
-    }
-
     fn decode_string_result(result: &[Felt]) -> Option<String> {
         if result.is_empty() {
             return None;
@@ -217,88 +236,72 @@ impl Erc1155Decoder {
     /// - data[4]: id_high (u128)
     /// - data[5]: value_low (u128)
     /// - data[6]: value_high (u128)
-    async fn decode_transfer_single(&self, event: &EmittedEvent) -> Result<Option<Envelope>> {
+    async fn decode_transfer_single(
+        &self,
+        from_address: &Felt,
+        block_number: u64,
+        transaction_hash: &Felt,
+        keys: &[Felt],
+        data: &[Felt],
+    ) -> Result<Option<TransferSingle>> {
         let operator;
         let from;
         let to;
         let id: U256;
         let value: U256;
 
-        if event.keys.len() == 4 && event.data.len() == 4 {
+        if keys.len() == 4 && data.len() == 4 {
             // Modern format: operator, from, to in keys; id, value in data
-            operator = event.keys[1];
-            from = event.keys[2];
-            to = event.keys[3];
-            let id_low: u128 = event.data[0].try_into().unwrap_or(0);
-            let id_high: u128 = event.data[1].try_into().unwrap_or(0);
+            operator = keys[1];
+            from = keys[2];
+            to = keys[3];
+            let id_low: u128 = data[0].try_into().unwrap_or(0);
+            let id_high: u128 = data[1].try_into().unwrap_or(0);
             id = U256::from_words(id_low, id_high);
-            let value_low: u128 = event.data[2].try_into().unwrap_or(0);
-            let value_high: u128 = event.data[3].try_into().unwrap_or(0);
+            let value_low: u128 = data[2].try_into().unwrap_or(0);
+            let value_high: u128 = data[3].try_into().unwrap_or(0);
             value = U256::from_words(value_low, value_high);
-        } else if event.keys.len() == 1 && event.data.len() == 7 {
+        } else if keys.len() == 1 && data.len() == 7 {
             // Legacy format: all in data
-            operator = event.data[0];
-            from = event.data[1];
-            to = event.data[2];
-            let id_low: u128 = event.data[3].try_into().unwrap_or(0);
-            let id_high: u128 = event.data[4].try_into().unwrap_or(0);
+            operator = data[0];
+            from = data[1];
+            to = data[2];
+            let id_low: u128 = data[3].try_into().unwrap_or(0);
+            let id_high: u128 = data[4].try_into().unwrap_or(0);
             id = U256::from_words(id_low, id_high);
-            let value_low: u128 = event.data[5].try_into().unwrap_or(0);
-            let value_high: u128 = event.data[6].try_into().unwrap_or(0);
+            let value_low: u128 = data[5].try_into().unwrap_or(0);
+            let value_high: u128 = data[6].try_into().unwrap_or(0);
             value = U256::from_words(value_low, value_high);
-        } else if event.keys.len() == 4 && event.data.len() == 2 {
+        } else if keys.len() == 4 && data.len() == 2 {
             // Alternative modern format with single felt id and value
-            operator = event.keys[1];
-            from = event.keys[2];
-            to = event.keys[3];
-            id = Self::felt_to_u256(event.data[0]);
-            value = Self::felt_to_u256(event.data[1]);
+            operator = keys[1];
+            from = keys[2];
+            to = keys[3];
+            id = Self::felt_to_u256(data[0]);
+            value = Self::felt_to_u256(data[1]);
         } else {
             tracing::warn!(
                 target: "torii_erc1155::decoder",
-                token = %format!("{:#x}", event.from_address),
-                tx_hash = %format!("{:#x}", event.transaction_hash),
-                block_number = event.block_number.unwrap_or(0),
-                keys_len = event.keys.len(),
-                data_len = event.data.len(),
+                token = %format!("{:#x}", from_address),
+                tx_hash = %format!("{:#x}", transaction_hash),
+                block_number = block_number,
+                keys_len = keys.len(),
+                data_len = data.len(),
                 "Malformed ERC1155 TransferSingle event"
             );
             return Ok(None);
         }
 
-        let transfer = TransferSingle {
+        Ok(Some(TransferSingle {
             operator,
             from,
             to,
             id,
             value,
-            token: event.from_address,
-            block_number: event.block_number.unwrap_or(0),
-            transaction_hash: event.transaction_hash,
-        };
-
-        let mut metadata = HashMap::new();
-        metadata.insert("token".to_string(), format!("{:#x}", event.from_address));
-        metadata.insert(
-            "block_number".to_string(),
-            event.block_number.unwrap_or(0).to_string(),
-        );
-        metadata.insert(
-            "tx_hash".to_string(),
-            format!("{:#x}", event.transaction_hash),
-        );
-
-        let envelope_id = format!(
-            "erc1155_transfer_single_{}_{}",
-            event.block_number.unwrap_or(0),
-            format!("{:#x}", event.transaction_hash)
-        );
-
-        Ok(Some(Envelope::new(
-            envelope_id,
-            Box::new(transfer),
-            metadata,
-        )))
+            token: *from_address,
+            block_number,
+            transaction_hash: *transaction_hash,
+        }))
     }
 
     /// Decode TransferBatch event into multiple envelopes (one per id/value pair)
@@ -316,42 +319,49 @@ impl Erc1155Decoder {
     /// - data[2+ids_len*2..]: values (low, high pairs)
     ///
     /// Legacy: all in data
-    async fn decode_transfer_batch(&self, event: &EmittedEvent) -> Result<Vec<Envelope>> {
+    async fn decode_transfer_batch(
+        &self,
+        from_address: &Felt,
+        block_number: u64,
+        transaction_hash: &Felt,
+        keys: &[Felt],
+        data: &[Felt],
+    ) -> Result<Vec<TransferBatch>> {
         let operator;
         let from;
         let to;
         let mut data_offset = 0;
 
-        if event.keys.len() == 4 {
+        if keys.len() == 4 {
             // Modern format: operator, from, to in keys
-            operator = event.keys[1];
-            from = event.keys[2];
-            to = event.keys[3];
-        } else if event.keys.len() == 1 && event.data.len() >= 3 {
+            operator = keys[1];
+            from = keys[2];
+            to = keys[3];
+        } else if keys.len() == 1 && data.len() >= 3 {
             // Legacy format: operator, from, to at start of data
-            operator = event.data[0];
-            from = event.data[1];
-            to = event.data[2];
+            operator = data[0];
+            from = data[1];
+            to = data[2];
             data_offset = 3;
         } else {
             tracing::warn!(
                 target: "torii_erc1155::decoder",
-                token = %format!("{:#x}", event.from_address),
-                tx_hash = %format!("{:#x}", event.transaction_hash),
-                block_number = event.block_number.unwrap_or(0),
-                keys_len = event.keys.len(),
-                data_len = event.data.len(),
+                token = %format!("{:#x}", from_address),
+                tx_hash = %format!("{:#x}", transaction_hash),
+                block_number = block_number,
+                keys_len = keys.len(),
+                data_len = data.len(),
                 "Malformed ERC1155 TransferBatch event"
             );
             return Ok(vec![]);
         }
 
         // Parse ids array
-        if event.data.len() <= data_offset {
+        if data.len() <= data_offset {
             return Ok(vec![]);
         }
 
-        let ids_len: usize = event.data[data_offset].try_into().unwrap_or(0);
+        let ids_len: usize = data[data_offset].try_into().unwrap_or(0);
         data_offset += 1;
 
         fn parse_u256_slice(items: &[Felt], as_pairs: bool) -> Vec<U256> {
@@ -381,24 +391,24 @@ impl Erc1155Decoder {
         for ids_as_pairs in [true, false] {
             let id_words = if ids_as_pairs { 2 } else { 1 };
             let ids_end = data_offset.saturating_add(ids_len.saturating_mul(id_words));
-            if ids_end > event.data.len() || ids_end >= event.data.len() {
+            if ids_end > data.len() || ids_end >= data.len() {
                 continue;
             }
 
-            let candidate_ids = parse_u256_slice(&event.data[data_offset..ids_end], ids_as_pairs);
-            let values_len: usize = event.data[ids_end].try_into().unwrap_or(0);
+            let candidate_ids = parse_u256_slice(&data[data_offset..ids_end], ids_as_pairs);
+            let values_len: usize = data[ids_end].try_into().unwrap_or(0);
             let values_start = ids_end + 1;
 
             for values_as_pairs in [true, false] {
                 let value_words = if values_as_pairs { 2 } else { 1 };
                 let values_end =
                     values_start.saturating_add(values_len.saturating_mul(value_words));
-                if values_end > event.data.len() {
+                if values_end > data.len() {
                     continue;
                 }
 
                 ids.clone_from(&candidate_ids);
-                values = parse_u256_slice(&event.data[values_start..values_end], values_as_pairs);
+                values = parse_u256_slice(&data[values_start..values_end], values_as_pairs);
                 parsed = true;
                 break;
             }
@@ -411,115 +421,77 @@ impl Erc1155Decoder {
         if !parsed {
             tracing::warn!(
                 target: "torii_erc1155::decoder",
-                token = %format!("{:#x}", event.from_address),
-                tx_hash = %format!("{:#x}", event.transaction_hash),
-                block_number = event.block_number.unwrap_or(0),
+                token = %format!("{:#x}", from_address),
+                tx_hash = %format!("{:#x}", transaction_hash),
+                block_number = block_number,
                 ids_len = ids_len,
                 "Failed to parse ERC1155 TransferBatch ids/values arrays"
             );
             return Ok(vec![]);
         }
 
-        // Create envelope for each id/value pair
-        let mut envelopes = Vec::new();
+        let mut transfers = Vec::new();
         for (i, (id, value)) in ids.iter().zip(values.iter()).enumerate() {
-            let transfer = TransferBatch {
+            transfers.push(TransferBatch {
                 operator,
                 from,
                 to,
                 id: *id,
                 value: *value,
                 batch_index: i as u32,
-                token: event.from_address,
-                block_number: event.block_number.unwrap_or(0),
-                transaction_hash: event.transaction_hash,
-            };
-
-            let mut metadata = HashMap::new();
-            metadata.insert("token".to_string(), format!("{:#x}", event.from_address));
-            metadata.insert(
-                "block_number".to_string(),
-                event.block_number.unwrap_or(0).to_string(),
-            );
-            metadata.insert(
-                "tx_hash".to_string(),
-                format!("{:#x}", event.transaction_hash),
-            );
-            metadata.insert("batch_index".to_string(), i.to_string());
-
-            let envelope_id = format!(
-                "erc1155_transfer_batch_{}_{}_{}",
-                event.block_number.unwrap_or(0),
-                format!("{:#x}", event.transaction_hash),
-                i
-            );
-
-            envelopes.push(Envelope::new(envelope_id, Box::new(transfer), metadata));
+                token: *from_address,
+                block_number,
+                transaction_hash: *transaction_hash,
+            });
         }
 
-        Ok(envelopes)
+        Ok(transfers)
     }
 
     /// Decode ApprovalForAll event into envelope
-    async fn decode_approval_for_all(&self, event: &EmittedEvent) -> Result<Option<Envelope>> {
+    async fn decode_approval_for_all(
+        &self,
+        from_address: &Felt,
+        block_number: u64,
+        transaction_hash: &Felt,
+        keys: &[Felt],
+        data: &[Felt],
+    ) -> Result<Option<OperatorApproval>> {
         let owner;
         let operator;
         let approved: bool;
 
-        if event.keys.len() == 3 && event.data.len() == 1 {
+        if keys.len() == 3 && data.len() == 1 {
             // Modern format: owner, operator in keys; approved in data
-            owner = event.keys[1];
-            operator = event.keys[2];
-            approved = event.data[0] != Felt::ZERO;
-        } else if event.keys.len() == 1 && event.data.len() == 3 {
+            owner = keys[1];
+            operator = keys[2];
+            approved = data[0] != Felt::ZERO;
+        } else if keys.len() == 1 && data.len() == 3 {
             // Legacy format: all in data
-            owner = event.data[0];
-            operator = event.data[1];
-            approved = event.data[2] != Felt::ZERO;
+            owner = data[0];
+            operator = data[1];
+            approved = data[2] != Felt::ZERO;
         } else {
             tracing::warn!(
                 target: "torii_erc1155::decoder",
-                token = %format!("{:#x}", event.from_address),
-                tx_hash = %format!("{:#x}", event.transaction_hash),
-                block_number = event.block_number.unwrap_or(0),
-                keys_len = event.keys.len(),
-                data_len = event.data.len(),
+                token = %format!("{:#x}", from_address),
+                tx_hash = %format!("{:#x}", transaction_hash),
+                block_number = block_number,
+                keys_len = keys.len(),
+                data_len = data.len(),
                 "Malformed ERC1155 ApprovalForAll event"
             );
             return Ok(None);
         }
 
-        let approval = OperatorApproval {
+        Ok(Some(OperatorApproval {
             owner,
             operator,
             approved,
-            token: event.from_address,
-            block_number: event.block_number.unwrap_or(0),
-            transaction_hash: event.transaction_hash,
-        };
-
-        let mut metadata = HashMap::new();
-        metadata.insert("token".to_string(), format!("{:#x}", event.from_address));
-        metadata.insert(
-            "block_number".to_string(),
-            event.block_number.unwrap_or(0).to_string(),
-        );
-        metadata.insert(
-            "tx_hash".to_string(),
-            format!("{:#x}", event.transaction_hash),
-        );
-
-        let envelope_id = format!(
-            "erc1155_approval_for_all_{}_{}",
-            event.block_number.unwrap_or(0),
-            format!("{:#x}", event.transaction_hash)
-        );
-
-        Ok(Some(Envelope::new(
-            envelope_id,
-            Box::new(approval),
-            metadata,
-        )))
+            token: *from_address,
+            block_number,
+            transaction_hash: *transaction_hash,
+        }))
     }
 
     /// Decode URI event into envelope
@@ -528,46 +500,75 @@ impl Erc1155Decoder {
     /// - keys[0]: URI selector
     /// - keys[1]: token id (felt-encoded)
     /// - data: URI payload (short string or ByteArray)
-    async fn decode_uri(&self, event: &EmittedEvent) -> Result<Option<Envelope>> {
-        if event.keys.len() < 2 || event.data.is_empty() {
+    async fn decode_uri(
+        &self,
+        from_address: &Felt,
+        block_number: u64,
+        transaction_hash: &Felt,
+        keys: &[Felt],
+        data: &[Felt],
+    ) -> Result<Option<UriUpdate>> {
+        if keys.len() < 2 || data.is_empty() {
             return Ok(None);
         }
 
-        let token_id = Self::felt_to_u256(event.keys[1]);
-        let Some(uri) = Self::decode_string_result(&event.data) else {
+        let token_id = Self::felt_to_u256(keys[1]);
+        let Some(uri) = Self::decode_string_result(data) else {
             return Ok(None);
         };
 
-        let uri_update = UriUpdate {
-            token: event.from_address,
+        Ok(Some(UriUpdate {
+            token: *from_address,
             token_id,
             uri,
-            block_number: event.block_number.unwrap_or(0),
-            transaction_hash: event.transaction_hash,
+            block_number,
+            transaction_hash: *transaction_hash,
+        }))
+    }
+
+    async fn decode_erc1155_event(
+        &self,
+        from_address: &Felt,
+        block_number: u64,
+        transaction_hash: &Felt,
+        keys: &[Felt],
+        data: &[Felt],
+    ) -> Result<Vec<Erc1155Msg>> {
+        let selector = match keys.get(0) {
+            Some(s) => *s,
+            None => return Ok(vec![]),
         };
-
-        let mut metadata = HashMap::new();
-        metadata.insert("token".to_string(), format!("{:#x}", event.from_address));
-        metadata.insert(
-            "block_number".to_string(),
-            event.block_number.unwrap_or(0).to_string(),
-        );
-        metadata.insert(
-            "tx_hash".to_string(),
-            format!("{:#x}", event.transaction_hash),
-        );
-
-        let envelope_id = format!(
-            "erc1155_uri_{}_{}",
-            event.block_number.unwrap_or(0),
-            format!("{:#x}", event.transaction_hash)
-        );
-
-        Ok(Some(Envelope::new(
-            envelope_id,
-            Box::new(uri_update),
-            metadata,
-        )))
+        match selector {
+            ERC1155_TRANSFER_SINGLE_SELECTOR => self
+                .decode_transfer_single(from_address, block_number, transaction_hash, keys, data)
+                .await
+                .map(|opt| opt.into_iter().map(Into::into).collect()),
+            ERC1155_TRANSFER_BATCH_SELECTOR => self
+                .decode_transfer_batch(from_address, block_number, transaction_hash, keys, data)
+                .await
+                .map(|v| v.into_iter().map(Into::into).collect()),
+            ERC1155_APPROVAL_FOR_ALL_SELECTOR => self
+                .decode_approval_for_all(from_address, block_number, transaction_hash, keys, data)
+                .await
+                .map(|opt| opt.into_iter().map(Into::into).collect()),
+            ERC1155_URI_SELECTOR => self
+                .decode_uri(from_address, block_number, transaction_hash, keys, data)
+                .await
+                .map(|opt| opt.into_iter().map(Into::into).collect()),
+            _ => {
+                tracing::trace!(
+                    target: "torii_erc1155::decoder",
+                    token = %format!("{:#x}", from_address),
+                    selector = %format!("{:#x}", selector),
+                    keys_len = keys.len(),
+                    data_len = data.len(),
+                    block_number = block_number,
+                    tx_hash = %format!("{:#x}", transaction_hash),
+                    "Unhandled event selector"
+                );
+                Ok(vec![])
+            }
+        }
     }
 }
 
@@ -583,41 +584,21 @@ impl Decoder for Erc1155Decoder {
         "erc1155"
     }
 
-    async fn decode_event(&self, event: &EmittedEvent) -> Result<Vec<Envelope>> {
-        if event.keys.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let selector = event.keys[0];
-
-        if selector == Self::transfer_single_selector() {
-            if let Some(envelope) = self.decode_transfer_single(event).await? {
-                return Ok(vec![envelope]);
-            }
-        } else if selector == Self::transfer_batch_selector() {
-            return self.decode_transfer_batch(event).await;
-        } else if selector == Self::approval_for_all_selector() {
-            if let Some(envelope) = self.decode_approval_for_all(event).await? {
-                return Ok(vec![envelope]);
-            }
-        } else if selector == Self::uri_selector() {
-            if let Some(envelope) = self.decode_uri(event).await? {
-                return Ok(vec![envelope]);
-            }
-        } else {
-            tracing::trace!(
-                target: "torii_erc1155::decoder",
-                token = %format!("{:#x}", event.from_address),
-                selector = %format!("{:#x}", selector),
-                keys_len = event.keys.len(),
-                data_len = event.data.len(),
-                block_number = event.block_number.unwrap_or(0),
-                tx_hash = %format!("{:#x}", event.transaction_hash),
-                "Unhandled event selector"
-            );
-        }
-
-        Ok(Vec::new())
+    async fn decode_event(
+        &self,
+        from_address: &Felt,
+        block_number: u64,
+        transaction_hash: &Felt,
+        keys: &[Felt],
+        data: &[Felt],
+    ) -> Result<Vec<Box<dyn TypedBody>>> {
+        let msgs = self
+            .decode_erc1155_event(from_address, block_number, transaction_hash, keys, data)
+            .await?;
+        Ok(msgs
+            .into_iter()
+            .map(|m| -> Box<dyn TypedBody> { Box::new(m) })
+            .collect())
     }
 }
 
@@ -630,70 +611,70 @@ mod tests {
         let decoder = Erc1155Decoder::new();
 
         // Modern format: operator, from, to in keys; id, value in data
-        let event = EmittedEvent {
-            from_address: Felt::from(0x123u64),
-            keys: vec![
-                Erc1155Decoder::transfer_single_selector(),
-                Felt::from(0x1u64), // operator
-                Felt::from(0x2u64), // from
-                Felt::from(0x3u64), // to
-            ],
-            data: vec![
-                Felt::from(42u64),  // id_low
-                Felt::ZERO,         // id_high
-                Felt::from(100u64), // value_low
-                Felt::ZERO,         // value_high
-            ],
-            block_hash: None,
-            block_number: Some(100),
-            transaction_hash: Felt::from(0xabcdu64),
-        };
+        let from_address = Felt::from(0x123u64);
+        let keys = vec![
+            ERC1155_TRANSFER_SINGLE_SELECTOR,
+            Felt::from(0x1u64), // operator
+            Felt::from(0x2u64), // from
+            Felt::from(0x3u64), // to
+        ];
+        let data = vec![
+            Felt::from(42u64),  // id_low
+            Felt::ZERO,         // id_high
+            Felt::from(100u64), // value_low
+            Felt::ZERO,         // value_high
+        ];
+        let block_number = 100;
+        let transaction_hash = Felt::from(0xabcdu64);
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
-        assert_eq!(envelopes.len(), 1);
-
-        let transfer = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<TransferSingle>()
+        let msgs = decoder
+            .decode_event(&from_address, block_number, &transaction_hash, &keys, &data)
+            .await
             .unwrap();
+        assert_eq!(msgs.len(), 1);
 
-        assert_eq!(transfer.operator, Felt::from(0x1u64));
-        assert_eq!(transfer.from, Felt::from(0x2u64));
-        assert_eq!(transfer.to, Felt::from(0x3u64));
-        assert_eq!(transfer.id, U256::from(42u64));
-        assert_eq!(transfer.value, U256::from(100u64));
+        let msg = msgs[0].as_any().downcast_ref::<Erc1155Msg>().unwrap();
+        match msg {
+            Erc1155Msg::TransferSingle(t) => {
+                assert_eq!(t.operator, Felt::from(0x1u64));
+                assert_eq!(t.from, Felt::from(0x2u64));
+                assert_eq!(t.to, Felt::from(0x3u64));
+                assert_eq!(t.id, U256::from(42u64));
+                assert_eq!(t.value, U256::from(100u64));
+            }
+            _ => panic!("Expected TransferSingle event"),
+        }
     }
 
     #[tokio::test]
     async fn test_decode_approval_for_all() {
         let decoder = Erc1155Decoder::new();
 
-        let event = EmittedEvent {
-            from_address: Felt::from(0x456u64),
-            keys: vec![
-                Erc1155Decoder::approval_for_all_selector(),
-                Felt::from(0xau64), // owner
-                Felt::from(0xbu64), // operator
-            ],
-            data: vec![Felt::from(1u64)], // approved = true
-            block_hash: None,
-            block_number: Some(200),
-            transaction_hash: Felt::from(0xef01u64),
-        };
+        let from_address = Felt::from(0x456u64);
+        let keys = vec![
+            ERC1155_APPROVAL_FOR_ALL_SELECTOR,
+            Felt::from(0xau64), // owner
+            Felt::from(0xbu64), // operator
+        ];
+        let data = vec![Felt::from(1u64)]; // approved = true
+        let block_number = 200;
+        let transaction_hash = Felt::from(0xef01u64);
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
-        assert_eq!(envelopes.len(), 1);
-
-        let approval = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<OperatorApproval>()
+        let msgs = decoder
+            .decode_event(&from_address, block_number, &transaction_hash, &keys, &data)
+            .await
             .unwrap();
+        assert_eq!(msgs.len(), 1);
 
-        assert_eq!(approval.owner, Felt::from(0xau64));
-        assert_eq!(approval.operator, Felt::from(0xbu64));
-        assert!(approval.approved);
+        let msg = msgs[0].as_any().downcast_ref::<Erc1155Msg>().unwrap();
+        match msg {
+            Erc1155Msg::ApprovalForAll(a) => {
+                assert_eq!(a.owner, Felt::from(0xau64));
+                assert_eq!(a.operator, Felt::from(0xbu64));
+                assert!(a.approved);
+            }
+            _ => panic!("Expected ApprovalForAll event"),
+        }
     }
 
     #[tokio::test]
@@ -705,76 +686,78 @@ mod tests {
         let value_felt =
             Felt::from_hex("0x200000000000000000000000000000003").expect("invalid value felt");
 
-        let event = EmittedEvent {
-            from_address: Felt::from(0x123u64),
-            keys: vec![
-                Erc1155Decoder::transfer_single_selector(),
-                Felt::from(0x1u64),
-                Felt::from(0x2u64),
-                Felt::from(0x3u64),
-            ],
-            data: vec![id_felt, value_felt],
-            block_hash: None,
-            block_number: Some(101),
-            transaction_hash: Felt::from(0xabcdu64),
-        };
+        let from_address = Felt::from(0x123u64);
+        let keys = vec![
+            ERC1155_TRANSFER_SINGLE_SELECTOR,
+            Felt::from(0x1u64),
+            Felt::from(0x2u64),
+            Felt::from(0x3u64),
+        ];
+        let data = vec![id_felt, value_felt];
+        let block_number = 101;
+        let transaction_hash = Felt::from(0xabcdu64);
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
-        assert_eq!(envelopes.len(), 1);
-
-        let transfer = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<TransferSingle>()
+        let msgs = decoder
+            .decode_event(&from_address, block_number, &transaction_hash, &keys, &data)
+            .await
             .unwrap();
+        assert_eq!(msgs.len(), 1);
 
-        assert_eq!(transfer.id, Erc1155Decoder::felt_to_u256(id_felt));
-        assert_eq!(transfer.value, Erc1155Decoder::felt_to_u256(value_felt));
+        let msg = msgs[0].as_any().downcast_ref::<Erc1155Msg>().unwrap();
+        match msg {
+            Erc1155Msg::TransferSingle(t) => {
+                assert_eq!(t.id, Erc1155Decoder::felt_to_u256(id_felt));
+                assert_eq!(t.value, Erc1155Decoder::felt_to_u256(value_felt));
+            }
+            _ => panic!("Expected TransferSingle event"),
+        }
     }
 
     #[tokio::test]
     async fn test_decode_transfer_batch_single_felt_arrays() {
         let decoder = Erc1155Decoder::new();
 
-        let event = EmittedEvent {
-            from_address: Felt::from(0x123u64),
-            keys: vec![
-                Erc1155Decoder::transfer_batch_selector(),
-                Felt::from(0x1u64), // operator
-                Felt::from(0x2u64), // from
-                Felt::from(0x3u64), // to
-            ],
-            data: vec![
-                Felt::from(2u64),   // ids_len
-                Felt::from(11u64),  // id[0]
-                Felt::from(12u64),  // id[1]
-                Felt::from(2u64),   // values_len
-                Felt::from(101u64), // value[0]
-                Felt::from(102u64), // value[1]
-            ],
-            block_hash: None,
-            block_number: Some(102),
-            transaction_hash: Felt::from(0xabcfu64),
-        };
+        let from_address = Felt::from(0x123u64);
+        let keys = vec![
+            ERC1155_TRANSFER_BATCH_SELECTOR,
+            Felt::from(0x1u64), // operator
+            Felt::from(0x2u64), // from
+            Felt::from(0x3u64), // to
+        ];
+        let data = vec![
+            Felt::from(2u64),   // ids_len
+            Felt::from(11u64),  // id[0]
+            Felt::from(12u64),  // id[1]
+            Felt::from(2u64),   // values_len
+            Felt::from(101u64), // value[0]
+            Felt::from(102u64), // value[1]
+        ];
+        let block_number = 102;
+        let transaction_hash = Felt::from(0xabcfu64);
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
-        assert_eq!(envelopes.len(), 2);
-
-        let first = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<TransferBatch>()
+        let msgs = decoder
+            .decode_event(&from_address, block_number, &transaction_hash, &keys, &data)
+            .await
             .unwrap();
-        let second = envelopes[1]
-            .body
-            .as_any()
-            .downcast_ref::<TransferBatch>()
-            .unwrap();
+        assert_eq!(msgs.len(), 2);
 
-        assert_eq!(first.id, U256::from(11u64));
-        assert_eq!(first.value, U256::from(101u64));
-        assert_eq!(second.id, U256::from(12u64));
-        assert_eq!(second.value, U256::from(102u64));
+        let first = msgs[0].as_any().downcast_ref::<Erc1155Msg>().unwrap();
+        let second = msgs[1].as_any().downcast_ref::<Erc1155Msg>().unwrap();
+
+        match first {
+            Erc1155Msg::TransferBatch(t) => {
+                assert_eq!(t.id, U256::from(11u64));
+                assert_eq!(t.value, U256::from(101u64));
+            }
+            _ => panic!("Expected TransferBatch event"),
+        }
+        match second {
+            Erc1155Msg::TransferBatch(t) => {
+                assert_eq!(t.id, U256::from(12u64));
+                assert_eq!(t.value, U256::from(102u64));
+            }
+            _ => panic!("Expected TransferBatch event"),
+        }
     }
 
     #[tokio::test]
@@ -783,28 +766,29 @@ mod tests {
 
         // "abc" as short string felt
         let uri_felt = Felt::from(0x616263u64);
-        let event = EmittedEvent {
-            from_address: Felt::from(0x123u64),
-            keys: vec![
-                Erc1155Decoder::uri_selector(),
-                Felt::from(7u64), // token id
-            ],
-            data: vec![uri_felt],
-            block_hash: None,
-            block_number: Some(103),
-            transaction_hash: Felt::from(0xabd0u64),
-        };
+        let from_address = Felt::from(0x123u64);
+        let keys = vec![
+            ERC1155_URI_SELECTOR,
+            Felt::from(7u64), // token id
+        ];
+        let data = vec![uri_felt];
+        let block_number = 103;
+        let transaction_hash = Felt::from(0xabd0u64);
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
-        assert_eq!(envelopes.len(), 1);
-
-        let uri = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<UriUpdate>()
+        let msgs = decoder
+            .decode_event(&from_address, block_number, &transaction_hash, &keys, &data)
+            .await
             .unwrap();
-        assert_eq!(uri.token, Felt::from(0x123u64));
-        assert_eq!(uri.token_id, U256::from(7u64));
-        assert_eq!(uri.uri, "abc".to_string());
+        assert_eq!(msgs.len(), 1);
+
+        let msg = msgs[0].as_any().downcast_ref::<Erc1155Msg>().unwrap();
+        match msg {
+            Erc1155Msg::UriUpdate(u) => {
+                assert_eq!(u.token, Felt::from(0x123u64));
+                assert_eq!(u.token_id, U256::from(7u64));
+                assert_eq!(u.uri, "abc".to_string());
+            }
+            _ => panic!("Expected UriUpdate event"),
+        }
     }
 }

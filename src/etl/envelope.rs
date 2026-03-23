@@ -50,11 +50,22 @@ macro_rules! typed_body_impl {
                 self
             }
         }
+
+        impl From<$t> for Box<dyn TypedBody> {
+            fn from(value: $t) -> Self {
+                Box::new(value)
+            }
+        }
+
+        impl From<$t> for Vec<Box<dyn TypedBody>> {
+            fn from(value: $t) -> Self {
+                vec![value.into()]
+            }
+        }
     };
 }
 
 pub struct TransactionMsgs {
-    pub type_id: TypeId,
     pub block_number: u64,
     pub transaction_hash: Felt,
     pub from_address: Felt,
@@ -62,65 +73,29 @@ pub struct TransactionMsgs {
     pub timestamp: i64,
 }
 
-struct Event {
-    pub id: String,
-    pub type_id: TypeId,
-    pub from_address: Felt,
-}
-
-/// Envelope wraps transformed data with metadata
-/// This is the core data structure that flows through the ETL pipeline
-pub struct Envelope {
-    /// Unique identifier for this envelope
-    pub id: String,
-
-    /// Type identifier for the body
-    pub type_id: TypeId,
-
-    /// The actual data (can be downcast by sinks)
-    pub body: Box<dyn TypedBody>,
-
-    /// Metadata that sinks can use for filtering
-    pub metadata: HashMap<String, String>,
-
-    /// Timestamp when this envelope was created
-    pub timestamp: i64,
-}
-
-impl Envelope {
-    /// Creates a new envelope.
-    pub fn new(id: String, body: Box<dyn TypedBody>, metadata: HashMap<String, String>) -> Self {
-        let type_id = body.envelope_type_id();
+impl TransactionMsgs {
+    pub fn new(
+        block_number: u64,
+        transaction_hash: Felt,
+        from_address: Felt,
+        msgs: Vec<Box<dyn TypedBody>>,
+    ) -> Self {
         Self {
-            id,
-            type_id,
-            body,
-            metadata,
+            block_number,
+            transaction_hash,
+            from_address,
+            msgs,
             timestamp: chrono::Utc::now().timestamp(),
         }
     }
-
-    /// Tries to downcast the body to a concrete type.
-    pub fn downcast_ref<T: 'static>(&self) -> Option<&T> {
-        self.body.as_any().downcast_ref::<T>()
-    }
-
-    /// Tries to downcast the body to a mutable concrete type.
-    pub fn downcast_mut<T: 'static>(&mut self) -> Option<&mut T> {
-        self.body.as_any_mut().downcast_mut::<T>()
-    }
-}
-
-/// Debug implementation for Envelope.
-impl std::fmt::Debug for Envelope {
-    /// Formats the envelope for debugging.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Envelope")
-            .field("id", &self.id)
-            .field("type_id", &self.type_id)
-            .field("metadata", &self.metadata)
-            .field("timestamp", &self.timestamp)
-            .finish()
+    pub fn new_empty(block_number: u64, transaction_hash: Felt, from_address: Felt) -> Self {
+        Self {
+            block_number,
+            transaction_hash,
+            from_address,
+            msgs: Vec::new(),
+            timestamp: chrono::Utc::now().timestamp(),
+        }
     }
 }
 
@@ -131,86 +106,7 @@ pub struct MetaData {
     pub from_address: Felt,
 }
 
-#[derive(Debug, Clone)]
-pub struct EventBody<T> {
-    pub metadata: MetaData,
-    pub msg: T,
-}
-
 pub trait EventMsg: Send + Sync + 'static {
     fn event_id(&self) -> String;
     fn envelope_type_id(&self) -> TypeId;
-    fn to_body(self, raw: &EmittedEvent) -> EventBody<Self>
-    where
-        Self: Sized,
-    {
-        EventBody {
-            metadata: raw.into(),
-            msg: self,
-        }
-    }
-    fn to_envelope(self, raw: &EmittedEvent) -> Envelope
-    where
-        Self: Sized,
-    {
-        Envelope::new(self.event_id(), Box::new(self.to_body(raw)), HashMap::new())
-    }
-}
-
-impl<T> From<EventBody<T>> for (T, MetaData) {
-    fn from(value: EventBody<T>) -> Self {
-        (value.msg, value.metadata)
-    }
-}
-
-impl<T> From<(T, MetaData)> for EventBody<T> {
-    fn from(value: (T, MetaData)) -> Self {
-        let (msg, meta_data) = value;
-        EventBody {
-            msg,
-            metadata: meta_data,
-        }
-    }
-}
-
-impl<'a, T> From<&'a EventBody<T>> for (&'a T, &'a MetaData) {
-    fn from(value: &'a EventBody<T>) -> Self {
-        (&value.msg, &value.metadata)
-    }
-}
-impl From<&EmittedEvent> for MetaData {
-    fn from(value: &EmittedEvent) -> Self {
-        MetaData {
-            block_number: value.block_number,
-            transaction_hash: value.transaction_hash,
-            from_address: value.from_address,
-        }
-    }
-}
-
-impl<T: EventMsg + Send + Sync + 'static> From<EventBody<T>> for Envelope {
-    fn from(value: EventBody<T>) -> Self {
-        Envelope::new(
-            value.msg.event_id(),
-            Box::new(value),
-            HashMap::new(), // You can add relevant metadata here
-        )
-    }
-}
-
-impl<T> TypedBody for EventBody<T>
-where
-    T: EventMsg + Send + Sync + 'static,
-{
-    fn envelope_type_id(&self) -> TypeId {
-        self.msg.envelope_type_id()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
 }

@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::RwLock;
 use torii::etl::event::EmittedEventExt;
-use torii::etl::{Decoder, Envelope, EventMsg};
+use torii::etl::{Decoder, Envelope, EventMsg, TypedBody};
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_introspect::schema::{TableMetadata, TableSchema};
 use torii_introspect::EventId;
@@ -245,10 +245,11 @@ where
 
     pub async fn decode_event_data(
         &self,
-        raw: &EmittedEvent,
-        selector: &Felt,
+        from_address: &Felt,
+        block_number: u64,
+        transaction_hash: &Felt,
         keys: &[Felt],
-        values: &[Felt],
+        data: &[Felt],
     ) -> DojoToriiResult<IntrospectMsg> {
         let selector_raw = selector.to_raw();
         match selector_raw {
@@ -288,19 +289,6 @@ where
             _ => Err(DojoToriiError::UnknownDojoEventSelector(*selector)),
         }
     }
-
-    pub async fn decode_raw_event_msg(&self, raw: &EmittedEvent) -> DojoToriiResult<IntrospectMsg> {
-        let (selector, keys) = raw
-            .split_keys()
-            .ok_or(DojoToriiError::MissingEventSelector)?;
-        self.decode_event_data(raw, selector, keys, &raw.data).await
-    }
-
-    pub async fn decode_raw_event(&self, raw: &EmittedEvent) -> DojoToriiResult<IntrospectBody> {
-        self.decode_raw_event_msg(raw)
-            .await
-            .map(|msg| msg.to_body(raw))
-    }
 }
 
 #[async_trait]
@@ -313,10 +301,17 @@ where
         "dojo-introspect"
     }
 
-    async fn decode_event(&self, event: &EmittedEvent) -> AnyResult<Vec<Envelope>> {
+    async fn decode_event(
+        &self,
+        from_address: &Felt,
+        block_number: u64,
+        transaction_hash: &Felt,
+        keys: &[Felt],
+        data: &[Felt],
+    ) -> AnyResult<Vec<Box<dyn TypedBody>>> {
         self.decode_raw_event(event)
             .await
-            .map(|msg| vec![msg.into()])
+            .map(Into::into)
             .err_into()
     }
 }

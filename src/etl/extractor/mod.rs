@@ -2,22 +2,17 @@
 
 pub mod block;
 pub mod block_range;
-pub mod composite;
 pub mod contract;
-pub mod event;
 pub mod event_common;
 pub mod events;
-pub mod global_event;
 pub mod retry;
 pub mod sample;
 pub mod starknet_helpers;
 pub mod synthetic;
 pub mod synthetic_adapter;
 pub mod synthetic_erc20;
-pub mod weighted_queue;
 
-use crate::etl::cursor::Cursors;
-use crate::etl::{cursor::Cursor, engine_db::EngineDb};
+use crate::etl::engine_db::EngineDb;
 use anyhow::Result;
 use async_trait::async_trait;
 use starknet::core::types::{BlockWithReceipts, Felt};
@@ -25,20 +20,16 @@ use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 
 pub use block_range::{BlockRangeConfig, BlockRangeExtractor};
-pub use composite::CompositeExtractor;
-pub use event::{ContractEventConfig, EventExtractor, EventExtractorConfig};
 pub use events::{
     BlockEvents, BlockTransactionEvents, ContractEvents, EventData, ExtractedEvents,
     TransactionEvents,
 };
-pub use global_event::{GlobalEventExtractor, GlobalEventExtractorConfig};
 pub use retry::RetryPolicy;
 pub use sample::SampleExtractor;
 pub use starknet_helpers::{ContractAbi, ProviderResult};
 pub use synthetic::SyntheticExtractor;
 pub use synthetic_adapter::SyntheticExtractorAdapter;
 pub use synthetic_erc20::{SyntheticErc20Config, SyntheticErc20Extractor};
-pub use weighted_queue::WeightedQueue;
 
 pub type FeltMap<V> = HashMap<Felt, V, ahash::RandomState>;
 pub type FeltSet = HashSet<Felt, ahash::RandomState>;
@@ -127,22 +118,12 @@ pub trait Extractor: Send + Sync {
 pub trait HybridExtractor {
     type Error;
     async fn next_batch(&mut self) -> Result<ExtractedEvents, Self::Error>;
-    async fn cursors(&self) -> (&Cursor, &Cursors);
 }
 
 pub trait ContractsExtractor {
     type Error: Send;
-    async fn next_events(&mut self) -> Result<Vec<ContractEvents>, Self::Error>;
-    async fn add_contract(
-        &mut self,
-        contract_address: Felt,
-        cursor: Option<Cursor>,
-        end: Option<u64>,
-    );
-    async fn remove_contract(&mut self, contract_address: &Felt);
-    async fn update_head(&mut self, block_number: u64);
-    fn cursors(&self) -> &Cursors;
-    fn contract_addresses(&self) -> &[Felt];
+    async fn next_events(&mut self) -> Vec<Result<ContractEvents, Self::Error>>;
+    fn at_end_block(&self) -> bool;
 }
 
 #[async_trait]
@@ -252,3 +233,5 @@ pub trait BlockExtractor: Sync {
         }
     }
 }
+
+// pub trait Contract

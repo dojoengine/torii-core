@@ -370,13 +370,6 @@ fn benchmark_decoder_context(c: &mut Criterion) {
     let context_fallback =
         DecoderContext::new(decoders.clone(), engine_db.clone(), ContractFilter::new());
 
-    let registry_cache = Arc::new(RwLock::new(HashMap::new()));
-    rt.block_on(async {
-        registry_cache.write().await.insert(
-            Felt::from(0xDEAD_u64),
-            vec![DecoderId::new("bench-decoder-6")],
-        );
-    });
     let context_registry =
         DecoderContext::with_registry(decoders, engine_db, ContractFilter::new(), registry_cache);
 

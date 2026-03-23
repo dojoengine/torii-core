@@ -8,13 +8,20 @@ pub struct Cursor {
     tx_hashes: Vec<Felt>,
 }
 
-pub enum Cursors {
-    Global(Cursor),
-    Contracts(FeltMap<Cursor>),
+pub enum Cursors<'a> {
+    Global(&'a Cursor),
+    Contracts(FeltMap<&'a Cursor>),
 }
 
 impl Cursor {
-    pub fn new(block_number: u64, tx_hashes: Vec<Felt>) -> Self {
+    pub fn new(block_number: u64) -> Self {
+        Self {
+            block_number,
+            tx_hashes: Vec::new(),
+        }
+    }
+
+    pub fn new_with_tx(block_number: u64, tx_hashes: Vec<Felt>) -> Self {
         Self {
             block_number,
             tx_hashes,
@@ -62,6 +69,12 @@ impl Cursor {
     pub fn set(&mut self, block_number: u64, tx_hashes: Vec<Felt>) {
         self.block_number = block_number;
         self.tx_hashes = tx_hashes;
+    }
+    pub fn update_block_number(&mut self, block_number: u64) {
+        if block_number > self.block_number {
+            self.block_number = block_number;
+            self.tx_hashes.clear();
+        }
     }
 
     pub fn claim(&mut self, block_number: u64, tx_hash: Felt) -> bool {

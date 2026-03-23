@@ -10,7 +10,7 @@ pub mod sink;
 pub use cursor::Cursor;
 pub use decoder::{Decoder, DecoderContext};
 pub use engine_db::{EngineDb, EngineStats};
-pub use envelope::{Envelope, EventBody, EventMsg, MetaData, TypeId, TypedBody};
+pub use envelope::{EventMsg, MetaData, TypeId, TypedBody};
 pub use extractor::{
     BlockEvents, BlockTransactionEvents, ContractAbi, ContractEvents, EventData, ExtractedEvents,
     Extractor, SampleExtractor, SyntheticErc20Config, SyntheticErc20Extractor, SyntheticExtractor,

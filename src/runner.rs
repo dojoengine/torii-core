@@ -1,7 +1,7 @@
 use crate::etl::engine_db::EngineDbConfig;
 use crate::etl::extractor::Extractor;
 use crate::etl::sink::{EventBus, Sink};
-use crate::etl::{DecoderContext, EngineDb, MultiSink, SampleExtractor};
+use crate::etl::{self, DecoderContext, EngineDb, MultiSink, SampleExtractor};
 use crate::{create_grpc_service, GrpcState, SubscriptionManager};
 use crate::{create_http_router, ToriiConfig};
 use crate::{metrics, FILE_DESCRIPTOR_SET};

@@ -8,7 +8,8 @@ use introspect_types::{
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
 use torii::etl::envelope::EventMsg;
-use torii::etl::{EventBody, TypeId};
+use torii::etl::{EventBody, TypeId, TypedBody};
+use torii::typed_body_impl;
 
 use crate::schema::TableSchema;
 
@@ -59,11 +60,7 @@ impl EventMsg for IntrospectMsg {
     }
 }
 
-impl EventId for IntrospectBody {
-    fn event_id(&self) -> String {
-        self.msg.event_id()
-    }
-}
+typed_body_impl!(IntrospectMsg, "introspect");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTable {

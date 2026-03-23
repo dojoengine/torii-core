@@ -8,10 +8,10 @@ use std::mem;
 
 #[derive(Debug, Clone, Default)]
 pub enum ExtractedEvents {
-    Contract(FeltMap<ContractEvents>),
-    Block(Vec<BlockEvents>),
     #[default]
     None,
+    Contract(FeltMap<ContractEvents>),
+    Block(Vec<BlockEvents>),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -165,6 +165,15 @@ impl<'a> ExtractEventData<'a> for TransactionReceipt {
             TransactionReceipt::DeployAccount(deploy_account) => {
                 deploy_account.extract_event_data(events)
             }
+        }
+    }
+}
+
+impl ContractEvents {
+    pub fn new(contract_address: Felt, transactions: Vec<TransactionEvents>) -> Self {
+        ContractEvents {
+            contract_address,
+            transactions,
         }
     }
 }

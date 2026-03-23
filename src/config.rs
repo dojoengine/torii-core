@@ -91,20 +91,6 @@ pub struct ToriiConfig {
     /// a registry cache via `with_registry_cache()` for identification to work.
     pub identification_rules: Vec<Box<dyn IdentificationRule>>,
 
-    /// Optional shared registry cache from ContractRegistry.
-    ///
-    /// If provided, the DecoderContext will use this cache to look up
-    /// contract→decoder mappings for contracts not in explicit mappings.
-    /// The cache is typically populated by a ContractRegistry running batch
-    /// identification before decoding.
-    pub registry_cache: Option<
-        Arc<
-            tokio::sync::RwLock<
-                std::collections::HashMap<starknet::core::types::Felt, Vec<DecoderId>>,
-            >,
-        >,
-    >,
-
     /// Optional contract identifier for runtime identification.
     ///
     /// If provided (via `with_contract_identifier()`), unknown contracts
@@ -483,7 +469,6 @@ impl ToriiConfigBuilder {
             engine_database_url: self.engine_database_url,
             contract_filter,
             identification_rules: self.identification_rules,
-            registry_cache: self.registry_cache,
             contract_identifier: self.contract_identifier,
             shutdown_timeout: self.shutdown_timeout.unwrap_or(30),
             etl_concurrency: self.etl_concurrency.unwrap_or_default(),

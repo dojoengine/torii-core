@@ -10,7 +10,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::etl::engine_db::EngineDb;
 
-use super::{BlockContext, ExtractionBatch, Extractor, TransactionContext};
+use super::Extractor;
 
 /// Simple extractor that cycles through predefined events
 pub struct SampleExtractor {

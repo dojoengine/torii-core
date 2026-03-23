@@ -199,6 +199,7 @@ prost.workspace = true
 xxhash-rust.workspace = true
 ahash.workspace = true
 itertools.workspace = true
+thiserror.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true
