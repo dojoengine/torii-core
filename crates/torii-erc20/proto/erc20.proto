@@ -240,6 +240,8 @@ message TokenMetadataEntry {
     optional string symbol = 3;
     // Token decimals (e.g. 18)
     optional uint32 decimals = 4;
+    // Total supply as U256 (variable length, up to 32 bytes)
+    optional bytes total_supply = 5;
 }
 
 // Response for GetTokenMetadata RPC

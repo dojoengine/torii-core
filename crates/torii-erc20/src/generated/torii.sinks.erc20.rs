@@ -282,6 +282,9 @@ pub struct TokenMetadataEntry {
     /// Token decimals (e.g. 18)
     #[prost(uint32, optional, tag = "4")]
     pub decimals: ::core::option::Option<u32>,
+    /// Total supply as U256 (variable length, up to 32 bytes)
+    #[prost(bytes = "vec", optional, tag = "5")]
+    pub total_supply: ::core::option::Option<::prost::alloc::vec::Vec<u8>>,
 }
 /// Response for GetTokenMetadata RPC
 #[derive(Clone, PartialEq, ::prost::Message)]

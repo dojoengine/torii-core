@@ -114,7 +114,7 @@ impl CommandHandler for SyntheticErc20MetadataCommandHandler {
         let name = format!("Synthetic ERC20 {suffix}");
         let symbol = format!("S{suffix}");
         self.storage
-            .upsert_token_metadata(command.token, Some(&name), Some(&symbol), Some(18))
+            .upsert_token_metadata(command.token, Some(&name), Some(&symbol), Some(18), None)
             .await
     }
 }

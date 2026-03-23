@@ -27,6 +27,7 @@ starknet-types-core.workspace = true
 thiserror.workspace = true
 introspect-types.workspace = true
 itertools.workspace = true
+primitive-types.workspace = true
 
 torii-introspect.workspace = true
 torii-sqlite.workspace = true

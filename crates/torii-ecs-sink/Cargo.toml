@@ -28,6 +28,7 @@ tracing.workspace = true
 metrics.workspace = true
 hex.workspace = true
 num-bigint = "0.4"
+primitive-types.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true

@@ -22,9 +22,24 @@ pub struct EcsSink {
 }
 
 impl EcsSink {
-    pub async fn new(database_url: &str, max_connections: Option<u32>) -> Result<Self> {
+    pub async fn new(
+        database_url: &str,
+        max_connections: Option<u32>,
+        erc20_url: Option<&str>,
+        erc721_url: Option<&str>,
+        erc1155_url: Option<&str>,
+    ) -> Result<Self> {
         Ok(Self {
-            service: Arc::new(EcsService::new(database_url, max_connections).await?),
+            service: Arc::new(
+                EcsService::new(
+                    database_url,
+                    max_connections,
+                    erc20_url,
+                    erc721_url,
+                    erc1155_url,
+                )
+                .await?,
+            ),
         })
     }
 
@@ -222,6 +237,7 @@ impl Sink for EcsSink {
         _event_bus: Arc<EventBus>,
         _context: &SinkContext,
     ) -> Result<()> {
+        self.service.attach_erc_databases().await?;
         Ok(())
     }
 }

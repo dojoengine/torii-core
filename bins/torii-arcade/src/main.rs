@@ -321,7 +321,14 @@ async fn run_indexer(config: Config) -> Result<()> {
         }
     };
 
-    let ecs_sink = EcsSink::new(&storage_database_url, config.max_db_connections).await?;
+    let ecs_sink = EcsSink::new(
+        &storage_database_url,
+        config.max_db_connections,
+        Some(erc20_db_url.as_str()),
+        Some(erc721_db_url.as_str()),
+        Some(erc1155_db_url.as_str()),
+    )
+    .await?;
     let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
     let arcade_sink = ArcadeSink::new(
         &storage_database_url,

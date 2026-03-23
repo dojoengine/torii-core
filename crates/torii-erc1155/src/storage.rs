@@ -179,11 +179,11 @@ impl Erc1155Storage {
                     to_addr BYTEA NOT NULL,
                     token_id BYTEA NOT NULL,
                     amount BYTEA NOT NULL,
-                    is_batch BIGINT NOT NULL DEFAULT 0,
-                    batch_index BIGINT NOT NULL DEFAULT 0,
-                    block_number BIGINT NOT NULL,
+                    is_batch TEXT NOT NULL DEFAULT '0',
+                    batch_index TEXT NOT NULL DEFAULT '0',
+                    block_number TEXT NOT NULL,
                     tx_hash BYTEA NOT NULL,
-                    timestamp BIGINT,
+                    timestamp TEXT,
                     UNIQUE(token, tx_hash, token_id, from_addr, to_addr, batch_index)
                 );
                 CREATE INDEX IF NOT EXISTS idx_token_transfers_token ON erc1155.token_transfers(token);
@@ -198,7 +198,7 @@ impl Erc1155Storage {
                     token BYTEA NOT NULL,
                     transfer_id BIGINT NOT NULL REFERENCES erc1155.token_transfers(id),
                     direction TEXT NOT NULL CHECK(direction IN ('sent', 'received', 'both')),
-                    block_number BIGINT NOT NULL
+                    block_number TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_token_wallet_activity_wallet_block ON erc1155.token_wallet_activity(wallet_address, block_number DESC);
                 CREATE INDEX IF NOT EXISTS idx_token_wallet_activity_wallet_token ON erc1155.token_wallet_activity(wallet_address, token, block_number DESC);
@@ -208,10 +208,10 @@ impl Erc1155Storage {
                     token BYTEA NOT NULL,
                     owner BYTEA NOT NULL,
                     operator BYTEA NOT NULL,
-                    approved BIGINT NOT NULL,
-                    block_number BIGINT NOT NULL,
+                    approved TEXT NOT NULL,
+                    block_number TEXT NOT NULL,
                     tx_hash BYTEA NOT NULL,
-                    timestamp BIGINT,
+                    timestamp TEXT,
                     UNIQUE(token, owner, operator)
                 );
 
@@ -220,7 +220,7 @@ impl Erc1155Storage {
                     token_id BYTEA NOT NULL,
                     uri TEXT,
                     metadata_json TEXT,
-                    updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+                    updated_at TEXT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT::TEXT),
                     PRIMARY KEY (token, token_id)
                 );
 
@@ -252,7 +252,7 @@ impl Erc1155Storage {
                     facet_key_id BIGINT NOT NULL REFERENCES erc1155.facet_keys(id) ON DELETE CASCADE,
                     value_norm TEXT NOT NULL,
                     value_display TEXT NOT NULL,
-                    token_count BIGINT NOT NULL DEFAULT 0,
+                    token_count TEXT NOT NULL DEFAULT '0',
                     UNIQUE(token, facet_key_id, value_norm)
                 );
                 CREATE INDEX IF NOT EXISTS idx_facet_values_token_key_value ON erc1155.facet_values(token, facet_key_id, value_norm);
@@ -273,8 +273,8 @@ impl Erc1155Storage {
                     wallet BYTEA NOT NULL,
                     token_id BYTEA NOT NULL,
                     balance BYTEA NOT NULL,
-                    last_block BIGINT NOT NULL,
-                    updated_at BIGINT DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+                    last_block TEXT NOT NULL,
+                    updated_at TEXT DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT::TEXT),
                     UNIQUE(contract, wallet, token_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_erc1155_balances_contract ON erc1155.erc1155_balances(contract);
@@ -288,9 +288,9 @@ impl Erc1155Storage {
                     token_id BYTEA NOT NULL,
                     computed_balance BYTEA NOT NULL,
                     actual_balance BYTEA NOT NULL,
-                    adjusted_at_block BIGINT NOT NULL,
+                    adjusted_at_block TEXT NOT NULL,
                     tx_hash BYTEA NOT NULL,
-                    created_at BIGINT DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+                    created_at TEXT DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT::TEXT)
                 );
                 CREATE INDEX IF NOT EXISTS idx_erc1155_adjustments_wallet ON erc1155.erc1155_balance_adjustments(wallet);
 
@@ -338,11 +338,11 @@ impl Erc1155Storage {
                 to_addr BLOB NOT NULL,
                 token_id BLOB NOT NULL,
                 amount BLOB NOT NULL,
-                is_batch INTEGER NOT NULL DEFAULT 0,
-                batch_index INTEGER NOT NULL DEFAULT 0,
-                block_number INTEGER NOT NULL,
+                is_batch TEXT NOT NULL DEFAULT '0',
+                batch_index TEXT NOT NULL DEFAULT '0',
+                block_number TEXT NOT NULL,
                 tx_hash BLOB NOT NULL,
-                timestamp INTEGER,
+                timestamp TEXT,
                 UNIQUE(token, tx_hash, token_id, from_addr, to_addr, batch_index)
             )",
             [],
@@ -381,7 +381,7 @@ impl Erc1155Storage {
                 token BLOB NOT NULL,
                 transfer_id INTEGER NOT NULL,
                 direction TEXT NOT NULL CHECK(direction IN ('sent', 'received', 'both')),
-                block_number INTEGER NOT NULL,
+                block_number TEXT NOT NULL,
                 FOREIGN KEY (transfer_id) REFERENCES token_transfers(id)
             )",
             [],
@@ -406,10 +406,10 @@ impl Erc1155Storage {
                 token BLOB NOT NULL,
                 owner BLOB NOT NULL,
                 operator BLOB NOT NULL,
-                approved INTEGER NOT NULL,
-                block_number INTEGER NOT NULL,
+                approved TEXT NOT NULL,
+                block_number TEXT NOT NULL,
                 tx_hash BLOB NOT NULL,
-                timestamp INTEGER,
+                timestamp TEXT,
                 UNIQUE(token, owner, operator)
             )",
             [],
@@ -422,7 +422,7 @@ impl Erc1155Storage {
                 token_id BLOB NOT NULL,
                 uri TEXT,
                 metadata_json TEXT,
-                updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%s', 'now')),
                 PRIMARY KEY (token, token_id)
             )",
             [],
@@ -458,7 +458,7 @@ impl Erc1155Storage {
                 facet_key_id INTEGER NOT NULL,
                 value_norm TEXT NOT NULL,
                 value_display TEXT NOT NULL,
-                token_count INTEGER NOT NULL DEFAULT 0,
+                token_count TEXT NOT NULL DEFAULT '0',
                 UNIQUE(token, facet_key_id, value_norm),
                 FOREIGN KEY (facet_key_id) REFERENCES facet_keys(id) ON DELETE CASCADE
             );
@@ -486,8 +486,8 @@ impl Erc1155Storage {
                 wallet BLOB NOT NULL,
                 token_id BLOB NOT NULL,
                 balance BLOB NOT NULL,
-                last_block INTEGER NOT NULL,
-                updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+                last_block TEXT NOT NULL,
+                updated_at TEXT DEFAULT (strftime('%s', 'now')),
                 UNIQUE(contract, wallet, token_id)
             )",
             [],
@@ -518,9 +518,9 @@ impl Erc1155Storage {
                 token_id BLOB NOT NULL,
                 computed_balance BLOB NOT NULL,
                 actual_balance BLOB NOT NULL,
-                adjusted_at_block INTEGER NOT NULL,
+                adjusted_at_block TEXT NOT NULL,
                 tx_hash BLOB NOT NULL,
-                created_at INTEGER DEFAULT (strftime('%s', 'now'))
+                created_at TEXT DEFAULT (strftime('%s', 'now'))
             )",
             [],
         )?;
@@ -568,7 +568,7 @@ impl Erc1155Storage {
         {
             let mut stmt = tx.prepare_cached(
                 "INSERT OR IGNORE INTO token_transfers (token, operator, from_addr, to_addr, token_id, amount, is_batch, batch_index, block_number, tx_hash, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, strftime('%s', 'now')))",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, COALESCE(?11, CAST(strftime('%s', 'now') AS TEXT)))",
             )?;
             let mut wallet_both_stmt = tx.prepare_cached(
                 "INSERT INTO token_wallet_activity (wallet_address, token, transfer_id, direction, block_number)
@@ -592,6 +592,7 @@ impl Erc1155Storage {
                 let amount_blob = u256_to_blob(transfer.amount);
                 let tx_hash_blob = felt_to_blob(transfer.tx_hash);
 
+                let ts_str = transfer.timestamp.map(|t| t.to_string());
                 let rows = stmt.execute(params![
                     &token_blob,
                     &operator_blob,
@@ -599,11 +600,11 @@ impl Erc1155Storage {
                     &to_blob,
                     &token_id_blob,
                     &amount_blob,
-                    transfer.is_batch as i32,
-                    transfer.batch_index,
-                    transfer.block_number,
+                    (transfer.is_batch as i32).to_string(),
+                    transfer.batch_index.to_string(),
+                    transfer.block_number.to_string(),
                     &tx_hash_blob,
-                    transfer.timestamp,
+                    ts_str,
                 ])?;
 
                 if rows > 0 {
@@ -611,6 +612,7 @@ impl Erc1155Storage {
                     let transfer_id = tx.last_insert_rowid();
 
                     // Insert wallet activity records
+                    let block_str = transfer.block_number.to_string();
                     if transfer.from != Felt::ZERO
                         && transfer.to != Felt::ZERO
                         && transfer.from == transfer.to
@@ -619,7 +621,7 @@ impl Erc1155Storage {
                             &from_blob,
                             &token_blob,
                             transfer_id,
-                            transfer.block_number
+                            &block_str
                         ])?;
                     } else {
                         if transfer.from != Felt::ZERO {
@@ -627,7 +629,7 @@ impl Erc1155Storage {
                                 &from_blob,
                                 &token_blob,
                                 transfer_id,
-                                transfer.block_number
+                                &block_str
                             ])?;
                         }
                         if transfer.to != Felt::ZERO {
@@ -635,7 +637,7 @@ impl Erc1155Storage {
                                 &to_blob,
                                 &token_blob,
                                 transfer_id,
-                                transfer.block_number
+                                &block_str
                             ])?;
                         }
                     }
@@ -667,7 +669,7 @@ impl Erc1155Storage {
         {
             let mut stmt = tx.prepare_cached(
                 "INSERT OR REPLACE INTO token_operators (token, owner, operator, approved, block_number, tx_hash, timestamp)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, strftime('%s', 'now')))",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, COALESCE(?7, CAST(strftime('%s', 'now') AS TEXT)))",
             )?;
 
             for approval in approvals {
@@ -676,14 +678,15 @@ impl Erc1155Storage {
                 let operator_blob = felt_to_blob(approval.operator);
                 let tx_hash_blob = felt_to_blob(approval.tx_hash);
 
+                let ts_str = approval.timestamp.map(|t| t.to_string());
                 stmt.execute(params![
                     &token_blob,
                     &owner_blob,
                     &operator_blob,
-                    approval.approved as i32,
-                    approval.block_number,
+                    (approval.approved as i32).to_string(),
+                    approval.block_number.to_string(),
                     &tx_hash_blob,
-                    approval.timestamp,
+                    ts_str,
                 ])?;
 
                 inserted += 1;
@@ -814,18 +817,18 @@ impl Erc1155Storage {
 
         if let Some(block_min) = block_from {
             query.push_str(" AND t.block_number >= ?");
-            params_vec.push(Box::new(block_min as i64));
+            params_vec.push(Box::new(block_min.to_string()));
         }
 
         if let Some(block_max) = block_to {
             query.push_str(" AND t.block_number <= ?");
-            params_vec.push(Box::new(block_max as i64));
+            params_vec.push(Box::new(block_max.to_string()));
         }
 
         if let Some(c) = cursor {
             query.push_str(" AND (t.block_number < ? OR (t.block_number = ? AND t.id < ?))");
-            params_vec.push(Box::new(c.block_number as i64));
-            params_vec.push(Box::new(c.block_number as i64));
+            params_vec.push(Box::new(c.block_number.to_string()));
+            params_vec.push(Box::new(c.block_number.to_string()));
             params_vec.push(Box::new(c.id));
         }
 
@@ -844,11 +847,11 @@ impl Erc1155Storage {
             let to_bytes: Vec<u8> = row.get(4)?;
             let token_id_bytes: Vec<u8> = row.get(5)?;
             let amount_bytes: Vec<u8> = row.get(6)?;
-            let is_batch: i32 = row.get(7)?;
-            let batch_index: i32 = row.get(8)?;
-            let block_number: i64 = row.get(9)?;
+            let is_batch_str: String = row.get(7)?;
+            let batch_index_str: String = row.get(8)?;
+            let block_number_str: String = row.get(9)?;
             let tx_hash_bytes: Vec<u8> = row.get(10)?;
-            let timestamp: Option<i64> = row.get(11)?;
+            let timestamp_str: Option<String> = row.get(11)?;
 
             Ok(TokenTransferData {
                 id: Some(id),
@@ -858,11 +861,11 @@ impl Erc1155Storage {
                 to: blob_to_felt(&to_bytes),
                 token_id: blob_to_u256(&token_id_bytes),
                 amount: blob_to_u256(&amount_bytes),
-                is_batch: is_batch != 0,
-                batch_index: batch_index as u32,
-                block_number: block_number as u64,
+                is_batch: is_batch_str.parse::<i32>().unwrap_or(0) != 0,
+                batch_index: batch_index_str.parse::<u32>().unwrap_or(0),
+                block_number: block_number_str.parse::<u64>().unwrap_or(0),
                 tx_hash: blob_to_felt(&tx_hash_bytes),
-                timestamp,
+                timestamp: timestamp_str.and_then(|s| s.parse::<i64>().ok()),
             })
         })?;
 
@@ -988,12 +991,13 @@ impl Erc1155Storage {
             return self.pg_get_latest_block().await;
         }
         let conn = self.conn.lock().unwrap();
-        let block: Option<i64> = conn
+        let block: Option<String> = conn
             .query_row("SELECT MAX(block_number) FROM token_transfers", [], |row| {
                 row.get(0)
             })
-            .ok();
-        Ok(block.map(|b| b as u64))
+            .ok()
+            .flatten();
+        Ok(block.and_then(|b| b.parse::<u64>().ok()))
     }
 
     // ===== Balance Tracking Methods =====
@@ -1042,7 +1046,7 @@ impl Erc1155Storage {
         let wallet_blob = felt_to_blob(wallet);
         let token_id_blob = u256_to_blob(token_id);
 
-        let result: Option<(Vec<u8>, i64)> = conn
+        let result: Option<(Vec<u8>, String)> = conn
             .query_row(
                 "SELECT balance, last_block FROM erc1155_balances
                  WHERE contract = ? AND wallet = ? AND token_id = ?",
@@ -1051,7 +1055,7 @@ impl Erc1155Storage {
             )
             .ok();
 
-        Ok(result.map(|(bytes, block)| (blob_to_u256(&bytes), block as u64)))
+        Ok(result.map(|(bytes, block_str)| (blob_to_u256(&bytes), block_str.parse::<u64>().unwrap_or(0))))
     }
 
     /// Get balances for multiple (contract, wallet, token_id) tuples in a single query
@@ -1342,7 +1346,7 @@ impl Erc1155Storage {
                     &wallet_blob,
                     &token_id_blob,
                     &balance_blob,
-                    last_block as i64,
+                    last_block.to_string(),
                 ])?;
             }
         }
@@ -1369,7 +1373,7 @@ impl Erc1155Storage {
                     &token_id_blob,
                     &computed_blob,
                     &actual_blob,
-                    adj.adjusted_at_block as i64,
+                    adj.adjusted_at_block.to_string(),
                     &tx_hash_blob,
                 ])?;
             }
@@ -2054,11 +2058,11 @@ impl Erc1155Storage {
         let mut to_vec = Vec::with_capacity(transfers.len());
         let mut token_id_vec = Vec::with_capacity(transfers.len());
         let mut amount_vec = Vec::with_capacity(transfers.len());
-        let mut is_batch_vec = Vec::with_capacity(transfers.len());
-        let mut batch_index_vec = Vec::with_capacity(transfers.len());
-        let mut block_vec = Vec::with_capacity(transfers.len());
+        let mut is_batch_vec: Vec<String> = Vec::with_capacity(transfers.len());
+        let mut batch_index_vec: Vec<String> = Vec::with_capacity(transfers.len());
+        let mut block_vec: Vec<String> = Vec::with_capacity(transfers.len());
         let mut tx_hash_vec = Vec::with_capacity(transfers.len());
-        let mut ts_vec = Vec::with_capacity(transfers.len());
+        let mut ts_vec: Vec<String> = Vec::with_capacity(transfers.len());
 
         for transfer in transfers {
             token_vec.push(felt_to_blob(transfer.token));
@@ -2067,14 +2071,15 @@ impl Erc1155Storage {
             to_vec.push(felt_to_blob(transfer.to));
             token_id_vec.push(u256_to_blob(transfer.token_id));
             amount_vec.push(u256_to_blob(transfer.amount));
-            is_batch_vec.push((transfer.is_batch as i32) as i64);
-            batch_index_vec.push(transfer.batch_index as i64);
-            block_vec.push(transfer.block_number as i64);
+            is_batch_vec.push((transfer.is_batch as i32).to_string());
+            batch_index_vec.push(transfer.batch_index.to_string());
+            block_vec.push(transfer.block_number.to_string());
             tx_hash_vec.push(felt_to_blob(transfer.tx_hash));
             ts_vec.push(
                 transfer
                     .timestamp
-                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp())
+                    .to_string(),
             );
         }
 
@@ -2093,11 +2098,11 @@ impl Erc1155Storage {
                         $4::bytea[],
                         $5::bytea[],
                         $6::bytea[],
-                        $7::bigint[],
-                        $8::bigint[],
-                        $9::bigint[],
+                        $7::text[],
+                        $8::text[],
+                        $9::text[],
                         $10::bytea[],
-                        $11::bigint[]
+                        $11::text[]
                     ) AS i(token, operator, from_addr, to_addr, token_id, amount, is_batch, batch_index, block_number, tx_hash, timestamp)
                     ON CONFLICT (token, tx_hash, token_id, from_addr, to_addr, batch_index) DO NOTHING
                     RETURNING id, token, from_addr, to_addr, block_number
@@ -2147,22 +2152,23 @@ impl Erc1155Storage {
         let mut token_vec = Vec::with_capacity(approvals.len());
         let mut owner_vec = Vec::with_capacity(approvals.len());
         let mut operator_vec = Vec::with_capacity(approvals.len());
-        let mut approved_vec = Vec::with_capacity(approvals.len());
-        let mut block_vec = Vec::with_capacity(approvals.len());
+        let mut approved_vec: Vec<String> = Vec::with_capacity(approvals.len());
+        let mut block_vec: Vec<String> = Vec::with_capacity(approvals.len());
         let mut tx_hash_vec = Vec::with_capacity(approvals.len());
-        let mut ts_vec = Vec::with_capacity(approvals.len());
+        let mut ts_vec: Vec<String> = Vec::with_capacity(approvals.len());
 
         for approval in approvals {
             token_vec.push(felt_to_blob(approval.token));
             owner_vec.push(felt_to_blob(approval.owner));
             operator_vec.push(felt_to_blob(approval.operator));
-            approved_vec.push((approval.approved as i32) as i64);
-            block_vec.push(approval.block_number as i64);
+            approved_vec.push((approval.approved as i32).to_string());
+            block_vec.push(approval.block_number.to_string());
             tx_hash_vec.push(felt_to_blob(approval.tx_hash));
             ts_vec.push(
                 approval
                     .timestamp
-                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp())
+                    .to_string(),
             );
         }
 
@@ -2175,10 +2181,10 @@ impl Erc1155Storage {
                     $1::bytea[],
                     $2::bytea[],
                     $3::bytea[],
-                    $4::bigint[],
-                    $5::bigint[],
+                    $4::text[],
+                    $5::text[],
                     $6::bytea[],
-                    $7::bigint[]
+                    $7::text[]
                 ) WITH ORDINALITY AS i(token, owner, operator, approved, block_number, tx_hash, timestamp, ord)
                 ORDER BY token, owner, operator, ord DESC
                 ON CONFLICT (token, owner, operator) DO UPDATE SET
@@ -2219,7 +2225,7 @@ impl Erc1155Storage {
         let rows = client
             .execute(
                 "INSERT INTO erc1155.token_uris (token, token_id, uri, updated_at)
-                SELECT DISTINCT ON (token, token_id) i.token, i.token_id, i.uri, EXTRACT(EPOCH FROM NOW())::BIGINT
+                SELECT DISTINCT ON (token, token_id) i.token, i.token_id, i.uri, EXTRACT(EPOCH FROM NOW())::BIGINT::TEXT
                 FROM unnest(
                     $1::bytea[],
                     $2::bytea[],
@@ -2307,15 +2313,15 @@ impl Erc1155Storage {
         }
         if let Some(block_min) = block_from {
             query.push_str(" AND t.block_number >= ");
-            query.push_str(&Self::pg_next_param(&mut params, block_min as i64));
+            query.push_str(&Self::pg_next_param(&mut params, block_min.to_string()));
         }
         if let Some(block_max) = block_to {
             query.push_str(" AND t.block_number <= ");
-            query.push_str(&Self::pg_next_param(&mut params, block_max as i64));
+            query.push_str(&Self::pg_next_param(&mut params, block_max.to_string()));
         }
         if let Some(c) = cursor {
-            let p1 = Self::pg_next_param(&mut params, c.block_number as i64);
-            let p2 = Self::pg_next_param(&mut params, c.block_number as i64);
+            let p1 = Self::pg_next_param(&mut params, c.block_number.to_string());
+            let p2 = Self::pg_next_param(&mut params, c.block_number.to_string());
             let p3 = Self::pg_next_param(&mut params, c.id);
             query.push_str(&format!(
                 " AND (t.block_number < {p1} OR (t.block_number = {p2} AND t.id < {p3}))"
@@ -2339,11 +2345,11 @@ impl Erc1155Storage {
                 to: blob_to_felt(&row.get::<usize, Vec<u8>>(4)),
                 token_id: blob_to_u256(&row.get::<usize, Vec<u8>>(5)),
                 amount: blob_to_u256(&row.get::<usize, Vec<u8>>(6)),
-                is_batch: row.get::<usize, i64>(7) != 0,
-                batch_index: row.get::<usize, i64>(8) as u32,
-                block_number: row.get::<usize, i64>(9) as u64,
+                is_batch: row.get::<usize, String>(7).parse::<i32>().unwrap_or(0) != 0,
+                batch_index: row.get::<usize, String>(8).parse::<u32>().unwrap_or(0),
+                block_number: row.get::<usize, String>(9).parse::<u64>().unwrap_or(0),
                 tx_hash: blob_to_felt(&row.get::<usize, Vec<u8>>(10)),
-                timestamp: Some(row.get::<usize, i64>(11)),
+                timestamp: row.get::<usize, String>(11).parse::<i64>().ok(),
             })
             .collect();
 
@@ -2491,8 +2497,8 @@ impl Erc1155Storage {
         let row = client
             .query_one("SELECT MAX(block_number) FROM erc1155.token_transfers", &[])
             .await?;
-        let v: Option<i64> = row.get(0);
-        Ok(v.map(|x| x as u64))
+        let v: Option<String> = row.get(0);
+        Ok(v.and_then(|x| x.parse::<u64>().ok()))
     }
 
     async fn pg_get_balance(
@@ -2537,7 +2543,7 @@ impl Erc1155Storage {
         Ok(row.map(|r| {
             (
                 blob_to_u256(&r.get::<usize, Vec<u8>>(0)),
-                r.get::<usize, i64>(1) as u64,
+                r.get::<usize, String>(1).parse::<u64>().unwrap_or(0),
             )
         }))
     }
@@ -2696,13 +2702,13 @@ impl Erc1155Storage {
                  ON CONFLICT(contract, wallet, token_id) DO UPDATE SET
                     balance = EXCLUDED.balance,
                     last_block = EXCLUDED.last_block,
-                    updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT",
+                    updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT::TEXT",
                 &[
                     &felt_to_blob(*contract),
                     &felt_to_blob(*wallet),
                     &u256_to_blob(*token_id),
                     &u256_to_blob(*balance),
-                    &(last_block as i64),
+                    &last_block.to_string(),
                 ],
             ).await?;
         }
@@ -2718,7 +2724,7 @@ impl Erc1155Storage {
                     &u256_to_blob(adj.token_id),
                     &u256_to_blob(adj.computed_balance),
                     &u256_to_blob(adj.actual_balance),
-                    &(adj.adjusted_at_block as i64),
+                    &adj.adjusted_at_block.to_string(),
                     &felt_to_blob(adj.tx_hash),
                 ],
             ).await?;
@@ -3040,7 +3046,7 @@ impl TokenUriStore for Erc1155Storage {
 
                 tx.execute(
                     "INSERT INTO erc1155.token_uris (token, token_id, uri, metadata_json, updated_at)
-                     VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::BIGINT)
+                     VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::BIGINT::TEXT)
                      ON CONFLICT(token, token_id) DO UPDATE SET
                         uri = EXCLUDED.uri,
                         metadata_json = EXCLUDED.metadata_json,
@@ -3195,7 +3201,7 @@ fn sqlite_sync_facets_for_token(
     for facet_value_id in existing_rows {
         tx.execute(
             "UPDATE facet_values
-             SET token_count = CASE WHEN token_count > 0 THEN token_count - 1 ELSE 0 END
+             SET token_count = CAST(CASE WHEN CAST(token_count AS INTEGER) > 0 THEN CAST(token_count AS INTEGER) - 1 ELSE 0 END AS TEXT)
              WHERE id = ?1",
             params![facet_value_id],
         )?;
@@ -3236,7 +3242,7 @@ fn sqlite_sync_facets_for_token(
             params![&token_blob, &token_id_blob, facet_key_id, facet_value_id],
         )?;
         tx.execute(
-            "UPDATE facet_values SET token_count = token_count + 1 WHERE id = ?1",
+            "UPDATE facet_values SET token_count = CAST(CAST(token_count AS INTEGER) + 1 AS TEXT) WHERE id = ?1",
             params![facet_value_id],
         )?;
     }
@@ -3263,7 +3269,7 @@ async fn pg_sync_facets_for_token(
         let facet_value_id: i64 = row.get(0);
         tx.execute(
             "UPDATE erc1155.facet_values
-             SET token_count = GREATEST(token_count - 1, 0)
+             SET token_count = CAST(GREATEST(CAST(token_count AS BIGINT) - 1, 0) AS TEXT)
              WHERE id = $1",
             &[&facet_value_id],
         )
@@ -3314,7 +3320,7 @@ async fn pg_sync_facets_for_token(
         )
         .await?;
         tx.execute(
-            "UPDATE erc1155.facet_values SET token_count = token_count + 1 WHERE id = $1",
+            "UPDATE erc1155.facet_values SET token_count = CAST(CAST(token_count AS BIGINT) + 1 AS TEXT) WHERE id = $1",
             &[&facet_value_id],
         )
         .await?;

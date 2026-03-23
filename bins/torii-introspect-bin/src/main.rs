@@ -481,7 +481,17 @@ async fn run_with_postgres(
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
 
-    let ecs_sink = EcsSink::new(storage_database_url, config.max_db_connections).await?;
+    let erc20_url = token_db_setup.as_ref().filter(|_| !token_targets.erc20.is_empty()).map(|s| s.erc20_url.as_str());
+    let erc721_url = token_db_setup.as_ref().filter(|_| !token_targets.erc721.is_empty()).map(|s| s.erc721_url.as_str());
+    let erc1155_url = token_db_setup.as_ref().filter(|_| !token_targets.erc1155.is_empty()).map(|s| s.erc1155_url.as_str());
+    let ecs_sink = EcsSink::new(
+        storage_database_url,
+        config.max_db_connections,
+        erc20_url,
+        erc721_url,
+        erc1155_url,
+    )
+    .await?;
     let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
 
     let reflection_builder = ReflectionBuilder::configure()
@@ -627,7 +637,17 @@ async fn run_with_sqlite(
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
 
-    let ecs_sink = EcsSink::new(storage_database_url, config.max_db_connections).await?;
+    let erc20_url = token_db_setup.as_ref().filter(|_| !token_targets.erc20.is_empty()).map(|s| s.erc20_url.as_str());
+    let erc721_url = token_db_setup.as_ref().filter(|_| !token_targets.erc721.is_empty()).map(|s| s.erc721_url.as_str());
+    let erc1155_url = token_db_setup.as_ref().filter(|_| !token_targets.erc1155.is_empty()).map(|s| s.erc1155_url.as_str());
+    let ecs_sink = EcsSink::new(
+        storage_database_url,
+        config.max_db_connections,
+        erc20_url,
+        erc721_url,
+        erc1155_url,
+    )
+    .await?;
     let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
 
     let reflection_builder = ReflectionBuilder::configure()
