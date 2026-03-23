@@ -37,6 +37,7 @@
 
 pub mod decoder;
 pub mod grpc_service;
+pub mod handlers;
 pub mod identification;
 pub mod sink;
 pub mod storage;
@@ -55,6 +56,7 @@ pub use decoder::{
     BatchMetadataUpdate, Erc721Decoder, MetadataUpdate, NftApproval, NftTransfer, OperatorApproval,
 };
 pub use grpc_service::Erc721Service;
+pub use handlers::{Erc721MetadataCommandHandler, Erc721TokenUriCommandHandler};
 pub use identification::Erc721Rule;
 pub use sink::Erc721Sink;
 pub use storage::{Erc721Storage, NftOwnershipData, NftTransferData, TransferCursor};

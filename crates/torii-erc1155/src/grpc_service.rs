@@ -199,7 +199,7 @@ impl Erc1155Service {
 
         let uri_rows = self
             .storage
-            .get_token_uris_by_contract(contract)
+            .get_token_uris_batch(contract, &result.token_ids)
             .await
             .map_err(|e| Status::internal(format!("Query failed: {e}")))?;
         let by_token_id: HashMap<Vec<u8>, (Option<String>, Option<String>)> = uri_rows

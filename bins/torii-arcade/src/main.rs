@@ -29,17 +29,17 @@ use torii_ecs_sink::proto::world::world_server::WorldServer;
 use torii_ecs_sink::{EcsSink, FILE_DESCRIPTOR_SET as ECS_DESCRIPTOR_SET};
 use torii_erc1155::proto::erc1155_server::Erc1155Server;
 use torii_erc1155::{
-    Erc1155Decoder, Erc1155Service, Erc1155Sink, Erc1155Storage,
+    Erc1155Decoder, Erc1155MetadataCommandHandler, Erc1155Service, Erc1155Sink, Erc1155Storage,
     FILE_DESCRIPTOR_SET as ERC1155_DESCRIPTOR_SET,
 };
 use torii_erc20::proto::erc20_server::Erc20Server;
 use torii_erc20::{
-    Erc20Decoder, Erc20Service, Erc20Sink, Erc20Storage,
+    Erc20Decoder, Erc20MetadataCommandHandler, Erc20Service, Erc20Sink, Erc20Storage,
     FILE_DESCRIPTOR_SET as ERC20_DESCRIPTOR_SET,
 };
 use torii_erc721::proto::erc721_server::Erc721Server;
 use torii_erc721::{
-    Erc721Decoder, Erc721Service, Erc721Sink, Erc721Storage,
+    Erc721Decoder, Erc721MetadataCommandHandler, Erc721Service, Erc721Sink, Erc721Storage,
     FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
 };
 use torii_introspect_postgres_sink::processor::IntrospectPgDb;
@@ -49,6 +49,11 @@ use torii_sqlite::{is_sqlite_memory_path, sqlite_connect_options};
 
 type StarknetProvider =
     starknet::providers::jsonrpc::JsonRpcClient<starknet::providers::jsonrpc::HttpTransport>;
+
+const TOKEN_COMMAND_QUEUE_SIZE: usize = 4096;
+const TOKEN_METADATA_COMMAND_PARALLELISM: usize = 1;
+const TOKEN_METADATA_MAX_RETRIES: u8 = 3;
+const TOKEN_URI_FETCH_PARALLELISM: usize = 8;
 
 struct ArcadeProjectionPipeline {
     introspect_sink: Box<dyn Sink>,
@@ -336,6 +341,7 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
         .database_root(&config.db_dir)
+        .command_bus_queue_size(TOKEN_COMMAND_QUEUE_SIZE)
         .etl_concurrency(EtlConcurrencyConfig {
             max_prefetch_batches: config.max_prefetch_batches,
         })
@@ -365,18 +371,29 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut erc20_grpc_service: Option<Erc20Service> = None;
     let mut erc721_grpc_service: Option<Erc721Service> = None;
     let mut erc1155_grpc_service: Option<Erc1155Service> = None;
+    let mut token_uri_services = Vec::new();
 
     if !erc20_addresses.is_empty() {
         let storage = Arc::new(Erc20Storage::new(&erc20_db_url).await?);
         let grpc_service = Erc20Service::new(storage.clone());
         let sink = Box::new(
-            Erc20Sink::new(storage)
+            Erc20Sink::new(storage.clone())
                 .with_grpc_service(grpc_service.clone())
-                .with_balance_tracking(provider.clone()),
+                .with_balance_tracking(provider.clone())
+                .with_metadata_pipeline(
+                    TOKEN_METADATA_COMMAND_PARALLELISM,
+                    TOKEN_COMMAND_QUEUE_SIZE,
+                    TOKEN_METADATA_MAX_RETRIES,
+                ),
         );
         torii_config = torii_config
             .add_decoder(Arc::new(Erc20Decoder::new()))
-            .add_sink_boxed(sink);
+            .add_sink_boxed(sink)
+            .with_command_handler(Box::new(Erc20MetadataCommandHandler::new(
+                provider.clone(),
+                storage,
+                TOKEN_METADATA_MAX_RETRIES,
+            )));
         reflection_builder =
             reflection_builder.register_encoded_file_descriptor_set(ERC20_DESCRIPTOR_SET);
         let decoder_id = DecoderId::new("erc20");
@@ -389,24 +406,29 @@ async fn run_indexer(config: Config) -> Result<()> {
     if !erc721_addresses.is_empty() {
         let storage = Arc::new(Erc721Storage::new(&erc721_db_url).await?);
         let grpc_service = Erc721Service::new(storage.clone());
-        let mut sink = Erc721Sink::new(storage).with_grpc_service(grpc_service.clone());
+        let mut sink = Erc721Sink::new(storage.clone()).with_grpc_service(grpc_service.clone());
         if config.metadata_mode == MetadataMode::Inline {
-            let image_cache_dir = Path::new("./data").join("image-cache");
-            let (token_uri_sender, _token_uri_service) = TokenUriService::spawn_with_image_cache(
+            let (token_uri_sender, token_uri_service) = TokenUriService::spawn_with_image_cache(
                 Arc::new(MetadataFetcher::new(provider.clone())),
-                sink.storage().clone(),
-                1024,
-                8,
-                Some(image_cache_dir),
-                8,
+                storage.clone(),
+                TOKEN_COMMAND_QUEUE_SIZE,
+                TOKEN_URI_FETCH_PARALLELISM,
+                Some(Path::new("./data").join("image-cache")),
+                4,
             );
+            token_uri_services.push(token_uri_service);
             sink = sink
-                .with_metadata_fetching(provider.clone())
+                .with_metadata_commands()
                 .with_token_uri_sender(token_uri_sender);
         }
         torii_config = torii_config
             .add_decoder(Arc::new(Erc721Decoder::new()))
-            .add_sink_boxed(Box::new(sink));
+            .add_sink_boxed(Box::new(sink))
+            .with_command_handler(Box::new(Erc721MetadataCommandHandler::new(
+                provider.clone(),
+                storage,
+                TOKEN_METADATA_MAX_RETRIES,
+            )));
         reflection_builder =
             reflection_builder.register_encoded_file_descriptor_set(ERC721_DESCRIPTOR_SET);
         let decoder_id = DecoderId::new("erc721");
@@ -419,24 +441,30 @@ async fn run_indexer(config: Config) -> Result<()> {
     if !erc1155_addresses.is_empty() {
         let storage = Arc::new(Erc1155Storage::new(&erc1155_db_url).await?);
         let grpc_service = Erc1155Service::new(storage.clone());
-        let mut sink = Erc1155Sink::new(storage)
+        let mut sink = Erc1155Sink::new(storage.clone())
             .with_grpc_service(grpc_service.clone())
             .with_balance_tracking(provider.clone());
         if config.metadata_mode == MetadataMode::Inline {
-            let image_cache_dir = Path::new("./data").join("image-cache");
-            let (token_uri_sender, _token_uri_service) = TokenUriService::spawn_with_image_cache(
+            let (token_uri_sender, token_uri_service) = TokenUriService::spawn_with_image_cache(
                 Arc::new(MetadataFetcher::new(provider.clone())),
-                sink.storage().clone(),
-                1024,
-                8,
-                Some(image_cache_dir),
-                8,
+                storage.clone(),
+                TOKEN_COMMAND_QUEUE_SIZE,
+                TOKEN_URI_FETCH_PARALLELISM,
+                Some(Path::new("./data").join("image-cache")),
+                4,
             );
-            sink = sink.with_token_uri_sender(token_uri_sender);
+            token_uri_services.push(token_uri_service);
+            sink = sink
+                .with_metadata_commands()
+                .with_token_uri_sender(token_uri_sender);
         }
         torii_config = torii_config
             .add_decoder(Arc::new(Erc1155Decoder::new()))
-            .add_sink_boxed(Box::new(sink));
+            .add_sink_boxed(Box::new(sink))
+            .with_command_handler(Box::new(Erc1155MetadataCommandHandler::new(
+                provider.clone(),
+                storage,
+            )));
         reflection_builder =
             reflection_builder.register_encoded_file_descriptor_set(ERC1155_DESCRIPTOR_SET);
         let decoder_id = DecoderId::new("erc1155");
@@ -557,6 +585,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     torii::run(torii_config)
         .await
         .map_err(|e| anyhow::anyhow!("Torii error: {e}"))?;
+
+    drop(token_uri_services);
 
     Ok(())
 }

@@ -10,21 +10,226 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use torii::command::{Command, CommandHandler};
 use torii::etl::decoder::ContractFilter;
 use torii::etl::engine_db::{EngineDb, EngineDbConfig};
 use torii::etl::extractor::SyntheticExtractor;
 use torii::etl::sink::Sink;
 use torii::etl::{Decoder, DecoderContext};
+use torii_common::{TokenUriResult, TokenUriStore};
+use torii_erc1155::handlers::{FetchErc1155MetadataCommand, RefreshErc1155TokenUriCommand};
 use torii_erc1155::{
     Erc1155Decoder, Erc1155Sink, Erc1155Storage, SyntheticErc1155Config, SyntheticErc1155Extractor,
 };
+use torii_erc20::handlers::FetchErc20MetadataCommand;
 use torii_erc20::{
     Erc20Decoder, Erc20Sink, Erc20Storage, SyntheticErc20Config, SyntheticErc20Extractor,
 };
+use torii_erc721::handlers::{FetchErc721MetadataCommand, RefreshErc721TokenUriCommand};
 use torii_erc721::{
     Erc721Decoder, Erc721Sink, Erc721Storage, SyntheticErc721Config, SyntheticErc721Extractor,
 };
-use torii_runtime_common::sink::{drop_postgres_schemas, initialize_sink};
+use torii_runtime_common::sink::{drop_postgres_schemas, initialize_sink_with_command_handlers};
+
+const SYNTH_COMMAND_QUEUE_SIZE: usize = 4096;
+const SYNTH_METADATA_COMMAND_PARALLELISM: usize = 1;
+const SYNTH_METADATA_MAX_RETRIES: u8 = 1;
+
+struct SyntheticErc20MetadataCommandHandler {
+    storage: Arc<Erc20Storage>,
+}
+
+impl SyntheticErc20MetadataCommandHandler {
+    fn new(storage: Arc<Erc20Storage>) -> Self {
+        Self { storage }
+    }
+}
+
+struct SyntheticErc721MetadataCommandHandler {
+    storage: Arc<Erc721Storage>,
+}
+
+impl SyntheticErc721MetadataCommandHandler {
+    fn new(storage: Arc<Erc721Storage>) -> Self {
+        Self { storage }
+    }
+}
+
+struct SyntheticErc721TokenUriCommandHandler {
+    storage: Arc<Erc721Storage>,
+}
+
+impl SyntheticErc721TokenUriCommandHandler {
+    fn new(storage: Arc<Erc721Storage>) -> Self {
+        Self { storage }
+    }
+}
+
+struct SyntheticErc1155MetadataCommandHandler {
+    storage: Arc<Erc1155Storage>,
+}
+
+impl SyntheticErc1155MetadataCommandHandler {
+    fn new(storage: Arc<Erc1155Storage>) -> Self {
+        Self { storage }
+    }
+}
+
+struct SyntheticErc1155TokenUriCommandHandler {
+    storage: Arc<Erc1155Storage>,
+}
+
+impl SyntheticErc1155TokenUriCommandHandler {
+    fn new(storage: Arc<Erc1155Storage>) -> Self {
+        Self { storage }
+    }
+}
+
+fn token_suffix(token: impl std::fmt::LowerHex) -> String {
+    let token_hex = format!("{token:#x}");
+    let trimmed = token_hex.trim_start_matches("0x");
+    let start = trimmed.len().saturating_sub(6);
+    trimmed[start..].to_uppercase()
+}
+
+fn synthetic_token_uri_metadata(standard: &str, token_id: impl std::fmt::Display) -> String {
+    format!(
+        r#"{{"name":"Synthetic {standard} #{token_id}","description":"Synthetic metadata for command bus profiling","attributes":[{{"trait_type":"standard","value":"{standard}"}},{{"trait_type":"token_id","value":"{token_id}"}}]}}"#
+    )
+}
+
+#[torii::async_trait]
+impl CommandHandler for SyntheticErc20MetadataCommandHandler {
+    fn supports(&self, command: &dyn Command) -> bool {
+        command.as_any().is::<FetchErc20MetadataCommand>()
+    }
+
+    async fn handle_command(&self, command: Box<dyn Command>) -> Result<()> {
+        let command = command
+            .into_any()
+            .downcast::<FetchErc20MetadataCommand>()
+            .map_err(|_| anyhow::anyhow!("synthetic ERC20 handler received unexpected command"))?;
+        let command = *command;
+        let suffix = token_suffix(command.token);
+        let name = format!("Synthetic ERC20 {suffix}");
+        let symbol = format!("S{suffix}");
+        self.storage
+            .upsert_token_metadata(command.token, Some(&name), Some(&symbol), Some(18))
+            .await
+    }
+}
+
+#[torii::async_trait]
+impl CommandHandler for SyntheticErc721MetadataCommandHandler {
+    fn supports(&self, command: &dyn Command) -> bool {
+        command.as_any().is::<FetchErc721MetadataCommand>()
+    }
+
+    async fn handle_command(&self, command: Box<dyn Command>) -> Result<()> {
+        let command = command
+            .into_any()
+            .downcast::<FetchErc721MetadataCommand>()
+            .map_err(|_| anyhow::anyhow!("synthetic ERC721 handler received unexpected command"))?;
+        let command = *command;
+        let suffix = token_suffix(command.token);
+        let name = format!("Synthetic ERC721 {suffix}");
+        let symbol = format!("N{suffix}");
+        self.storage
+            .upsert_token_metadata(
+                command.token,
+                Some(&name),
+                Some(&symbol),
+                Some(10_000u64.into()),
+            )
+            .await
+    }
+}
+
+#[torii::async_trait]
+impl CommandHandler for SyntheticErc721TokenUriCommandHandler {
+    fn supports(&self, command: &dyn Command) -> bool {
+        command.as_any().is::<RefreshErc721TokenUriCommand>()
+    }
+
+    async fn handle_command(&self, command: Box<dyn Command>) -> Result<()> {
+        let command = command
+            .into_any()
+            .downcast::<RefreshErc721TokenUriCommand>()
+            .map_err(|_| {
+                anyhow::anyhow!("synthetic ERC721 URI handler received unexpected command")
+            })?;
+        let command = *command;
+
+        self.storage
+            .store_token_uri(&TokenUriResult {
+                contract: command.contract,
+                token_id: command.token_id,
+                uri: Some(format!(
+                    "synthetic://erc721/{:#x}/{}",
+                    command.contract, command.token_id
+                )),
+                metadata_json: Some(synthetic_token_uri_metadata("ERC721", command.token_id)),
+            })
+            .await
+    }
+}
+
+#[torii::async_trait]
+impl CommandHandler for SyntheticErc1155MetadataCommandHandler {
+    fn supports(&self, command: &dyn Command) -> bool {
+        command.as_any().is::<FetchErc1155MetadataCommand>()
+    }
+
+    async fn handle_command(&self, command: Box<dyn Command>) -> Result<()> {
+        let command = command
+            .into_any()
+            .downcast::<FetchErc1155MetadataCommand>()
+            .map_err(|_| {
+                anyhow::anyhow!("synthetic ERC1155 handler received unexpected command")
+            })?;
+        let command = *command;
+        let suffix = token_suffix(command.token);
+        let name = format!("Synthetic ERC1155 {suffix}");
+        let symbol = format!("M{suffix}");
+        self.storage
+            .upsert_token_metadata(
+                command.token,
+                Some(&name),
+                Some(&symbol),
+                Some(10_000u64.into()),
+            )
+            .await
+    }
+}
+
+#[torii::async_trait]
+impl CommandHandler for SyntheticErc1155TokenUriCommandHandler {
+    fn supports(&self, command: &dyn Command) -> bool {
+        command.as_any().is::<RefreshErc1155TokenUriCommand>()
+    }
+
+    async fn handle_command(&self, command: Box<dyn Command>) -> Result<()> {
+        let command = command
+            .into_any()
+            .downcast::<RefreshErc1155TokenUriCommand>()
+            .map_err(|_| {
+                anyhow::anyhow!("synthetic ERC1155 URI handler received unexpected command")
+            })?;
+        let command = *command;
+
+        self.storage
+            .store_token_uri(&TokenUriResult {
+                contract: command.contract,
+                token_id: command.token_id,
+                uri: Some(format!(
+                    "synthetic://erc1155/{:#x}/{}",
+                    command.contract, command.token_id
+                )),
+                metadata_json: Some(synthetic_token_uri_metadata("ERC1155", command.token_id)),
+            })
+            .await
+    }
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "torii-tokens-synth")]
@@ -131,7 +336,13 @@ struct CommonConfig {
     output_root: PathBuf,
 
     /// Drop and recreate schemas before each run.
-    #[arg(long, default_value_t = true)]
+    #[arg(
+        long,
+        default_value_t = true,
+        num_args = 0..=1,
+        default_missing_value = "true",
+        action = clap::ArgAction::Set
+    )]
     reset_schema: bool,
 }
 
@@ -298,8 +509,20 @@ async fn run_erc20_profile(config: Erc20ProfileConfig) -> Result<()> {
 
     let storage = Arc::new(Erc20Storage::new(&config.common.db_url).await?);
 
-    let mut sink = Erc20Sink::new(storage.clone());
-    initialize_sink(&mut sink, output_dir.clone()).await?;
+    let mut sink = Erc20Sink::new(storage.clone()).with_metadata_pipeline(
+        SYNTH_METADATA_COMMAND_PARALLELISM,
+        SYNTH_COMMAND_QUEUE_SIZE,
+        SYNTH_METADATA_MAX_RETRIES,
+    );
+    let sink_runtime = initialize_sink_with_command_handlers(
+        &mut sink,
+        output_dir.clone(),
+        vec![Box::new(SyntheticErc20MetadataCommandHandler::new(
+            storage.clone(),
+        ))],
+        SYNTH_COMMAND_QUEUE_SIZE,
+    )
+    .await?;
 
     let synthetic_cfg = SyntheticErc20Config {
         from_block: config.common.from_block,
@@ -383,6 +606,7 @@ async fn run_erc20_profile(config: Erc20ProfileConfig) -> Result<()> {
     );
 
     write_artifacts(&output_dir, &report)?;
+    sink_runtime.shutdown().await;
 
     tracing::info!(
         run_id = %run_id,
@@ -420,8 +644,19 @@ async fn run_erc721_profile(config: Erc721ProfileConfig) -> Result<()> {
 
     let storage = Arc::new(Erc721Storage::new(&config.common.db_url).await?);
 
-    let mut sink = Erc721Sink::new(storage.clone());
-    initialize_sink(&mut sink, output_dir.clone()).await?;
+    let mut sink = Erc721Sink::new(storage.clone())
+        .with_metadata_commands()
+        .with_token_uri_commands();
+    let sink_runtime = initialize_sink_with_command_handlers(
+        &mut sink,
+        output_dir.clone(),
+        vec![
+            Box::new(SyntheticErc721MetadataCommandHandler::new(storage.clone())),
+            Box::new(SyntheticErc721TokenUriCommandHandler::new(storage.clone())),
+        ],
+        SYNTH_COMMAND_QUEUE_SIZE,
+    )
+    .await?;
 
     let synthetic_cfg = SyntheticErc721Config {
         from_block: config.common.from_block,
@@ -509,6 +744,7 @@ async fn run_erc721_profile(config: Erc721ProfileConfig) -> Result<()> {
     );
 
     write_artifacts(&output_dir, &report)?;
+    sink_runtime.shutdown().await;
 
     tracing::info!(
         run_id = %run_id,
@@ -546,8 +782,19 @@ async fn run_erc1155_profile(config: Erc1155ProfileConfig) -> Result<()> {
 
     let storage = Arc::new(Erc1155Storage::new(&config.common.db_url).await?);
 
-    let mut sink = Erc1155Sink::new(storage.clone());
-    initialize_sink(&mut sink, output_dir.clone()).await?;
+    let mut sink = Erc1155Sink::new(storage.clone())
+        .with_metadata_commands()
+        .with_token_uri_commands();
+    let sink_runtime = initialize_sink_with_command_handlers(
+        &mut sink,
+        output_dir.clone(),
+        vec![
+            Box::new(SyntheticErc1155MetadataCommandHandler::new(storage.clone())),
+            Box::new(SyntheticErc1155TokenUriCommandHandler::new(storage.clone())),
+        ],
+        SYNTH_COMMAND_QUEUE_SIZE,
+    )
+    .await?;
 
     let synthetic_cfg = SyntheticErc1155Config {
         from_block: config.common.from_block,
@@ -637,6 +884,7 @@ async fn run_erc1155_profile(config: Erc1155ProfileConfig) -> Result<()> {
     );
 
     write_artifacts(&output_dir, &report)?;
+    sink_runtime.shutdown().await;
 
     tracing::info!(
         run_id = %run_id,

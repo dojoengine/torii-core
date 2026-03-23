@@ -41,7 +41,14 @@ use torii_runtime_common::database::{backend_from_url_or_path, DatabaseBackend};
 
 // Import from the library crate
 use torii_erc20::proto::erc20_server::Erc20Server;
-use torii_erc20::{Erc20Decoder, Erc20Service, Erc20Sink, Erc20Storage, FILE_DESCRIPTOR_SET};
+use torii_erc20::{
+    Erc20Decoder, Erc20MetadataCommandHandler, Erc20Service, Erc20Sink, Erc20Storage,
+    FILE_DESCRIPTOR_SET,
+};
+
+const ERC20_METADATA_COMMAND_PARALLELISM: usize = 1;
+const ERC20_METADATA_COMMAND_QUEUE_SIZE: usize = 4096;
+const ERC20_METADATA_MAX_RETRIES: u8 = 3;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -110,7 +117,15 @@ async fn main() -> Result<()> {
     let grpc_service = Erc20Service::new(storage.clone());
 
     // Create sink with gRPC service for dual publishing
-    let sink = Box::new(Erc20Sink::new(storage.clone()).with_grpc_service(grpc_service.clone()));
+    let sink = Box::new(
+        Erc20Sink::new(storage.clone())
+            .with_grpc_service(grpc_service.clone())
+            .with_metadata_pipeline(
+                ERC20_METADATA_COMMAND_PARALLELISM,
+                ERC20_METADATA_COMMAND_QUEUE_SIZE,
+                ERC20_METADATA_MAX_RETRIES,
+            ),
+    );
 
     // Build gRPC router with Erc20 service and reflection
     let reflection = tonic_reflection::server::Builder::configure()
@@ -126,10 +141,16 @@ async fn main() -> Result<()> {
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
         .database_root(&db_setup.database_root)
+        .command_bus_queue_size(ERC20_METADATA_COMMAND_QUEUE_SIZE)
         .engine_database_url(db_setup.engine_url.clone())
         .with_extractor(extractor)
         .add_decoder(decoder)
         .add_sink_boxed(sink)
+        .with_command_handler(Box::new(Erc20MetadataCommandHandler::new(
+            provider.clone(),
+            storage.clone(),
+            ERC20_METADATA_MAX_RETRIES,
+        )))
         .with_grpc_router(grpc_router)
         .with_custom_reflection(true); // We've added our own reflection
 

@@ -5,11 +5,13 @@
 //! selectors, felt-encoded strings and ByteArray returns.
 
 use starknet::core::codec::Decode;
-use starknet::core::types::{BlockId, BlockTag, ByteArray, Felt, FunctionCall, U256};
+use starknet::core::types::{
+    requests::CallRequest, BlockId, BlockTag, ByteArray, Felt, FunctionCall, U256,
+};
 use starknet::core::utils::parse_cairo_short_string;
 use starknet::macros::selector;
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
-use starknet::providers::Provider;
+use starknet::providers::{Provider, ProviderRequestData, ProviderResponseData};
 use std::sync::Arc;
 
 /// Token metadata (common fields for all ERC standards)
@@ -169,6 +171,29 @@ impl MetadataFetcher {
         None
     }
 
+    /// Fetch `token_uri(token_id)` or `tokenURI(token_id)` for multiple ERC721 NFTs.
+    pub async fn fetch_token_uri_batch(&self, requests: &[(Felt, Felt)]) -> Vec<Option<String>> {
+        self.fetch_string_calls_batch(
+            requests,
+            &[
+                (selector!("token_uri"), true),
+                (selector!("tokenURI"), true),
+                (selector!("token_uri"), false),
+                (selector!("tokenURI"), false),
+            ],
+        )
+        .await
+    }
+
+    /// Fetch `uri(token_id)` for multiple ERC1155 tokens.
+    pub async fn fetch_uri_batch(&self, requests: &[(Felt, Felt)]) -> Vec<Option<String>> {
+        self.fetch_string_calls_batch(
+            requests,
+            &[(selector!("uri"), true), (selector!("uri"), false)],
+        )
+        .await
+    }
+
     /// Fetch a string value (name or symbol) from a contract.
     ///
     /// Tries snake_case first, returns None on failure.
@@ -324,6 +349,81 @@ impl MetadataFetcher {
         parse_cairo_short_string(&result[0])
             .ok()
             .filter(|s| !s.is_empty())
+    }
+
+    async fn fetch_string_calls_batch(
+        &self,
+        requests: &[(Felt, Felt)],
+        attempts: &[(Felt, bool)],
+    ) -> Vec<Option<String>> {
+        if requests.is_empty() {
+            return Vec::new();
+        }
+
+        let mut results = vec![None; requests.len()];
+        let mut unresolved = (0..requests.len()).collect::<Vec<_>>();
+
+        for &(selector, use_u256) in attempts {
+            if unresolved.is_empty() {
+                break;
+            }
+
+            let rpc_requests = unresolved
+                .iter()
+                .map(|&idx| {
+                    let (contract, token_id) = requests[idx];
+                    let calldata = if use_u256 {
+                        vec![token_id, Felt::ZERO]
+                    } else {
+                        vec![token_id]
+                    };
+                    ProviderRequestData::Call(CallRequest {
+                        request: FunctionCall {
+                            contract_address: contract,
+                            entry_point_selector: selector,
+                            calldata,
+                        },
+                        block_id: BlockId::Tag(BlockTag::Latest),
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            let responses = match self.provider.batch_requests(&rpc_requests).await {
+                Ok(responses) => responses,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "torii_common::metadata",
+                        batch_size = unresolved.len(),
+                        selector = %format!("{selector:#x}"),
+                        use_u256,
+                        error = %error,
+                        "Failed to batch fetch string calls"
+                    );
+                    break;
+                }
+            };
+
+            let mut still_unresolved = Vec::with_capacity(unresolved.len());
+            for (response_idx, response) in responses.into_iter().enumerate() {
+                let request_idx = unresolved[response_idx];
+                match response {
+                    ProviderResponseData::Call(felts) => {
+                        if let Some(value) = Self::decode_string_result(&felts) {
+                            if !value.is_empty() {
+                                results[request_idx] = Some(value);
+                                continue;
+                            }
+                        }
+                        still_unresolved.push(request_idx);
+                    }
+                    _ => still_unresolved.push(request_idx),
+                }
+            }
+
+            unresolved = still_unresolved;
+        }
+
+        results
     }
 }
 
