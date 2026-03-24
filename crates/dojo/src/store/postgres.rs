@@ -13,11 +13,10 @@ use sqlx::{FromRow, Postgres};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::ops::Deref;
-use torii_common::sql::SqlxResult;
 use torii_introspect::postgres::owned::PgTypeDef;
 use torii_introspect::postgres::PgFelt;
 use torii_introspect::schema::ColumnKeyTrait;
-use torii_postgres::db::PostgresConnection;
+use torii_sql::{DbConnection, SqlxResult};
 
 pub const FETCH_TABLES_QUERY: &str = r#"
     SELECT DISTINCT ON (owner, id)
@@ -320,20 +319,20 @@ impl<T> Deref for PgStore<T> {
     }
 }
 
-impl<T: PostgresConnection + Send + Sync> PgStore<T> {
+impl<T: DbConnection<Postgres> + Send + Sync> PgStore<T> {
     pub async fn initialize(&self) -> SqlxResult<()> {
         self.migrate(Some("dojo"), DOJO_STORE_MIGRATIONS).await
     }
 }
 
-impl<T: PostgresConnection> From<T> for PgStore<T> {
+impl<T: DbConnection<Postgres>> From<T> for PgStore<T> {
     fn from(pool: T) -> Self {
         PgStore(pool)
     }
 }
 
 #[async_trait]
-impl<T: PostgresConnection + Send + Sync + 'static> DojoStoreTrait for PgStore<T> {
+impl<T: DbConnection<Postgres> + Send + Sync + 'static> DojoStoreTrait for PgStore<T> {
     type Error = DojoPgStoreError;
 
     async fn save_table(

@@ -13,7 +13,7 @@ sqlx = { workspace = true, features = [
     "migrate",
 ] }
 
-torii-common.workspace = true
+torii-sql.workspace = true
 
 [lints]
 workspace = true

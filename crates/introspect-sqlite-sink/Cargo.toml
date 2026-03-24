@@ -29,7 +29,7 @@ introspect-types.workspace = true
 itertools.workspace = true
 
 torii-introspect.workspace = true
-torii-sqlite.workspace = true
+torii-sql = { workspace = true, features = ["sqlite"] }
 
 [lints]
 workspace = true

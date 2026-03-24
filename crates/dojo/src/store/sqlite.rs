@@ -12,10 +12,9 @@ use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::io;
 use std::ops::Deref;
-use torii_common::sql::SqlxResult;
 use torii_common::{blob_to_felt, felt_to_blob};
 use torii_introspect::schema::ColumnKeyTrait;
-use torii_sqlite::SqliteConnection;
+use torii_sql::{DbConnection, SqlxResult};
 
 pub const DOJO_SQLITE_STORE_MIGRATIONS: Migrator = sqlx::migrate!("./migrations/sqlite");
 
@@ -162,21 +161,21 @@ impl<T> Deref for SqliteStore<T> {
     }
 }
 
-impl<T: SqliteConnection + Send + Sync> SqliteStore<T> {
+impl<T: DbConnection<Sqlite> + Send + Sync> SqliteStore<T> {
     pub async fn initialize(&self) -> SqlxResult<()> {
         self.migrate(Some("dojo"), DOJO_SQLITE_STORE_MIGRATIONS)
             .await
     }
 }
 
-impl<T: SqliteConnection> From<T> for SqliteStore<T> {
+impl<T: DbConnection<Sqlite>> From<T> for SqliteStore<T> {
     fn from(pool: T) -> Self {
         Self(pool)
     }
 }
 
 #[async_trait]
-impl<T: SqliteConnection + Send + Sync + 'static> DojoStoreTrait for SqliteStore<T> {
+impl<T: DbConnection<Sqlite> + Send + Sync + 'static> DojoStoreTrait for SqliteStore<T> {
     type Error = DojoSqliteStoreError;
 
     async fn save_table(

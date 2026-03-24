@@ -15,9 +15,9 @@ use std::{
     fmt::{Display, Formatter, Result as FmtResult, Write},
     rc::Rc,
 };
-use torii_common::sql::{PgQuery, Queries, SqlxResult};
 use torii_introspect::postgres::types::{PgPrimary, Uint128};
 use torii_introspect::postgres::PgFelt;
+use torii_sql::{PgQuery, Queries, SqlxResult};
 
 pub const COMMIT_CMD: &str = "--COMMIT";
 

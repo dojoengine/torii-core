@@ -18,12 +18,6 @@ tracing.workspace = true
 thiserror.workspace = true
 hex.workspace = true
 itertools.workspace = true
-
-dojo-introspect.workspace = true
-introspect-types.workspace = true
-torii-introspect.workspace = true
-torii-postgres.workspace = true
-torii-sqlite.workspace = true
 sqlx = { workspace = true, features = [
     "postgres",
     "sqlite",
@@ -31,6 +25,13 @@ sqlx = { workspace = true, features = [
     "macros",
     "migrate",
 ] }
+
+dojo-introspect.workspace = true
+introspect-types.workspace = true
+
+torii-introspect.workspace = true
+torii-sql = { workspace = true, features = ["postgres", "sqlite"] }
+
 
 [build-dependencies]
 tonic-build.workspace = true

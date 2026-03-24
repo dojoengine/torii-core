@@ -5,7 +5,6 @@
 
 pub mod json;
 pub mod metadata;
-pub mod sql;
 pub mod token_uri;
 pub mod utils;
 

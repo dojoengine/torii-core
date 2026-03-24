@@ -4624,6 +4624,7 @@ dependencies = [
  "torii-introspect",
  "torii-introspect-postgres-sink",
  "torii-log-sink",
+ "torii-sql",
  "torii-sql-sink",
  "torii-test-utils",
  "tower 0.5.3",
@@ -4657,7 +4658,7 @@ dependencies = [
  "torii-introspect-postgres-sink",
  "torii-introspect-sqlite-sink",
  "torii-runtime-common",
- "torii-sqlite",
+ "torii-sql",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -4731,8 +4732,7 @@ dependencies = [
  "torii",
  "torii-common",
  "torii-introspect",
- "torii-postgres",
- "torii-sqlite",
+ "torii-sql",
  "tracing",
 ]
 
@@ -4903,6 +4903,7 @@ dependencies = [
  "tonic-build",
  "torii",
  "torii-common",
+ "torii-sql",
 ]
 
 [[package]]
@@ -4928,7 +4929,7 @@ dependencies = [
  "torii-introspect-postgres-sink",
  "torii-introspect-sqlite-sink",
  "torii-runtime-common",
- "torii-sqlite",
+ "torii-sql",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -4953,9 +4954,33 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "torii",
- "torii-common",
  "torii-introspect",
- "torii-postgres",
+ "torii-sql",
+ "tracing",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "torii-introspect-sql-sink"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrayvec",
+ "async-trait",
+ "hex",
+ "introspect-types",
+ "itertools 0.14.0",
+ "metrics",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "starknet",
+ "starknet-types-core",
+ "thiserror 2.0.18",
+ "tokio",
+ "torii",
+ "torii-introspect",
+ "torii-sql",
  "tracing",
  "xxhash-rust",
 ]
@@ -4979,7 +5004,7 @@ dependencies = [
  "tokio",
  "torii",
  "torii-introspect",
- "torii-sqlite",
+ "torii-sql",
  "tracing",
 ]
 
@@ -5028,27 +5053,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "torii-postgres"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "crc",
- "futures",
- "hex",
- "serde",
- "serde_json",
- "sqlx",
- "starknet-types-core",
- "thiserror 2.0.18",
- "tokio",
- "torii",
- "torii-common",
- "tracing",
- "xxhash-rust",
-]
-
-[[package]]
 name = "torii-runtime-common"
 version = "0.1.0"
 dependencies = [
@@ -5057,6 +5061,17 @@ dependencies = [
  "tokio-postgres",
  "torii",
  "tracing",
+]
+
+[[package]]
+name = "torii-sql"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "crc",
+ "futures",
+ "itertools 0.14.0",
+ "sqlx",
 ]
 
 [[package]]
@@ -5081,16 +5096,6 @@ dependencies = [
  "tonic-web",
  "torii",
  "tracing",
-]
-
-[[package]]
-name = "torii-sqlite"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "sqlx",
- "torii-common",
 ]
 
 [[package]]

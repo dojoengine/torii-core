@@ -1,22 +1,13 @@
+use crate::{AcquiredSchema, FlexQuery};
 use futures::future::BoxFuture;
-use sqlx::{
-    migrate::{AppliedMigration, Migrate, MigrateError, Migration, MigrationSource, Migrator},
-    query, query_scalar, Acquire, Connection, Database, PgConnection, Postgres,
-};
+use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migration};
+use sqlx::{query, query_scalar, Connection, PgConnection, Postgres};
 use sqlx::{query_as, Executor};
-use std::{
-    collections::{HashMap, HashSet},
-    ops::{Deref, DerefMut},
-    slice,
-    time::{Duration, Instant},
-};
-use torii_sql::AcquiredSchema;
+use std::time::{Duration, Instant};
 
-impl<DB, C> Migrate for AcquiredSchema<DB, C>
-where
-    DB: Database,
-    C: Connection<Database = DB>,
-{
+pub type PgQuery = FlexQuery<sqlx::Postgres>;
+
+impl Migrate for AcquiredSchema<Postgres, PgConnection> {
     fn ensure_migrations_table(&mut self) -> BoxFuture<'_, Result<(), MigrateError>> {
         Box::pin(async move {
             // language=SQL
@@ -51,7 +42,7 @@ CREATE TABLE IF NOT EXISTS {schema}._sqlx_migrations (
             let row: Option<(i64,)> = query_as(
                     format!("SELECT version FROM {schema}._sqlx_migrations WHERE success = false ORDER BY version LIMIT 1", schema = self.schema).as_str()
             )
-            .fetch_optional(&mut *self.connection)
+            .fetch_optional(&mut self.connection)
             .await?;
 
             Ok(row.map(|r: (i64,)| r.0))
@@ -70,7 +61,7 @@ CREATE TABLE IF NOT EXISTS {schema}._sqlx_migrations (
                 )
                 .as_str(),
             )
-            .fetch_all(&mut *self.connection)
+            .fetch_all(&mut self.connection)
             .await?;
 
             let migrations = rows
@@ -99,7 +90,7 @@ CREATE TABLE IF NOT EXISTS {schema}._sqlx_migrations (
             // language=SQL
             let _ = query("SELECT pg_advisory_lock($1)")
                 .bind(lock_id)
-                .execute(&mut *self.connection)
+                .execute(&mut self.connection)
                 .await?;
 
             Ok(())
@@ -114,7 +105,7 @@ CREATE TABLE IF NOT EXISTS {schema}._sqlx_migrations (
             // language=SQL
             let _ = query("SELECT pg_advisory_unlock($1)")
                 .bind(lock_id)
-                .execute(&mut *self.connection)
+                .execute(&mut self.connection)
                 .await?;
 
             Ok(())
@@ -137,7 +128,7 @@ CREATE TABLE IF NOT EXISTS {schema}._sqlx_migrations (
                 // The `execution_time` however can only be measured for the whole transaction. This value _only_ exists for
                 // data lineage and debugging reasons, so it is not super important if it is lost. So we initialize it to -1
                 // and update it once the actual transaction completed.
-                let mut tx = self.begin().await?;
+                let mut tx = Connection::begin(&mut self.connection).await?;
                 execute_migration(&mut tx, schema, migration).await?;
                 tx.commit().await?;
             }
@@ -159,7 +150,7 @@ CREATE TABLE IF NOT EXISTS {schema}._sqlx_migrations (
             ))
             .bind(elapsed.as_nanos() as i64)
             .bind(migration.version)
-            .execute(&mut *self.connection)
+            .execute(&mut self.connection)
             .await?;
 
             Ok(elapsed)
@@ -179,7 +170,7 @@ CREATE TABLE IF NOT EXISTS {schema}._sqlx_migrations (
             } else {
                 // Use a single transaction for the actual migration script and the essential bookeeping so we never
                 // execute migrations twice. See https://github.com/launchbadge/sqlx/issues/1966.
-                let mut tx = self.begin().await?;
+                let mut tx = Connection::begin(&mut self.connection).await?;
                 revert_migration(&mut tx, schema, migration).await?;
                 tx.commit().await?;
             }

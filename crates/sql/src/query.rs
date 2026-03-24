@@ -1,23 +1,20 @@
 use async_trait::async_trait;
 use itertools::Itertools;
-use sqlx::{Database, Executor, Postgres};
-pub use sqlx::{PgPool, Transaction};
+use sqlx::{Database, Executor, Transaction};
 use std::borrow::Cow;
 use std::sync::Arc;
 
-pub use sqlx::Error as SqlxError;
-
-pub type SqlxResult<T> = std::result::Result<T, SqlxError>;
+use crate::SqlxResult;
 
 #[async_trait]
-pub trait Executable<DB: sqlx::Database> {
+pub trait Executable<DB: Database> {
     async fn execute(self, transaction: &mut Transaction<'_, DB>) -> SqlxResult<()>;
 }
 
 #[async_trait]
-impl<DB: sqlx::Database> Executable<DB> for &str
+impl<DB: Database> Executable<DB> for &str
 where
-    for<'c> &'c mut <DB as sqlx::Database>::Connection: Executor<'c, Database = DB>,
+    for<'c> &'c mut <DB as Database>::Connection: Executor<'c, Database = DB>,
 {
     async fn execute(self, transaction: &mut Transaction<'_, DB>) -> SqlxResult<()> {
         transaction.execute(self).await?;
@@ -26,9 +23,9 @@ where
 }
 
 #[async_trait]
-impl<DB: sqlx::Database> Executable<DB> for &String
+impl<DB: Database> Executable<DB> for &String
 where
-    for<'c> &'c mut <DB as sqlx::Database>::Connection: Executor<'c, Database = DB>,
+    for<'c> &'c mut <DB as Database>::Connection: Executor<'c, Database = DB>,
 {
     async fn execute(self, transaction: &mut Transaction<'_, DB>) -> SqlxResult<()> {
         transaction.execute(self.as_str()).await?;
@@ -37,9 +34,9 @@ where
 }
 
 #[async_trait]
-impl<DB: sqlx::Database> Executable<DB> for String
+impl<DB: Database> Executable<DB> for String
 where
-    for<'c> &'c mut <DB as sqlx::Database>::Connection: Executor<'c, Database = DB>,
+    for<'c> &'c mut <DB as Database>::Connection: Executor<'c, Database = DB>,
 {
     async fn execute(self, transaction: &mut Transaction<'_, DB>) -> SqlxResult<()> {
         transaction.execute(self.as_str()).await?;
@@ -48,9 +45,9 @@ where
 }
 
 #[async_trait]
-impl<DB: sqlx::Database> Executable<DB> for Cow<'_, str>
+impl<DB: Database> Executable<DB> for Cow<'_, str>
 where
-    for<'c> &'c mut <DB as sqlx::Database>::Connection: Executor<'c, Database = DB>,
+    for<'c> &'c mut <DB as Database>::Connection: Executor<'c, Database = DB>,
 {
     async fn execute(self, transaction: &mut Transaction<'_, DB>) -> SqlxResult<()> {
         transaction.execute(self.as_ref()).await?;
@@ -77,9 +74,9 @@ impl<S: AsRef<str>, DB: Database> QueryLike<S, DB> {
 }
 
 #[async_trait]
-impl<DB: sqlx::Database> Executable<DB> for FlexStr
+impl<DB: Database> Executable<DB> for FlexStr
 where
-    for<'c> &'c mut <DB as sqlx::Database>::Connection: Executor<'c, Database = DB>,
+    for<'c> &'c mut <DB as Database>::Connection: Executor<'c, Database = DB>,
 {
     async fn execute(self, transaction: &mut Transaction<'_, DB>) -> SqlxResult<()> {
         transaction.execute(self.as_ref()).await?;
@@ -172,9 +169,9 @@ impl<DB: Database> Queries<DB> for Vec<QueryLike<FlexStr, DB>> {
 }
 
 #[async_trait]
-impl<DB: sqlx::Database, const N: usize> Executable<DB> for &[String; N]
+impl<DB: Database, const N: usize> Executable<DB> for &[String; N]
 where
-    for<'c> &'c mut <DB as sqlx::Database>::Connection: Executor<'c, Database = DB>,
+    for<'c> &'c mut <DB as Database>::Connection: Executor<'c, Database = DB>,
 {
     async fn execute(self, transaction: &mut Transaction<'_, DB>) -> SqlxResult<()> {
         for query in self {
@@ -185,7 +182,7 @@ where
 }
 
 #[async_trait]
-impl<DB: sqlx::Database, T: Executable<DB> + Send> Executable<DB> for Vec<T> {
+impl<DB: Database, T: Executable<DB> + Send> Executable<DB> for Vec<T> {
     async fn execute(self, transaction: &mut Transaction<'_, DB>) -> SqlxResult<()> {
         for item in self {
             item.execute(transaction).await?;
@@ -195,7 +192,7 @@ impl<DB: sqlx::Database, T: Executable<DB> + Send> Executable<DB> for Vec<T> {
 }
 
 #[async_trait]
-impl<'a, DB: sqlx::Database, T> Executable<DB> for &'a Vec<T>
+impl<'a, DB: Database, T> Executable<DB> for &'a Vec<T>
 where
     &'a T: Executable<DB> + Send,
     T: Send + Sync,
@@ -209,7 +206,7 @@ where
 }
 
 #[async_trait]
-impl<'a, DB: sqlx::Database, T> Executable<DB> for &'a [T]
+impl<'a, DB: Database, T> Executable<DB> for &'a [T]
 where
     &'a T: Executable<DB> + Send,
     T: Send + Sync,
@@ -223,10 +220,10 @@ where
 }
 
 #[async_trait]
-impl<S: AsRef<str> + Send, DB: sqlx::Database> Executable<DB> for QueryLike<S, DB>
+impl<S: AsRef<str> + Send, DB: Database> Executable<DB> for QueryLike<S, DB>
 where
-    for<'c> &'c mut <DB as sqlx::Database>::Connection: Executor<'c, Database = DB>,
-    for<'q> <DB as sqlx::Database>::Arguments<'static>: sqlx::IntoArguments<'q, DB>,
+    for<'c> &'c mut <DB as Database>::Connection: Executor<'c, Database = DB>,
+    for<'q> <DB as Database>::Arguments<'static>: sqlx::IntoArguments<'q, DB>,
 {
     async fn execute(mut self, transaction: &mut Transaction<'_, DB>) -> SqlxResult<()> {
         let sql = self.sql.as_ref();
@@ -236,6 +233,4 @@ where
     }
 }
 
-pub type PgQuery = QueryLike<FlexStr, Postgres>;
-pub type MySqlQuery = QueryLike<FlexStr, sqlx::MySql>;
-pub type SqliteQuery = QueryLike<FlexStr, sqlx::Sqlite>;
+pub type FlexQuery<DB> = QueryLike<FlexStr, DB>;
