@@ -4939,6 +4939,7 @@ name = "torii-introspect-postgres-sink"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrayvec",
  "async-trait",
  "hex",
  "introspect-types",

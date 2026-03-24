@@ -1,25 +1,25 @@
+use crate::table::PgTable;
+use crate::{table::DeadField, PostgresField, PostgresType, PrimaryKey, SchemaName};
 use introspect_types::{ColumnDef, ColumnInfo, MemberDef, PrimaryDef, TypeDef};
 use itertools::Itertools;
 use sqlx::error::BoxDynError;
+use sqlx::postgres::PgRow;
 use sqlx::prelude::FromRow;
+use sqlx::query::QueryAs;
 use sqlx::Error::Encode as EncodeError;
 use sqlx::{postgres::PgArguments, types::Json};
 use sqlx::{Arguments, Executor, Postgres};
 use starknet_types_core::felt::Felt;
-use torii_common::sql::{PgQuery, Queries, SqlxResult};
-use torii_introspect::postgres::types::{PgPrimary, Uint128};
-use torii_introspect::postgres::PgFelt;
-
-use crate::table::PgTable;
-use crate::{
-    processor::COMMIT_CMD, table::DeadField, PgSchema, PostgresField, PostgresType, PrimaryKey,
-    SchemaName,
-};
 use std::collections::HashMap;
 use std::{
     fmt::{Display, Formatter, Result as FmtResult, Write},
     rc::Rc,
 };
+use torii_common::sql::{PgQuery, Queries, SqlxResult};
+use torii_introspect::postgres::types::{PgPrimary, Uint128};
+use torii_introspect::postgres::PgFelt;
+
+pub const COMMIT_CMD: &str = "--COMMIT";
 
 const CREATE_METADATA_COLUMNS: &str =  "__created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), __updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), __created_block public.uint64 NOT NULL, __updated_block public.uint64 NOT NULL, __created_tx public.felt252 NOT NULL, __updated_tx public.felt252 NOT NULL);";
 const INSERT_DEAD_MEMBER_QUERY: &str = r#"INSERT INTO introspect.db_dead_fields
@@ -28,8 +28,8 @@ const INSERT_DEAD_MEMBER_QUERY: &str = r#"INSERT INTO introspect.db_dead_fields
     ON CONFLICT ("schema", "table", id) DO UPDATE SET
     name = EXCLUDED.name, type_def = EXCLUDED.type_def, updated_at = NOW(), updated_block = EXCLUDED.updated_block, updated_tx = EXCLUDED.updated_tx"#;
 const INSERT_TABLE_QUERY: &str = r#"INSERT INTO introspect.db_tables
-    ("schema", id, name, primary_def, updated_at, created_block, updated_block, created_tx, updated_tx)
-    VALUES ($1, $2, $3, $4, NOW(), $5::uint64, $5::uint64, $6, $6)
+    ("schema", id, owner, name, primary_def, updated_at, created_block, updated_block, created_tx, updated_tx)
+    VALUES ($1, $2, $3, $4, $5, NOW(), $6::uint64, $6::uint64, $7, $7)
     ON CONFLICT ("schema", id) DO UPDATE SET
     name = EXCLUDED.name, primary_def = EXCLUDED.primary_def, updated_at = NOW(), updated_block = EXCLUDED.updated_block, updated_tx = EXCLUDED.updated_tx"#;
 const INSERT_COLUMN_QUERY: &str = r#"INSERT INTO introspect.db_columns
@@ -38,22 +38,22 @@ const INSERT_COLUMN_QUERY: &str = r#"INSERT INTO introspect.db_columns
     ON CONFLICT ("schema", "table", id) DO UPDATE SET
     name = EXCLUDED.name, type_def = EXCLUDED.type_def, updated_at = NOW(), updated_block = EXCLUDED.updated_block, updated_tx = EXCLUDED.updated_tx"#;
 
-const FETCH_TABLES_QUERY: &str =
-    r#"SELECT id, name, primary_def FROM introspect.db_tables WHERE "schema" = $1"#;
-const FETCH_COLUMNS_QUERY: &str =
-    r#"SELECT "table", id, name, type_def FROM introspect.db_columns WHERE "schema" = $1"#;
-const FETCH_DEAD_FIELDS_QUERY: &str =
-    r#"SELECT "table", id, name, type_def FROM introspect.db_dead_fields WHERE "schema" = $1"#;
+const FETCH_TABLES_QUERY: &str = r#"SELECT "schema", id, name, primary_def, owner FROM introspect.db_tables WHERE $1::text[] = '{}'::text[] OR "schema" = ANY($1::text[])"#;
+const FETCH_COLUMNS_QUERY: &str = r#"SELECT "schema", "table", id, name, type_def FROM introspect.db_columns WHERE $1::text[] = '{}'::text[] OR "schema" = ANY($1::text[])"#;
+const FETCH_DEAD_FIELDS_QUERY: &str = r#"SELECT "schema", "table", id, name, type_def FROM introspect.db_dead_fields WHERE $1::text[] = '{}'::text[] OR "schema" = ANY($1::text[])"#;
 
 #[derive(FromRow)]
 pub struct TableRow {
+    pub schema: String,
     pub id: PgFelt,
     pub name: String,
     pub primary_def: PgPrimary,
+    pub owner: PgFelt,
 }
 
 #[derive(FromRow)]
 pub struct ColumnRow {
+    pub schema: String,
     pub table: PgFelt,
     pub id: PgFelt,
     pub name: String,
@@ -62,6 +62,7 @@ pub struct ColumnRow {
 
 #[derive(FromRow)]
 pub struct DeadFieldRow {
+    pub schema: String,
     pub table: PgFelt,
     pub id: Uint128,
     pub name: String,
@@ -69,9 +70,11 @@ pub struct DeadFieldRow {
 }
 
 pub struct PgTableHead {
+    schema: String,
     id: Felt,
     name: String,
     primary: PrimaryDef,
+    owner: Felt,
 }
 
 #[derive(Debug)]
@@ -84,7 +87,7 @@ pub struct CreatePgTable {
 
 #[derive(Debug)]
 pub struct TableUpgrade {
-    pub schema: Rc<PgSchema>,
+    pub schema: Rc<str>,
     pub name: String,
     pub old_name: Option<String>,
     pub atomic: Vec<TypeMod>,
@@ -242,7 +245,7 @@ impl Display for CreatesType {
 
 impl CreatesType {
     pub fn new_struct<S: Into<String>>(
-        schema: &Rc<PgSchema>,
+        schema: &Rc<str>,
         name: S,
         fields: Vec<PostgresField>,
     ) -> Self {
@@ -252,11 +255,7 @@ impl CreatesType {
         })
     }
 
-    pub fn new_enum<S: Into<String>>(
-        schema: &Rc<PgSchema>,
-        name: S,
-        variants: Vec<String>,
-    ) -> Self {
+    pub fn new_enum<S: Into<String>>(schema: &Rc<str>, name: S, variants: Vec<String>) -> Self {
         Self::Enum(CreateEnum {
             name: SchemaName::new(schema, name),
             variants,
@@ -265,7 +264,7 @@ impl CreatesType {
 }
 
 impl TableUpgrade {
-    pub fn new<S: Into<String>>(schema: &Rc<PgSchema>, name: S) -> Self {
+    pub fn new<S: Into<String>>(schema: &Rc<str>, name: S) -> Self {
         Self {
             schema: schema.clone(),
             name: name.into(),
@@ -496,7 +495,7 @@ impl TypeMods for Vec<TypeMod> {
 impl ColumnUpgrade {
     pub fn maybe_alter(
         &mut self,
-        schema: &Rc<PgSchema>,
+        schema: &Rc<str>,
         name: &str,
         field: &str,
         pg_type: Option<PostgresType>,
@@ -513,7 +512,7 @@ impl ColumnUpgrade {
 
     pub fn add_struct_mod<S: Into<String>>(
         &mut self,
-        schema: &Rc<PgSchema>,
+        schema: &Rc<str>,
         name: S,
         mods: Vec<StructMod>,
     ) {
@@ -527,7 +526,7 @@ impl ColumnUpgrade {
     }
     pub fn add_enum_mod<S: Into<String>>(
         &mut self,
-        schema: &Rc<PgSchema>,
+        schema: &Rc<str>,
         name: S,
         rename: Vec<(String, String)>,
         add: Vec<String>,
@@ -577,9 +576,10 @@ impl From<CreatesType> for TypeMod {
     }
 }
 
-impl From<ColumnRow> for (Felt, Felt, ColumnInfo) {
+impl From<ColumnRow> for (String, Felt, Felt, ColumnInfo) {
     fn from(value: ColumnRow) -> Self {
         (
+            value.schema,
             value.table.into(),
             value.id.into(),
             ColumnInfo {
@@ -591,9 +591,10 @@ impl From<ColumnRow> for (Felt, Felt, ColumnInfo) {
     }
 }
 
-impl From<DeadFieldRow> for (Felt, u128, DeadField) {
+impl From<DeadFieldRow> for (String, Felt, u128, DeadField) {
     fn from(value: DeadFieldRow) -> Self {
         (
+            value.schema,
             value.table.into(),
             value.id.into(),
             DeadField {
@@ -606,23 +607,24 @@ impl From<DeadFieldRow> for (Felt, u128, DeadField) {
 
 impl From<TableRow> for PgTableHead {
     fn from(value: TableRow) -> Self {
-        let row = value;
         PgTableHead {
-            id: row.id.into(),
-            name: row.name,
-            primary: row.primary_def.into(),
+            schema: value.schema,
+            id: value.id.into(),
+            name: value.name,
+            primary: value.primary_def.into(),
+            owner: value.owner.into(),
         }
     }
 }
-
-impl PgTableHead {
-    pub fn to_table(self, schema: &PgSchema) -> (Felt, PgTable) {
+impl From<PgTableHead> for (Felt, PgTable) {
+    fn from(value: PgTableHead) -> Self {
         (
-            self.id,
+            value.id,
             PgTable {
-                schema: schema.clone(),
-                name: self.name,
-                primary: self.primary,
+                schema: value.schema,
+                owner: value.owner,
+                name: value.name,
+                primary: value.primary,
                 columns: HashMap::new(),
                 alive: true,
                 dead: HashMap::new(),
@@ -632,7 +634,7 @@ impl PgTableHead {
 }
 
 fn insert_dead_member_query(
-    schema: &PgSchema,
+    schema: &str,
     table: &Felt,
     fields: &[DeadFieldWithId],
     block_number: u64,
@@ -651,7 +653,7 @@ fn insert_dead_member_query(
 }
 
 pub fn insert_columns_query(
-    schema: &PgSchema,
+    schema: &str,
     table: &Felt,
     columns: Vec<(&Felt, &ColumnInfo)>,
     block_number: u64,
@@ -675,16 +677,18 @@ pub fn insert_columns_query(
 }
 
 pub fn insert_table_query(
-    schema: &PgSchema,
+    schema: &str,
     id: &Felt,
     name: &str,
     primary_def: &PrimaryDef,
+    from_address: &Felt,
     block_number: u64,
     transaction_hash: &Felt,
 ) -> Result<PgQuery, BoxDynError> {
     let mut args = PgArguments::default();
     args.add(schema.to_string())?;
     args.add(PgFelt::from(*id))?;
+    args.add(PgFelt::from(*from_address))?;
     args.add(name.to_owned())?;
     args.add(PgPrimary::from(primary_def))?;
     args.add(block_number.to_string())?;
@@ -693,12 +697,25 @@ pub fn insert_table_query(
     Ok(PgQuery::new(INSERT_TABLE_QUERY, args))
 }
 
+pub fn schema_query<'a, R>(
+    query: &'a str,
+    schemas: &'a Option<Vec<&'a str>>,
+) -> QueryAs<'a, Postgres, R, PgArguments>
+where
+    R: for<'r> FromRow<'r, PgRow>,
+{
+    let query = sqlx::query_as::<_, R>(query);
+    match schemas {
+        Some(schemas) => query.bind(schemas),
+        None => query.bind("{}".to_string()),
+    }
+}
+
 pub async fn fetch_tables<'e, 'c, E: 'e + Executor<'c, Database = Postgres>>(
     conn: E,
-    schema: &PgSchema,
+    schemas: &Option<Vec<&str>>,
 ) -> SqlxResult<Vec<PgTableHead>> {
-    sqlx::query_as::<_, TableRow>(FETCH_TABLES_QUERY)
-        .bind(schema.to_string())
+    schema_query::<TableRow>(FETCH_TABLES_QUERY, schemas)
         .fetch_all(conn)
         .await
         .map(|rows| rows.into_iter().map_into().collect())
@@ -706,10 +723,9 @@ pub async fn fetch_tables<'e, 'c, E: 'e + Executor<'c, Database = Postgres>>(
 
 pub async fn fetch_columns<'e, 'c, E: 'e + Executor<'c, Database = Postgres>>(
     conn: E,
-    schema: &PgSchema,
-) -> SqlxResult<Vec<(Felt, Felt, ColumnInfo)>> {
-    sqlx::query_as::<_, ColumnRow>(FETCH_COLUMNS_QUERY)
-        .bind(schema.to_string())
+    schemas: &Option<Vec<&str>>,
+) -> SqlxResult<Vec<(String, Felt, Felt, ColumnInfo)>> {
+    schema_query::<ColumnRow>(FETCH_COLUMNS_QUERY, schemas)
         .fetch_all(conn)
         .await
         .map(|rows| rows.into_iter().map_into().collect())
@@ -717,11 +733,14 @@ pub async fn fetch_columns<'e, 'c, E: 'e + Executor<'c, Database = Postgres>>(
 
 pub async fn fetch_dead_fields<'e, 'c, E: 'e + Executor<'c, Database = Postgres>>(
     conn: E,
-    schema: &PgSchema,
-) -> SqlxResult<Vec<(Felt, u128, DeadField)>> {
-    sqlx::query_as::<_, DeadFieldRow>(FETCH_DEAD_FIELDS_QUERY)
-        .bind(schema.to_string())
+    schemas: &Option<Vec<&str>>,
+) -> SqlxResult<Vec<(String, Felt, u128, DeadField)>> {
+    schema_query::<DeadFieldRow>(FETCH_DEAD_FIELDS_QUERY, schemas)
         .fetch_all(conn)
         .await
         .map(|rows| rows.into_iter().map_into().collect())
+}
+
+pub fn make_schema_query(schema: &str) -> String {
+    format!(r#"CREATE SCHEMA IF NOT EXISTS "{schema}""#)
 }

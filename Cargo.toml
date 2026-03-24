@@ -120,6 +120,7 @@ dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev =
 # Utils
 resolve-path = "0.1.0"
 itertools = "0.14.0"
+arrayvec = "0.7.6"
 
 # Torii core
 torii.path = "."

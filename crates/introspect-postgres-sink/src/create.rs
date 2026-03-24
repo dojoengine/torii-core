@@ -1,24 +1,22 @@
 use crate::{
-    query::{CreatePgTable, CreatesType},
+    query::{make_schema_query, CreatePgTable, CreatesType},
     utils::{AsBytes, HasherExt},
-    PgSchema, PgTypeError, PgTypeResult, PostgresField, PostgresScalar, PostgresType, PrimaryKey,
-    SchemaName,
+    PgTypeError, PgTypeResult, PostgresField, PostgresScalar, PostgresType, PrimaryKey, SchemaName,
 };
 use introspect_types::{
-    ArrayDef, ColumnDef, EnumDef, FixedArrayDef, MemberDef, OptionDef, PrimaryDef, PrimaryTypeDef,
-    StructDef, TupleDef, TypeDef, VariantDef,
+    ArrayDef, ColumnDef, ColumnInfo, EnumDef, FixedArrayDef, MemberDef, OptionDef, PrimaryDef,
+    PrimaryTypeDef, StructDef, TupleDef, TypeDef, VariantDef,
 };
 use itertools::Itertools;
 use starknet_types_core::felt::Felt;
 use std::rc::Rc;
 use torii_common::sql::{PgQuery, Queries};
-use torii_introspect::schema::TableInfo;
 use xxhash_rust::xxh3::Xxh3;
 
 pub trait PostgresTypeExtractor {
     fn extract_type(
         &self,
-        schema: &Rc<PgSchema>,
+        schema: &Rc<str>,
         branch: &Xxh3,
         creates: &mut Vec<impl From<CreatesType>>,
     ) -> PgTypeResult<PostgresType>;
@@ -34,7 +32,7 @@ pub trait PostgresFieldExtractor {
     }
     fn extract_field(
         &self,
-        schema: &Rc<PgSchema>,
+        schema: &Rc<str>,
         branch: &Xxh3,
         creates: &mut Vec<impl From<CreatesType>>,
     ) -> PgTypeResult<PostgresField> {
@@ -54,7 +52,7 @@ impl PostgresField {
         }
     }
 
-    pub fn new_composite<S, T>(name: S, schema: &Rc<PgSchema>, type_name: T) -> Self
+    pub fn new_composite<S, T>(name: S, schema: &Rc<str>, type_name: T) -> Self
     where
         S: Into<String>,
         T: Into<String>,
@@ -77,6 +75,20 @@ impl PostgresFieldExtractor for ColumnDef {
     }
     fn id(&self) -> &Self::Id {
         &self.id
+    }
+}
+
+impl PostgresFieldExtractor for (&Felt, &ColumnInfo) {
+    type Id = Felt;
+    fn name(&self) -> &str {
+        &self.1.name
+    }
+
+    fn type_def(&self) -> &TypeDef {
+        &self.1.type_def
+    }
+    fn id(&self) -> &Self::Id {
+        &self.0
     }
 }
 
@@ -111,7 +123,7 @@ impl PostgresFieldExtractor for (&Felt, &VariantDef) {
 impl PostgresTypeExtractor for TypeDef {
     fn extract_type(
         &self,
-        schema: &Rc<PgSchema>,
+        schema: &Rc<str>,
         branch: &Xxh3,
         creates: &mut Vec<impl From<CreatesType>>,
     ) -> PgTypeResult<PostgresType> {
@@ -187,7 +199,7 @@ impl From<&PrimaryDef> for PrimaryKey {
 impl PostgresTypeExtractor for ArrayDef {
     fn extract_type(
         &self,
-        schema: &Rc<PgSchema>,
+        schema: &Rc<str>,
         branch: &Xxh3,
         creates: &mut Vec<impl From<CreatesType>>,
     ) -> PgTypeResult<PostgresType> {
@@ -200,7 +212,7 @@ impl PostgresTypeExtractor for ArrayDef {
 impl PostgresTypeExtractor for FixedArrayDef {
     fn extract_type(
         &self,
-        schema: &Rc<PgSchema>,
+        schema: &Rc<str>,
         branch: &Xxh3,
         creates: &mut Vec<impl From<CreatesType>>,
     ) -> PgTypeResult<PostgresType> {
@@ -213,7 +225,7 @@ impl PostgresTypeExtractor for FixedArrayDef {
 impl PostgresTypeExtractor for StructDef {
     fn extract_type(
         &self,
-        schema: &Rc<PgSchema>,
+        schema: &Rc<str>,
         branch: &Xxh3,
         creates: &mut Vec<impl From<CreatesType>>,
     ) -> PgTypeResult<PostgresType> {
@@ -231,7 +243,7 @@ impl PostgresTypeExtractor for StructDef {
 impl PostgresTypeExtractor for EnumDef {
     fn extract_type(
         &self,
-        schema: &Rc<PgSchema>,
+        schema: &Rc<str>,
         branch: &Xxh3,
         creates: &mut Vec<impl From<CreatesType>>,
     ) -> PgTypeResult<PostgresType> {
@@ -259,7 +271,7 @@ impl PostgresTypeExtractor for EnumDef {
 impl PostgresTypeExtractor for TupleDef {
     fn extract_type(
         &self,
-        schema: &Rc<PgSchema>,
+        schema: &Rc<str>,
         branch: &Xxh3,
         creates: &mut Vec<impl From<CreatesType>>,
     ) -> PgTypeResult<PostgresType> {
@@ -280,7 +292,7 @@ impl PostgresTypeExtractor for TupleDef {
 impl PostgresTypeExtractor for OptionDef {
     fn extract_type(
         &self,
-        schema: &Rc<PgSchema>,
+        schema: &Rc<str>,
         branch: &Xxh3,
         creates: &mut Vec<impl From<CreatesType>>,
     ) -> PgTypeResult<PostgresType> {
@@ -289,13 +301,13 @@ impl PostgresTypeExtractor for OptionDef {
 }
 
 impl CreatePgTable {
-    pub fn new(schema: &Rc<PgSchema>, id: &Felt, table: &TableInfo) -> PgTypeResult<Self> {
-        let TableInfo {
-            name,
-            attributes: _,
-            primary,
-            columns,
-        } = table;
+    pub fn new(
+        schema: &Rc<str>,
+        id: &Felt,
+        name: &str,
+        primary: &PrimaryDef,
+        columns: Vec<(&Felt, &ColumnInfo)>,
+    ) -> PgTypeResult<Self> {
         let mut creates = Vec::new();
         let branch = Xxh3::new_based(id);
         let primary = primary.into();
@@ -311,6 +323,7 @@ impl CreatePgTable {
         })
     }
     pub fn make_queries(&self, queries: &mut Vec<PgQuery>) {
+        queries.add(make_schema_query(&self.name.0));
         for pg_type in &self.pg_types {
             queries.add(pg_type.to_string());
         }

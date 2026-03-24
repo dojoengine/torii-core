@@ -5,9 +5,7 @@ use introspect_types::serialize_def::CairoTypeSerialization;
 use introspect_types::{CairoDeserializer, ColumnInfo, PrimaryDef, PrimaryTypeDef, TypeDef};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Serialize, Serializer};
-use starknet_types_core::felt::Felt;
 use std::ops::Deref;
-use torii::etl::envelope::MetaData;
 
 pub struct RecordSchema<'a> {
     primary: &'a PrimaryDef,
@@ -213,25 +211,5 @@ impl SerializeEntries for () {
         _map: &mut <S as Serializer>::SerializeMap,
     ) -> Result<(), S::Error> {
         Ok(())
-    }
-}
-
-pub fn pg_json_felt252(value: &Felt) -> String {
-    format!("\\x{}", hex::encode(value.to_bytes_be()))
-}
-
-impl SerializeEntries for MetaData {
-    fn entry_count(&self) -> usize {
-        4
-    }
-    fn serialize_entries<S: serde::Serializer>(
-        &self,
-        map: &mut <S as serde::Serializer>::SerializeMap,
-    ) -> Result<(), S::Error> {
-        let tx_hash = pg_json_felt252(&self.transaction_hash);
-        map.serialize_entry("__created_block", &self.block_number)?;
-        map.serialize_entry("__updated_block", &self.block_number)?;
-        map.serialize_entry("__created_tx", &tx_hash)?;
-        map.serialize_entry("__updated_tx", &tx_hash)
     }
 }

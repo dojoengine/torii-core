@@ -1,8 +1,8 @@
-use std::sync::PoisonError;
-
+use crate::tables::TableKey;
 use introspect_types::{PrimaryTypeDef, TypeDef};
 use sqlx::Error as SqlxError;
-use starknet_types_core::felt::Felt;
+use starknet_types_core::felt::{Felt, FromStrError};
+use std::sync::PoisonError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -114,15 +114,17 @@ pub enum PgDbError {
     #[error(transparent)]
     TypeError(#[from] PgTypeError),
     #[error("Table with id: {0} already exists, incoming name: {1}, existing name: {2}")]
-    TableAlreadyExists(Felt, String, String),
+    TableAlreadyExists(TableKey, String, String),
     #[error("Table not found with id: {0}")]
-    TableNotFound(Felt),
+    TableNotFound(TableKey),
     #[error("Table not alive - id: {0}, name: {1}")]
     TableNotAlive(Felt, String),
     #[error("Manager does not support updating")]
     UpdateNotSupported,
     #[error("Table poison error: {0}")]
     PoisonError(String),
+    #[error("Schema not found for address: {0:#063x}")]
+    SchemaNotFound(Felt),
 }
 
 pub type PgDbResult<T> = std::result::Result<T, PgDbError>;
@@ -131,4 +133,28 @@ impl<T> From<PoisonError<T>> for PgDbError {
     fn from(err: PoisonError<T>) -> Self {
         Self::PoisonError(err.to_string())
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SchemaError {
+    #[error("Invalid address length for schema: {0} should be 63 characters long")]
+    InvalidAddressLength(String),
+    #[error(transparent)]
+    AddressFromStrError(#[from] FromStrError),
+    #[error("Schema {0} does not match expected schema {1}")]
+    SchemaMismatch(String, String),
+    #[error("Schema {1} not found for address: {0:#063x}")]
+    AddressNotFound(Felt, String),
+}
+
+pub type SchemaResult<T> = std::result::Result<T, SchemaError>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum TableLoadError {
+    #[error(transparent)]
+    SchemaError(#[from] SchemaError),
+    #[error("Table {0} {1:#063x} not found for column {2} with id: {3:#063x}")]
+    ColumnTableNotFound(String, Felt, String, Felt),
+    #[error("Table {0} {1:#063x} not found for dead field {2} with id: {3}")]
+    TableDeadNotFound(String, Felt, String, u128),
 }

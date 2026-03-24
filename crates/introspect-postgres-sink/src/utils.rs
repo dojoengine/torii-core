@@ -8,6 +8,10 @@ pub fn truncate(s: &str, max_chars: usize) -> &str {
     }
 }
 
+pub fn felt_to_schema(address: &Felt) -> String {
+    format!("{address:063x}")
+}
+
 const ALLOWED_TYPE_NAME_CHARS: &str =
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
 

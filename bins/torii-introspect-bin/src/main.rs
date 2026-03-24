@@ -39,6 +39,7 @@ use torii_erc721::{
     FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
 };
 use torii_introspect_postgres_sink::processor::IntrospectPgDb;
+use torii_introspect_postgres_sink::SchemaMode;
 use torii_introspect_sqlite_sink::processor::IntrospectSqliteDb;
 use torii_runtime_common::database::{resolve_token_db_setup, TokenDbSetup};
 use torii_sqlite::{is_sqlite_memory_path, sqlite_connect_options};
@@ -473,7 +474,7 @@ async fn run_with_postgres(
     );
 
     let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), provider);
-    let sink = IntrospectPgDb::new(pool.clone(), ());
+    let sink = IntrospectPgDb::new(pool.clone(), SchemaMode::Address);
     decoder.store.initialize().await?;
     sink.initialize_introspect_pg_sink().await?;
     decoder.load_tables(&[]).await?;

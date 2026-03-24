@@ -7,14 +7,8 @@ use std::{
 
 use crate::{PgTypeError, PgTypeResult};
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub enum PgSchema {
-    Public,
-    Custom(String),
-}
-
 #[derive(Clone, Deserialize, Serialize, PartialEq, Debug)]
-pub struct SchemaName(pub Rc<PgSchema>, pub String);
+pub struct SchemaName(pub Rc<str>, pub String);
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Debug)]
 pub enum PostgresScalar {
@@ -71,15 +65,6 @@ impl From<PostgresScalar> for PostgresType {
         PostgresType {
             scalar: value,
             array: PostgresArray::None,
-        }
-    }
-}
-
-impl Display for PgSchema {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PgSchema::Custom(namespace) => write!(f, "{namespace}",),
-            PgSchema::Public => write!(f, "public"),
         }
     }
 }
@@ -156,7 +141,7 @@ impl From<SchemaName> for PostgresType {
 }
 
 impl SchemaName {
-    pub fn new<T: Into<String>>(schema: &Rc<PgSchema>, name: T) -> Self {
+    pub fn new<T: Into<String>>(schema: &Rc<str>, name: T) -> Self {
         Self(schema.clone(), name.into())
     }
     pub fn replace<S: Into<String>>(&mut self, name: S) -> String {
@@ -184,7 +169,7 @@ impl PostgresType {
         })
     }
 
-    pub fn composite<S: Into<String>>(schema: &Rc<PgSchema>, name: S) -> Self {
+    pub fn composite<S: Into<String>>(schema: &Rc<str>, name: S) -> Self {
         Self {
             scalar: PostgresScalar::Composite(SchemaName::new(schema, name)),
             array: PostgresArray::None,
