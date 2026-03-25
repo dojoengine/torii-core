@@ -14,7 +14,8 @@ use std::io;
 use std::ops::Deref;
 use torii_common::{blob_to_felt, felt_to_blob};
 use torii_introspect::schema::ColumnKeyTrait;
-use torii_sql::{DbConnection, SqlxResult};
+use torii_sql::sqlite::SqliteDbConnection;
+use torii_sql::SqlxResult;
 
 pub const DOJO_SQLITE_STORE_MIGRATIONS: Migrator = sqlx::migrate!("./migrations/sqlite");
 
@@ -161,21 +162,21 @@ impl<T> Deref for SqliteStore<T> {
     }
 }
 
-impl<T: DbConnection<Sqlite> + Send + Sync> SqliteStore<T> {
+impl<T: SqliteDbConnection + Send + Sync> SqliteStore<T> {
     pub async fn initialize(&self) -> SqlxResult<()> {
         self.migrate(Some("dojo"), DOJO_SQLITE_STORE_MIGRATIONS)
             .await
     }
 }
 
-impl<T: DbConnection<Sqlite>> From<T> for SqliteStore<T> {
+impl<T: SqliteDbConnection> From<T> for SqliteStore<T> {
     fn from(pool: T) -> Self {
         Self(pool)
     }
 }
 
 #[async_trait]
-impl<T: DbConnection<Sqlite> + Send + Sync + 'static> DojoStoreTrait for SqliteStore<T> {
+impl<T: SqliteDbConnection + Send + Sync + 'static> DojoStoreTrait for SqliteStore<T> {
     type Error = DojoSqliteStoreError;
 
     async fn save_table(

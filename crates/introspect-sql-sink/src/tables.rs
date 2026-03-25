@@ -1,90 +1,86 @@
-use crate::schema::{SchemaKey, TableKey};
-use crate::table::{DbTable, DbTableTrait};
+use crate::backend::IntrospectQueryMaker;
+use crate::error::RecordResultExt;
+use crate::namespace::{NamespaceKey, TableKey};
+use crate::table::Table;
 use crate::{DbError, DbResult};
-use introspect_types::FeltIds;
-use sqlx::Database;
+use introspect_types::ResultInto;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::RwLock;
-use torii_common::sql::FlexQuery;
 use torii_introspect::events::IntrospectMsg;
 use torii_introspect::schema::TableSchema;
 use torii_introspect::InsertsFields;
-
-pub const DEAD_MEMBERS_TABLE: &str = "__introspect_dead_fields";
-pub const TABLES_TABLE: &str = "__introspect_tables";
-pub const COLUMNS_TABLE: &str = "__introspect_columns";
+use torii_sql::FlexQuery;
 
 #[derive(Debug, Default)]
-pub struct DbTables<DB>(pub RwLock<HashMap<TableKey, DbTable>>, PhantomData<DB>);
+pub struct Tables(pub RwLock<HashMap<TableKey, Table>>);
 
-impl<DB: Database> Deref for DbTables<DB> {
-    type Target = RwLock<HashMap<TableKey, DbTable>>;
+impl Deref for Tables {
+    type Target = RwLock<HashMap<TableKey, Table>>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl<DB> DbTables<DB>
-where
-    DB: Database,
-    DbTable: DbTableTrait<DB>,
-{
-    pub fn create_table(
+impl Tables {
+    pub fn create_table<Backend: IntrospectQueryMaker>(
         &self,
-        schema_key: SchemaKey,
+        namespace_key: NamespaceKey,
         to_table: impl Into<TableSchema>,
         from_address: &Felt,
         block_number: u64,
         transaction_hash: &Felt,
-        queries: &mut Vec<FlexQuery<DB>>,
+        queries: &mut Vec<FlexQuery<Backend::DB>>,
     ) -> DbResult<()> {
         let (id, info) = Into::<TableSchema>::into(to_table).into();
-        let schema = schema_key.to_string();
-        let key = TableKey::new(schema_key, id);
+        let namespace = namespace_key.to_string();
+
+        let key = TableKey::new(namespace_key, id);
         self.assert_table_not_exists(&key, &info.name)?;
-        let order = info.columns.ids();
-        let table = DbTable::new(schema, *from_address, info, None);
-        table.create_table_queries(
+        Backend::create_table_queries(
+            &namespace,
             &id,
-            &order,
+            &info.name,
+            &info.primary,
+            &info.columns,
             from_address,
             block_number,
             transaction_hash,
             queries,
         )?;
         let mut tables = self.write()?;
-        tables.insert(key, table);
+        tables.insert(key, Table::new(id, namespace, *from_address, info, None));
         Ok(())
     }
 
-    pub fn update_table(
+    pub fn update_table<Backend: IntrospectQueryMaker>(
         &self,
-        schema_key: SchemaKey,
+        namespace_key: NamespaceKey,
         to_table: impl Into<TableSchema>,
         from_address: &Felt,
         block_number: u64,
         transaction_hash: &Felt,
-        queries: &mut Vec<FlexQuery<DB>>,
+        queries: &mut Vec<FlexQuery<Backend::DB>>,
     ) -> DbResult<()> {
-        let (id, table) = Into::<TableSchema>::into(to_table).into();
+        let (id, new) = Into::<TableSchema>::into(to_table).into();
         let mut tables = self.write()?;
-        let key = TableKey::new(schema_key, id);
-        let existing = tables
+        let key = TableKey::new(namespace_key, id);
+        let table = tables
             .get_mut(&key)
             .ok_or_else(|| DbError::TableNotFound(key.clone()))?;
-        existing.update_table_queries(
-            &table.name,
-            &table.primary,
-            &table.columns,
+        Backend::update_table_queries(
+            table,
+            &new.name,
+            &new.primary,
+            &new.columns,
             from_address,
             block_number,
             transaction_hash,
             queries,
         )
+        .err_into()
     }
 
     pub fn assert_table_not_exists(&self, id: &TableKey, name: &str) -> DbResult<()> {
@@ -98,9 +94,9 @@ where
         }
     }
 
-    pub fn set_table_dead(&self, schema: SchemaKey, id: Felt) -> DbResult<()> {
+    pub fn set_table_dead(&self, namespace: NamespaceKey, id: Felt) -> DbResult<()> {
         let mut tables = self.write()?;
-        let key = TableKey::new(schema, id);
+        let key = TableKey::new(namespace, id);
         match tables.get_mut(&key) {
             Some(table) => {
                 table.alive = false;
@@ -110,17 +106,17 @@ where
         }
     }
 
-    pub fn insert_fields(
+    pub fn insert_fields<Backend: IntrospectQueryMaker>(
         &self,
-        schema: SchemaKey,
+        namespace: NamespaceKey,
         event: &InsertsFields,
         from_address: &Felt,
         block_number: u64,
         transaction_hash: &Felt,
-        queries: &mut Vec<FlexQuery<DB>>,
+        queries: &mut Vec<FlexQuery<Backend::DB>>,
     ) -> DbResult<()> {
         let tables = self.read().unwrap();
-        let key = TableKey::new(schema, event.table);
+        let key = TableKey::new(namespace, event.table);
         let table = match tables.get(&key) {
             Some(table) => Ok(table),
             None => Err(DbError::TableNotFound(key)),
@@ -128,52 +124,56 @@ where
         if !table.alive {
             return Ok(());
         }
-        table.insert_fields_queries(
-            &event.columns,
+        let schema = table.get_record_schema(&event.columns)?;
+        Backend::insert_record_queries(
+            &table.namespace,
+            &table.name,
+            &schema,
             &event.records,
             from_address,
             block_number,
             transaction_hash,
             queries,
         )
+        .to_db_result(&table.name)
     }
 
-    pub fn handle_message(
+    pub fn handle_message<Backend: IntrospectQueryMaker>(
         &self,
-        schema: SchemaKey,
+        namespace: NamespaceKey,
         msg: &IntrospectMsg,
         from_address: &Felt,
         block_number: u64,
         transaction_hash: &Felt,
-        queries: &mut Vec<FlexQuery<DB>>,
+        queries: &mut Vec<FlexQuery<Backend::DB>>,
     ) -> DbResult<()> {
         match msg {
-            IntrospectMsg::CreateTable(event) => self.create_table(
-                schema,
+            IntrospectMsg::CreateTable(event) => self.create_table::<Backend>(
+                namespace,
                 event.clone(),
                 from_address,
                 block_number,
                 transaction_hash,
                 queries,
             ),
-            IntrospectMsg::UpdateTable(event) => self.update_table(
-                schema,
+            IntrospectMsg::UpdateTable(event) => self.update_table::<Backend>(
+                namespace,
                 event.clone(),
                 from_address,
                 block_number,
                 transaction_hash,
                 queries,
             ),
-            IntrospectMsg::AddColumns(event) => self.set_table_dead(schema, event.table),
-            IntrospectMsg::DropColumns(event) => self.set_table_dead(schema, event.table),
-            IntrospectMsg::RetypeColumns(event) => self.set_table_dead(schema, event.table),
-            IntrospectMsg::RetypePrimary(event) => self.set_table_dead(schema, event.table),
+            IntrospectMsg::AddColumns(event) => self.set_table_dead(namespace, event.table),
+            IntrospectMsg::DropColumns(event) => self.set_table_dead(namespace, event.table),
+            IntrospectMsg::RetypeColumns(event) => self.set_table_dead(namespace, event.table),
+            IntrospectMsg::RetypePrimary(event) => self.set_table_dead(namespace, event.table),
             IntrospectMsg::RenameTable(_)
             | IntrospectMsg::DropTable(_)
             | IntrospectMsg::RenameColumns(_)
             | IntrospectMsg::RenamePrimary(_) => Ok(()),
-            IntrospectMsg::InsertsFields(event) => self.insert_fields(
-                schema,
+            IntrospectMsg::InsertsFields(event) => self.insert_fields::<Backend>(
+                namespace,
                 event,
                 from_address,
                 block_number,

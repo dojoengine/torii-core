@@ -1,32 +1,31 @@
-use crate::processor::IntrospectPgDb;
+use crate::processor::IntrospectSqliteDb;
 use anyhow::Result;
 use async_trait::async_trait;
+use sqlx::Sqlite;
 use std::sync::Arc;
 use torii::axum::Router;
-use torii::etl::{
-    envelope::{Envelope, TypeId},
-    extractor::ExtractionBatch,
-    sink::{EventBus, Sink, SinkContext, TopicInfo},
-};
+use torii::etl::envelope::{Envelope, TypeId};
+use torii::etl::extractor::ExtractionBatch;
+use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
-use torii_postgres::PostgresConnection;
+use torii_sql::DbConnection;
 
-pub const LOGGING_TARGET: &str = "torii::sinks::introspect::postgres";
+pub const LOGGING_TARGET: &str = "torii::sinks::introspect::sqlite";
 const INTROSPECT_TYPE: TypeId = TypeId::new("introspect");
 
 #[async_trait]
-impl<T: Send + Sync + PostgresConnection> Sink for IntrospectPgDb<T> {
+impl<T: Send + Sync + DbConnection<Sqlite>> Sink for IntrospectSqliteDb<T> {
     fn name(&self) -> &'static str {
-        "introspect-postgres"
+        "introspect-sqlite"
     }
 
     fn interested_types(&self) -> Vec<TypeId> {
-        vec![INTROSPECT_TYPE]
+        vec![TypeId::new("introspect")]
     }
 
     async fn process(&self, envelopes: &[Envelope], _batch: &ExtractionBatch) -> Result<()> {
         let mut processed = 0usize;
-        let mut create_tables: usize = 0usize;
+        let mut create_tables = 0usize;
         let mut update_tables = 0usize;
         let mut inserts_fields = 0usize;
         let mut inserted_records = 0usize;
@@ -53,6 +52,7 @@ impl<T: Send + Sync + PostgresConnection> Sink for IntrospectPgDb<T> {
             }
         }
         self.process_messages(msgs).await?;
+
         if processed > 0 {
             tracing::info!(
                 target: LOGGING_TARGET,
@@ -92,10 +92,10 @@ impl<T: Send + Sync + PostgresConnection> Sink for IntrospectPgDb<T> {
         _event_bus: Arc<EventBus>,
         _context: &SinkContext,
     ) -> Result<()> {
-        self.initialize_introspect_pg_sink().await?;
+        self.initialize_introspect_sqlite_sink().await?;
         tracing::info!(
             target: LOGGING_TARGET,
-            "Initialized introspect Postgres sink"
+            "Initialized introspect SQLite sink"
         );
         Ok(())
     }

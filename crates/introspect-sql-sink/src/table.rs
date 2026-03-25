@@ -1,15 +1,17 @@
-use crate::{DbResult, TableError, TableResult};
-use introspect_types::{ColumnDef, ColumnInfo, MemberDef, PrimaryDef, TypeDef};
+use crate::{TableError, TableResult};
+use introspect_types::{ColumnInfo, MemberDef, PrimaryDef, TypeDef};
 use itertools::Itertools;
-use sqlx::Database;
+use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
-use std::{collections::HashMap, rc::Rc};
-use torii_common::sql::FlexQuery;
-use torii_introspect::{schema::TableInfo, tables::RecordSchema, Record};
+use std::collections::HashMap;
+use std::rc::Rc;
+use torii_introspect::schema::TableInfo;
+use torii_introspect::tables::RecordSchema;
 
 #[derive(Debug)]
-pub struct DbTable {
-    pub schema: String,
+pub struct Table {
+    pub id: Felt,
+    pub namespace: String,
     pub name: String,
     pub owner: Felt,
     pub primary: PrimaryDef,
@@ -18,8 +20,15 @@ pub struct DbTable {
     pub dead: HashMap<u128, DeadField>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DeadField {
+    pub name: String,
+    pub type_def: TypeDef,
+}
+
+#[derive(Debug)]
+pub struct DeadFieldDef {
+    pub id: u128,
     pub name: String,
     pub type_def: TypeDef,
 }
@@ -43,46 +52,37 @@ impl From<DeadField> for MemberDef {
     }
 }
 
-pub trait DbTableTrait<DB: Database> {
-    fn create_table_queries(
-        &self,
-        id: &Felt,
-        order: &[Felt],
-        from_address: &Felt,
-        block_number: u64,
-        transaction_hash: &Felt,
-        queries: &mut Vec<FlexQuery<DB>>,
-    ) -> DbResult<()>;
-    fn update_table_queries(
-        &mut self,
-        name: &str,
-        primary: &PrimaryDef,
-        columns: &[ColumnDef],
-        from_address: &Felt,
-        block_number: u64,
-        transaction_hash: &Felt,
-        queries: &mut Vec<FlexQuery<DB>>,
-    ) -> DbResult<()>;
-    fn insert_fields_queries(
-        &self,
-        columns: &[Felt],
-        records: &[Record],
-        from_address: &Felt,
-        block_number: u64,
-        transaction_hash: &Felt,
-        queries: &mut Vec<FlexQuery<DB>>,
-    ) -> DbResult<()>;
+impl From<DeadFieldDef> for (u128, DeadField) {
+    fn from(value: DeadFieldDef) -> Self {
+        (
+            value.id,
+            DeadField {
+                name: value.name,
+                type_def: value.type_def,
+            },
+        )
+    }
 }
 
-impl DbTable {
+impl From<(u128, DeadField)> for DeadFieldDef {
+    fn from(value: (u128, DeadField)) -> Self {
+        DeadFieldDef {
+            id: value.0,
+            name: value.1.name,
+            type_def: value.1.type_def,
+        }
+    }
+}
+
+impl Table {
     pub fn column(&self, id: &Felt) -> TableResult<&ColumnInfo> {
         self.columns
             .get(id)
             .ok_or_else(|| TableError::ColumnNotFound(*id, self.name.clone()))
     }
 
-    pub fn schema(&self) -> Rc<str> {
-        self.schema.as_str().into()
+    pub fn namespace(&self) -> Rc<str> {
+        self.namespace.as_str().into()
     }
 
     pub fn columns(&self, ids: &[Felt]) -> TableResult<Vec<&ColumnInfo>> {
@@ -101,13 +101,15 @@ impl DbTable {
     }
 
     pub fn new(
-        schema: String,
+        id: Felt,
+        namespace: String,
         owner: Felt,
         info: TableInfo,
         dead: Option<Vec<(u128, DeadField)>>,
     ) -> Self {
-        DbTable {
-            schema,
+        Table {
+            id,
+            namespace,
             owner,
             name: info.name,
             primary: info.primary,

@@ -33,3 +33,4 @@ arrayvec.workspace = true
 # Local crates
 torii-introspect.workspace = true
 torii-sql = { workspace = true, features = ["postgres"] }
+torii-introspect-sql-sink.workspace = true

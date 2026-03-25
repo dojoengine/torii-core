@@ -6,17 +6,15 @@ use async_trait::async_trait;
 use introspect_types::{Attribute, ColumnInfo, ResultInto, TypeDef};
 use itertools::Itertools;
 use sqlx::migrate::Migrator;
-use sqlx::postgres::PgArguments;
 use sqlx::query::Query;
 use sqlx::types::Json;
-use sqlx::{FromRow, Postgres};
+use sqlx::FromRow;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
-use std::ops::Deref;
 use torii_introspect::postgres::owned::PgTypeDef;
 use torii_introspect::postgres::PgFelt;
 use torii_introspect::schema::ColumnKeyTrait;
-use torii_sql::{DbConnection, SqlxResult};
+use torii_sql::{DbConnection, PgArguments, PgPool, Postgres, SqlxResult};
 
 pub const FETCH_TABLES_QUERY: &str = r#"
     SELECT DISTINCT ON (owner, id)
@@ -190,34 +188,6 @@ where
     }
 }
 
-// #[async_trait]
-// impl PgTypeDef<Felt> for DojoTableInfo {
-//     type Row = DojoTableRow;
-//     async fn get_rows(
-//         pool: &PgPool,
-//         query: &'static str,
-//         owners: &[Felt],
-//     ) -> SqlxResult<Vec<(Felt, DojoTableInfo)>> {
-//         Self::get_pg_rows(pool, query, owners)
-//             .await
-//             .map(|rows| rows.into_iter().map_into().collect_vec())
-//     }
-// }
-
-// #[async_trait]
-// impl PgTypeDef<()> for DojoTable {
-//     type Row = DojoTableRow;
-//     async fn get_rows(
-//         pool: &PgPool,
-//         query: &'static str,
-//         owners: &[Felt],
-//     ) -> SqlxResult<Vec<((), DojoTable)>> {
-//         Self::get_pg_rows(pool, query, owners)
-//             .await
-//             .map(|rows| rows.into_iter().map_into().collect_vec())
-//     }
-// }
-
 pub fn table_insert_query(
     owner: &Felt,
     id: &Felt,
@@ -311,11 +281,9 @@ impl DojoTable {
 
 pub struct PgStore<T>(pub T);
 
-impl<T> Deref for PgStore<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl<T: DbConnection<Postgres>> DbConnection<Postgres> for PgStore<T> {
+    fn pool(&self) -> &PgPool {
+        &self.0.pool()
     }
 }
 

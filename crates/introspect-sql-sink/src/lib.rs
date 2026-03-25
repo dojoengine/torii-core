@@ -1,14 +1,26 @@
+pub mod backend;
 pub mod error;
+pub mod namespace;
 pub mod processor;
-pub mod schema;
 pub mod sink;
 pub mod table;
 pub mod tables;
-pub mod utils;
 
+pub use backend::{IntrospectInitialize, IntrospectProcessor, IntrospectQueryMaker};
 pub use error::{
-    DbError, DbResult, TableError, TableResult, TypeError, TypeResult, UpgradeError, UpgradeResult,
-    UpgradeResultExt,
+    DbError, DbResult, RecordError, RecordResult, TableError, TableResult, TypeError, TypeResult,
+    UpgradeError, UpgradeResult, UpgradeResultExt,
 };
-pub use schema::{SchemaKey, SchemaMode, TableKey};
-pub use utils::{truncate, HasherExt};
+pub use namespace::{NamespaceKey, NamespaceMode, TableKey};
+pub use processor::{DbColumn, DbDeadField, DbTable, IntrospectDb};
+pub use sink::IntrospectSqlSink;
+pub use table::{DeadField, DeadFieldDef, Table};
+
+#[cfg(feature = "postgres")]
+pub mod postgres;
+
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
+
+#[cfg(feature = "postgres")]
+pub mod runtime;

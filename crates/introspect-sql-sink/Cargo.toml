@@ -11,7 +11,6 @@ sqlx = { workspace = true, features = ["runtime-tokio-rustls", "macros"] }
 anyhow.workspace = true
 async-trait.workspace = true
 metrics.workspace = true
-xxhash-rust.workspace = true
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -28,3 +27,11 @@ arrayvec.workspace = true
 # Local crates
 torii-introspect.workspace = true
 torii-sql.workspace = true
+
+# Postgres features
+xxhash-rust = { workspace = true, optional = true }
+
+
+[features]
+postgres = ["sqlx/postgres", "dep:xxhash-rust", "torii-sql/postgres"]
+sqlite = ["sqlx/sqlite", "torii-sql/sqlite"]

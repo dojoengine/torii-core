@@ -26,7 +26,7 @@ async fn main() {
     let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), provider);
     let db = IntrospectPgDb::new(pool.clone(), SCHEMA_NAME);
     decoder.store.initialize().await.unwrap();
-    db.initialize_introspect_pg_sink().await.unwrap();
+    db.initialize_introspect_sql_sink().await.unwrap();
 
     let mut event_n = 0;
     let mut success = 0;

@@ -1,5 +1,6 @@
 use itertools::Itertools;
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use starknet::core::types::Felt;
 use std::sync::Arc;
 use torii_dojo::decoder::DojoDecoder;
@@ -37,7 +38,7 @@ async fn run_events(
     let db = IntrospectPgDb::new(pool.clone(), ADDRESSES);
     decoder.store.initialize().await.unwrap();
     decoder.load_tables(&[]).await.unwrap();
-    let results = db.initialize_introspect_pg_sink().await.unwrap();
+    let results = db.initialize_introspect_sql_sink().await.unwrap();
     if results.len() > 0 {
         for err in results {
             println!("Error loading table: {err}");

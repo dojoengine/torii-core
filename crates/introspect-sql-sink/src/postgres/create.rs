@@ -1,8 +1,7 @@
-use crate::{
-    query::{make_schema_query, CreatePgTable, CreatesType},
-    utils::{AsBytes, HasherExt},
-    PostgresField, PostgresScalar, PostgresType, PrimaryKey, SchemaName,
-};
+use super::query::{make_schema_query, CreatePgTable, CreatesType};
+use super::utils::{AsBytes, HasherExt};
+use super::{PostgresField, PostgresScalar, PostgresType, PrimaryKey, SchemaName};
+use crate::{TypeError, TypeResult};
 use introspect_types::{
     ArrayDef, ColumnDef, EnumDef, FixedArrayDef, MemberDef, OptionDef, PrimaryDef, PrimaryTypeDef,
     StructDef, TupleDef, TypeDef, VariantDef,
@@ -10,8 +9,8 @@ use introspect_types::{
 use itertools::Itertools;
 use starknet_types_core::felt::Felt;
 use std::rc::Rc;
-use torii_introspect_sql_sink::{TypeError, TypeResult};
-use torii_sql::{postgres::PgQuery, Queries};
+use torii_sql::postgres::PgQuery;
+use torii_sql::Queries;
 use xxhash_rust::xxh3::Xxh3;
 
 pub trait PostgresTypeExtractor {

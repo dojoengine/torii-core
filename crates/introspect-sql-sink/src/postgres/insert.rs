@@ -1,15 +1,14 @@
-use crate::json::PostgresJsonSerializer;
+use super::json::PostgresJsonSerializer;
+use crate::RecordResult;
 use introspect_types::ColumnInfo;
 use serde::ser::SerializeMap;
 use serde_json::Serializer as JsonSerializer;
 use starknet_types_core::felt::Felt;
 use std::io::Write;
-use torii_introspect::{
-    tables::{RecordSchema, SerializeEntries},
-    Record,
-};
-use torii_introspect_sql_sink::RecordResult;
-use torii_sql::{postgres::PgQuery, Queries};
+use torii_introspect::tables::{RecordSchema, SerializeEntries};
+use torii_introspect::Record;
+use torii_sql::postgres::PgQuery;
+use torii_sql::Queries;
 
 pub const METADATA_CONFLICTS: &str = "__updated_at = NOW(), __updated_block = EXCLUDED.__updated_block, __updated_tx = EXCLUDED.__updated_tx";
 

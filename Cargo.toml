@@ -106,10 +106,10 @@ bigdecimal = "0.4.10"
 tonic-build = "0.12"
 
 # Introspect
-introspect-events = { git = "https://github.com/cartridge-gg/introspect", rev = "34e93c1" }
-introspect-types = { git = "https://github.com/cartridge-gg/introspect", rev = "34e93c1" }
-introspect-rust-macros = { git = "https://github.com/cartridge-gg/introspect", rev = "34e93c1" }
-dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev = "aadc3c9" }
+introspect-events = { git = "https://github.com/cartridge-gg/introspect", rev = "4092011" }
+introspect-types = { git = "https://github.com/cartridge-gg/introspect", rev = "4092011" }
+introspect-rust-macros = { git = "https://github.com/cartridge-gg/introspect", rev = "4092011" }
+dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev = "214eb01" }
 
 
 # Utils
@@ -217,12 +217,16 @@ torii-log-sink.workspace = true
 torii-erc20.workspace = true
 torii-erc721.workspace = true
 torii-erc1155.workspace = true
-torii-dojo.workspace = true
+torii-dojo = { workspace = true, features = ["postgres", "sqlite"] }
 torii-introspect.workspace = true
 torii-common.workspace = true
 torii-introspect-postgres-sink.workspace = true
 torii-test-utils.workspace = true
 torii-sql = { workspace = true, features = ["postgres", "sqlite"] }
+torii-introspect-sql-sink = { workspace = true, features = [
+  "postgres",
+  "sqlite",
+] }
 
 
 # Example dependencies

@@ -11,7 +11,7 @@ path = "src/main.rs"
 torii = { path = "../../" }
 torii-runtime-common.workspace = true
 torii-dojo = { path = "../../crates/dojo" }
-torii-introspect-postgres-sink = { path = "../../crates/introspect-postgres-sink" }
+torii-introspect-postgres-sink.workspace = true
 
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

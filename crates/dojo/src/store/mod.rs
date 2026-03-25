@@ -1,5 +1,8 @@
 pub mod json;
+
+#[cfg(feature = "postgres")]
 pub mod postgres;
+#[cfg(feature = "sqlite")]
 pub mod sqlite;
 
 use crate::table::DojoTableInfo;

@@ -1,10 +1,8 @@
+use crate::{TypeError, TypeResult};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::VecDeque,
-    fmt::{Display, Formatter, Result as FmtResult},
-    rc::Rc,
-};
-use torii_introspect_sql_sink::{TypeError, TypeResult};
+use std::collections::VecDeque;
+use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::rc::Rc;
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Debug)]
 pub struct SchemaName(pub Rc<str>, pub String);

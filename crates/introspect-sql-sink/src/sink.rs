@@ -2,21 +2,26 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
 use torii::axum::Router;
-use torii::etl::{
-    envelope::{Envelope, TypeId},
-    extractor::ExtractionBatch,
-    sink::{EventBus, Sink, SinkContext, TopicInfo},
-};
+use torii::etl::envelope::{Envelope, TypeId};
+use torii::etl::extractor::ExtractionBatch;
+use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
-use torii_postgres::PostgresConnection;
 
-pub const LOGGING_TARGET: &str = "torii::sinks::introspect::postgres";
+use crate::{IntrospectDb, IntrospectInitialize, IntrospectProcessor};
+
+pub const LOGGING_TARGET: &str = "torii::sinks::introspect-sql";
 const INTROSPECT_TYPE: TypeId = TypeId::new("introspect");
 
+pub trait IntrospectSqlSink {
+    const NAME: &'static str;
+}
+
 #[async_trait]
-impl<T: Send + Sync + PostgresConnection> Sink for IntrospectPgDb<T> {
+impl<Backend: Send + Sync + IntrospectProcessor + IntrospectSqlSink + IntrospectInitialize> Sink
+    for IntrospectDb<Backend>
+{
     fn name(&self) -> &'static str {
-        "introspect-postgres"
+        Backend::NAME
     }
 
     fn interested_types(&self) -> Vec<TypeId> {
@@ -91,10 +96,11 @@ impl<T: Send + Sync + PostgresConnection> Sink for IntrospectPgDb<T> {
         _event_bus: Arc<EventBus>,
         _context: &SinkContext,
     ) -> Result<()> {
-        self.initialize_introspect_pg_sink().await?;
+        self.initialize_introspect_sql_sink().await?;
         tracing::info!(
             target: LOGGING_TARGET,
-            "Initialized introspect Postgres sink"
+            "Connected to introspect SQL sink with database: {}",
+            Backend::NAME
         );
         Ok(())
     }

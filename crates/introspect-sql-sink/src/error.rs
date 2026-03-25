@@ -1,5 +1,6 @@
 use crate::TableKey;
 use introspect_types::{PrimaryTypeDef, TypeDef};
+use sqlx::error::BoxDynError;
 use sqlx::Error as SqlxError;
 use starknet_types_core::felt::{Felt, FromStrError};
 use std::sync::PoisonError;
@@ -29,6 +30,8 @@ pub enum TableError {
         column: String,
         reason: UpgradeError,
     },
+    #[error("error occurred while encoding a value: {0}")]
+    Encode(#[source] BoxDynError),
 }
 
 pub type TableResult<T> = std::result::Result<T, TableError>;
@@ -100,6 +103,24 @@ impl<T> UpgradeResultExt<T> for UpgradeResult<T> {
 }
 
 #[derive(Debug, thiserror::Error)]
+pub enum RecordError {
+    #[error(transparent)]
+    JsonError(#[from] serde_json::Error),
+}
+
+pub type RecordResult<T> = std::result::Result<T, RecordError>;
+
+pub trait RecordResultExt<T> {
+    fn to_db_result(self, table: &str) -> DbResult<T>;
+}
+
+impl<T> RecordResultExt<T> for RecordResult<T> {
+    fn to_db_result(self, table: &str) -> DbResult<T> {
+        self.map_err(|err| DbError::RecordError(table.to_string(), err))
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum DbError {
     #[error(transparent)]
     DatabaseError(#[from] SqlxError),
@@ -123,8 +144,12 @@ pub enum DbError {
     UpdateNotSupported,
     #[error("Table poison error: {0}")]
     PoisonError(String),
-    #[error("Schema not found for address: {0:#063x}")]
-    SchemaNotFound(Felt),
+    #[error("Namespace not found for address: {0:#063x}")]
+    NamespaceNotFound(Felt),
+    #[error("Could not parse record for table {0}: {1}")]
+    RecordError(String, RecordError),
+    #[error("Failed to pass string to felt")]
+    FeltFromStrError(#[from] FromStrError),
 }
 
 pub type DbResult<T> = std::result::Result<T, DbError>;
@@ -136,23 +161,23 @@ impl<T> From<PoisonError<T>> for DbError {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum SchemaError {
-    #[error("Invalid address length for schema: {0} should be 63 characters long")]
+pub enum NamespaceError {
+    #[error("Invalid address length for address: {0} should be 63 characters long")]
     InvalidAddressLength(String),
     #[error(transparent)]
     AddressFromStrError(#[from] FromStrError),
-    #[error("Schema {0} does not match expected schema {1}")]
-    SchemaMismatch(String, String),
-    #[error("Schema {1} not found for address: {0:#063x}")]
+    #[error("Namespace {0} does not match expected namespace {1}")]
+    NamespaceMismatch(String, String),
+    #[error("Namespace {1} not found for address: {0:#063x}")]
     AddressNotFound(Felt, String),
 }
 
-pub type SchemaResult<T> = std::result::Result<T, SchemaError>;
+pub type NamespaceResult<T> = std::result::Result<T, NamespaceError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TableLoadError {
     #[error(transparent)]
-    SchemaError(#[from] SchemaError),
+    NamespaceError(#[from] NamespaceError),
     #[error("Table {0} {1:#063x} not found for column {2} with id: {3:#063x}")]
     ColumnTableNotFound(String, Felt, String, Felt),
     #[error("Table {0} {1:#063x} not found for dead field {2} with id: {3}")]

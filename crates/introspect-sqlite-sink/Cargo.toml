@@ -30,6 +30,7 @@ itertools.workspace = true
 
 torii-introspect.workspace = true
 torii-sql = { workspace = true, features = ["sqlite"] }
+torii-introspect-sql-sink.workspace = true
 
 [lints]
 workspace = true

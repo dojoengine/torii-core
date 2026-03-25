@@ -1,21 +1,20 @@
 use crate::processor::IntrospectSqliteDb;
 use anyhow::Result;
 use async_trait::async_trait;
+use sqlx::Sqlite;
 use std::sync::Arc;
 use torii::axum::Router;
-use torii::etl::{
-    envelope::{Envelope, TypeId},
-    extractor::ExtractionBatch,
-    sink::{EventBus, Sink, SinkContext, TopicInfo},
-};
+use torii::etl::envelope::{Envelope, TypeId};
+use torii::etl::extractor::ExtractionBatch;
+use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
-use torii_sqlite::SqliteConnection;
+use torii_sql::DbConnection;
 
 pub const LOGGING_TARGET: &str = "torii::sinks::introspect::sqlite";
 const INTROSPECT_TYPE: TypeId = TypeId::new("introspect");
 
 #[async_trait]
-impl<T: Send + Sync + SqliteConnection> Sink for IntrospectSqliteDb<T> {
+impl<T: Send + Sync + DbConnection<Sqlite>> Sink for IntrospectSqliteDb<T> {
     fn name(&self) -> &'static str {
         "introspect-sqlite"
     }

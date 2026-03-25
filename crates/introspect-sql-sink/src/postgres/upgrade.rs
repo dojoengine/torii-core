@@ -1,16 +1,16 @@
-use crate::create::PostgresTypeExtractor;
-use crate::query::{ColumnUpgrade, StructMod, StructMods, TableUpgrade};
-use crate::{HasherExt, PostgresScalar, PostgresType};
+use super::create::PostgresTypeExtractor;
+use super::query::{ColumnUpgrade, StructMod, StructMods, TableUpgrade};
+use super::{HasherExt, PostgresScalar, PostgresType};
+use crate::{
+    DeadField, Table, TableResult, TypeError, TypeResult, UpgradeError, UpgradeResult,
+    UpgradeResultExt,
+};
 use introspect_types::{
     ArrayDef, ColumnDef, EnumDef, FixedArrayDef, MemberDef, OptionDef, PrimaryDef, PrimaryTypeDef,
     ResultInto, StructDef, TupleDef, TypeDef, VariantDef,
 };
 use std::collections::HashMap;
 use std::rc::Rc;
-use torii_introspect_sql_sink::table::Table;
-use torii_introspect_sql_sink::{
-    DeadField, TableResult, TypeError, TypeResult, UpgradeError, UpgradeResult, UpgradeResultExt,
-};
 use xxhash_rust::xxh3::Xxh3;
 
 pub trait PgTableUpgrade {
@@ -69,7 +69,7 @@ impl PgTableUpgrade for Table {
         Ok(table_mod)
     }
     fn retype_primary(&mut self, new: &PrimaryTypeDef) -> UpgradeResult<Option<PostgresType>> {
-        use crate::PostgresScalar::{
+        use super::PostgresScalar::{
             BigInt, Felt252 as PgFelt252, Int, Int128, SmallInt, Uint128, Uint16, Uint32, Uint64,
             Uint8,
         };

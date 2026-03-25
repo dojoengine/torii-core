@@ -1,122 +1,196 @@
-use crate::error::{SchemaError, SchemaResult, TableLoadError};
-use crate::tables::DbTables;
-use crate::utils::felt_to_schema;
-use introspect_types::ResultInto;
+use crate::backend::{
+    IntrospectExecutor, IntrospectInitialize, IntrospectProcessor, IntrospectQueryMaker,
+};
+use crate::error::TableLoadError;
+use crate::table::{DeadField, DeadFieldDef, Table};
+use crate::tables::Tables;
+use crate::{DbResult, NamespaceMode};
+use async_trait::async_trait;
+use introspect_types::{ColumnDef, ColumnInfo, PrimaryDef, TypeDef};
 use itertools::Itertools;
-use sqlx::{Database, PgPool};
+use sqlx::Pool;
 use starknet_types_core::felt::Felt;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use torii_common::sql::PgQuery;
+use std::collections::HashMap;
 use torii_introspect::events::IntrospectBody;
-use torii_postgres::PostgresConnection;
+use torii_sql::{DbConnection, Executable, FlexQuery};
 
-pub struct IntrospectDb<T, DB> {
-    tables: DbTables<DB>,
-    schemas: SchemaMode,
-    pool: T,
+pub const COMMIT_CMD: &str = "--COMMIT";
+
+pub struct IntrospectDb<Backend> {
+    tables: Tables,
+    namespaces: NamespaceMode,
+    db: Backend,
 }
 
-impl<T: PostgresConnection> PostgresConnection for IntrospectDb<T> {
-    fn pool(&self) -> &PgPool {
-        self.pool.pool()
+pub struct DbTable {
+    pub namespace: String,
+    pub id: Felt,
+    pub owner: Felt,
+    pub name: String,
+    pub primary: PrimaryDef,
+    pub columns: Vec<ColumnDef>,
+    pub dead: Vec<DeadFieldDef>,
+    pub alive: bool,
+}
+
+pub struct DbColumn {
+    pub namespace: String,
+    pub table: Felt,
+    pub id: Felt,
+    pub name: String,
+    pub type_def: TypeDef,
+}
+
+pub struct DbDeadField {
+    pub namespace: String,
+    pub table: Felt,
+    pub id: u128,
+    pub name: String,
+    pub type_def: TypeDef,
+}
+
+impl<Backend: IntrospectQueryMaker> DbConnection<Backend::DB> for IntrospectDb<Backend> {
+    fn pool(&self) -> &Pool<Backend::DB> {
+        self.db.pool()
     }
 }
 
-// TODO: Add errors for unknown schema
-impl<T: PostgresConnection + Send + Sync> IntrospectDb<T> {
-    pub fn new<S: Into<SchemaMode>>(pool: T, schemas: S) -> Self {
+pub trait IntoHashMap<K, V> {
+    fn into_hash_map(self) -> HashMap<K, V>;
+}
+
+impl<K, V, T> IntoHashMap<K, V> for Vec<T>
+where
+    T: Into<(K, V)>,
+    K: std::hash::Hash + Eq,
+{
+    fn into_hash_map(self) -> HashMap<K, V> {
+        self.into_iter().map_into().collect()
+    }
+}
+
+#[async_trait]
+impl<Backend: IntrospectExecutor + Send + Sync> IntrospectProcessor for Backend
+where
+    Vec<FlexQuery<Backend::DB>>: Executable<Backend::DB>,
+{
+    async fn process_msgs(
+        &self,
+        tables: &Tables,
+        namespaces: &NamespaceMode,
+        msgs: Vec<&IntrospectBody>,
+    ) -> DbResult<Vec<DbResult<()>>> {
+        self.execute_msgs(tables, namespaces, msgs).await
+    }
+}
+
+impl<Backend: IntrospectProcessor + IntrospectInitialize> IntrospectDb<Backend> {
+    pub fn new(pool: impl Into<Backend>, namespaces: impl Into<NamespaceMode>) -> Self {
         Self {
-            tables: PostgresTables::default(),
-            schemas: schemas.into(),
-            pool,
+            tables: Tables::default(),
+            namespaces: namespaces.into(),
+            db: pool.into(),
         }
-    }
-    pub async fn load_store_data(&self) -> PgDbResult<Vec<TableLoadError>> {
-        let mut errors = Vec::new();
-        let schemas = self.schemas.schemas();
-        let schemas = schemas
-            .as_ref()
-            .map(|s| s.iter().map(AsRef::as_ref).collect());
-        let table_rows = fetch_tables(self.pool(), &schemas).await?;
-        let mut tables = HashMap::with_capacity(table_rows.len());
-        for table in table_rows {
-            let (id, table) = table.into();
-            tables.insert((table.schema.clone(), id), table);
-        }
-        for (schema, table_id, id, column_info) in fetch_columns(self.pool(), &schemas).await? {
-            if let Some(table) = tables.get_mut(&(schema.clone(), table_id)) {
-                table.columns.insert(id, column_info);
-            } else {
-                errors.push(TableLoadError::ColumnTableNotFound(
-                    schema,
-                    table_id,
-                    column_info.name,
-                    id,
-                ));
-            }
-        }
-        for (schema, table_id, id, field) in fetch_dead_fields(self.pool(), &schemas).await? {
-            if let Some(table) = tables.get_mut(&(schema.clone(), table_id)) {
-                table.dead.insert(id, field);
-            } else {
-                errors.push(TableLoadError::TableDeadNotFound(
-                    schema, table_id, field.name, id,
-                ));
-            }
-        }
-        let mut map = self.tables.write()?;
-        for ((schema, id), table) in tables {
-            match self.schemas.get_key(schema, id, &table.owner) {
-                Ok(key) => {
-                    map.insert(key, table);
-                }
-                Err(err) => errors.push(TableLoadError::SchemaError(err)),
-            }
-        }
-        Ok(errors)
     }
 
-    pub async fn initialize_introspect_pg_sink(&self) -> PgDbResult<Vec<TableLoadError>> {
-        self.migrate(Some("introspect"), INTROSPECT_PG_SINK_MIGRATIONS)
-            .await?;
+    pub async fn initialize_introspect_sql_sink(&self) -> DbResult<Vec<TableLoadError>> {
+        self.db.initialize().await?;
         self.load_store_data().await
     }
 
     pub async fn process_messages(
         &self,
         msgs: Vec<&IntrospectBody>,
-    ) -> PgDbResult<Vec<PgDbResult<()>>> {
-        let mut queries = Vec::new();
-        let mut results = Vec::with_capacity(msgs.len());
-
-        for body in msgs {
-            let (msg, metadata) = body.into();
-            results.push(self.tables.handle_message(
-                self.schemas.to_schema(&metadata.from_address)?,
-                msg,
-                &metadata.from_address,
-                metadata.block_number.unwrap_or(u64::MAX),
-                &metadata.transaction_hash,
-                &mut queries,
-            ));
-        }
-        self.process_queries(queries).await?;
-        Ok(results)
+    ) -> DbResult<Vec<DbResult<()>>> {
+        self.db
+            .process_msgs(&self.tables, &self.namespaces, msgs)
+            .await
     }
 
-    pub async fn process_queries(&self, queries: Vec<PgQuery>) -> PgDbResult<()> {
-        let mut batch = Vec::new();
-        for query in queries {
-            if query == *COMMIT_CMD {
-                self.execute_queries(std::mem::take(&mut batch)).await?;
+    pub async fn load_store_data(&self) -> DbResult<Vec<TableLoadError>> {
+        let mut errors = Vec::new();
+        let namespaces = self.namespaces.namespaces();
+        let mut tables: HashMap<(String, Felt), Table> =
+            self.db.load_tables(&namespaces).await?.into_hash_map();
+        for column in self.db.load_columns(&namespaces).await? {
+            let (namespace, table_id, id, column_info) = column.into();
+            if let Some(table) = tables.get_mut(&(namespace.clone(), table_id)) {
+                table.columns.insert(id, column_info);
             } else {
-                batch.push(query);
+                errors.push(TableLoadError::ColumnTableNotFound(
+                    namespace,
+                    table_id,
+                    column_info.name,
+                    id,
+                ));
             }
         }
-        if !batch.is_empty() {
-            self.execute_queries(batch).await?;
+        for dead_field in self.db.load_dead_fields(&namespaces).await? {
+            let (namespace, table_id, id, field) = dead_field.into();
+            if let Some(table) = tables.get_mut(&(namespace.clone(), table_id)) {
+                table.dead.insert(id, field);
+            } else {
+                errors.push(TableLoadError::TableDeadNotFound(
+                    namespace, table_id, field.name, id,
+                ));
+            }
         }
-        Ok(())
+        let mut map = self.tables.write()?;
+        for ((namespace, id), table) in tables {
+            match self.namespaces.get_key(namespace, id, &table.owner) {
+                Ok(key) => {
+                    map.insert(key, table);
+                }
+                Err(err) => errors.push(TableLoadError::NamespaceError(err)),
+            }
+        }
+        Ok(errors)
+    }
+}
+
+impl From<DbTable> for ((String, Felt), Table) {
+    fn from(value: DbTable) -> Self {
+        (
+            (value.namespace.clone(), value.id),
+            Table {
+                id: value.id,
+                namespace: value.namespace,
+                name: value.name,
+                owner: value.owner,
+                primary: value.primary,
+                columns: value.columns.into_hash_map(),
+                dead: value.dead.into_hash_map(),
+                alive: value.alive,
+            },
+        )
+    }
+}
+
+impl From<DbColumn> for (String, Felt, Felt, ColumnInfo) {
+    fn from(value: DbColumn) -> Self {
+        (
+            value.namespace,
+            value.table,
+            value.id,
+            ColumnInfo {
+                name: value.name,
+                attributes: Vec::new(),
+                type_def: value.type_def,
+            },
+        )
+    }
+}
+
+impl From<DbDeadField> for (String, Felt, u128, DeadField) {
+    fn from(value: DbDeadField) -> Self {
+        (
+            value.namespace,
+            value.table,
+            value.id,
+            DeadField {
+                name: value.name,
+                type_def: value.type_def,
+            },
+        )
     }
 }

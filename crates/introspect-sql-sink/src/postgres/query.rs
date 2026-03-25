@@ -1,23 +1,19 @@
-use crate::{PostgresField, PostgresType, PrimaryKey, SchemaName};
+use super::{PostgresField, PostgresType, PrimaryKey, SchemaName};
+use crate::{DbColumn, DbDeadField, DbTable, DeadFieldDef, TableError, TableResult};
 use introspect_types::schema::{Names, TypeDefs};
 use introspect_types::{ColumnDef, FeltIds, MemberDef, PrimaryDef, TypeDef};
 use itertools::Itertools;
 use sqlx::error::BoxDynError;
-use sqlx::postgres::PgRow;
+use sqlx::postgres::{PgArguments, PgRow};
 use sqlx::prelude::FromRow;
 use sqlx::query::QueryAs;
-use sqlx::{postgres::PgArguments, types::Json};
+use sqlx::types::Json;
 use sqlx::{Arguments, Executor, Postgres};
 use starknet_types_core::felt::Felt;
-use std::{
-    fmt::{Display, Formatter, Result as FmtResult, Write},
-    rc::Rc,
-};
+use std::fmt::{Display, Formatter, Result as FmtResult, Write};
+use std::rc::Rc;
 use torii_introspect::postgres::types::{PgPrimary, Uint128};
 use torii_introspect::postgres::PgFelt;
-use torii_introspect_sql_sink::processor::{DbColumn, DbDeadField, DbTable};
-use torii_introspect_sql_sink::table::DeadFieldDef;
-use torii_introspect_sql_sink::{TableError, TableResult};
 use torii_sql::postgres::PgQuery;
 use torii_sql::{Queries, SqlxResult};
 
