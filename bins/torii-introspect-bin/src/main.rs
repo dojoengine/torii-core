@@ -11,20 +11,27 @@ use starknet::core::types::Felt;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tonic::codec::CompressionEncoding;
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{
     ContractEventConfig, EventExtractor, EventExtractorConfig, Extractor, RetryPolicy,
 };
+use torii::etl::EngineDb;
 use torii::{EtlConcurrencyConfig, ToriiConfigBuilder};
 use torii_common::{MetadataFetcher, TokenUriService};
 use torii_config_common::apply_observability_env;
 use torii_controllers_sink::ControllersSink;
 use torii_dojo::decoder::DojoDecoder;
+use torii_dojo::external_contract::{
+    contract_type_from_decoder_ids, RegisterExternalContractCommandHandler, RegisteredContractType,
+    SharedContractTypeRegistry, SharedDecoderRegistry,
+};
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::store::sqlite::SqliteStore;
 use torii_ecs_sink::proto::world::world_server::WorldServer;
 use torii_ecs_sink::{EcsSink, FILE_DESCRIPTOR_SET as ECS_DESCRIPTOR_SET};
+use torii_entities_historical_sink::EntitiesHistoricalSink;
 use torii_erc1155::proto::erc1155_server::Erc1155Server;
 use torii_erc1155::{
     Erc1155Decoder, Erc1155MetadataCommandHandler, Erc1155Service, Erc1155Sink, Erc1155Storage,
@@ -53,6 +60,85 @@ const TOKEN_COMMAND_QUEUE_SIZE: usize = 4096;
 const TOKEN_METADATA_COMMAND_PARALLELISM: usize = 1;
 const TOKEN_METADATA_MAX_RETRIES: u8 = 3;
 const TOKEN_URI_FETCH_PARALLELISM: usize = 8;
+
+struct OrderedSinkPipeline {
+    name: String,
+    sinks: Vec<Box<dyn torii::etl::sink::Sink>>,
+}
+
+impl OrderedSinkPipeline {
+    fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            sinks: Vec::new(),
+        }
+    }
+
+    fn push(mut self, sink: Box<dyn torii::etl::sink::Sink>) -> Self {
+        self.sinks.push(sink);
+        self
+    }
+}
+
+#[torii::async_trait]
+impl torii::etl::sink::Sink for OrderedSinkPipeline {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn interested_types(&self) -> Vec<torii::etl::TypeId> {
+        let mut seen = HashSet::new();
+        let mut interested = Vec::new();
+        for type_id in self
+            .sinks
+            .iter()
+            .flat_map(|sink| sink.interested_types().into_iter())
+        {
+            if seen.insert(type_id) {
+                interested.push(type_id);
+            }
+        }
+        interested
+    }
+
+    async fn process(
+        &self,
+        envelopes: &[torii::etl::Envelope],
+        batch: &torii::etl::extractor::ExtractionBatch,
+    ) -> Result<()> {
+        for sink in &self.sinks {
+            sink.process(envelopes, batch).await?;
+        }
+        Ok(())
+    }
+
+    fn topics(&self) -> Vec<torii::etl::sink::TopicInfo> {
+        let mut topics = Vec::new();
+        for sink in &self.sinks {
+            topics.extend(sink.topics());
+        }
+        topics
+    }
+
+    fn build_routes(&self) -> torii::axum::Router {
+        let mut router = torii::axum::Router::new();
+        for sink in &self.sinks {
+            router = router.merge(sink.build_routes());
+        }
+        router
+    }
+
+    async fn initialize(
+        &mut self,
+        event_bus: Arc<torii::etl::sink::EventBus>,
+        context: &torii::etl::sink::SinkContext,
+    ) -> Result<()> {
+        for sink in &mut self.sinks {
+            sink.initialize(event_bus.clone(), context).await?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 struct TokenTargets {
@@ -84,6 +170,57 @@ struct TokenGrpcServices {
     erc20: Option<Erc20Service>,
     erc721: Option<Erc721Service>,
     erc1155: Option<Erc1155Service>,
+}
+
+fn build_static_contract_type_registry(
+    contracts: &[Felt],
+    token_targets: &TokenTargets,
+) -> SharedContractTypeRegistry {
+    let mut contract_types = HashMap::new();
+    for &contract in contracts {
+        contract_types.insert(contract, RegisteredContractType::World);
+    }
+    for &contract in &token_targets.erc20 {
+        contract_types.insert(contract, RegisteredContractType::Erc20);
+    }
+    for &contract in &token_targets.erc721 {
+        contract_types.insert(contract, RegisteredContractType::Erc721);
+    }
+    for &contract in &token_targets.erc1155 {
+        contract_types.insert(contract, RegisteredContractType::Erc1155);
+    }
+    Arc::new(RwLock::new(contract_types))
+}
+
+async fn load_persisted_contract_registries(
+    engine_db: &EngineDb,
+    decoder_registry: &SharedDecoderRegistry,
+    contract_type_registry: &SharedContractTypeRegistry,
+) -> Result<()> {
+    let mappings = engine_db.get_all_contract_decoders().await?;
+    let mut decoders = decoder_registry.write().await;
+    let mut contract_types = contract_type_registry.write().await;
+
+    for (contract, decoder_ids, _) in mappings {
+        decoders.insert(contract, decoder_ids.clone());
+        if let Some(contract_type) = contract_type_from_decoder_ids(&decoder_ids) {
+            contract_types.insert(contract, contract_type);
+        }
+    }
+
+    Ok(())
+}
+
+fn installed_external_decoder_ids(enabled: bool) -> HashSet<DecoderId> {
+    if !enabled {
+        return HashSet::new();
+    }
+
+    HashSet::from([
+        DecoderId::new("erc20"),
+        DecoderId::new("erc721"),
+        DecoderId::new("erc1155"),
+    ])
 }
 
 fn append_unique_contract_configs(
@@ -155,6 +292,7 @@ fn apply_contract_mappings(
 async fn configure_token_support(
     token_targets: &TokenTargets,
     token_db_setup: Option<&TokenDbSetup>,
+    enable_external_contracts: bool,
     provider: Arc<StarknetProvider>,
     mut torii_config: ToriiConfigBuilder,
     mut reflection_builder: ReflectionBuilder,
@@ -166,8 +304,11 @@ async fn configure_token_support(
 )> {
     let mut services = TokenGrpcServices::default();
     let mut token_uri_services = Vec::new();
+    let install_erc20 = enable_external_contracts || !token_targets.erc20.is_empty();
+    let install_erc721 = enable_external_contracts || !token_targets.erc721.is_empty();
+    let install_erc1155 = enable_external_contracts || !token_targets.erc1155.is_empty();
 
-    if !token_targets.has_any() {
+    if !install_erc20 && !install_erc721 && !install_erc1155 {
         return Ok((
             torii_config,
             reflection_builder,
@@ -177,9 +318,9 @@ async fn configure_token_support(
     }
 
     let db_setup =
-        token_db_setup.expect("token DB setup must exist when token targets are configured");
+        token_db_setup.expect("token DB setup must exist when token support is configured");
 
-    if !token_targets.erc20.is_empty() {
+    if install_erc20 {
         let storage = Arc::new(Erc20Storage::new(&db_setup.erc20_url).await?);
         tracing::info!("ERC20 database initialized: {}", db_setup.erc20_url);
 
@@ -209,7 +350,7 @@ async fn configure_token_support(
             reflection_builder.register_encoded_file_descriptor_set(ERC20_DESCRIPTOR_SET);
     }
 
-    if !token_targets.erc721.is_empty() {
+    if install_erc721 {
         let storage = Arc::new(Erc721Storage::new(&db_setup.erc721_url).await?);
         tracing::info!("ERC721 database initialized: {}", db_setup.erc721_url);
 
@@ -244,7 +385,7 @@ async fn configure_token_support(
             reflection_builder.register_encoded_file_descriptor_set(ERC721_DESCRIPTOR_SET);
     }
 
-    if !token_targets.erc1155.is_empty() {
+    if install_erc1155 {
         let storage = Arc::new(Erc1155Storage::new(&db_setup.erc1155_url).await?);
         tracing::info!("ERC1155 database initialized: {}", db_setup.erc1155_url);
 
@@ -311,7 +452,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     let engine_database_url = config.engine_database_url(db_dir);
     let contracts = config.contract_addresses()?;
     let token_targets = TokenTargets::from_config(&config)?;
-    let token_db_setup = if token_targets.has_any() {
+    let historical_models = config.historical_models();
+    let token_db_setup = if token_targets.has_any() || config.index_external_contracts {
         Some(resolve_token_db_setup(
             db_dir,
             config.database_url.as_deref(),
@@ -378,6 +520,32 @@ async fn run_indexer(config: Config) -> Result<()> {
             "disabled"
         }
     );
+    tracing::info!(
+        "External contract indexing: {}",
+        if config.index_external_contracts {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    tracing::info!("Historical models tracked: {}", historical_models.len());
+
+    let registry_engine_db = Arc::new(
+        EngineDb::new(torii::etl::engine_db::EngineDbConfig {
+            path: engine_database_url.clone(),
+        })
+        .await?,
+    );
+    let decoder_registry: SharedDecoderRegistry = Arc::new(RwLock::new(HashMap::new()));
+    let contract_type_registry = build_static_contract_type_registry(&contracts, &token_targets);
+    load_persisted_contract_registries(
+        registry_engine_db.as_ref(),
+        &decoder_registry,
+        &contract_type_registry,
+    )
+    .await?;
+    let installed_external_decoders =
+        installed_external_decoder_ids(config.index_external_contracts);
 
     let provider = starknet::providers::jsonrpc::JsonRpcClient::new(
         starknet::providers::jsonrpc::HttpTransport::new(
@@ -442,6 +610,11 @@ async fn run_indexer(config: Config) -> Result<()> {
                 contracts,
                 token_targets,
                 token_db_setup,
+                registry_engine_db.clone(),
+                decoder_registry.clone(),
+                contract_type_registry.clone(),
+                installed_external_decoders.clone(),
+                historical_models.clone(),
                 provider,
                 extractor,
             )
@@ -455,6 +628,11 @@ async fn run_indexer(config: Config) -> Result<()> {
                 contracts,
                 token_targets,
                 token_db_setup,
+                registry_engine_db.clone(),
+                decoder_registry.clone(),
+                contract_type_registry.clone(),
+                installed_external_decoders.clone(),
+                historical_models.clone(),
                 provider,
                 extractor,
             )
@@ -473,6 +651,11 @@ async fn run_with_postgres(
     contracts: Vec<Felt>,
     token_targets: TokenTargets,
     token_db_setup: Option<TokenDbSetup>,
+    registry_engine_db: Arc<EngineDb>,
+    decoder_registry: SharedDecoderRegistry,
+    contract_type_registry: SharedContractTypeRegistry,
+    installed_external_decoders: HashSet<DecoderId>,
+    historical_models: Vec<String>,
     provider: StarknetProvider,
     extractor: Box<dyn Extractor>,
 ) -> Result<()> {
@@ -486,9 +669,8 @@ async fn run_with_postgres(
     );
 
     let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), provider);
-    let sink = IntrospectPgDb::new(pool.clone(), ());
+    let introspect_sink = IntrospectPgDb::new(pool.clone(), ());
     decoder.store.initialize().await?;
-    sink.initialize_introspect_pg_sink().await?;
     decoder.load_tables(&[]).await?;
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
@@ -511,6 +693,9 @@ async fn run_with_postgres(
         erc20_url,
         erc721_url,
         erc1155_url,
+        contract_type_registry.clone(),
+        config.index_external_contracts,
+        installed_external_decoders.clone(),
     )
     .await?;
     let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
@@ -519,7 +704,7 @@ async fn run_with_postgres(
         .register_encoded_file_descriptor_set(torii::TORII_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(ECS_DESCRIPTOR_SET);
 
-    let torii_config = torii::ToriiConfig::builder()
+    let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
         .command_bus_queue_size(TOKEN_COMMAND_QUEUE_SIZE)
         .with_custom_reflection(true)
@@ -530,7 +715,28 @@ async fn run_with_postgres(
         .with_extractor(extractor)
         .add_decoder(decoder)
         .add_sink_boxed(Box::new(ecs_sink))
-        .add_sink_boxed(Box::new(sink));
+        .add_sink_boxed(Box::new(
+            OrderedSinkPipeline::new("introspect-projection-pipeline")
+                .push(Box::new(introspect_sink))
+                .push(Box::new(
+                    EntitiesHistoricalSink::new(
+                        storage_database_url,
+                        config.max_db_connections,
+                        (),
+                        historical_models,
+                    )
+                    .await?,
+                )),
+        ));
+    if config.index_external_contracts {
+        torii_config = torii_config
+            .with_registry_cache(decoder_registry.clone())
+            .with_command_handler(Box::new(RegisterExternalContractCommandHandler::new(
+                registry_engine_db.clone(),
+                decoder_registry.clone(),
+                contract_type_registry.clone(),
+            )));
+    }
     let torii_config = if config.controllers {
         torii_config.add_sink_boxed(Box::new(
             ControllersSink::new(
@@ -548,6 +754,7 @@ async fn run_with_postgres(
         configure_token_support(
             &token_targets,
             token_db_setup.as_ref(),
+            config.index_external_contracts,
             token_provider,
             torii_config,
             reflection_builder,
@@ -637,6 +844,11 @@ async fn run_with_sqlite(
     contracts: Vec<Felt>,
     token_targets: TokenTargets,
     token_db_setup: Option<TokenDbSetup>,
+    registry_engine_db: Arc<EngineDb>,
+    decoder_registry: SharedDecoderRegistry,
+    contract_type_registry: SharedContractTypeRegistry,
+    installed_external_decoders: HashSet<DecoderId>,
+    historical_models: Vec<String>,
     provider: StarknetProvider,
     extractor: Box<dyn Extractor>,
 ) -> Result<()> {
@@ -688,6 +900,9 @@ async fn run_with_sqlite(
         erc20_url,
         erc721_url,
         erc1155_url,
+        contract_type_registry.clone(),
+        config.index_external_contracts,
+        installed_external_decoders.clone(),
     )
     .await?;
     let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
@@ -696,7 +911,7 @@ async fn run_with_sqlite(
         .register_encoded_file_descriptor_set(torii::TORII_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(ECS_DESCRIPTOR_SET);
 
-    let torii_config = torii::ToriiConfig::builder()
+    let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
         .command_bus_queue_size(TOKEN_COMMAND_QUEUE_SIZE)
         .with_custom_reflection(true)
@@ -707,7 +922,28 @@ async fn run_with_sqlite(
         .with_extractor(extractor)
         .add_decoder(decoder)
         .add_sink_boxed(Box::new(ecs_sink))
-        .add_sink_boxed(Box::new(IntrospectSqliteDb::new(pool.clone(), ())));
+        .add_sink_boxed(Box::new(
+            OrderedSinkPipeline::new("introspect-projection-pipeline")
+                .push(Box::new(IntrospectSqliteDb::new(pool.clone(), ())))
+                .push(Box::new(
+                    EntitiesHistoricalSink::new(
+                        storage_database_url,
+                        config.max_db_connections,
+                        (),
+                        historical_models,
+                    )
+                    .await?,
+                )),
+        ));
+    if config.index_external_contracts {
+        torii_config = torii_config
+            .with_registry_cache(decoder_registry.clone())
+            .with_command_handler(Box::new(RegisterExternalContractCommandHandler::new(
+                registry_engine_db.clone(),
+                decoder_registry.clone(),
+                contract_type_registry.clone(),
+            )));
+    }
     let torii_config = if config.controllers {
         torii_config.add_sink_boxed(Box::new(
             ControllersSink::new(
@@ -725,6 +961,7 @@ async fn run_with_sqlite(
         configure_token_support(
             &token_targets,
             token_db_setup.as_ref(),
+            config.index_external_contracts,
             token_provider,
             torii_config,
             reflection_builder,

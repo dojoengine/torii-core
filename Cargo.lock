@@ -4652,6 +4652,7 @@ dependencies = [
  "torii-config-common",
  "torii-dojo",
  "torii-ecs-sink",
+ "torii-entities-historical-sink",
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",
@@ -4782,6 +4783,24 @@ dependencies = [
  "tonic-build",
  "torii",
  "torii-dojo",
+ "torii-introspect",
+ "tracing",
+]
+
+[[package]]
+name = "torii-entities-historical-sink"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "introspect-types",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "starknet",
+ "thiserror 2.0.18",
+ "tokio",
+ "torii",
  "torii-introspect",
  "tracing",
 ]
@@ -4944,6 +4963,7 @@ dependencies = [
  "torii-controllers-sink",
  "torii-dojo",
  "torii-ecs-sink",
+ "torii-entities-historical-sink",
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",

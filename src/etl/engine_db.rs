@@ -353,6 +353,32 @@ impl EngineDb {
         Ok(())
     }
 
+    /// List all extractor state rows for an extractor type.
+    pub async fn get_all_extractor_states(
+        &self,
+        extractor_type: &str,
+    ) -> Result<Vec<(String, String)>> {
+        let table = self.table("extractor_state", "engine.extractor_state");
+        let sql = match self.backend {
+            DbBackend::Sqlite => {
+                format!("SELECT state_key, state_value FROM {table} WHERE extractor_type = ?")
+            }
+            DbBackend::Postgres => {
+                format!("SELECT state_key, state_value FROM {table} WHERE extractor_type = $1")
+            }
+        };
+
+        let rows = sqlx::query(&sql)
+            .bind(extractor_type)
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.get(0), row.get(1)))
+            .collect())
+    }
+
     /// Delete extractor state
     ///
     /// # Arguments
@@ -787,6 +813,34 @@ mod tests {
         // Get missing stat
         let missing = db.get_stat("nonexistent").await.unwrap();
         assert_eq!(missing, None);
+    }
+
+    #[tokio::test]
+    async fn test_get_all_extractor_states() {
+        let config = EngineDbConfig {
+            path: ":memory:".to_string(),
+        };
+
+        let db = EngineDb::new(config).await.unwrap();
+        db.set_extractor_state("event", "0x1", "block:10")
+            .await
+            .unwrap();
+        db.set_extractor_state("event", "0x2", "block:20")
+            .await
+            .unwrap();
+        db.set_extractor_state("other", "cursor", "block:30")
+            .await
+            .unwrap();
+
+        let mut rows = db.get_all_extractor_states("event").await.unwrap();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                ("0x1".to_string(), "block:10".to_string()),
+                ("0x2".to_string(), "block:20".to_string())
+            ]
+        );
     }
 
     #[tokio::test]

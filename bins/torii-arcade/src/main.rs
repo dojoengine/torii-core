@@ -6,9 +6,10 @@ use config::{Config, MetadataMode};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::SqlitePoolOptions;
 use starknet::core::types::Felt;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tonic::codec::CompressionEncoding;
 use tonic_reflection::server::Builder as ReflectionBuilder;
 use torii::axum::Router;
@@ -24,10 +25,12 @@ use torii_arcade_sink::{ArcadeSink, FILE_DESCRIPTOR_SET as ARCADE_DESCRIPTOR_SET
 use torii_common::{MetadataFetcher, TokenUriService};
 use torii_config_common::apply_observability_env;
 use torii_dojo::decoder::DojoDecoder;
+use torii_dojo::external_contract::RegisteredContractType;
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::store::sqlite::SqliteStore;
 use torii_ecs_sink::proto::world::world_server::WorldServer;
 use torii_ecs_sink::{EcsSink, FILE_DESCRIPTOR_SET as ECS_DESCRIPTOR_SET};
+use torii_entities_historical_sink::EntitiesHistoricalSink;
 use torii_erc1155::proto::erc1155_server::Erc1155Server;
 use torii_erc1155::{
     Erc1155Decoder, Erc1155MetadataCommandHandler, Erc1155Service, Erc1155Sink, Erc1155Storage,
@@ -56,17 +59,35 @@ const TOKEN_METADATA_COMMAND_PARALLELISM: usize = 1;
 const TOKEN_METADATA_MAX_RETRIES: u8 = 3;
 const TOKEN_URI_FETCH_PARALLELISM: usize = 8;
 
+fn build_contract_type_registry(
+    dojo_event_contracts: &[Felt],
+    erc20_addresses: &[Felt],
+    erc721_addresses: &[Felt],
+    erc1155_addresses: &[Felt],
+) -> Arc<RwLock<HashMap<Felt, RegisteredContractType>>> {
+    let mut contract_types = HashMap::new();
+    for &contract in dojo_event_contracts {
+        contract_types.insert(contract, RegisteredContractType::World);
+    }
+    for &contract in erc20_addresses {
+        contract_types.insert(contract, RegisteredContractType::Erc20);
+    }
+    for &contract in erc721_addresses {
+        contract_types.insert(contract, RegisteredContractType::Erc721);
+    }
+    for &contract in erc1155_addresses {
+        contract_types.insert(contract, RegisteredContractType::Erc1155);
+    }
+    Arc::new(RwLock::new(contract_types))
+}
+
 struct ArcadeProjectionPipeline {
-    introspect_sink: Box<dyn Sink>,
-    arcade_sink: Box<dyn Sink>,
+    sinks: Vec<Box<dyn Sink>>,
 }
 
 impl ArcadeProjectionPipeline {
-    fn new(introspect_sink: Box<dyn Sink>, arcade_sink: Box<dyn Sink>) -> Self {
-        Self {
-            introspect_sink,
-            arcade_sink,
-        }
+    fn new(sinks: Vec<Box<dyn Sink>>) -> Self {
+        Self { sinks }
     }
 
     fn abort_on_sink_failure(stage: &str, sink_name: &str, error: anyhow::Error) -> ! {
@@ -90,12 +111,7 @@ impl Sink for ArcadeProjectionPipeline {
     fn interested_types(&self) -> Vec<TypeId> {
         let mut seen = HashSet::new();
         let mut interested = Vec::new();
-        for type_id in self
-            .introspect_sink
-            .interested_types()
-            .into_iter()
-            .chain(self.arcade_sink.interested_types())
-        {
+        for type_id in self.sinks.iter().flat_map(|sink| sink.interested_types()) {
             if seen.insert(type_id) {
                 interested.push(type_id);
             }
@@ -108,25 +124,28 @@ impl Sink for ArcadeProjectionPipeline {
         envelopes: &[torii::etl::Envelope],
         batch: &torii::etl::extractor::ExtractionBatch,
     ) -> anyhow::Result<()> {
-        if let Err(error) = self.introspect_sink.process(envelopes, batch).await {
-            Self::abort_on_sink_failure("process", self.introspect_sink.name(), error);
-        }
-        if let Err(error) = self.arcade_sink.process(envelopes, batch).await {
-            Self::abort_on_sink_failure("process", self.arcade_sink.name(), error);
+        for sink in &self.sinks {
+            if let Err(error) = sink.process(envelopes, batch).await {
+                Self::abort_on_sink_failure("process", sink.name(), error);
+            }
         }
         Ok(())
     }
 
     fn topics(&self) -> Vec<TopicInfo> {
-        let mut topics = self.introspect_sink.topics();
-        topics.extend(self.arcade_sink.topics());
+        let mut topics = Vec::new();
+        for sink in &self.sinks {
+            topics.extend(sink.topics());
+        }
         topics
     }
 
     fn build_routes(&self) -> Router {
-        self.introspect_sink
-            .build_routes()
-            .merge(self.arcade_sink.build_routes())
+        let mut router = Router::new();
+        for sink in &self.sinks {
+            router = router.merge(sink.build_routes());
+        }
+        router
     }
 
     async fn initialize(
@@ -134,10 +153,9 @@ impl Sink for ArcadeProjectionPipeline {
         event_bus: Arc<EventBus>,
         context: &SinkContext,
     ) -> anyhow::Result<()> {
-        self.introspect_sink
-            .initialize(event_bus.clone(), context)
-            .await?;
-        self.arcade_sink.initialize(event_bus, context).await?;
+        for sink in &mut self.sinks {
+            sink.initialize(event_bus.clone(), context).await?;
+        }
         Ok(())
     }
 }
@@ -185,6 +203,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     let dojo_event_contracts = config.dojo_event_contract_addresses()?;
     let introspect_contracts = config.introspect_contract_addresses()?;
+    let historical_models = config.historical_models();
     let mut erc20_addresses = config.erc20_addresses()?;
     let erc721_addresses = config.erc721_addresses()?;
     let erc1155_addresses = config.erc1155_addresses()?;
@@ -247,6 +266,7 @@ async fn run_indexer(config: Config) -> Result<()> {
             "disabled"
         }
     );
+    tracing::info!("Historical models tracked: {}", historical_models.len());
 
     let excluded_dojo_contracts: Vec<Felt> = dojo_event_contracts
         .iter()
@@ -327,6 +347,14 @@ async fn run_indexer(config: Config) -> Result<()> {
         Some(erc20_db_url.as_str()),
         Some(erc721_db_url.as_str()),
         Some(erc1155_db_url.as_str()),
+        build_contract_type_registry(
+            &dojo_event_contracts,
+            &erc20_addresses,
+            &erc721_addresses,
+            &erc1155_addresses,
+        ),
+        false,
+        HashSet::new(),
     )
     .await?;
     let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
@@ -343,8 +371,20 @@ async fn run_indexer(config: Config) -> Result<()> {
         .register_encoded_file_descriptor_set(ECS_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(ARCADE_DESCRIPTOR_SET);
 
-    let arcade_projection_pipeline =
-        ArcadeProjectionPipeline::new(introspect_sink, Box::new(arcade_sink));
+    let historical_sink = Box::new(
+        EntitiesHistoricalSink::new(
+            &storage_database_url,
+            config.max_db_connections,
+            (),
+            historical_models,
+        )
+        .await?,
+    );
+    let arcade_projection_pipeline = ArcadeProjectionPipeline::new(vec![
+        introspect_sink,
+        historical_sink,
+        Box::new(arcade_sink),
+    ]);
 
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)

@@ -9,6 +9,7 @@ members = [
   "crates/torii-controllers-sink",
   "crates/arcade-sink",
   "crates/torii-ecs-sink",
+  "crates/torii-entities-historical-sink",
   "crates/torii-erc20",
   "crates/torii-erc721",
   "crates/torii-erc1155",
@@ -134,6 +135,7 @@ torii-log-sink.path = "crates/torii-log-sink"
 torii-controllers-sink.path = "crates/torii-controllers-sink"
 torii-arcade-sink.path = "crates/arcade-sink"
 torii-ecs-sink.path = "crates/torii-ecs-sink"
+torii-entities-historical-sink.path = "crates/torii-entities-historical-sink"
 torii-erc20.path = "crates/torii-erc20"
 torii-erc721.path = "crates/torii-erc721"
 torii-erc1155.path = "crates/torii-erc1155"
