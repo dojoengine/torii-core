@@ -40,9 +40,10 @@ use crate::proto::types::{
 };
 use crate::proto::world::{
     world_server::World, RetrieveContractsRequest, RetrieveContractsResponse,
-    RetrieveEntitiesRequest, RetrieveEntitiesResponse, RetrieveEventsRequest,
-    RetrieveEventsResponse, RetrieveTokenBalancesRequest, RetrieveTokenBalancesResponse,
-    RetrieveTokenContractsRequest, RetrieveTokenContractsResponse, RetrieveTokenTransfersRequest,
+    RetrieveControllersRequest, RetrieveControllersResponse, RetrieveEntitiesRequest,
+    RetrieveEntitiesResponse, RetrieveEventsRequest, RetrieveEventsResponse,
+    RetrieveTokenBalancesRequest, RetrieveTokenBalancesResponse, RetrieveTokenContractsRequest,
+    RetrieveTokenContractsResponse, RetrieveTokenTransfersRequest,
     RetrieveTokenTransfersResponse, RetrieveTokensRequest, RetrieveTokensResponse,
     RetrieveTransactionsRequest, RetrieveTransactionsResponse, SubscribeContractsRequest,
     SubscribeContractsResponse, SubscribeEntitiesRequest, SubscribeEntityResponse,
@@ -997,6 +998,119 @@ impl EcsService {
         Ok(contracts)
     }
 
+    async fn load_controllers(
+        &self,
+        query: &types::ControllerQuery,
+    ) -> Result<(Vec<types::Controller>, String)> {
+        let pagination = query.pagination.clone().unwrap_or(types::Pagination {
+            cursor: String::new(),
+            limit: 100,
+            direction: PaginationDirection::Forward as i32,
+            order_by: Vec::new(),
+        });
+        let limit = Self::pagination_limit(Some(&pagination), 100);
+        let target_limit = limit.saturating_add(1);
+        let direction_is_backward = pagination.direction == PaginationDirection::Backward as i32;
+        let order_sql = if direction_is_backward { "DESC" } else { "ASC" };
+
+        let mut conn = self.acquire_initialized_connection().await?;
+        self.ensure_sql_compat_views_on_connection(&mut conn).await?;
+
+        let mut builder =
+            QueryBuilder::<Any>::new("SELECT address, username, deployed_at FROM controllers");
+        let mut has_where = false;
+
+        if !query.contract_addresses.is_empty() {
+            builder.push(" WHERE address IN (");
+            {
+                let mut separated = builder.separated(", ");
+                for address in &query.contract_addresses {
+                    separated.push_bind(format!("{:#066x}", felt_from_bytes(address)?));
+                }
+            }
+            builder.push(")");
+            has_where = true;
+        }
+
+        if !query.usernames.is_empty() {
+            if has_where {
+                builder.push(" AND ");
+            } else {
+                builder.push(" WHERE ");
+                has_where = true;
+            }
+            builder.push("username IN (");
+            {
+                let mut separated = builder.separated(", ");
+                for username in &query.usernames {
+                    separated.push_bind(username.clone());
+                }
+            }
+            builder.push(")");
+        }
+
+        if !pagination.cursor.is_empty() {
+            if has_where {
+                builder.push(" AND ");
+            } else {
+                builder.push(" WHERE ");
+            }
+            builder.push("LOWER(SUBSTR(address, 3)) ");
+            builder.push(if direction_is_backward { "< " } else { "> " });
+            builder.push_bind(
+                pagination
+                    .cursor
+                    .trim_start_matches("0x")
+                    .trim_start_matches("0X")
+                    .to_ascii_lowercase(),
+            );
+        }
+
+        builder.push(" ORDER BY address ");
+        builder.push(order_sql);
+        builder.push(" LIMIT ");
+        builder.push_bind(target_limit as i64);
+
+        let rows = builder.build().fetch_all(&mut *conn).await?;
+        let mut controllers = rows
+            .into_iter()
+            .map(|row| {
+                let address = row.try_get::<String, _>("address")?;
+                let deployed_at_timestamp = row
+                    .try_get::<Option<String>, _>("deployed_at")?
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(&value).ok())
+                    .map(|value| value.timestamp() as u64)
+                    .unwrap_or_default();
+                Ok(types::Controller {
+                    address: felt_from_hex(&address)?.to_bytes_be().to_vec(),
+                    username: row
+                        .try_get::<Option<String>, _>("username")?
+                        .unwrap_or_default(),
+                    deployed_at_timestamp,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let has_more = controllers.len() > limit;
+        if has_more {
+            controllers.truncate(limit);
+        }
+        if direction_is_backward {
+            controllers.reverse();
+        }
+
+        let next_cursor = if has_more {
+            controllers
+                .last()
+                .map(|controller| hex::encode(&controller.address))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        Ok((controllers, next_cursor))
+    }
+
     fn scoped_table(&self, schema: &str, table: &str) -> String {
         format!("{schema}.{table}")
     }
@@ -1084,9 +1198,14 @@ impl EcsService {
         &self,
         conn: &mut PoolConnection<Any>,
     ) -> Result<()> {
-        let controllers_sql = self.controllers_view_sql(conn).await?;
-        self.replace_sql_compat_view_on_connection(conn, "controllers", &controllers_sql)
-            .await?;
+        if !self
+            .sql_object_exists_on_connection(conn, None, "controllers")
+            .await?
+        {
+            let controllers_sql = self.controllers_view_sql(conn).await?;
+            self.replace_sql_compat_view_on_connection(conn, "controllers", &controllers_sql)
+                .await?;
+        }
         let event_messages_historical_sql = self.event_messages_historical_view_sql().await?;
         self.replace_sql_compat_view_on_connection(
             conn,
@@ -4017,6 +4136,24 @@ impl World for EcsService {
         Ok(Response::new(RetrieveContractsResponse { contracts }))
     }
 
+    async fn retrieve_controllers(
+        &self,
+        request: Request<RetrieveControllersRequest>,
+    ) -> Result<Response<RetrieveControllersResponse>, Status> {
+        let query = request
+            .into_inner()
+            .query
+            .ok_or_else(|| Status::invalid_argument("Missing query argument"))?;
+        let (controllers, next_cursor) = self
+            .load_controllers(&query)
+            .await
+            .map_err(internal_status)?;
+        Ok(Response::new(RetrieveControllersResponse {
+            next_cursor,
+            controllers,
+        }))
+    }
+
     async fn retrieve_token_contracts(
         &self,
         request: Request<RetrieveTokenContractsRequest>,
@@ -6257,6 +6394,31 @@ mod tests {
         .await
         .expect("insert erc721 ownership");
 
+        sqlx::query(
+            "CREATE TABLE controllers (
+                id TEXT PRIMARY KEY,
+                address TEXT NOT NULL UNIQUE,
+                username TEXT NOT NULL,
+                deployed_at TEXT NOT NULL,
+                updated_at BIGINT NOT NULL
+            )",
+        )
+        .execute(&service.state.pool)
+        .await
+        .expect("create controllers backing table");
+        sqlx::query(
+            "INSERT INTO controllers (id, address, username, deployed_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(player)
+        .bind(player)
+        .bind("cartridge_user")
+        .bind("2024-03-20T12:00:00Z")
+        .bind(1_710_936_000_i64)
+        .execute(&service.state.pool)
+        .await
+        .expect("insert controller backing row");
+
         let controllers = service
             .execute_sql(Request::new(types::SqlQueryRequest {
                 query: "SELECT address, username FROM controllers LIMIT 5".to_string(),
@@ -6269,7 +6431,7 @@ mod tests {
         assert_eq!(controller_rows[0].get("address"), Some(&player.to_string()));
         assert_eq!(
             controller_rows[0].get("username"),
-            Some(&player.to_string())
+            Some(&"cartridge_user".to_string())
         );
 
         let historical = service
@@ -6526,5 +6688,65 @@ mod tests {
         );
         assert_eq!(balance.balance, u256_bytes_from_u64(1));
         assert_eq!(balance.token_id.as_ref(), Some(&expected_token_id));
+    }
+
+    #[tokio::test]
+    async fn retrieve_controllers_reads_backing_table() {
+        let db_path = test_db_path("retrieve-controllers");
+        let service = EcsService::new(&db_path, Some(1), None, None, None)
+            .await
+            .expect("service init");
+        let controller = format!("{:#066x}", Felt::from(0x123_u64));
+
+        sqlx::query(
+            "CREATE TABLE controllers (
+                id TEXT PRIMARY KEY,
+                address TEXT NOT NULL UNIQUE,
+                username TEXT NOT NULL,
+                deployed_at TEXT NOT NULL,
+                updated_at BIGINT NOT NULL
+            )",
+        )
+        .execute(&service.state.pool)
+        .await
+        .expect("create controllers table");
+        sqlx::query(
+            "INSERT INTO controllers (id, address, username, deployed_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(&controller)
+        .bind(&controller)
+        .bind("alice")
+        .bind("2024-03-20T12:00:00Z")
+        .bind(1_710_936_000_i64)
+        .execute(&service.state.pool)
+        .await
+        .expect("insert controller");
+
+        let response = service
+            .retrieve_controllers(Request::new(RetrieveControllersRequest {
+                query: Some(types::ControllerQuery {
+                    contract_addresses: vec![Felt::from(0x123_u64).to_bytes_be().to_vec()],
+                    usernames: Vec::new(),
+                    pagination: Some(types::Pagination {
+                        cursor: String::new(),
+                        limit: 10,
+                        direction: PaginationDirection::Forward as i32,
+                        order_by: Vec::new(),
+                    }),
+                }),
+            }))
+            .await
+            .expect("retrieve controllers")
+            .into_inner();
+
+        assert_eq!(response.controllers.len(), 1);
+        assert!(response.next_cursor.is_empty());
+        assert_eq!(
+            response.controllers[0].address,
+            Felt::from(0x123_u64).to_bytes_be().to_vec()
+        );
+        assert_eq!(response.controllers[0].username, "alice");
+        assert_eq!(response.controllers[0].deployed_at_timestamp, 1_710_936_000);
     }
 }

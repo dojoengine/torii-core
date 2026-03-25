@@ -84,6 +84,14 @@ pub struct Config {
     #[arg(long, default_value = "3000")]
     pub port: u16,
 
+    /// Cartridge-compatible GraphQL API used to fetch controller usernames.
+    #[arg(long, default_value = "https://api.cartridge.gg/query")]
+    pub controllers_api_url: String,
+
+    /// Enable controller synchronization into the introspect database.
+    #[arg(long)]
+    pub controllers: bool,
+
     /// Enable Prometheus metrics collection.
     #[arg(long)]
     pub observability: bool,
@@ -183,6 +191,19 @@ mod tests {
     fn observability_flag_enables_metrics() {
         let cfg = Config::parse_from(["torii-server", "--contract", "0x1", "--observability"]);
         assert!(cfg.observability);
+    }
+
+    #[test]
+    fn controllers_sync_defaults_to_disabled() {
+        let cfg = Config::parse_from(["torii-server", "--contract", "0x1"]);
+        assert_eq!(cfg.controllers_api_url, "https://api.cartridge.gg/query");
+        assert!(!cfg.controllers);
+    }
+
+    #[test]
+    fn controllers_flag_enables_sync() {
+        let cfg = Config::parse_from(["torii-server", "--contract", "0x1", "--controllers"]);
+        assert!(cfg.controllers);
     }
 
     #[test]

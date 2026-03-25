@@ -39,6 +39,7 @@ use torii_erc721::{
     Erc721Decoder, Erc721MetadataCommandHandler, Erc721Service, Erc721Sink, Erc721Storage,
     FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
 };
+use torii_controllers_sink::ControllersSink;
 use torii_introspect_postgres_sink::processor::IntrospectPgDb;
 use torii_introspect_sqlite_sink::processor::IntrospectSqliteDb;
 use torii_runtime_common::database::{resolve_token_db_setup, TokenDbSetup};
@@ -339,6 +340,17 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("Storage backend: {:?}", backend);
     tracing::info!("Engine database URL: {}", engine_database_url);
     tracing::info!("Storage database URL: {}", storage_database_url);
+    tracing::info!(
+        "Controllers sync: {}",
+        if config.controllers {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    if config.controllers {
+        tracing::info!("Controllers API URL: {}", config.controllers_api_url);
+    }
     if let Some(db_setup) = &token_db_setup {
         tracing::info!("ERC20 storage database URL: {}", db_setup.erc20_url);
         tracing::info!("ERC721 storage database URL: {}", db_setup.erc721_url);
@@ -510,6 +522,18 @@ async fn run_with_postgres(
         .add_decoder(decoder)
         .add_sink_boxed(Box::new(ecs_sink))
         .add_sink_boxed(Box::new(sink));
+    let torii_config = if config.controllers {
+        torii_config.add_sink_boxed(Box::new(
+            ControllersSink::new(
+                storage_database_url,
+                config.max_db_connections,
+                Some(config.controllers_api_url.clone()),
+            )
+            .await?,
+        ))
+    } else {
+        torii_config
+    };
 
     let (torii_config, reflection_builder, token_services, _token_uri_services) =
         configure_token_support(
@@ -666,6 +690,18 @@ async fn run_with_sqlite(
         .add_decoder(decoder)
         .add_sink_boxed(Box::new(ecs_sink))
         .add_sink_boxed(Box::new(IntrospectSqliteDb::new(pool.clone(), ())));
+    let torii_config = if config.controllers {
+        torii_config.add_sink_boxed(Box::new(
+            ControllersSink::new(
+                storage_database_url,
+                config.max_db_connections,
+                Some(config.controllers_api_url.clone()),
+            )
+            .await?,
+        ))
+    } else {
+        torii_config
+    };
 
     let (torii_config, reflection_builder, token_services, _token_uri_services) =
         configure_token_support(

@@ -26,6 +26,7 @@ service World {
   rpc RetrieveTokenBalances (RetrieveTokenBalancesRequest) returns (RetrieveTokenBalancesResponse);
   rpc RetrieveTransactions (RetrieveTransactionsRequest) returns (RetrieveTransactionsResponse);
   rpc SubscribeTransactions (SubscribeTransactionsRequest) returns (stream SubscribeTransactionsResponse);
+  rpc RetrieveControllers (RetrieveControllersRequest) returns (RetrieveControllersResponse);
   rpc RetrieveContracts (RetrieveContractsRequest) returns (RetrieveContractsResponse);
   rpc RetrieveTokenContracts (RetrieveTokenContractsRequest) returns (RetrieveTokenContractsResponse);
   rpc ExecuteSql (types.SqlQueryRequest) returns (types.SqlQueryResponse);
@@ -37,6 +38,15 @@ message SubscribeTransactionsRequest {
 
 message SubscribeTransactionsResponse {
   types.Transaction transaction = 1;
+}
+
+message RetrieveControllersRequest {
+  types.ControllerQuery query = 1;
+}
+
+message RetrieveControllersResponse {
+  string next_cursor = 1;
+  repeated types.Controller controllers = 2;
 }
 
 message RetrieveContractsRequest {
