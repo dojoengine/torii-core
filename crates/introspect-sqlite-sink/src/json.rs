@@ -32,24 +32,18 @@ impl CairoTypeSerialization for SqliteJsonSerializer {
         self.serialize_byte_array(serializer, value)
     }
 
-    fn serialize_u256<S: Serializer>(
-        &self,
-        serializer: S,
-        value: U256,
-    ) -> Result<S::Ok, S::Error> {
-        let U256([a, b, c, d]) = value;
-        let corrected = U256([d, c, b, a]);
+    fn serialize_u256<S: Serializer>(&self, serializer: S, value: U256) -> Result<S::Ok, S::Error> {
+        let limbs = value.0;
+        let corrected = U256([limbs[3], limbs[2], limbs[1], limbs[0]]);
         let bytes = corrected.to_big_endian();
         self.serialize_byte_array(serializer, &bytes)
     }
 
-    fn serialize_u512<S: Serializer>(
-        &self,
-        serializer: S,
-        value: U512,
-    ) -> Result<S::Ok, S::Error> {
-        let U512([a, b, c, d, e, f, g, h]) = value;
-        let corrected = U512([h, g, f, e, d, c, b, a]);
+    fn serialize_u512<S: Serializer>(&self, serializer: S, value: U512) -> Result<S::Ok, S::Error> {
+        let limbs = value.0;
+        let corrected = U512([
+            limbs[7], limbs[6], limbs[5], limbs[4], limbs[3], limbs[2], limbs[1], limbs[0],
+        ]);
         let bytes = corrected.to_big_endian();
         self.serialize_byte_array(serializer, &bytes)
     }

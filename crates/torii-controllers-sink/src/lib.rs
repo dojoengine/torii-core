@@ -92,11 +92,20 @@ impl TryFrom<ControllerNode> for StoredController {
 
     fn try_from(value: ControllerNode) -> Result<Self> {
         let created_at = DateTime::parse_from_rfc3339(&value.created_at)
-            .with_context(|| format!("invalid controller createdAt returned by API: {}", value.created_at))?
+            .with_context(|| {
+                format!(
+                    "invalid controller createdAt returned by API: {}",
+                    value.created_at
+                )
+            })?
             .with_timezone(&Utc);
-        let felt_addr = Felt::from_str(&value.address)
-            .with_context(|| format!("invalid controller address returned by API: {}", value.address))?;
-        let normalized = format!("{:#066x}", felt_addr);
+        let felt_addr = Felt::from_str(&value.address).with_context(|| {
+            format!(
+                "invalid controller address returned by API: {}",
+                value.address
+            )
+        })?;
+        let normalized = format!("{felt_addr:#066x}");
         Ok(Self {
             id: normalized.clone(),
             address: normalized,
@@ -181,15 +190,16 @@ impl ControllersStore {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.and_then(|row| row.try_get::<Option<i64>, _>(0).ok()).flatten())
+        Ok(row
+            .and_then(|row| row.try_get::<Option<i64>, _>(0).ok())
+            .flatten())
     }
 
     async fn is_empty(&self) -> Result<bool> {
-        let row = sqlx::query_scalar::<Any, i64>(&format!(
-            "SELECT COUNT(*) FROM {CONTROLLERS_TABLE}"
-        ))
-        .fetch_one(&self.pool)
-        .await?;
+        let row =
+            sqlx::query_scalar::<Any, i64>(&format!("SELECT COUNT(*) FROM {CONTROLLERS_TABLE}"))
+                .fetch_one(&self.pool)
+                .await?;
 
         Ok(row == 0)
     }
@@ -426,7 +436,9 @@ query {{
             stored += 1;
         }
 
-        self.store.store_synced_until(upper_bound.timestamp()).await?;
+        self.store
+            .store_synced_until(upper_bound.timestamp())
+            .await?;
 
         tracing::info!(
             target: "torii::sinks::controllers",
@@ -443,7 +455,7 @@ query {{
 
 #[async_trait]
 impl Sink for ControllersSink {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "controllers"
     }
 
@@ -451,7 +463,11 @@ impl Sink for ControllersSink {
         vec![CONTROLLERS_TYPE]
     }
 
-    async fn process(&self, _envelopes: &[torii::etl::Envelope], batch: &ExtractionBatch) -> Result<()> {
+    async fn process(
+        &self,
+        _envelopes: &[torii::etl::Envelope],
+        batch: &ExtractionBatch,
+    ) -> Result<()> {
         match self.sync_batch(batch).await {
             Ok(()) => Ok(()),
             Err(error) => {
@@ -514,8 +530,8 @@ mod tests {
     use serde_json::Value;
     use sqlx::query_scalar;
     use tokio::net::TcpListener;
-    use torii::command::CommandBus;
     use torii::axum::{extract::State, routing::post, Json, Router};
+    use torii::command::CommandBus;
     use torii::grpc::SubscriptionManager;
 
     async fn initialize_sink(sink: &mut ControllersSink) {

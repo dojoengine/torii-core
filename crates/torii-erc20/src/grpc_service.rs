@@ -490,13 +490,15 @@ impl Erc20Trait for Erc20Service {
 
         let entries = all
             .into_iter()
-            .map(|(token, name, symbol, decimals, total_supply)| TokenMetadataEntry {
-                token: token.to_bytes_be().to_vec(),
-                name,
-                symbol,
-                decimals: decimals.map(|d| d as u32),
-                total_supply: total_supply.map(u256_to_bytes),
-            })
+            .map(
+                |(token, name, symbol, decimals, total_supply)| TokenMetadataEntry {
+                    token: token.to_bytes_be().to_vec(),
+                    name,
+                    symbol,
+                    decimals: decimals.map(|d| d as u32),
+                    total_supply: total_supply.map(u256_to_bytes),
+                },
+            )
             .collect();
 
         Ok(Response::new(GetTokenMetadataResponse {

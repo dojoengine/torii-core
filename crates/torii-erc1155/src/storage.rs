@@ -1055,7 +1055,9 @@ impl Erc1155Storage {
             )
             .ok();
 
-        Ok(result.map(|(bytes, block_str)| (blob_to_u256(&bytes), block_str.parse::<u64>().unwrap_or(0))))
+        Ok(result.map(|(bytes, block_str)| {
+            (blob_to_u256(&bytes), block_str.parse::<u64>().unwrap_or(0))
+        }))
     }
 
     /// Get balances for multiple (contract, wallet, token_id) tuples in a single query

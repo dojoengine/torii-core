@@ -43,16 +43,16 @@ use crate::proto::world::{
     RetrieveControllersRequest, RetrieveControllersResponse, RetrieveEntitiesRequest,
     RetrieveEntitiesResponse, RetrieveEventsRequest, RetrieveEventsResponse,
     RetrieveTokenBalancesRequest, RetrieveTokenBalancesResponse, RetrieveTokenContractsRequest,
-    RetrieveTokenContractsResponse, RetrieveTokenTransfersRequest,
-    RetrieveTokenTransfersResponse, RetrieveTokensRequest, RetrieveTokensResponse,
-    RetrieveTransactionsRequest, RetrieveTransactionsResponse, SubscribeContractsRequest,
-    SubscribeContractsResponse, SubscribeEntitiesRequest, SubscribeEntityResponse,
-    SubscribeEventsRequest, SubscribeEventsResponse, SubscribeTokenBalancesRequest,
-    SubscribeTokenBalancesResponse, SubscribeTokenTransfersRequest,
-    SubscribeTokenTransfersResponse, SubscribeTokensRequest, SubscribeTokensResponse,
-    SubscribeTransactionsRequest, SubscribeTransactionsResponse, UpdateEntitiesSubscriptionRequest,
-    UpdateTokenBalancesSubscriptionRequest, UpdateTokenSubscriptionRequest,
-    UpdateTokenTransfersSubscriptionRequest, WorldsRequest, WorldsResponse,
+    RetrieveTokenContractsResponse, RetrieveTokenTransfersRequest, RetrieveTokenTransfersResponse,
+    RetrieveTokensRequest, RetrieveTokensResponse, RetrieveTransactionsRequest,
+    RetrieveTransactionsResponse, SubscribeContractsRequest, SubscribeContractsResponse,
+    SubscribeEntitiesRequest, SubscribeEntityResponse, SubscribeEventsRequest,
+    SubscribeEventsResponse, SubscribeTokenBalancesRequest, SubscribeTokenBalancesResponse,
+    SubscribeTokenTransfersRequest, SubscribeTokenTransfersResponse, SubscribeTokensRequest,
+    SubscribeTokensResponse, SubscribeTransactionsRequest, SubscribeTransactionsResponse,
+    UpdateEntitiesSubscriptionRequest, UpdateTokenBalancesSubscriptionRequest,
+    UpdateTokenSubscriptionRequest, UpdateTokenTransfersSubscriptionRequest, WorldsRequest,
+    WorldsResponse,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -232,9 +232,9 @@ impl EcsService {
                 has_erc20,
                 has_erc721,
                 has_erc1155,
-                erc20_url: erc20_url.map(|s| s.to_string()),
-                erc721_url: erc721_url.map(|s| s.to_string()),
-                erc1155_url: erc1155_url.map(|s| s.to_string()),
+                erc20_url: erc20_url.map(std::string::ToString::to_string),
+                erc721_url: erc721_url.map(std::string::ToString::to_string),
+                erc1155_url: erc1155_url.map(std::string::ToString::to_string),
                 managed_tables: Mutex::new(None),
                 entity_subscriptions: Mutex::new(HashMap::new()),
                 event_message_subscriptions: Mutex::new(HashMap::new()),
@@ -1014,13 +1014,14 @@ impl EcsService {
         let order_sql = if direction_is_backward { "DESC" } else { "ASC" };
 
         let mut conn = self.acquire_initialized_connection().await?;
-        self.ensure_sql_compat_views_on_connection(&mut conn).await?;
+        self.ensure_sql_compat_views_on_connection(&mut conn)
+            .await?;
 
         let mut builder =
             QueryBuilder::<Any>::new("SELECT address, username, deployed_at FROM controllers");
-        let mut has_where = false;
-
-        if !query.contract_addresses.is_empty() {
+        let mut has_where = if query.contract_addresses.is_empty() {
+            false
+        } else {
             builder.push(" WHERE address IN (");
             {
                 let mut separated = builder.separated(", ");
@@ -1029,8 +1030,8 @@ impl EcsService {
                 }
             }
             builder.push(")");
-            has_where = true;
-        }
+            true
+        };
 
         if !query.usernames.is_empty() {
             if has_where {
@@ -1374,8 +1375,7 @@ impl EcsService {
         pagination
             .map(|pagination| pagination.limit)
             .filter(|limit| *limit > 0)
-            .map(|limit| limit.min(1000) as usize)
-            .unwrap_or(default)
+            .map_or(default, |limit| limit.min(1000) as usize)
     }
 
     async fn load_token_contracts(
@@ -1387,22 +1387,17 @@ impl EcsService {
         let mut conn = self.acquire_initialized_connection().await?;
         let include_erc20 = self.state.has_erc20
             && (query.contract_types.is_empty()
-                || query
-                    .contract_types
-                    .iter()
-                    .any(|kind| *kind == ContractType::Erc20 as i32));
+                || query.contract_types.contains(&(ContractType::Erc20 as i32)));
         let include_erc721 = self.state.has_erc721
             && (query.contract_types.is_empty()
                 || query
                     .contract_types
-                    .iter()
-                    .any(|kind| *kind == ContractType::Erc721 as i32));
+                    .contains(&(ContractType::Erc721 as i32)));
         let include_erc1155 = self.state.has_erc1155
             && (query.contract_types.is_empty()
                 || query
                     .contract_types
-                    .iter()
-                    .any(|kind| *kind == ContractType::Erc1155 as i32));
+                    .contains(&(ContractType::Erc1155 as i32)));
 
         if include_erc20 {
             let table = self.scoped_table("erc20", "token_metadata");
@@ -1890,7 +1885,7 @@ impl EcsService {
         query: &types::TransactionQuery,
     ) -> Result<(Vec<types::Transaction>, String)> {
         let limit = Self::pagination_limit(query.pagination.as_ref(), 100);
-        let filter = query.filter.as_ref().cloned().unwrap_or_default();
+        let filter = query.filter.clone().unwrap_or_default();
         if !filter.caller_addresses.is_empty()
             || !filter.entrypoints.is_empty()
             || !filter.model_selectors.is_empty()
@@ -1964,12 +1959,13 @@ impl EcsService {
         let mut builder = QueryBuilder::<Any>::new(
             "SELECT transaction_hash, block_number, executed_at, world_address FROM torii_ecs_events",
         );
-        let mut has_where = false;
-        if let Some(from_block) = filter.from_block {
+        let mut has_where = if let Some(from_block) = filter.from_block {
             builder.push(" WHERE block_number >= ");
             builder.push_bind(from_block as i64);
-            has_where = true;
-        }
+            true
+        } else {
+            false
+        };
         if let Some(to_block) = filter.to_block {
             if has_where {
                 builder.push(" AND ");
@@ -2046,12 +2042,13 @@ impl EcsService {
         let mut builder = QueryBuilder::<Any>::new(format!(
             "SELECT tx_hash, block_number, COALESCE(timestamp, '0') AS timestamp, {contract_column} FROM {table}"
         ));
-        let mut has_where = false;
-        if let Some(from_block) = filter.from_block {
+        let mut has_where = if let Some(from_block) = filter.from_block {
             builder.push(" WHERE block_number >= ");
             builder.push_bind(from_block as i64);
-            has_where = true;
-        }
+            true
+        } else {
+            false
+        };
         if let Some(to_block) = filter.to_block {
             if has_where {
                 builder.push(" AND ");
@@ -4336,15 +4333,17 @@ impl CairoTypeSerialization for SnapshotJsonSerializer {
     }
 
     fn serialize_u256<S: Serializer>(&self, serializer: S, value: U256) -> Result<S::Ok, S::Error> {
-        let U256([a, b, c, d]) = value;
-        let corrected = U256([d, c, b, a]);
+        let limbs = value.0;
+        let corrected = U256([limbs[3], limbs[2], limbs[1], limbs[0]]);
         let bytes = corrected.to_big_endian();
         self.serialize_byte_array(serializer, &bytes)
     }
 
     fn serialize_u512<S: Serializer>(&self, serializer: S, value: U512) -> Result<S::Ok, S::Error> {
-        let U512([a, b, c, d, e, f, g, h]) = value;
-        let corrected = U512([h, g, f, e, d, c, b, a]);
+        let limbs = value.0;
+        let corrected = U512([
+            limbs[7], limbs[6], limbs[5], limbs[4], limbs[3], limbs[2], limbs[1], limbs[0],
+        ]);
         let bytes = corrected.to_big_endian();
         self.serialize_byte_array(serializer, &bytes)
     }
@@ -5005,8 +5004,9 @@ fn push_transfer_filters(
     to_column: &str,
     token_id_column: Option<&str>,
 ) {
-    let mut has_where = false;
-    if !query.contract_addresses.is_empty() {
+    let mut has_where = if query.contract_addresses.is_empty() {
+        false
+    } else {
         builder.push(format!(" WHERE hex({contract_column}) IN ("));
         {
             let mut separated = builder.separated(", ");
@@ -5015,8 +5015,8 @@ fn push_transfer_filters(
             }
         }
         builder.push(")");
-        has_where = true;
-    }
+        true
+    };
     if !query.account_addresses.is_empty() {
         if has_where {
             builder.push(" AND ");

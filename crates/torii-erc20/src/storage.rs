@@ -1503,7 +1503,9 @@ impl Erc20Storage {
             )
             .ok();
 
-        Ok(result.map(|(bytes, block_str)| (blob_to_u256(&bytes), block_str.parse::<u64>().unwrap_or(0))))
+        Ok(result.map(|(bytes, block_str)| {
+            (blob_to_u256(&bytes), block_str.parse::<u64>().unwrap_or(0))
+        }))
     }
 
     /// Get balances with optional token/wallet filters and cursor pagination.
@@ -2049,7 +2051,12 @@ impl Erc20Storage {
                     let symbol: Option<String> = row.get(1)?;
                     let decimals: Option<String> = row.get(2)?;
                     let total_supply: Option<Vec<u8>> = row.get(3)?;
-                    Ok((name, symbol, decimals.and_then(|d| d.parse::<u8>().ok()), total_supply.map(|b| blob_to_u256(&b))))
+                    Ok((
+                        name,
+                        symbol,
+                        decimals.and_then(|d| d.parse::<u8>().ok()),
+                        total_supply.map(|b| blob_to_u256(&b)),
+                    ))
                 },
             )
             .ok();
@@ -2059,9 +2066,18 @@ impl Erc20Storage {
     /// Get all token metadata
     pub async fn get_all_token_metadata(
         &self,
-    ) -> Result<Vec<(Felt, Option<String>, Option<String>, Option<u8>, Option<U256>)>> {
+    ) -> Result<
+        Vec<(
+            Felt,
+            Option<String>,
+            Option<String>,
+            Option<u8>,
+            Option<U256>,
+        )>,
+    > {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT token, name, symbol, decimals, total_supply FROM token_metadata")?;
+        let mut stmt =
+            conn.prepare("SELECT token, name, symbol, decimals, total_supply FROM token_metadata")?;
         let rows = stmt.query_map([], |row| {
             let token_bytes: Vec<u8> = row.get(0)?;
             let name: Option<String> = row.get(1)?;
@@ -2087,7 +2103,13 @@ impl Erc20Storage {
         cursor: Option<Felt>,
         limit: u32,
     ) -> Result<(
-        Vec<(Felt, Option<String>, Option<String>, Option<u8>, Option<U256>)>,
+        Vec<(
+            Felt,
+            Option<String>,
+            Option<String>,
+            Option<u8>,
+            Option<U256>,
+        )>,
         Option<Felt>,
     )> {
         if self.backend == StorageBackend::Postgres {
@@ -2435,7 +2457,9 @@ impl Erc20Storage {
                 amount: blob_to_u256(&row.get::<usize, Vec<u8>>(4)),
                 block_number: row.get::<usize, String>(5).parse::<u64>().unwrap_or(0),
                 tx_hash: blob_to_felt(&row.get::<usize, Vec<u8>>(6)),
-                timestamp: row.get::<usize, Option<String>>(7).and_then(|s| s.parse::<i64>().ok()),
+                timestamp: row
+                    .get::<usize, Option<String>>(7)
+                    .and_then(|s| s.parse::<i64>().ok()),
             })
             .collect();
 
@@ -2549,7 +2573,9 @@ impl Erc20Storage {
                 amount: blob_to_u256(&row.get::<usize, Vec<u8>>(4)),
                 block_number: row.get::<usize, String>(5).parse::<u64>().unwrap_or(0),
                 tx_hash: blob_to_felt(&row.get::<usize, Vec<u8>>(6)),
-                timestamp: row.get::<usize, Option<String>>(7).and_then(|s| s.parse::<i64>().ok()),
+                timestamp: row
+                    .get::<usize, Option<String>>(7)
+                    .and_then(|s| s.parse::<i64>().ok()),
             })
             .collect();
 
@@ -2987,7 +3013,12 @@ impl Erc20Storage {
         Ok(row.map(|r| {
             let decimals: Option<String> = r.get(2);
             let total_supply: Option<Vec<u8>> = r.get(3);
-            (r.get(0), r.get(1), decimals.and_then(|d| d.parse::<u8>().ok()), total_supply.map(|b| blob_to_u256(&b)))
+            (
+                r.get(0),
+                r.get(1),
+                decimals.and_then(|d| d.parse::<u8>().ok()),
+                total_supply.map(|b| blob_to_u256(&b)),
+            )
         }))
     }
 
@@ -2996,7 +3027,13 @@ impl Erc20Storage {
         cursor: Option<Felt>,
         limit: u32,
     ) -> Result<(
-        Vec<(Felt, Option<String>, Option<String>, Option<u8>, Option<U256>)>,
+        Vec<(
+            Felt,
+            Option<String>,
+            Option<String>,
+            Option<u8>,
+            Option<U256>,
+        )>,
         Option<Felt>,
     )> {
         let client = self.pg_client().await?;
@@ -3024,7 +3061,13 @@ impl Erc20Storage {
                 .await?
         };
 
-        let mut out: Vec<(Felt, Option<String>, Option<String>, Option<u8>, Option<U256>)> = rows
+        let mut out: Vec<(
+            Felt,
+            Option<String>,
+            Option<String>,
+            Option<u8>,
+            Option<U256>,
+        )> = rows
             .into_iter()
             .map(|row| {
                 let decimals: Option<String> = row.get(3);

@@ -19,6 +19,7 @@ use torii::etl::extractor::{
 use torii::{EtlConcurrencyConfig, ToriiConfigBuilder};
 use torii_common::{MetadataFetcher, TokenUriService};
 use torii_config_common::apply_observability_env;
+use torii_controllers_sink::ControllersSink;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::store::sqlite::SqliteStore;
@@ -39,7 +40,6 @@ use torii_erc721::{
     Erc721Decoder, Erc721MetadataCommandHandler, Erc721Service, Erc721Sink, Erc721Storage,
     FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
 };
-use torii_controllers_sink::ControllersSink;
 use torii_introspect_postgres_sink::processor::IntrospectPgDb;
 use torii_introspect_sqlite_sink::processor::IntrospectSqliteDb;
 use torii_runtime_common::database::{resolve_token_db_setup, TokenDbSetup};
@@ -493,9 +493,18 @@ async fn run_with_postgres(
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
 
-    let erc20_url = token_db_setup.as_ref().filter(|_| !token_targets.erc20.is_empty()).map(|s| s.erc20_url.as_str());
-    let erc721_url = token_db_setup.as_ref().filter(|_| !token_targets.erc721.is_empty()).map(|s| s.erc721_url.as_str());
-    let erc1155_url = token_db_setup.as_ref().filter(|_| !token_targets.erc1155.is_empty()).map(|s| s.erc1155_url.as_str());
+    let erc20_url = token_db_setup
+        .as_ref()
+        .filter(|_| !token_targets.erc20.is_empty())
+        .map(|s| s.erc20_url.as_str());
+    let erc721_url = token_db_setup
+        .as_ref()
+        .filter(|_| !token_targets.erc721.is_empty())
+        .map(|s| s.erc721_url.as_str());
+    let erc1155_url = token_db_setup
+        .as_ref()
+        .filter(|_| !token_targets.erc1155.is_empty())
+        .map(|s| s.erc1155_url.as_str());
     let ecs_sink = EcsSink::new(
         storage_database_url,
         config.max_db_connections,
@@ -661,9 +670,18 @@ async fn run_with_sqlite(
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
 
-    let erc20_url = token_db_setup.as_ref().filter(|_| !token_targets.erc20.is_empty()).map(|s| s.erc20_url.as_str());
-    let erc721_url = token_db_setup.as_ref().filter(|_| !token_targets.erc721.is_empty()).map(|s| s.erc721_url.as_str());
-    let erc1155_url = token_db_setup.as_ref().filter(|_| !token_targets.erc1155.is_empty()).map(|s| s.erc1155_url.as_str());
+    let erc20_url = token_db_setup
+        .as_ref()
+        .filter(|_| !token_targets.erc20.is_empty())
+        .map(|s| s.erc20_url.as_str());
+    let erc721_url = token_db_setup
+        .as_ref()
+        .filter(|_| !token_targets.erc721.is_empty())
+        .map(|s| s.erc721_url.as_str());
+    let erc1155_url = token_db_setup
+        .as_ref()
+        .filter(|_| !token_targets.erc1155.is_empty())
+        .map(|s| s.erc1155_url.as_str());
     let ecs_sink = EcsSink::new(
         storage_database_url,
         config.max_db_connections,

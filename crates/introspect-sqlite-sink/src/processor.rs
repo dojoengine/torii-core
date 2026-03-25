@@ -11,8 +11,8 @@ use std::fmt::Display;
 use std::ops::Deref;
 use std::sync::{PoisonError, RwLock};
 use torii::etl::envelope::MetaData;
-use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii::etl::EventMsg;
+use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_introspect::schema::TableSchema;
 use torii_introspect::InsertsFields;
 use torii_sqlite::SqliteConnection;
@@ -140,63 +140,38 @@ impl SqliteTables {
 }
 
 fn sqlite_column_type(type_def: &TypeDef) -> &'static str {
-    match type_def {
+    if is_json_type(type_def) {
+        "JSONB"
+    } else if matches!(
+        type_def,
         TypeDef::Bool
-        | TypeDef::I8
-        | TypeDef::I16
-        | TypeDef::I32
-        | TypeDef::U8
-        | TypeDef::U16
-        | TypeDef::U32 => "INTEGER",
-
-        TypeDef::I64
-        | TypeDef::U64
-        | TypeDef::U128
-        | TypeDef::I128
-        | TypeDef::U256
-        | TypeDef::U512
-        | TypeDef::Felt252
-        | TypeDef::ClassHash
-        | TypeDef::ContractAddress
-        | TypeDef::StorageAddress
-        | TypeDef::StorageBaseAddress
-        | TypeDef::EthAddress => "TEXT",
-
-        TypeDef::Struct(_)
-        | TypeDef::Enum(_)
-        | TypeDef::Tuple(_)
-        | TypeDef::Array(_)
-        | TypeDef::FixedArray(_)
-        | TypeDef::Option(_)
-        | TypeDef::Nullable(_)
-        | TypeDef::Result(_) => "JSONB",
-
-        _ => "TEXT",
+            | TypeDef::I8
+            | TypeDef::I16
+            | TypeDef::I32
+            | TypeDef::U8
+            | TypeDef::U16
+            | TypeDef::U32
+    ) {
+        "INTEGER"
+    } else {
+        "TEXT"
     }
 }
 
 fn sqlite_primary_type(type_def: &PrimaryTypeDef) -> &'static str {
-    match type_def {
+    if matches!(
+        type_def,
         PrimaryTypeDef::Bool
-        | PrimaryTypeDef::I8
-        | PrimaryTypeDef::I16
-        | PrimaryTypeDef::I32
-        | PrimaryTypeDef::U8
-        | PrimaryTypeDef::U16
-        | PrimaryTypeDef::U32 => "INTEGER",
-
-        PrimaryTypeDef::I64
-        | PrimaryTypeDef::U64
-        | PrimaryTypeDef::U128
-        | PrimaryTypeDef::I128
-        | PrimaryTypeDef::Felt252
-        | PrimaryTypeDef::ClassHash
-        | PrimaryTypeDef::ContractAddress
-        | PrimaryTypeDef::StorageAddress
-        | PrimaryTypeDef::StorageBaseAddress
-        | PrimaryTypeDef::EthAddress => "TEXT",
-
-        _ => "TEXT",
+            | PrimaryTypeDef::I8
+            | PrimaryTypeDef::I16
+            | PrimaryTypeDef::I32
+            | PrimaryTypeDef::U8
+            | PrimaryTypeDef::U16
+            | PrimaryTypeDef::U32
+    ) {
+        "INTEGER"
+    } else {
+        "TEXT"
     }
 }
 
@@ -217,7 +192,10 @@ fn is_json_type(type_def: &TypeDef) -> bool {
 fn create_table_query(table: &SqliteTable) -> String {
     let primary_type = sqlite_primary_type(&table.primary.type_def);
     let mut columns = Vec::with_capacity(table.columns.len() + 1);
-    columns.push(format!(r#""{}" {primary_type} PRIMARY KEY"#, table.primary.name));
+    columns.push(format!(
+        r#""{}" {primary_type} PRIMARY KEY"#,
+        table.primary.name
+    ));
     for column_id in &table.order {
         let column = &table.columns[column_id];
         let col_type = sqlite_column_type(&column.type_def);
@@ -246,20 +224,21 @@ fn to_bind_value(value: &Value, type_def: &TypeDef) -> SqliteBindValue {
             Some(b) => SqliteBindValue::Integer(i64::from(b)),
             None => SqliteBindValue::Null,
         },
-        TypeDef::I8 | TypeDef::I16 | TypeDef::I32 | TypeDef::U8 | TypeDef::U16
-        | TypeDef::U32 => match value.as_i64() {
-            Some(n) => SqliteBindValue::Integer(n),
-            None => SqliteBindValue::Null,
-        },
+        TypeDef::I8 | TypeDef::I16 | TypeDef::I32 | TypeDef::U8 | TypeDef::U16 | TypeDef::U32 => {
+            match value.as_i64() {
+                Some(n) => SqliteBindValue::Integer(n),
+                None => SqliteBindValue::Null,
+            }
+        }
         TypeDef::U64 => match value.as_u64() {
-            Some(n) => SqliteBindValue::Text(format!("0x{:x}", n)),
+            Some(n) => SqliteBindValue::Text(format!("0x{n:x}")),
             None => match value.as_str() {
                 Some(s) => SqliteBindValue::Text(s.to_string()),
                 None => SqliteBindValue::Null,
             },
         },
         TypeDef::I64 => match value.as_i64() {
-            Some(n) => SqliteBindValue::Text(format!("0x{:x}", n)),
+            Some(n) => SqliteBindValue::Text(format!("0x{n:x}")),
             None => match value.as_str() {
                 Some(s) => SqliteBindValue::Text(s.to_string()),
                 None => SqliteBindValue::Null,
@@ -271,12 +250,9 @@ fn to_bind_value(value: &Value, type_def: &TypeDef) -> SqliteBindValue {
         | TypeDef::ContractAddress
         | TypeDef::StorageAddress
         | TypeDef::StorageBaseAddress
-        | TypeDef::EthAddress => match value.as_str() {
-            Some(s) => SqliteBindValue::Text(s.to_string()),
-            None => SqliteBindValue::Null,
-        },
-
-        TypeDef::U256 | TypeDef::U512 => match value.as_str() {
+        | TypeDef::EthAddress
+        | TypeDef::U256
+        | TypeDef::U512 => match value.as_str() {
             Some(s) => SqliteBindValue::Text(s.to_string()),
             None => SqliteBindValue::Null,
         },
@@ -285,7 +261,7 @@ fn to_bind_value(value: &Value, type_def: &TypeDef) -> SqliteBindValue {
             Some(n) => SqliteBindValue::Text(format!("0x{:032x}", n as u128)),
             None => match value.as_str() {
                 Some(s) => match s.parse::<u128>() {
-                    Ok(n) => SqliteBindValue::Text(format!("0x{:032x}", n)),
+                    Ok(n) => SqliteBindValue::Text(format!("0x{n:032x}")),
                     Err(_) => SqliteBindValue::Text(s.to_string()),
                 },
                 None => SqliteBindValue::Null,
@@ -325,20 +301,24 @@ fn primary_to_bind_value(value: &Value, type_def: &PrimaryTypeDef) -> SqliteBind
             Some(b) => SqliteBindValue::Integer(i64::from(b)),
             None => SqliteBindValue::Null,
         },
-        PrimaryTypeDef::I8 | PrimaryTypeDef::I16 | PrimaryTypeDef::I32 | PrimaryTypeDef::U8
-        | PrimaryTypeDef::U16 | PrimaryTypeDef::U32 => match value.as_i64() {
+        PrimaryTypeDef::I8
+        | PrimaryTypeDef::I16
+        | PrimaryTypeDef::I32
+        | PrimaryTypeDef::U8
+        | PrimaryTypeDef::U16
+        | PrimaryTypeDef::U32 => match value.as_i64() {
             Some(n) => SqliteBindValue::Integer(n),
             None => SqliteBindValue::Null,
         },
         PrimaryTypeDef::U64 => match value.as_u64() {
-            Some(n) => SqliteBindValue::Text(format!("0x{:x}", n)),
+            Some(n) => SqliteBindValue::Text(format!("0x{n:x}")),
             None => match value.as_str() {
                 Some(s) => SqliteBindValue::Text(s.to_string()),
                 None => SqliteBindValue::Null,
             },
         },
         PrimaryTypeDef::I64 => match value.as_i64() {
-            Some(n) => SqliteBindValue::Text(format!("0x{:x}", n)),
+            Some(n) => SqliteBindValue::Text(format!("0x{n:x}")),
             None => match value.as_str() {
                 Some(s) => SqliteBindValue::Text(s.to_string()),
                 None => SqliteBindValue::Null,
@@ -359,7 +339,7 @@ fn primary_to_bind_value(value: &Value, type_def: &PrimaryTypeDef) -> SqliteBind
             Some(n) => SqliteBindValue::Text(format!("0x{:032x}", n as u128)),
             None => match value.as_str() {
                 Some(s) => match s.parse::<u128>() {
-                    Ok(n) => SqliteBindValue::Text(format!("0x{:032x}", n)),
+                    Ok(n) => SqliteBindValue::Text(format!("0x{n:032x}")),
                     Err(_) => SqliteBindValue::Text(s.to_string()),
                 },
                 None => SqliteBindValue::Null,
@@ -455,32 +435,15 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
         Ok(())
     }
 
-    async fn persist_alive_state(&self, table_id: Felt, alive: bool) -> SqliteDbResult<()> {
-        let alive = i64::from(alive);
-        sqlx::query(
-            r"
-            UPDATE introspect_sink_schema_state
-            SET alive = ?1, updated_at = unixepoch()
-            WHERE table_id = ?2
-            ",
-        )
-        .bind(alive)
-        .bind(format!("{table_id:#x}"))
-        .execute(self.pool())
-        .await?;
-        Ok(())
-    }
-
-    async fn update_table(
-        &self,
-        event: impl Into<TableSchema>,
-    ) -> SqliteDbResult<()> {
+    async fn update_table(&self, event: impl Into<TableSchema>) -> SqliteDbResult<()> {
         let table_schema: TableSchema = event.into();
         let id = table_schema.id;
         let exists_in_memory = self.tables.read()?.contains_key(&id);
 
         if !exists_in_memory {
-            let (_, query) = self.tables.create_table(&self.namespace, table_schema.clone())?;
+            let (_, query) = self
+                .tables
+                .create_table(&self.namespace, table_schema.clone())?;
             self.execute_queries(&[query]).await?;
             self.persist_table_state(&table_schema, true).await?;
             return Ok(());
@@ -537,9 +500,7 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
                     .await?;
                 Ok(())
             }
-            IntrospectMsg::UpdateTable(event) => {
-                self.update_table(event.clone()).await
-            }
+            IntrospectMsg::UpdateTable(event) => self.update_table(event.clone()).await,
             IntrospectMsg::AddColumns(event) => {
                 tracing::warn!(
                     target: "torii::introspect_sqlite_sink",
@@ -712,10 +673,7 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
 
             for (column_name, type_def) in column_names.iter().skip(1).zip(column_type_defs.iter())
             {
-                let val = object
-                    .get(*column_name)
-                    .cloned()
-                    .unwrap_or(Value::Null);
+                let val = object.get(*column_name).cloned().unwrap_or(Value::Null);
                 match to_bind_value(&val, type_def) {
                     SqliteBindValue::Null => {
                         query = query.bind(None::<String>);
