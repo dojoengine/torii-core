@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use torii::command::CommandHandler;
 use torii::etl::sink::EventBus;
 use torii::UpdateType;
-use torii_common::MetadataFetcher;
+use torii_common::{u256_to_bytes, MetadataFetcher};
 
 use crate::proto;
 use crate::storage::Erc20Storage;
@@ -105,6 +105,7 @@ impl CommandHandler for Erc20MetadataCommandHandler {
                         meta.name.as_deref(),
                         meta.symbol.as_deref(),
                         meta.decimals,
+                        meta.total_supply,
                     )
                     .await?;
 
@@ -115,6 +116,7 @@ impl CommandHandler for Erc20MetadataCommandHandler {
                         name: meta.name,
                         symbol: meta.symbol,
                         decimals: meta.decimals.map(|d| d as u32),
+                        total_supply: meta.total_supply.map(u256_to_bytes),
                     };
 
                     let mut buf = Vec::new();

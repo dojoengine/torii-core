@@ -1,3 +1,4 @@
+use crate::external_contract::{ExternalContractRegistered, ExternalContractRegisteredEvent};
 use crate::store::DojoStoreTrait;
 use crate::table::{sort_columns, DojoTableInfo};
 use crate::{DojoTable, DojoToriiError, DojoToriiResult};
@@ -243,6 +244,14 @@ where
             .ok_into()
     }
 
+    fn process_external_contract_event<'a>(
+        &self,
+        keys: &'a [Felt],
+        values: &'a [Felt],
+    ) -> DojoToriiResult<ExternalContractRegistered> {
+        deserialize_data::<ExternalContractRegisteredEvent>(keys, values).map(Into::into)
+    }
+
     pub async fn decode_event_data(
         &self,
         raw: &EmittedEvent,
@@ -314,9 +323,20 @@ where
     }
 
     async fn decode_event(&self, event: &EmittedEvent) -> AnyResult<Vec<Envelope>> {
-        self.decode_raw_event(event)
+        let (selector, keys) = event
+            .split_keys()
+            .ok_or(DojoToriiError::MissingEventSelector)?;
+
+        if selector.to_raw() == ExternalContractRegisteredEvent::SELECTOR_RAW {
+            return self
+                .process_external_contract_event(keys, &event.data)
+                .map(|msg| vec![msg.to_envelope(event)])
+                .err_into();
+        }
+
+        self.decode_event_data(event, selector, keys, &event.data)
             .await
-            .map(|msg| vec![msg.into()])
+            .map(|msg| vec![msg.to_body(event).into()])
             .err_into()
     }
 }
@@ -324,9 +344,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ExternalContractRegisteredBody;
     use async_trait::async_trait;
     use dojo_introspect::DojoIntrospectError;
-    use introspect_types::{Attribute, ColumnDef, TypeDef};
+    use introspect_types::{
+        utils::string_to_cairo_serialize_byte_array, Attribute, ColumnDef, TypeDef,
+    };
     use std::sync::Mutex;
 
     #[derive(Debug, thiserror::Error)]
@@ -421,5 +444,45 @@ mod tests {
             .unwrap();
         assert_eq!(parsed, 3);
         assert_eq!(*decoder.store.saved_blocks.lock().unwrap(), vec![42]);
+    }
+
+    #[tokio::test]
+    async fn decode_external_contract_registered_event_emits_control_envelope() {
+        let decoder: DojoDecoder<FakeStore, PanicFetcher> =
+            DojoDecoder::with_tables(FakeStore::default(), PanicFetcher, Vec::new());
+
+        let mut keys = vec![ExternalContractRegisteredEvent::SELECTOR];
+        keys.extend(string_to_cairo_serialize_byte_array("tokens"));
+        keys.extend(string_to_cairo_serialize_byte_array("ERC20"));
+        keys.extend(string_to_cairo_serialize_byte_array("eth"));
+        keys.push(Felt::from_hex("0x99").unwrap());
+
+        let event = EmittedEvent {
+            from_address: Felt::from_hex("0x1").unwrap(),
+            keys,
+            data: vec![
+                Felt::from_hex("0xabc").unwrap(),
+                Felt::from_hex("0x1234").unwrap(),
+                Felt::from(42_u64),
+            ],
+            block_hash: None,
+            block_number: Some(42),
+            transaction_hash: Felt::from_hex("0xbeef").unwrap(),
+        };
+
+        let envelopes = decoder.decode_event(&event).await.unwrap();
+        assert_eq!(envelopes.len(), 1);
+        let body = envelopes[0]
+            .downcast_ref::<ExternalContractRegisteredBody>()
+            .unwrap();
+
+        assert_eq!(body.msg.namespace, "tokens");
+        assert_eq!(body.msg.contract_name, "ERC20");
+        assert_eq!(body.msg.instance_name, "eth");
+        assert_eq!(body.msg.contract_selector, Felt::from_hex("0x99").unwrap());
+        assert_eq!(body.msg.class_hash, Felt::from_hex("0xabc").unwrap());
+        assert_eq!(body.msg.contract_address, Felt::from_hex("0x1234").unwrap());
+        assert_eq!(body.msg.registration_block, 42);
+        assert_eq!(body.metadata.from_address, Felt::from_hex("0x1").unwrap());
     }
 }

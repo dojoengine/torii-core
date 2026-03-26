@@ -42,12 +42,13 @@ impl MetadataFetcher {
         let name = self.fetch_string(contract, "name").await;
         let symbol = self.fetch_string(contract, "symbol").await;
         let decimals = self.fetch_decimals(contract).await;
+        let total_supply = self.fetch_total_supply(contract).await;
 
         TokenMetadata {
             name,
             symbol,
             decimals,
-            total_supply: None,
+            total_supply,
         }
     }
 

@@ -31,7 +31,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 anyhow = "1.0"
 
 # gRPC
-tonic = "0.12"
+tonic = { version = "0.12", features = ["gzip"] }
 tonic-reflection = "0.12"
 
 # Profiling (optional, enable with --features profiling)

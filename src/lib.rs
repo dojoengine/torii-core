@@ -32,6 +32,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
 use tower_http::cors::{Any as CorsAny, CorsLayer};
 
@@ -701,11 +702,13 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
     } else {
         let reflection_v1 = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
-            .build_v1()?;
+            .build_v1()?
+            .accept_compressed(CompressionEncoding::Gzip);
 
         let reflection_v1alpha = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
-            .build_v1alpha()?;
+            .build_v1alpha()?
+            .accept_compressed(CompressionEncoding::Gzip);
 
         grpc_router = grpc_router
             .add_service(tonic_web::enable(reflection_v1))

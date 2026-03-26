@@ -386,7 +386,54 @@ impl EventExtractor {
             self.contract_states.insert(address, state);
         }
 
+        self.refresh_dynamic_contract_states(engine_db).await?;
+
         self.initialized = true;
+        Ok(())
+    }
+
+    async fn refresh_dynamic_contract_states(&mut self, engine_db: &EngineDb) -> Result<()> {
+        let persisted_states = engine_db.get_all_extractor_states(EXTRACTOR_TYPE).await?;
+
+        for (state_key, state_value) in persisted_states {
+            let Ok(address) = Felt::from_hex(&state_key) else {
+                tracing::debug!(
+                    target: "torii::etl::event",
+                    state_key,
+                    "Skipping non-contract extractor state"
+                );
+                continue;
+            };
+
+            if self.contract_states.contains_key(&address) {
+                continue;
+            }
+
+            let to_block = self
+                .config
+                .contracts
+                .iter()
+                .find(|contract| contract.address == address)
+                .map_or(u64::MAX, |contract| contract.to_block);
+            let state =
+                ContractState::deserialize(address, to_block, &state_value).with_context(|| {
+                    format!("failed to deserialize extractor state for {state_key}")
+                })?;
+
+            if state.is_following_head() {
+                self.has_following_contracts = true;
+            }
+
+            tracing::info!(
+                target: "torii::etl::event",
+                contract = state_key,
+                state = state_value,
+                to_block,
+                "Loaded dynamic contract extractor state"
+            );
+            self.contract_states.insert(address, state);
+        }
+
         Ok(())
     }
 
@@ -493,6 +540,7 @@ impl Extractor for EventExtractor {
     ) -> Result<ExtractionBatch> {
         // Initialize on first call
         self.initialize(engine_db).await?;
+        self.refresh_dynamic_contract_states(engine_db).await?;
 
         // Check if all contracts are finished (only possible when no following contracts)
         if self.is_finished() {
@@ -989,5 +1037,34 @@ mod tests {
                 .current_block,
             7
         );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_dynamic_contract_states_loads_runtime_contracts() {
+        let provider = Arc::new(JsonRpcClient::new(HttpTransport::new(
+            starknet::providers::Url::parse("http://localhost:5050").unwrap(),
+        )));
+        let mut extractor = EventExtractor::new(provider, EventExtractorConfig::default());
+        let engine_db = EngineDb::new(crate::etl::engine_db::EngineDbConfig {
+            path: "sqlite::memory:".to_string(),
+        })
+        .await
+        .unwrap();
+        let address = Felt::from_hex("0xdead").unwrap();
+
+        engine_db
+            .set_extractor_state(EXTRACTOR_TYPE, &format!("{address:#x}"), "block:42")
+            .await
+            .unwrap();
+
+        extractor
+            .refresh_dynamic_contract_states(&engine_db)
+            .await
+            .unwrap();
+
+        let state = extractor.contract_states.get(&address).unwrap();
+        assert_eq!(state.current_block, 42);
+        assert_eq!(state.to_block, u64::MAX);
+        assert!(!state.finished);
     }
 }

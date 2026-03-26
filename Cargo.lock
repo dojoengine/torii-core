@@ -4517,6 +4517,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "flate2",
  "h2",
  "http",
  "http-body",
@@ -4651,6 +4652,7 @@ dependencies = [
  "torii-config-common",
  "torii-dojo",
  "torii-ecs-sink",
+ "torii-entities-historical-sink",
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",
@@ -4711,6 +4713,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "torii-controllers-sink"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "metrics",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "starknet",
+ "tokio",
+ "torii",
+ "tracing",
+]
+
+[[package]]
 name = "torii-dojo"
 version = "0.1.0"
 dependencies = [
@@ -4749,6 +4769,8 @@ dependencies = [
  "hex",
  "introspect-types",
  "metrics",
+ "num-bigint",
+ "primitive-types 0.14.0",
  "prost 0.13.5",
  "prost-types 0.13.5",
  "serde",
@@ -4761,6 +4783,24 @@ dependencies = [
  "tonic-build",
  "torii",
  "torii-dojo",
+ "torii-introspect",
+ "tracing",
+]
+
+[[package]]
+name = "torii-entities-historical-sink"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "introspect-types",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "starknet",
+ "thiserror 2.0.18",
+ "tokio",
+ "torii",
  "torii-introspect",
  "tracing",
 ]
@@ -4920,8 +4960,10 @@ dependencies = [
  "torii",
  "torii-common",
  "torii-config-common",
+ "torii-controllers-sink",
  "torii-dojo",
  "torii-ecs-sink",
+ "torii-entities-historical-sink",
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",
@@ -4969,6 +5011,7 @@ dependencies = [
  "introspect-types",
  "itertools 0.14.0",
  "metrics",
+ "primitive-types 0.14.0",
  "serde",
  "serde_json",
  "sqlx",

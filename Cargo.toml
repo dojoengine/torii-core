@@ -6,8 +6,10 @@ members = [
   "crates/torii-runtime-common",
   "crates/torii-sql-sink",
   "crates/torii-log-sink",
+  "crates/torii-controllers-sink",
   "crates/arcade-sink",
   "crates/torii-ecs-sink",
+  "crates/torii-entities-historical-sink",
   "crates/torii-erc20",
   "crates/torii-erc721",
   "crates/torii-erc1155",
@@ -47,7 +49,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 
 # gRPC and protobuf
 # Keep older version for now due to some compatibility issues with newer axum: https://github.com/hyperium/tonic/issues/1964.
-tonic = "0.12"
+tonic = { version = "0.12", features = ["gzip"] }
 tonic-reflection = "0.12"
 tonic-web = "0.12"
 prost = "0.13"
@@ -130,8 +132,10 @@ torii-runtime-common = { path = "crates/torii-runtime-common" }
 # Internal crates
 torii-sql-sink.path = "crates/torii-sql-sink"
 torii-log-sink.path = "crates/torii-log-sink"
+torii-controllers-sink.path = "crates/torii-controllers-sink"
 torii-arcade-sink.path = "crates/arcade-sink"
 torii-ecs-sink.path = "crates/torii-ecs-sink"
+torii-entities-historical-sink.path = "crates/torii-entities-historical-sink"
 torii-erc20.path = "crates/torii-erc20"
 torii-erc721.path = "crates/torii-erc721"
 torii-erc1155.path = "crates/torii-erc1155"

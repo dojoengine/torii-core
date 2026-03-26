@@ -75,7 +75,6 @@ impl Erc721MetadataCommandHandler {
                 .symbol
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty())
-            && meta.total_supply.is_some()
     }
 
     fn metadata_retry_delay(attempt: u8) -> std::time::Duration {
