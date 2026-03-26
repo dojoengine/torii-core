@@ -17,6 +17,7 @@ use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{
     ContractEventConfig, EventExtractor, EventExtractorConfig, Extractor, RetryPolicy,
 };
+use torii::etl::EngineDb;
 use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
 use torii::etl::TypeId;
 use torii::EtlConcurrencyConfig;
@@ -25,7 +26,10 @@ use torii_arcade_sink::{ArcadeSink, FILE_DESCRIPTOR_SET as ARCADE_DESCRIPTOR_SET
 use torii_common::{MetadataFetcher, TokenUriService};
 use torii_config_common::apply_observability_env;
 use torii_dojo::decoder::DojoDecoder;
-use torii_dojo::external_contract::RegisteredContractType;
+use torii_dojo::external_contract::{
+    contract_type_from_decoder_ids, RegisterExternalContractCommandHandler,
+    RegisteredContractType, SharedContractTypeRegistry, SharedDecoderRegistry,
+};
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::store::sqlite::SqliteStore;
 use torii_ecs_sink::proto::world::world_server::WorldServer;
@@ -64,7 +68,7 @@ fn build_contract_type_registry(
     erc20_addresses: &[Felt],
     erc721_addresses: &[Felt],
     erc1155_addresses: &[Felt],
-) -> Arc<RwLock<HashMap<Felt, RegisteredContractType>>> {
+) -> SharedContractTypeRegistry {
     let mut contract_types = HashMap::new();
     for &contract in dojo_event_contracts {
         contract_types.insert(contract, RegisteredContractType::World);
@@ -79,6 +83,48 @@ fn build_contract_type_registry(
         contract_types.insert(contract, RegisteredContractType::Erc1155);
     }
     Arc::new(RwLock::new(contract_types))
+}
+
+async fn load_persisted_contract_registries(
+    engine_db: &EngineDb,
+    decoder_registry: &SharedDecoderRegistry,
+    contract_type_registry: &SharedContractTypeRegistry,
+) -> Result<()> {
+    let mappings = engine_db.get_all_contract_decoders().await?;
+    let mut decoders = decoder_registry.write().await;
+    let mut contract_types = contract_type_registry.write().await;
+
+    for (contract, decoder_ids, _) in mappings {
+        decoders.insert(contract, decoder_ids.clone());
+        if let Some(contract_type) = contract_type_from_decoder_ids(&decoder_ids) {
+            contract_types.insert(contract, contract_type);
+        }
+    }
+
+    Ok(())
+}
+
+fn installed_external_decoder_ids(
+    enabled: bool,
+    install_erc20: bool,
+    install_erc721: bool,
+    install_erc1155: bool,
+) -> HashSet<DecoderId> {
+    if !enabled {
+        return HashSet::new();
+    }
+
+    let mut installed = HashSet::from([DecoderId::new("dojo-introspect")]);
+    if install_erc20 {
+        installed.insert(DecoderId::new("erc20"));
+    }
+    if install_erc721 {
+        installed.insert(DecoderId::new("erc721"));
+    }
+    if install_erc1155 {
+        installed.insert(DecoderId::new("erc1155"));
+    }
+    installed
 }
 
 struct ArcadeProjectionPipeline {
@@ -266,6 +312,14 @@ async fn run_indexer(config: Config) -> Result<()> {
             "disabled"
         }
     );
+    tracing::info!(
+        "External contract indexing: {}",
+        if config.index_external_contracts {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     tracing::info!("Historical models tracked: {}", historical_models.len());
 
     let excluded_dojo_contracts: Vec<Felt> = dojo_event_contracts
@@ -273,6 +327,36 @@ async fn run_indexer(config: Config) -> Result<()> {
         .copied()
         .filter(|contract| !introspect_contracts.contains(contract))
         .collect();
+
+    let registry_engine_db = Arc::new(
+        EngineDb::new(torii::etl::engine_db::EngineDbConfig {
+            path: engine_database_url.clone(),
+        })
+        .await?,
+    );
+    let decoder_registry: SharedDecoderRegistry = Arc::new(RwLock::new(HashMap::new()));
+    let contract_type_registry = build_contract_type_registry(
+        &dojo_event_contracts,
+        &erc20_addresses,
+        &erc721_addresses,
+        &erc1155_addresses,
+    );
+    load_persisted_contract_registries(
+        registry_engine_db.as_ref(),
+        &decoder_registry,
+        &contract_type_registry,
+    )
+    .await?;
+
+    let install_erc20 = config.index_external_contracts || !erc20_addresses.is_empty();
+    let install_erc721 = config.index_external_contracts || !erc721_addresses.is_empty();
+    let install_erc1155 = config.index_external_contracts || !erc1155_addresses.is_empty();
+    let installed_external_decoders = installed_external_decoder_ids(
+        config.index_external_contracts,
+        install_erc20,
+        install_erc721,
+        install_erc1155,
+    );
 
     let extractor = build_extractor(
         provider.clone(),
@@ -347,14 +431,10 @@ async fn run_indexer(config: Config) -> Result<()> {
         Some(erc20_db_url.as_str()),
         Some(erc721_db_url.as_str()),
         Some(erc1155_db_url.as_str()),
-        build_contract_type_registry(
-            &dojo_event_contracts,
-            &erc20_addresses,
-            &erc721_addresses,
-            &erc1155_addresses,
-        ),
-        false,
-        HashSet::new(),
+        contract_type_registry.clone(),
+        config.from_block,
+        config.index_external_contracts,
+        installed_external_decoders.clone(),
     )
     .await?;
     let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
@@ -399,6 +479,16 @@ async fn run_indexer(config: Config) -> Result<()> {
         .add_sink_boxed(Box::new(ecs_sink))
         .add_sink_boxed(Box::new(arcade_projection_pipeline));
 
+    if config.index_external_contracts {
+        torii_config = torii_config
+            .with_registry_cache(decoder_registry.clone())
+            .with_command_handler(Box::new(RegisterExternalContractCommandHandler::new(
+                registry_engine_db.clone(),
+                decoder_registry.clone(),
+                contract_type_registry.clone(),
+            )));
+    }
+
     if !excluded_dojo_contracts.is_empty() {
         torii_config = torii_config.blacklist_contracts(excluded_dojo_contracts.clone());
     }
@@ -421,7 +511,7 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut erc1155_grpc_service: Option<Erc1155Service> = None;
     let mut token_uri_services = Vec::new();
 
-    if !erc20_addresses.is_empty() {
+    if install_erc20 {
         let storage = Arc::new(Erc20Storage::new(&erc20_db_url).await?);
         let grpc_service = Erc20Service::new(storage.clone());
         let sink = Box::new(
@@ -451,7 +541,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         erc20_grpc_service = Some(grpc_service);
     }
 
-    if !erc721_addresses.is_empty() {
+    if install_erc721 {
         let storage = Arc::new(Erc721Storage::new(&erc721_db_url).await?);
         let grpc_service = Erc721Service::new(storage.clone());
         let mut sink = Erc721Sink::new(storage.clone()).with_grpc_service(grpc_service.clone());
@@ -486,7 +576,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         erc721_grpc_service = Some(grpc_service);
     }
 
-    if !erc1155_addresses.is_empty() {
+    if install_erc1155 {
         let storage = Arc::new(Erc1155Storage::new(&erc1155_db_url).await?);
         let grpc_service = Erc1155Service::new(storage.clone());
         let mut sink = Erc1155Sink::new(storage.clone())

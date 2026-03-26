@@ -27,6 +27,7 @@ use crate::grpc_service::{EcsService, TableKind};
 pub struct EcsSink {
     service: Arc<EcsService>,
     contract_types: SharedContractTypeRegistry,
+    external_contract_from_block: u64,
     external_contract_indexing: bool,
     installed_external_decoders: HashSet<DecoderId>,
     command_bus: RwLock<Option<CommandBusSender>>,
@@ -40,6 +41,7 @@ impl EcsSink {
         erc721_url: Option<&str>,
         erc1155_url: Option<&str>,
         contract_types: SharedContractTypeRegistry,
+        external_contract_from_block: u64,
         external_contract_indexing: bool,
         installed_external_decoders: HashSet<DecoderId>,
     ) -> Result<Self> {
@@ -55,6 +57,7 @@ impl EcsSink {
                 .await?,
             ),
             contract_types,
+            external_contract_from_block,
             external_contract_indexing,
             installed_external_decoders,
             command_bus: RwLock::new(None),
@@ -142,6 +145,7 @@ impl EcsSink {
             contract_name: body.msg.contract_name.clone(),
             namespace: body.msg.namespace.clone(),
             instance_name: body.msg.instance_name.clone(),
+            from_block: self.external_contract_from_block,
             registration_block: body.msg.registration_block,
             contract_type: resolved.contract_type,
             decoder_ids: resolved.decoder_ids,

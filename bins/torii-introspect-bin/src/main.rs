@@ -217,6 +217,7 @@ fn installed_external_decoder_ids(enabled: bool) -> HashSet<DecoderId> {
     }
 
     HashSet::from([
+        DecoderId::new("dojo-introspect"),
         DecoderId::new("erc20"),
         DecoderId::new("erc721"),
         DecoderId::new("erc1155"),
@@ -694,6 +695,7 @@ async fn run_with_postgres(
         erc721_url,
         erc1155_url,
         contract_type_registry.clone(),
+        config.from_block,
         config.index_external_contracts,
         installed_external_decoders.clone(),
     )
@@ -901,6 +903,7 @@ async fn run_with_sqlite(
         erc721_url,
         erc1155_url,
         contract_type_registry.clone(),
+        config.from_block,
         config.index_external_contracts,
         installed_external_decoders.clone(),
     )

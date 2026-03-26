@@ -160,6 +160,18 @@ pub struct Config {
     #[arg(long)]
     pub ignore_saved_state: bool,
 
+    /// Enable runtime indexing for Dojo `ExternalContractRegistered` events.
+    ///
+    /// Enabled by default. Pass `--index-external-contracts=false` to disable.
+    #[arg(
+        long,
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    pub index_external_contracts: bool,
+
     #[arg(long)]
     pub allow_unsafe_latest_schema_bootstrap: bool,
 
@@ -450,6 +462,21 @@ mod tests {
         assert_eq!(cfg.event_block_batch_size, 8888);
         assert_eq!(cfg.max_prefetch_batches, 4);
         assert_eq!(cfg.rpc_parallelism, 6);
+    }
+
+    #[test]
+    fn external_contract_indexing_defaults_to_enabled() {
+        let cfg = Config::parse_from(["torii-arcade"]);
+        assert!(cfg.index_external_contracts);
+    }
+
+    #[test]
+    fn external_contract_indexing_flag_can_disable_runtime_registration() {
+        let cfg = Config::parse_from([
+            "torii-arcade",
+            "--index-external-contracts=false",
+        ]);
+        assert!(!cfg.index_external_contracts);
     }
 
     #[test]

@@ -2828,90 +2828,114 @@ impl EcsService {
             .as_ref()
             .map_or(String::new(), |pagination| pagination.cursor.clone());
 
-        let keys_start = Instant::now();
-        let mut candidate_keys = self
-            .load_entity_page_keys(
-                kind,
-                &world_filters,
-                table_id_filter,
-                member_pushdown.as_ref(),
-                &cursor,
-                direction,
-                target_limit.saturating_add(1),
-            )
-            .await?;
-        ::metrics::histogram!("torii_ecs_load_entity_page_meta_seconds")
-            .record(keys_start.elapsed().as_secs_f64());
-
-        let has_more = target_limit != usize::MAX && candidate_keys.len() > target_limit;
-        if has_more {
-            candidate_keys.truncate(target_limit);
-        }
-
-        let meta_start = Instant::now();
-        let candidate_meta = self
-            .load_entity_meta_for_keys(kind, None, candidate_keys.as_slice())
-            .await?;
-        ::metrics::histogram!("torii_ecs_load_entity_page_meta_rows_seconds")
-            .record(meta_start.elapsed().as_secs_f64());
-        ::metrics::gauge!("torii_ecs_load_entity_page_candidates").set(candidate_keys.len() as f64);
-
         let mut items = Vec::new();
-        for chunk in candidate_keys.chunks(256) {
-            let rows_start = Instant::now();
-            let rows = self
-                .load_entity_page_rows(kind, &world_filters, None, chunk)
-                .await?;
-            ::metrics::histogram!("torii_ecs_load_entity_page_rows_seconds")
-                .record(rows_start.elapsed().as_secs_f64());
-            ::metrics::counter!("torii_ecs_load_entity_page_rows_total")
-                .increment(rows.len() as u64);
-            let row_map = rows.into_iter().fold(
-                HashMap::<(String, String), Vec<(String, String)>>::new(),
-                |mut acc, row| {
-                    acc.entry((row.world_address, row.entity_id))
-                        .or_default()
-                        .push((row.table_id, row.row_json));
-                    acc
-                },
-            );
+        let mut next_cursor = String::new();
+        let mut candidate_cursor = cursor;
 
-            for key in chunk {
-                let Some(meta) = candidate_meta.get(key) else {
-                    continue;
-                };
-                let Some(entity) =
-                    build_entity_from_snapshot(key, meta, row_map.get(key), &all_model_map)?
-                else {
-                    continue;
-                };
-                let entity = entity.into_proto();
-                if query
-                    .clause
-                    .as_ref()
-                    .is_some_and(|clause| !entity_matches_clause(&entity, clause))
-                {
-                    continue;
+        loop {
+            let keys_start = Instant::now();
+            let mut candidate_keys = self
+                .load_entity_page_keys(
+                    kind,
+                    &world_filters,
+                    table_id_filter,
+                    member_pushdown.as_ref(),
+                    &candidate_cursor,
+                    direction,
+                    target_limit.saturating_add(1),
+                )
+                .await?;
+            ::metrics::histogram!("torii_ecs_load_entity_page_meta_seconds")
+                .record(keys_start.elapsed().as_secs_f64());
+
+            if candidate_keys.is_empty() {
+                next_cursor.clear();
+                break;
+            }
+
+            let has_more_candidates = candidate_keys.len() > target_limit;
+            if has_more_candidates {
+                candidate_keys.truncate(target_limit);
+            }
+            ::metrics::gauge!("torii_ecs_load_entity_page_candidates")
+                .set(candidate_keys.len() as f64);
+
+            let batch_cursor = candidate_keys
+                .last()
+                .map(|(_, entity_id)| entity_id.trim_start_matches("0x").to_string())
+                .unwrap_or_default();
+
+            let meta_start = Instant::now();
+            let candidate_meta = self
+                .load_entity_meta_for_keys(kind, None, candidate_keys.as_slice())
+                .await?;
+            ::metrics::histogram!("torii_ecs_load_entity_page_meta_rows_seconds")
+                .record(meta_start.elapsed().as_secs_f64());
+
+            for chunk in candidate_keys.chunks(256) {
+                let rows_start = Instant::now();
+                let rows = self
+                    .load_entity_page_rows(kind, &world_filters, None, chunk)
+                    .await?;
+                ::metrics::histogram!("torii_ecs_load_entity_page_rows_seconds")
+                    .record(rows_start.elapsed().as_secs_f64());
+                ::metrics::counter!("torii_ecs_load_entity_page_rows_total")
+                    .increment(rows.len() as u64);
+                let row_map = rows.into_iter().fold(
+                    HashMap::<(String, String), Vec<(String, String)>>::new(),
+                    |mut acc, row| {
+                        acc.entry((row.world_address, row.entity_id))
+                            .or_default()
+                            .push((row.table_id, row.row_json));
+                        acc
+                    },
+                );
+
+                for key in chunk {
+                    let Some(meta) = candidate_meta.get(key) else {
+                        continue;
+                    };
+                    let Some(entity) =
+                        build_entity_from_snapshot(key, meta, row_map.get(key), &all_model_map)?
+                    else {
+                        continue;
+                    };
+                    let entity = entity.into_proto();
+                    if query
+                        .clause
+                        .as_ref()
+                        .is_some_and(|clause| !entity_matches_clause(&entity, clause))
+                    {
+                        continue;
+                    }
+                    items.push(entity);
+                    if items.len() >= target_limit {
+                        break;
+                    }
                 }
-                items.push(entity);
+
                 if items.len() >= target_limit {
                     break;
                 }
             }
 
             if items.len() >= target_limit {
+                next_cursor = if has_more_candidates {
+                    batch_cursor
+                } else {
+                    String::new()
+                };
                 break;
             }
-        }
 
-        let next_cursor = if has_more {
-            candidate_keys
-                .last()
-                .map(|(_, entity_id)| entity_id.trim_start_matches("0x").to_string())
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+            if !has_more_candidates {
+                next_cursor.clear();
+                break;
+            }
+
+            candidate_cursor = batch_cursor;
+            next_cursor = candidate_cursor.clone();
+        }
 
         if query.no_hashed_keys {
             for entity in &mut items {
@@ -5301,27 +5325,7 @@ fn entity_matches_clause(entity: &types::Entity, clause: &types::Clause) -> bool
         Some(ClauseType::HashedKeys(hashed)) => {
             hashed.hashed_keys.is_empty() || hashed.hashed_keys.contains(&entity.hashed_keys)
         }
-        Some(ClauseType::Keys(keys)) => {
-            if !keys.models.is_empty()
-                && !entity
-                    .models
-                    .iter()
-                    .any(|model| keys.models.contains(&model.name))
-            {
-                return false;
-            }
-            let entity_keys = entity_key_values(entity);
-            if keys.pattern_matching == PatternMatching::FixedLen as i32
-                && entity_keys.len() != keys.keys.len()
-            {
-                return false;
-            }
-            entity_keys.iter().enumerate().all(|(index, key)| {
-                keys.keys
-                    .get(index)
-                    .is_none_or(|expected| expected.is_empty() || expected == key)
-            })
-        }
+        Some(ClauseType::Keys(keys)) => entity_matches_keys_clause(entity, keys),
         Some(ClauseType::Member(member)) => entity.models.iter().any(|model| {
             model.name == member.model
                 && model_member_matches(
@@ -5347,19 +5351,37 @@ fn entity_matches_clause(entity: &types::Entity, clause: &types::Clause) -> bool
 
 fn match_keys(keys: &[Vec<u8>], clauses: &[types::KeysClause]) -> bool {
     clauses.is_empty()
-        || clauses.iter().any(|clause| {
-            if clause.pattern_matching == PatternMatching::FixedLen as i32
-                && keys.len() != clause.keys.len()
-            {
-                return false;
-            }
-            keys.iter().enumerate().all(|(index, key)| {
-                clause
-                    .keys
-                    .get(index)
-                    .is_none_or(|expected| expected.is_empty() || expected == key)
-            })
-        })
+        || clauses
+            .iter()
+            .any(|clause| keys_clause_matches_entity_keys(keys, clause))
+}
+
+fn entity_matches_keys_clause(entity: &types::Entity, clause: &types::KeysClause) -> bool {
+    if clause.models.is_empty() {
+        return keys_clause_matches_entity_keys(&entity_key_values(entity), clause);
+    }
+
+    entity
+        .models
+        .iter()
+        .filter(|model| clause.models.contains(&model.name))
+        .filter_map(model_key_values)
+        .any(|keys| keys_clause_matches_entity_keys(&keys, clause))
+}
+
+fn keys_clause_matches_entity_keys(entity_keys: &[Vec<u8>], clause: &types::KeysClause) -> bool {
+    if clause.pattern_matching == PatternMatching::FixedLen as i32
+        && entity_keys.len() != clause.keys.len()
+    {
+        return false;
+    }
+
+    entity_keys.iter().enumerate().all(|(index, key)| {
+        clause
+            .keys
+            .get(index)
+            .is_none_or(|expected| expected.is_empty() || expected == key)
+    })
 }
 
 fn model_member_matches(
@@ -5499,24 +5521,26 @@ fn entity_key_values(entity: &types::Entity) -> Vec<Vec<u8>> {
     entity
         .models
         .iter()
-        .find_map(|model| {
-            let keys = model
-                .children
-                .iter()
-                .filter(|member| member.key)
-                .filter_map(|member| {
-                    scalar_from_ty(member.ty.as_ref()?).map(|value| match value {
-                        ScalarValue::Bool(value) => vec![u8::from(value)],
-                        ScalarValue::Signed(value) => value.to_be_bytes().to_vec(),
-                        ScalarValue::Unsigned(value) => value.to_be_bytes().to_vec(),
-                        ScalarValue::Text(value) => value.into_bytes(),
-                        ScalarValue::Bytes(value) => value,
-                    })
-                })
-                .collect::<Vec<_>>();
-            (!keys.is_empty()).then_some(keys)
-        })
+        .find_map(model_key_values)
         .unwrap_or_default()
+}
+
+fn model_key_values(model: &types::Struct) -> Option<Vec<Vec<u8>>> {
+    let keys = model
+        .children
+        .iter()
+        .filter(|member| member.key)
+        .filter_map(|member| {
+            scalar_from_ty(member.ty.as_ref()?).map(|value| match value {
+                ScalarValue::Bool(value) => vec![u8::from(value)],
+                ScalarValue::Signed(value) => value.to_be_bytes().to_vec(),
+                ScalarValue::Unsigned(value) => value.to_be_bytes().to_vec(),
+                ScalarValue::Text(value) => value.into_bytes(),
+                ScalarValue::Bytes(value) => value,
+            })
+        })
+        .collect::<Vec<_>>();
+    (!keys.is_empty()).then_some(keys)
 }
 
 fn contract_matches_query(contract: &types::Contract, query: &types::ContractQuery) -> bool {
@@ -5545,7 +5569,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use introspect_types::{ColumnDef, PrimaryDef, PrimaryTypeDef, TypeDef};
+    use introspect_types::{Attribute, ColumnDef, PrimaryDef, PrimaryTypeDef, TypeDef};
     use tokio::time::{timeout, Duration};
     use tokio_stream::StreamExt;
 
@@ -5737,7 +5761,11 @@ mod tests {
             .await
             .expect("upsert entity meta");
 
-        let row_json = serde_json::json!({ "open": open }).to_string();
+        let row_json = serde_json::json!({
+            "entity_id": felt_hex(entity_id),
+            "open": open
+        })
+        .to_string();
         sqlx::query(
             "INSERT INTO torii_ecs_entity_models (
                 kind, world_address, table_id, entity_id, row_json, updated_at
@@ -5828,7 +5856,120 @@ mod tests {
             .await
             .expect("upsert entity meta");
 
-        let row_json = serde_json::json!({ field_name: field_value }).to_string();
+        let row_json = serde_json::json!({
+            "entity_id": felt_hex(entity_id),
+            field_name: field_value
+        })
+        .to_string();
+        sqlx::query(
+            "INSERT INTO torii_ecs_entity_models (
+                kind, world_address, table_id, entity_id, row_json, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(kind, world_address, table_id, entity_id) DO UPDATE SET
+                row_json = excluded.row_json,
+                updated_at = excluded.updated_at",
+        )
+        .bind(kind.as_str())
+        .bind(felt_hex(world_address))
+        .bind(felt_hex(table_id))
+        .bind(felt_hex(entity_id))
+        .bind(row_json)
+        .bind(1_i64)
+        .execute(&service.state.pool)
+        .await
+        .expect("insert entity model");
+    }
+
+    fn keyed_member(name: &str, value: Felt) -> types::Member {
+        types::Member {
+            name: name.to_string(),
+            key: true,
+            ty: Some(types::Ty {
+                ty_type: Some(types::ty::TyType::Primitive(types::Primitive {
+                    primitive_type: Some(types::primitive::PrimitiveType::Felt252(
+                        value.to_bytes_be().to_vec(),
+                    )),
+                })),
+            }),
+        }
+    }
+
+    async fn seed_entity_with_custom_keys(
+        service: &EcsService,
+        kind: TableKind,
+        world_address: Felt,
+        table_id: Felt,
+        table_name: &str,
+        entity_id: Felt,
+        key_field_name: &str,
+        key_value: Felt,
+    ) {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS dojo_tables (
+                owner BLOB NOT NULL,
+                id BLOB NOT NULL,
+                name TEXT NOT NULL,
+                attributes TEXT NOT NULL,
+                keys_json TEXT NOT NULL,
+                values_json TEXT NOT NULL,
+                legacy INTEGER NOT NULL,
+                created_at INTEGER,
+                updated_at INTEGER,
+                created_block INTEGER,
+                updated_block INTEGER,
+                created_tx BLOB,
+                updated_tx BLOB,
+                PRIMARY KEY(owner, id)
+            )",
+        )
+        .execute(&service.state.pool)
+        .await
+        .expect("create dojo_tables");
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS dojo_columns (
+                owner BLOB NOT NULL,
+                table_id BLOB NOT NULL,
+                id BLOB NOT NULL,
+                payload TEXT NOT NULL,
+                PRIMARY KEY(owner, table_id, id)
+            )",
+        )
+        .execute(&service.state.pool)
+        .await
+        .expect("create dojo_columns");
+
+        let table = CreateTable {
+            id: table_id,
+            name: table_name.to_string(),
+            attributes: vec![],
+            primary: PrimaryDef {
+                name: "entity_id".to_string(),
+                attributes: vec![],
+                type_def: PrimaryTypeDef::Felt252,
+            },
+            columns: vec![ColumnDef {
+                id: Felt::from(1_u64),
+                name: key_field_name.to_string(),
+                attributes: vec![Attribute::new_empty("key".to_string())],
+                type_def: TypeDef::Felt252,
+            }],
+        };
+
+        service.cache_created_table(world_address, &table).await;
+        service
+            .record_table_kind(world_address, table_id, kind)
+            .await
+            .expect("record table kind");
+        service
+            .upsert_entity_meta(kind, world_address, table_id, entity_id, 1, false)
+            .await
+            .expect("upsert entity meta");
+
+        let row_json = serde_json::json!({
+            "entity_id": felt_hex(entity_id),
+            key_field_name: felt_hex(key_value)
+        })
+        .to_string();
         sqlx::query(
             "INSERT INTO torii_ecs_entity_models (
                 kind, world_address, table_id, entity_id, row_json, updated_at
@@ -6093,6 +6234,36 @@ mod tests {
         assert_eq!(contract.contract_type, ContractType::World as i32);
     }
 
+    #[test]
+    fn entity_keys_clause_scopes_key_extraction_to_requested_models() {
+        let entity = types::Entity {
+            hashed_keys: vec![],
+            models: vec![
+                types::Struct {
+                    name: "NUMS-Other".to_string(),
+                    children: vec![keyed_member("other_id", Felt::from(0x111_u64))],
+                },
+                types::Struct {
+                    name: "NUMS-Config".to_string(),
+                    children: vec![keyed_member("config_id", Felt::from(0x222_u64))],
+                },
+            ],
+            created_at: 0,
+            updated_at: 0,
+            executed_at: 0,
+            world_address: vec![],
+        };
+        let clause = types::Clause {
+            clause_type: Some(ClauseType::Keys(types::KeysClause {
+                models: vec!["NUMS-Config".to_string()],
+                pattern_matching: PatternMatching::VariableLen as i32,
+                keys: vec![Felt::from(0x222_u64).to_bytes_be().to_vec()],
+            })),
+        };
+
+        assert!(entity_matches_clause(&entity, &clause));
+    }
+
     #[tokio::test]
     async fn retrieve_entities_without_filters_uses_bounded_query() {
         let db_path = test_db_path("retrieve-entities");
@@ -6207,6 +6378,77 @@ mod tests {
         assert_eq!(model_names.len(), 2);
         assert!(model_names.contains("NUMS-QuestDefinition"));
         assert!(model_names.contains("NUMS-QuestAssociation"));
+    }
+
+    #[tokio::test]
+    async fn retrieve_entities_keys_clause_fills_first_page_with_matches() {
+        let db_path = test_db_path("retrieve-entities-keys-page");
+        let service = EcsService::new(&db_path, Some(1), None, None, None)
+            .await
+            .expect("service init");
+        let world = Felt::from(920_u64);
+        let matching_key = Felt::from(0xdead_u64);
+
+        for index in 0..100_u64 {
+            let entity_id = Felt::from(index + 1);
+            seed_entity_with_custom_keys(
+                &service,
+                TableKind::Entity,
+                world,
+                Felt::from(index + 1_000),
+                "NUMS-Config",
+                entity_id,
+                "config_id",
+                Felt::from(0x100_u64 + index),
+            )
+            .await;
+        }
+
+        let matching_entity = Felt::from(10_000_u64);
+        seed_entity_with_custom_keys(
+            &service,
+            TableKind::Entity,
+            world,
+            Felt::from(9_999_u64),
+            "NUMS-Config",
+            matching_entity,
+            "config_id",
+            matching_key,
+        )
+        .await;
+
+        let response = service
+            .retrieve_entities(Request::new(RetrieveEntitiesRequest {
+                query: Some(types::Query {
+                    pagination: Some(types::Pagination {
+                        cursor: String::new(),
+                        limit: 100,
+                        direction: PaginationDirection::Forward as i32,
+                        order_by: vec![],
+                    }),
+                    world_addresses: vec![world.to_bytes_be().to_vec()],
+                    models: vec![],
+                    clause: Some(types::Clause {
+                        clause_type: Some(ClauseType::Keys(types::KeysClause {
+                            models: vec!["NUMS-Config".to_string()],
+                            pattern_matching: PatternMatching::VariableLen as i32,
+                            keys: vec![matching_key.to_bytes_be().to_vec()],
+                        })),
+                    }),
+                    no_hashed_keys: false,
+                    historical: false,
+                }),
+            }))
+            .await
+            .expect("retrieve entities")
+            .into_inner();
+
+        assert_eq!(response.entities.len(), 1);
+        assert_eq!(
+            response.entities[0].hashed_keys,
+            matching_entity.to_bytes_be().to_vec()
+        );
+        assert!(response.next_cursor.is_empty());
     }
 
     #[tokio::test]

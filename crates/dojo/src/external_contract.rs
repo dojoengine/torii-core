@@ -122,6 +122,10 @@ pub fn resolve_external_contract(contract_name: &str) -> Option<ResolvedExternal
         .collect::<String>()
         .to_ascii_uppercase();
 
+    if normalized.is_empty() {
+        return None;
+    }
+
     match normalized.as_str() {
         "ERC20" => Some(ResolvedExternalContract {
             contract_type: RegisteredContractType::Erc20,
@@ -135,7 +139,10 @@ pub fn resolve_external_contract(contract_name: &str) -> Option<ResolvedExternal
             contract_type: RegisteredContractType::Erc1155,
             decoder_ids: vec![DecoderId::new("erc1155")],
         }),
-        _ => None,
+        _ => Some(ResolvedExternalContract {
+            contract_type: RegisteredContractType::World,
+            decoder_ids: vec![DecoderId::new("dojo-introspect")],
+        }),
     }
 }
 
@@ -163,6 +170,7 @@ pub struct RegisterExternalContractCommand {
     pub contract_name: String,
     pub namespace: String,
     pub instance_name: String,
+    pub from_block: u64,
     pub registration_block: u64,
     pub contract_type: RegisteredContractType,
     pub decoder_ids: Vec<DecoderId>,
@@ -228,7 +236,7 @@ impl CommandHandler for RegisterExternalContractCommandHandler {
                 .set_extractor_state(
                     EVENT_EXTRACTOR_TYPE,
                     &state_key,
-                    &format!("block:{}", command.registration_block),
+                    &format!("block:{}", command.from_block),
                 )
                 .await
                 .with_context(|| {
@@ -262,6 +270,7 @@ impl CommandHandler for RegisterExternalContractCommandHandler {
             namespace = command.namespace,
             contract_name = command.contract_name,
             instance_name = command.instance_name,
+            from_block = command.from_block,
             registration_block = command.registration_block,
             "Registered external contract for runtime indexing"
         );
@@ -287,7 +296,11 @@ mod tests {
         let erc1155 = resolve_external_contract("Erc-1155").unwrap();
         assert_eq!(erc1155.contract_type, RegisteredContractType::Erc1155);
 
-        assert!(resolve_external_contract("udc").is_none());
+        let dojo = resolve_external_contract("Actions").unwrap();
+        assert_eq!(dojo.contract_type, RegisteredContractType::World);
+        assert_eq!(dojo.decoder_ids, vec![DecoderId::new("dojo-introspect")]);
+
+        assert!(resolve_external_contract("---").is_none());
     }
 
     #[tokio::test]
@@ -315,12 +328,22 @@ mod tests {
                 contract_name: "ERC20".to_string(),
                 namespace: "tokens".to_string(),
                 instance_name: "eth".to_string(),
+                from_block: 12,
                 registration_block: 77,
                 contract_type: RegisteredContractType::Erc20,
                 decoder_ids: vec![DecoderId::new("erc20")],
             }))
             .await
             .unwrap();
+
+        assert_eq!(
+            engine_db
+                .get_extractor_state(EVENT_EXTRACTOR_TYPE, &format!("{contract_address:#x}"))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("block:12")
+        );
 
         engine_db
             .set_extractor_state(
@@ -338,6 +361,7 @@ mod tests {
                 contract_name: "ERC20".to_string(),
                 namespace: "tokens".to_string(),
                 instance_name: "eth".to_string(),
+                from_block: 12,
                 registration_block: 77,
                 contract_type: RegisteredContractType::Erc20,
                 decoder_ids: vec![DecoderId::new("erc20")],

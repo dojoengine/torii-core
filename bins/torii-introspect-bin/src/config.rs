@@ -121,7 +121,15 @@ pub struct Config {
     pub ignore_saved_state: bool,
 
     /// Enable runtime indexing for Dojo `ExternalContractRegistered` events.
-    #[arg(long)]
+    ///
+    /// Enabled by default. Pass `--index-external-contracts=false` to disable.
+    #[arg(
+        long,
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
     pub index_external_contracts: bool,
 
     /// Exact Dojo model names to mirror into append-only `_historical` tables.
@@ -298,20 +306,20 @@ mod tests {
     }
 
     #[test]
-    fn external_contract_indexing_defaults_to_disabled() {
+    fn external_contract_indexing_defaults_to_enabled() {
         let cfg = Config::parse_from(["torii-server", "--contract", "0x1"]);
-        assert!(!cfg.index_external_contracts);
+        assert!(cfg.index_external_contracts);
     }
 
     #[test]
-    fn external_contract_indexing_flag_enables_runtime_registration() {
+    fn external_contract_indexing_flag_can_disable_runtime_registration() {
         let cfg = Config::parse_from([
             "torii-server",
             "--contract",
             "0x1",
-            "--index-external-contracts",
+            "--index-external-contracts=false",
         ]);
-        assert!(cfg.index_external_contracts);
+        assert!(!cfg.index_external_contracts);
     }
 
     #[test]
