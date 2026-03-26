@@ -4,13 +4,13 @@ use crate::backend::IntrospectInitialize;
 use crate::{DbColumn, DbDeadField, DbResult, DbTable};
 use async_trait::async_trait;
 use introspect_types::ResultInto;
-use torii_sql::{DbConnection, Postgres};
+use torii_sql::DbPool;
 
 pub const INTROSPECT_PG_SINK_MIGRATIONS: sqlx::migrate::Migrator =
     sqlx::migrate!("./migrations/postgres");
 
 #[async_trait]
-impl<T: DbConnection<Postgres> + Send + Sync> IntrospectInitialize for PostgresBackend<T> {
+impl IntrospectInitialize for PostgresBackend {
     async fn load_tables(&self, schemas: &Option<Vec<String>>) -> DbResult<Vec<DbTable>> {
         fetch_tables(self.pool(), schemas).await.err_into()
     }

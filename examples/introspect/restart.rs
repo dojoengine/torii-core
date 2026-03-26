@@ -2,11 +2,10 @@ use itertools::Itertools;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use starknet::core::types::Felt;
-use std::sync::Arc;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::DojoToriiError;
-use torii_introspect_postgres_sink::IntrospectPgDb;
+use torii_introspect_sql_sink::IntrospectPgDb;
 use torii_test_utils::{resolve_path_like, FakeProvider, MultiContractEventIterator};
 
 const DB_URL: &str = "postgres://torii:torii@localhost:5432/torii";
@@ -28,7 +27,7 @@ const ADDRESSES: [Felt; 2] = [PISTOLS_ADDRESS, BLOB_ARENA_ADDRESS];
 async fn run_events(
     events: &mut MultiContractEventIterator,
     provider: FakeProvider,
-    pool: Arc<PgPool>,
+    pool: PgPool,
     end: Option<u64>,
     event_n: &mut u32,
     success: &mut u32,
@@ -93,7 +92,7 @@ async fn main() {
     let event_paths = EVENT_PATHS.map(resolve_path_like).to_vec();
     let provider = FakeProvider::new(resolve_path_like(MODEL_CONTRACTS_PATH));
     let mut event_iterator = MultiContractEventIterator::new(event_paths);
-    let pool = Arc::new(PgPoolOptions::new().connect(DB_URL).await.unwrap());
+    let pool = PgPoolOptions::new().connect(DB_URL).await.unwrap();
     let mut event_n = 0;
     let mut success = 0;
     while run_events(

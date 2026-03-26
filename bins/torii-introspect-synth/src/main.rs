@@ -27,7 +27,7 @@ use torii::etl::Decoder;
 use torii::grpc::SubscriptionManager;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::postgres::PgStore;
-use torii_introspect_postgres_sink::IntrospectPgDb;
+use torii_introspect_sql_sink::IntrospectPgDb;
 
 const EXTRACTOR_TYPE: &str = "synthetic_introspect";
 const STATE_KEY: &str = "last_block";
@@ -414,14 +414,12 @@ async fn main() -> Result<()> {
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create output dir {}", output_dir.display()))?;
 
-    let pool = Arc::new(
-        PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&config.db_url)
-            .await?,
-    );
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&config.db_url)
+        .await?;
     if config.reset_schema {
-        reset_schema(pool.as_ref()).await?;
+        reset_schema(&pool).await?;
     }
 
     let started = Instant::now();
@@ -482,7 +480,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let verification = verify_run(pool.as_ref(), &config).await?;
+    let verification = verify_run(&pool, &config).await?;
     let summary = Summary {
         run_id: run_id.clone(),
         duration_ms: started.elapsed().as_millis(),

@@ -9,28 +9,36 @@ use sqlx::prelude::FromRow;
 use sqlx::types::Json;
 use starknet_types_core::felt::{Felt, FromStrError};
 use std::collections::HashMap;
+use std::ops::Deref;
 use torii_introspect::tables::RecordSchema;
 use torii_introspect::Record;
-use torii_sql::{DbConnection, Queries, Sqlite, SqlitePool, SqliteQuery};
+use torii_sql::{DbPool, Queries, Sqlite, SqlitePool, SqliteQuery};
 
 use super::query::create_table_query;
 
 pub const INTROSPECT_SQLITE_SINK_MIGRATIONS: sqlx::migrate::Migrator =
     sqlx::migrate!("./migrations/sqlite");
 
-pub type IntrospectSqliteDb<T> = IntrospectDb<SqliteBackend<T>>;
+pub type IntrospectSqliteDb = IntrospectDb<SqliteBackend>;
 
-pub struct SqliteBackend<T: DbConnection<Sqlite>>(T);
+pub struct SqliteBackend(SqlitePool);
 
-impl<T: DbConnection<Sqlite>> From<T> for SqliteBackend<T> {
-    fn from(value: T) -> Self {
+impl Deref for SqliteBackend {
+    type Target = SqlitePool;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<SqlitePool> for SqliteBackend {
+    fn from(value: SqlitePool) -> Self {
         SqliteBackend(value)
     }
 }
 
-impl<T: DbConnection<Sqlite>> DbConnection<Sqlite> for SqliteBackend<T> {
+impl DbPool<Sqlite> for SqliteBackend {
     fn pool(&self) -> &SqlitePool {
-        self.0.pool()
+        &self.0
     }
 }
 
@@ -63,7 +71,7 @@ impl TryFrom<SqliteTableRow> for DbTable {
 }
 
 #[async_trait]
-impl<T: DbConnection<Sqlite> + Send + Sync> IntrospectQueryMaker for SqliteBackend<T> {
+impl IntrospectQueryMaker for SqliteBackend {
     type DB = Sqlite;
     fn create_table_queries(
         namespace: &str,
@@ -105,12 +113,12 @@ impl<T: DbConnection<Sqlite> + Send + Sync> IntrospectQueryMaker for SqliteBacke
     }
 }
 
-impl<T: DbConnection<Sqlite>> IntrospectSqlSink for SqliteBackend<T> {
+impl IntrospectSqlSink for SqliteBackend {
     const NAME: &'static str = "Introspect Sqlite";
 }
 
 #[async_trait]
-impl<T: DbConnection<Sqlite> + Send + Sync> IntrospectInitialize for SqliteBackend<T> {
+impl IntrospectInitialize for SqliteBackend {
     async fn load_tables(&self, _schemas: &Option<Vec<String>>) -> DbResult<Vec<DbTable>> {
         let rows: Vec<SqliteTableRow> = sqlx::query_as(
             r"

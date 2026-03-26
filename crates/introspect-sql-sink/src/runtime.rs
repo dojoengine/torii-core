@@ -6,19 +6,15 @@ use crate::{
     NamespaceMode,
 };
 use async_trait::async_trait;
-use sqlx::{Postgres, Sqlite};
 use torii_introspect::events::IntrospectBody;
-use torii_sql::DbConnection;
 
-pub enum RuntimeBackend<Pg, Site> {
-    Postgres(Pg),
-    Sqlite(Site),
+pub enum RuntimeBackend {
+    Postgres(PostgresBackend),
+    Sqlite(SqliteBackend),
 }
 
 #[async_trait]
-impl<Pg: IntrospectInitialize + Send + Sync, Site: IntrospectInitialize + Send + Sync>
-    IntrospectInitialize for RuntimeBackend<Pg, Site>
-{
+impl IntrospectInitialize for RuntimeBackend {
     async fn initialize(&self) -> DbResult<()> {
         match self {
             RuntimeBackend::Postgres(pg) => pg.initialize().await,
@@ -49,9 +45,7 @@ impl<Pg: IntrospectInitialize + Send + Sync, Site: IntrospectInitialize + Send +
 }
 
 #[async_trait]
-impl<Pg: IntrospectProcessor + Send + Sync, Site: IntrospectProcessor + Send + Sync>
-    IntrospectProcessor for RuntimeBackend<Pg, Site>
-{
+impl IntrospectProcessor for RuntimeBackend {
     async fn process_msgs(
         &self,
         tables: &Tables,
@@ -65,18 +59,14 @@ impl<Pg: IntrospectProcessor + Send + Sync, Site: IntrospectProcessor + Send + S
     }
 }
 
-impl<Conn: DbConnection<Postgres>, Site> From<PostgresBackend<Conn>>
-    for RuntimeBackend<PostgresBackend<Conn>, Site>
-{
-    fn from(pg: PostgresBackend<Conn>) -> Self {
+impl From<PostgresBackend> for RuntimeBackend {
+    fn from(pg: PostgresBackend) -> Self {
         RuntimeBackend::Postgres(pg)
     }
 }
 
-impl<Conn: DbConnection<Sqlite>, Pg> From<SqliteBackend<Conn>>
-    for RuntimeBackend<Pg, SqliteBackend<Conn>>
-{
-    fn from(site: SqliteBackend<Conn>) -> Self {
+impl From<SqliteBackend> for RuntimeBackend {
+    fn from(site: SqliteBackend) -> Self {
         RuntimeBackend::Sqlite(site)
     }
 }

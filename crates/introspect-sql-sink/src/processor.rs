@@ -12,7 +12,7 @@ use sqlx::Pool;
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use torii_introspect::events::IntrospectBody;
-use torii_sql::{DbConnection, Executable, FlexQuery};
+use torii_sql::{DbPool, Executable, FlexQuery};
 
 pub const COMMIT_CMD: &str = "--COMMIT";
 
@@ -49,7 +49,7 @@ pub struct DbDeadField {
     pub type_def: TypeDef,
 }
 
-impl<Backend: IntrospectQueryMaker> DbConnection<Backend::DB> for IntrospectDb<Backend> {
+impl<Backend: IntrospectQueryMaker> DbPool<Backend::DB> for IntrospectDb<Backend> {
     fn pool(&self) -> &Pool<Backend::DB> {
         self.db.pool()
     }
@@ -84,7 +84,7 @@ where
     }
 }
 
-impl<Backend: IntrospectProcessor + IntrospectInitialize> IntrospectDb<Backend> {
+impl<Backend> IntrospectDb<Backend> {
     pub fn new(pool: impl Into<Backend>, namespaces: impl Into<NamespaceMode>) -> Self {
         Self {
             tables: Tables::default(),
@@ -92,7 +92,8 @@ impl<Backend: IntrospectProcessor + IntrospectInitialize> IntrospectDb<Backend> 
             db: pool.into(),
         }
     }
-
+}
+impl<Backend: IntrospectProcessor + IntrospectInitialize> IntrospectDb<Backend> {
     pub async fn initialize_introspect_sql_sink(&self) -> DbResult<Vec<TableLoadError>> {
         self.db.initialize().await?;
         self.load_store_data().await

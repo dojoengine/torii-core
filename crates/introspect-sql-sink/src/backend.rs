@@ -9,7 +9,7 @@ use starknet_types_core::felt::Felt;
 use torii_introspect::events::IntrospectBody;
 use torii_introspect::tables::RecordSchema;
 use torii_introspect::Record;
-use torii_sql::{DbConnection, Executable, FlexQuery};
+use torii_sql::{DbPool, Executable, FlexQuery};
 
 #[async_trait]
 pub trait IntrospectProcessor {
@@ -32,7 +32,7 @@ pub trait IntrospectInitialize {
     ) -> DbResult<Vec<DbDeadField>>;
 }
 
-pub trait IntrospectQueryMaker: DbConnection<Self::DB> {
+pub trait IntrospectQueryMaker: DbPool<Self::DB> {
     type DB: Database;
     fn create_table_queries(
         namespace: &str,

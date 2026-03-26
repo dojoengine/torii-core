@@ -17,10 +17,12 @@ torii-erc20 = { path = "../../crates/torii-erc20" }
 torii-erc721 = { path = "../../crates/torii-erc721" }
 torii-erc1155 = { path = "../../crates/torii-erc1155" }
 torii-ecs-sink = { path = "../../crates/torii-ecs-sink" }
-torii-introspect-postgres-sink = { path = "../../crates/introspect-postgres-sink" }
-torii-introspect-sqlite-sink = { path = "../../crates/introspect-sqlite-sink" }
+torii-introspect-sql-sink = { path = "../../crates/introspect-sql-sink", features = [
+    "postgres",
+    "sqlite",
+] }
 torii-runtime-common.workspace = true
-torii-sql = { path = "../../crates/sql" }
+torii-sql = { path = "../../crates/sql", features = ["postgres", "sqlite"] }
 
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

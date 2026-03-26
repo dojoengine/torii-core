@@ -18,9 +18,14 @@ pub use table::{DeadField, DeadFieldDef, Table};
 
 #[cfg(feature = "postgres")]
 pub mod postgres;
+#[cfg(feature = "postgres")]
+pub use postgres::{IntrospectPgDb, PostgresBackend};
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+#[cfg(feature = "sqlite")]
+pub use sqlite::{IntrospectSqliteDb, SqliteBackend};
 
 #[cfg(feature = "postgres")]
+#[cfg(feature = "sqlite")]
 pub mod runtime;

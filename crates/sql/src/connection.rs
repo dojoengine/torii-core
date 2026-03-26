@@ -1,13 +1,11 @@
-use crate::{query::Executable, AcquiredSchema, SqlxResult};
+use crate::query::Executable;
+use crate::{AcquiredSchema, SqlxResult};
 use async_trait::async_trait;
-use sqlx::{
-    migrate::{Migrate, Migrator},
-    Database, Pool, Transaction,
-};
-use std::ops::Deref;
+use sqlx::migrate::{Migrate, Migrator};
+use sqlx::{Database, Pool, Transaction};
 
 #[async_trait]
-pub trait DbConnection<DB: Database> {
+pub trait DbPool<DB: Database> {
     fn pool(&self) -> &Pool<DB>;
     async fn begin(&self) -> SqlxResult<Transaction<'_, DB>> {
         Ok(self.pool().begin().await?)
@@ -21,7 +19,7 @@ pub trait DbConnection<DB: Database> {
             Some(schema) => {
                 let mut conn = AcquiredSchema {
                     connection: self.pool().acquire().await?.detach(),
-                    schema: schema,
+                    schema,
                 };
                 migrator.run_direct(&mut conn).await
             }
@@ -29,17 +27,21 @@ pub trait DbConnection<DB: Database> {
         };
         Ok(result?)
     }
-    async fn execute_queries(&self, queries: impl Executable<DB> + Send) -> SqlxResult<()> {
+    async fn execute_queries<E: Executable<DB> + Send>(&self, queries: E) -> SqlxResult<()> {
         let mut transaction: Transaction<'_, DB> = self.begin().await?;
         queries.execute(&mut transaction).await?;
         transaction.commit().await
     }
 }
 
-#[allow(clippy::explicit_auto_deref)]
 #[async_trait]
-impl<DB: Database, T: Deref<Target = Pool<DB>> + Send + Sync + 'static> DbConnection<DB> for T {
+impl<DB: Database> DbPool<DB> for Pool<DB> {
     fn pool(&self) -> &Pool<DB> {
-        &**self
+        self
     }
+}
+
+pub enum DbConn {
+    Postgres,
+    Sqlite,
 }

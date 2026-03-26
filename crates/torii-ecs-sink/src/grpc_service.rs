@@ -14,10 +14,10 @@ use introspect_types::{
 use serde::ser::SerializeMap;
 use serde::Serializer;
 use serde_json::{Map, Serializer as JsonSerializer, Value};
-use sqlx::{
-    any::AnyPoolOptions, postgres::PgPoolOptions, sqlite::SqliteConnectOptions,
-    sqlite::SqlitePoolOptions, Any, ConnectOptions, Pool, QueryBuilder, Row,
-};
+use sqlx::any::AnyPoolOptions;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Any, ConnectOptions, Pool, QueryBuilder, Row};
 use starknet::core::types::Felt;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, Mutex};
@@ -30,12 +30,14 @@ use torii_dojo::DojoTable;
 use torii_introspect::events::{CreateTable, Record, UpdateTable};
 use torii_introspect::schema::TableSchema;
 
+use crate::proto::types::clause::ClauseType;
+use crate::proto::types::member_value::ValueType;
 use crate::proto::types::{
-    self, clause::ClauseType, member_value::ValueType, ComparisonOperator, ContractType,
-    LogicalOperator, PaginationDirection, PatternMatching,
+    self, ComparisonOperator, ContractType, LogicalOperator, PaginationDirection, PatternMatching,
 };
+use crate::proto::world::world_server::World;
 use crate::proto::world::{
-    world_server::World, RetrieveEntitiesRequest, RetrieveEntitiesResponse, RetrieveEventsRequest,
+    RetrieveEntitiesRequest, RetrieveEntitiesResponse, RetrieveEventsRequest,
     RetrieveEventsResponse, SubscribeContractsRequest, SubscribeContractsResponse,
     SubscribeEntitiesRequest, SubscribeEntityResponse, SubscribeEventsRequest,
     SubscribeEventsResponse, UpdateEntitiesSubscriptionRequest, WorldsRequest, WorldsResponse,
@@ -1000,7 +1002,7 @@ impl EcsService {
                     .max_connections(1)
                     .connect_with(SqliteConnectOptions::from_str(&self.state.database_url)?)
                     .await?;
-                let store = SqliteStore(Arc::new(pool));
+                let store = SqliteStore(pool);
                 Ok(store.read_tables(&[]).await?)
             }
             DbBackend::Postgres => {
@@ -1008,7 +1010,7 @@ impl EcsService {
                     .max_connections(1)
                     .connect(&self.state.database_url)
                     .await?;
-                let store = PgStore(Arc::new(pool));
+                let store = PgStore(pool);
                 Ok(store.read_tables(&[]).await?)
             }
         }

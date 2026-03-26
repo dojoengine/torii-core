@@ -18,8 +18,10 @@ torii-ecs-sink = { path = "../../crates/torii-ecs-sink" }
 torii-erc20 = { path = "../../crates/torii-erc20" }
 torii-erc721 = { path = "../../crates/torii-erc721" }
 torii-erc1155 = { path = "../../crates/torii-erc1155" }
-torii-introspect-postgres-sink = { path = "../../crates/introspect-postgres-sink" }
-torii-introspect-sqlite-sink = { path = "../../crates/introspect-sqlite-sink" }
+torii-introspect-sql-sink = { workspace = true, features = [
+    "postgres",
+    "sqlite",
+] }
 torii-runtime-common.workspace = true
 torii-sql = { workspace = true, features = ["postgres", "sqlite"] }
 

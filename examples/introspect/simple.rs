@@ -1,10 +1,9 @@
 use itertools::Itertools;
 use sqlx::postgres::PgPoolOptions;
-use std::sync::Arc;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::DojoToriiError;
-use torii_introspect_postgres_sink::IntrospectPgDb;
+use torii_introspect_sql_sink::IntrospectPgDb;
 use torii_test_utils::{resolve_path_like, EventIterator, FakeProvider};
 
 const DB_URL: &str = "postgres://torii:torii@localhost:5432/torii";
@@ -22,7 +21,7 @@ async fn main() {
     let provider = FakeProvider::new(contracts_path);
     let mut event_iterator = EventIterator::new(events_path);
 
-    let pool = Arc::new(PgPoolOptions::new().connect(DB_URL).await.unwrap());
+    let pool = PgPoolOptions::new().connect(DB_URL).await.unwrap();
     let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), provider);
     let db = IntrospectPgDb::new(pool.clone(), SCHEMA_NAME);
     decoder.store.initialize().await.unwrap();

@@ -42,10 +42,9 @@ use torii_erc721::{
     Erc721Decoder, Erc721MetadataCommandHandler, Erc721Service, Erc721Sink, Erc721Storage,
     FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
 };
-use torii_introspect_postgres_sink::processor::IntrospectPgDb;
-use torii_introspect_sqlite_sink::processor::IntrospectSqliteDb;
+use torii_introspect_sql_sink::{IntrospectPgDb, IntrospectSqliteDb, NamespaceMode};
 use torii_runtime_common::database::{validate_uniform_backends, DatabaseBackend};
-use torii_sqlite::{is_sqlite_memory_path, sqlite_connect_options};
+use torii_sql::sqlite::{is_sqlite_memory_path, sqlite_connect_options};
 
 type StarknetProvider =
     starknet::providers::jsonrpc::JsonRpcClient<starknet::providers::jsonrpc::HttpTransport>;
@@ -268,15 +267,13 @@ async fn run_indexer(config: Config) -> Result<()> {
     ) = match backend {
         DatabaseBackend::Postgres => {
             let max_db_connections = config.max_db_connections.unwrap_or(5);
-            let pool = Arc::new(
-                PgPoolOptions::new()
-                    .max_connections(max_db_connections)
-                    .connect(&storage_database_url)
-                    .await?,
-            );
+            let pool = PgPoolOptions::new()
+                .max_connections(max_db_connections)
+                .connect(&storage_database_url)
+                .await?;
 
             let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), (*provider).clone());
-            let sink = IntrospectPgDb::new(pool.clone(), ());
+            let sink = IntrospectPgDb::new(pool.clone(), NamespaceMode::Address);
             decoder.store.initialize().await?;
             decoder.load_tables(&[]).await?;
 
@@ -292,22 +289,18 @@ async fn run_indexer(config: Config) -> Result<()> {
                 None if is_sqlite_memory_path(&storage_database_url) => 1,
                 None => 1,
             };
-            let pool = Arc::new(
-                SqlitePoolOptions::new()
-                    .max_connections(max_db_connections)
-                    .connect_with(options)
-                    .await?,
-            );
+            let pool = SqlitePoolOptions::new()
+                .max_connections(max_db_connections)
+                .connect_with(options)
+                .await?;
 
             sqlx::query("PRAGMA journal_mode=WAL")
-                .execute(pool.as_ref())
+                .execute(&pool)
                 .await?;
             sqlx::query("PRAGMA synchronous=NORMAL")
-                .execute(pool.as_ref())
+                .execute(&pool)
                 .await?;
-            sqlx::query("PRAGMA foreign_keys=ON")
-                .execute(pool.as_ref())
-                .await?;
+            sqlx::query("PRAGMA foreign_keys=ON").execute(&pool).await?;
 
             let decoder = DojoDecoder::<SqliteStore<_>, _>::new(pool.clone(), (*provider).clone());
             decoder.store.initialize().await?;
@@ -315,7 +308,10 @@ async fn run_indexer(config: Config) -> Result<()> {
 
             (
                 Arc::new(decoder) as Arc<dyn torii::etl::Decoder>,
-                Box::new(IntrospectSqliteDb::new(pool.clone(), ())),
+                Box::new(IntrospectSqliteDb::new(
+                    pool.clone(),
+                    NamespaceMode::Address,
+                )),
             )
         }
     };

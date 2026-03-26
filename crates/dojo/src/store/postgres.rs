@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use torii_introspect::postgres::owned::PgTypeDef;
 use torii_introspect::postgres::PgFelt;
 use torii_introspect::schema::ColumnKeyTrait;
-use torii_sql::{DbConnection, PgArguments, PgPool, Postgres, SqlxResult};
+use torii_sql::{DbPool, PgArguments, PgPool, Postgres, SqlxResult};
 
 pub const FETCH_TABLES_QUERY: &str = r#"
     SELECT DISTINCT ON (owner, id)
@@ -281,26 +281,26 @@ impl DojoTable {
 
 pub struct PgStore<T>(pub T);
 
-impl<T: DbConnection<Postgres>> DbConnection<Postgres> for PgStore<T> {
+impl<T: DbPool<Postgres>> DbPool<Postgres> for PgStore<T> {
     fn pool(&self) -> &PgPool {
         &self.0.pool()
     }
 }
 
-impl<T: DbConnection<Postgres> + Send + Sync> PgStore<T> {
+impl<T: DbPool<Postgres> + Send + Sync> PgStore<T> {
     pub async fn initialize(&self) -> SqlxResult<()> {
         self.migrate(Some("dojo"), DOJO_STORE_MIGRATIONS).await
     }
 }
 
-impl<T: DbConnection<Postgres>> From<T> for PgStore<T> {
+impl<T: DbPool<Postgres>> From<T> for PgStore<T> {
     fn from(pool: T) -> Self {
         PgStore(pool)
     }
 }
 
 #[async_trait]
-impl<T: DbConnection<Postgres> + Send + Sync + 'static> DojoStoreTrait for PgStore<T> {
+impl<T: DbPool<Postgres> + Send + Sync + 'static> DojoStoreTrait for PgStore<T> {
     type Error = DojoPgStoreError;
 
     async fn save_table(

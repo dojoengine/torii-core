@@ -8,10 +8,12 @@ name = "torii-introspect-synth"
 path = "src/main.rs"
 
 [dependencies]
-torii = { path = "../../" }
-torii-runtime-common.workspace = true
-torii-dojo = { path = "../../crates/dojo" }
-torii-introspect-postgres-sink.workspace = true
+torii.workspace = true
+torii-dojo.workspace = true
+torii-introspect-sql-sink = { workspace = true, features = [
+    "postgres",
+    "sqlite",
+] }
 
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

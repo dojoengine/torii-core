@@ -15,8 +15,6 @@ members = [
   "crates/introspect",
   "crates/dojo",
   "crates/introspect-sql-sink",
-  "crates/introspect-postgres-sink",
-  "crates/introspect-sqlite-sink",
   "crates/testing",
   "bins/torii-erc20",
   "bins/torii-erc20-synth",
@@ -135,8 +133,6 @@ torii-erc1155.path = "crates/torii-erc1155"
 torii-dojo.path = "./crates/dojo"
 torii-introspect.path = "crates/introspect"
 torii-introspect-sql-sink.path = "./crates/introspect-sql-sink"
-torii-introspect-postgres-sink.path = "./crates/introspect-postgres-sink"
-torii-introspect-sqlite-sink.path = "./crates/introspect-sqlite-sink"
 torii-test-utils.path = "crates/testing"
 
 [lib]
@@ -220,7 +216,6 @@ torii-erc1155.workspace = true
 torii-dojo = { workspace = true, features = ["postgres", "sqlite"] }
 torii-introspect.workspace = true
 torii-common.workspace = true
-torii-introspect-postgres-sink.workspace = true
 torii-test-utils.workspace = true
 torii-sql = { workspace = true, features = ["postgres", "sqlite"] }
 torii-introspect-sql-sink = { workspace = true, features = [
