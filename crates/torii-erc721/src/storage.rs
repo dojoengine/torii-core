@@ -300,6 +300,18 @@ impl Erc721Storage {
             [],
         )?;
 
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_nft_ownership_token_owner_token_id_ord
+             ON nft_ownership(token, owner, length(token_id), token_id)",
+            [],
+        )?;
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_nft_ownership_owner_token_token_id_ord
+             ON nft_ownership(owner, token, length(token_id), token_id)",
+            [],
+        )?;
+
         // Transfer history
         conn.execute(
             "CREATE TABLE IF NOT EXISTS nft_transfers (
@@ -727,7 +739,7 @@ impl Erc721Storage {
         query.push_str(" ORDER BY t.block_number DESC, t.id DESC LIMIT ?");
         params_vec.push(Box::new(limit as i64));
 
-        let mut stmt = conn.prepare(&query)?;
+        let mut stmt = conn.prepare_cached(&query)?;
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(std::convert::AsRef::as_ref).collect();
 
@@ -825,7 +837,7 @@ impl Erc721Storage {
         query.push_str(" ORDER BY block_number DESC, id DESC LIMIT ?");
         params_vec.push(Box::new(limit as i64));
 
-        let mut stmt = conn.prepare(&query)?;
+        let mut stmt = conn.prepare_cached(&query)?;
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(std::convert::AsRef::as_ref).collect();
 
@@ -1020,7 +1032,7 @@ impl Erc721Storage {
             );
             let token_blobs: Vec<Vec<u8>> =
                 chunk.iter().map(|token| felt_to_blob(*token)).collect();
-            let mut stmt = conn.prepare(&query)?;
+            let mut stmt = conn.prepare_cached(&query)?;
             let rows = stmt.query_map(params_from_iter(token_blobs.iter()), |row| {
                 let token_bytes: Vec<u8> = row.get(0)?;
                 Ok(blob_to_felt(&token_bytes))
@@ -1093,7 +1105,7 @@ impl Erc721Storage {
     ) -> Result<Vec<(Felt, Option<String>, Option<String>, Option<U256>)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt =
-            conn.prepare("SELECT token, name, symbol, total_supply FROM token_metadata")?;
+            conn.prepare_cached("SELECT token, name, symbol, total_supply FROM token_metadata")?;
         let rows = stmt.query_map([], |row| {
             let token_bytes: Vec<u8> = row.get(0)?;
             let name: Option<String> = row.get(1)?;
@@ -1128,7 +1140,7 @@ impl Erc721Storage {
 
         let mut out = if let Some(cursor_token) = cursor {
             let cursor_blob = felt_to_blob(cursor_token);
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare_cached(
                 "SELECT token, name, symbol, total_supply
                  FROM token_metadata
                  WHERE token > ?1
@@ -1149,7 +1161,7 @@ impl Erc721Storage {
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         } else {
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare_cached(
                 "SELECT token, name, symbol, total_supply
                  FROM token_metadata
                  ORDER BY token ASC
@@ -1224,7 +1236,7 @@ impl Erc721Storage {
             }
             let params_refs: Vec<&dyn ToSql> =
                 params_vec.iter().map(std::convert::AsRef::as_ref).collect();
-            let mut stmt = conn.prepare(&query)?;
+            let mut stmt = conn.prepare_cached(&query)?;
             let rows = stmt.query_map(params_refs.as_slice(), |row| {
                 let token_bytes: Vec<u8> = row.get(0)?;
                 let token_id_bytes: Vec<u8> = row.get(1)?;
@@ -1249,7 +1261,7 @@ impl Erc721Storage {
         }
         let conn = self.conn.lock().unwrap();
         let token_blob = felt_to_blob(token);
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT token_id, uri, metadata_json
              FROM token_uris
              WHERE token = ?1
@@ -1293,7 +1305,7 @@ impl Erc721Storage {
             }
             let params_refs: Vec<&dyn ToSql> =
                 params_vec.iter().map(std::convert::AsRef::as_ref).collect();
-            let mut stmt = conn.prepare(&query)?;
+            let mut stmt = conn.prepare_cached(&query)?;
             let rows = stmt.query_map(params_refs.as_slice(), |row| {
                 let token_id_bytes: Vec<u8> = row.get(0)?;
                 let uri: Option<String> = row.get(1)?;
@@ -1383,7 +1395,7 @@ impl Erc721Storage {
             }
             let params_refs: Vec<&dyn ToSql> =
                 params_vec.iter().map(std::convert::AsRef::as_ref).collect();
-            let mut stmt = conn.prepare(&query)?;
+            let mut stmt = conn.prepare_cached(&query)?;
             let rows = stmt.query_map(params_refs.as_slice(), |row| row.get::<_, i64>(0))?;
             let value_ids = rows.collect::<std::result::Result<Vec<_>, _>>()?;
             if value_ids.is_empty() {
@@ -1465,7 +1477,7 @@ impl Erc721Storage {
             .iter()
             .map(std::convert::AsRef::as_ref)
             .collect();
-        let mut stmt = conn.prepare(&page_query)?;
+        let mut stmt = conn.prepare_cached(&page_query)?;
         let rows = stmt.query_map(page_refs.as_slice(), |row| row.get::<_, Vec<u8>>(0))?;
         let mut token_ids = rows
             .collect::<std::result::Result<Vec<_>, _>>()?
@@ -1514,7 +1526,7 @@ impl Erc721Storage {
                 .iter()
                 .map(std::convert::AsRef::as_ref)
                 .collect();
-            let mut stmt = conn.prepare(&facet_query)?;
+            let mut stmt = conn.prepare_cached(&facet_query)?;
             let rows = stmt.query_map(facet_refs.as_slice(), |row| {
                 Ok(AttributeFacetCount {
                     key: row.get(0)?,
@@ -2627,7 +2639,7 @@ fn sqlite_load_existing_facet_assignments(
             params.push(&entry.token_id_blob);
         }
 
-        let mut stmt = tx.prepare(&query)?;
+        let mut stmt = tx.prepare_cached(&query)?;
         let rows = stmt.query_map(params.as_slice(), |row| {
             Ok((
                 row.get::<usize, Vec<u8>>(0)?,
@@ -2954,7 +2966,7 @@ fn sqlite_token_uri_state_matches(
         return Ok(false);
     }
 
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT key, value FROM token_attributes
          WHERE token = ?1 AND token_id = ?2
          ORDER BY key ASC, value ASC",

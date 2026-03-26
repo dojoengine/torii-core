@@ -780,7 +780,7 @@ impl Erc20Storage {
                     params.push(wallet as &dyn ToSql);
                 }
 
-                let mut stmt = conn.prepare(&sql)?;
+                let mut stmt = conn.prepare_cached(&sql)?;
                 let rows = stmt.query_map(params_from_iter(params), |row| {
                     let wallet: Vec<u8> = row.get(0)?;
                     let balance: Vec<u8> = row.get(1)?;
@@ -1229,7 +1229,7 @@ impl Erc20Storage {
         query.push_str(" ORDER BY t.block_number DESC, t.id DESC LIMIT ?");
         params_vec.push(Box::new(limit as i64));
 
-        let mut stmt = conn.prepare(&query)?;
+        let mut stmt = conn.prepare_cached(&query)?;
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(std::convert::AsRef::as_ref).collect();
 
@@ -1371,7 +1371,7 @@ impl Erc20Storage {
         query.push_str(" ORDER BY a.block_number DESC, a.id DESC LIMIT ?");
         params_vec.push(Box::new(limit as i64));
 
-        let mut stmt = conn.prepare(&query)?;
+        let mut stmt = conn.prepare_cached(&query)?;
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(std::convert::AsRef::as_ref).collect();
 
@@ -1551,7 +1551,7 @@ impl Erc20Storage {
         query.push_str(" ORDER BY id ASC LIMIT ?");
         params_vec.push(Box::new(limit as i64));
 
-        let mut stmt = conn.prepare(&query)?;
+        let mut stmt = conn.prepare_cached(&query)?;
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(std::convert::AsRef::as_ref).collect();
 
@@ -1977,7 +1977,8 @@ impl Erc20Storage {
 
         let conn = self.conn.lock().unwrap();
         let mut existing = HashSet::with_capacity(tokens.len());
-        let mut stmt = conn.prepare("SELECT 1 FROM token_metadata WHERE token = ? LIMIT 1")?;
+        let mut stmt =
+            conn.prepare_cached("SELECT 1 FROM token_metadata WHERE token = ? LIMIT 1")?;
         for token in tokens {
             let mut rows = stmt.query(params![felt_to_blob(*token)])?;
             if rows.next()?.is_some() {
@@ -2076,8 +2077,9 @@ impl Erc20Storage {
         )>,
     > {
         let conn = self.conn.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT token, name, symbol, decimals, total_supply FROM token_metadata")?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT token, name, symbol, decimals, total_supply FROM token_metadata",
+        )?;
         let rows = stmt.query_map([], |row| {
             let token_bytes: Vec<u8> = row.get(0)?;
             let name: Option<String> = row.get(1)?;
@@ -2120,7 +2122,7 @@ impl Erc20Storage {
 
         let mut out = if let Some(cursor_token) = cursor {
             let cursor_blob = felt_to_blob(cursor_token);
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare_cached(
                 "SELECT token, name, symbol, decimals, total_supply
                  FROM token_metadata
                  WHERE token > ?1
@@ -2143,7 +2145,7 @@ impl Erc20Storage {
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         } else {
-            let mut stmt = conn.prepare(
+            let mut stmt = conn.prepare_cached(
                 "SELECT token, name, symbol, decimals, total_supply
                  FROM token_metadata
                  ORDER BY token ASC

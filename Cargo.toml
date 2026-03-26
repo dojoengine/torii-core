@@ -58,7 +58,7 @@ prost-types = "0.13"
 # HTTP server and routing
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.5", features = ["cors", "fs"] }
 hyper = "1.0"
 
 # Serialization
@@ -187,20 +187,25 @@ axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 futures.workspace = true
+hyper.workspace = true
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 prost-types.workspace = true
+rustls-pemfile = "2.0"
 serde_json.workspace = true
 serde.workspace = true
 sqlx.workspace = true
 starknet.workspace = true
 tokio-stream.workspace = true
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12", "ring"] }
 tokio-util.workspace = true
 tokio.workspace = true
 tonic-reflection.workspace = true
 tonic-web.workspace = true
 tonic.workspace = true
 torii-common.workspace = true
+tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 prost.workspace = true

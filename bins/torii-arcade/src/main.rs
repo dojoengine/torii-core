@@ -480,6 +480,10 @@ async fn run_indexer(config: Config) -> Result<()> {
         .add_sink_boxed(Box::new(ecs_sink))
         .add_sink_boxed(Box::new(arcade_projection_pipeline));
 
+    if let Some(tls) = config.tls_config()? {
+        torii_config = torii_config.with_tls(tls);
+    }
+
     if config.index_external_contracts {
         torii_config = torii_config
             .with_registry_cache(decoder_registry.clone())

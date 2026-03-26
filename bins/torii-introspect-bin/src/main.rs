@@ -60,6 +60,7 @@ const TOKEN_COMMAND_QUEUE_SIZE: usize = 4096;
 const TOKEN_METADATA_COMMAND_PARALLELISM: usize = 1;
 const TOKEN_METADATA_MAX_RETRIES: u8 = 3;
 const TOKEN_URI_FETCH_PARALLELISM: usize = 8;
+const DEFAULT_SQLITE_MAX_DB_CONNECTIONS: u32 = 4;
 
 struct OrderedSinkPipeline {
     name: String,
@@ -730,6 +731,9 @@ async fn run_with_postgres(
                     .await?,
                 )),
         ));
+    if let Some(tls) = config.tls_config()? {
+        torii_config = torii_config.with_tls(tls);
+    }
     if config.index_external_contracts {
         torii_config = torii_config
             .with_registry_cache(decoder_registry.clone())
@@ -859,7 +863,7 @@ async fn run_with_sqlite(
     let max_db_connections = match config.max_db_connections {
         Some(limit) => limit.max(1),
         None if is_sqlite_memory_path(storage_database_url) => 1,
-        None => 1,
+        None => DEFAULT_SQLITE_MAX_DB_CONNECTIONS,
     };
     let pool = Arc::new(
         SqlitePoolOptions::new()
@@ -938,6 +942,9 @@ async fn run_with_sqlite(
                     .await?,
                 )),
         ));
+    if let Some(tls) = config.tls_config()? {
+        torii_config = torii_config.with_tls(tls);
+    }
     if config.index_external_contracts {
         torii_config = torii_config
             .with_registry_cache(decoder_registry.clone())
