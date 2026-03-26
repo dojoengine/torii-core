@@ -118,7 +118,7 @@ pub struct ResolvedExternalContract {
 pub fn resolve_external_contract(contract_name: &str) -> Option<ResolvedExternalContract> {
     let normalized = contract_name
         .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .collect::<String>()
         .to_ascii_uppercase();
 

@@ -2934,7 +2934,7 @@ impl EcsService {
             }
 
             candidate_cursor = batch_cursor;
-            next_cursor = candidate_cursor.clone();
+            next_cursor.clone_from(&candidate_cursor);
         }
 
         if query.no_hashed_keys {

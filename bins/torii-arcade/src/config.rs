@@ -472,10 +472,7 @@ mod tests {
 
     #[test]
     fn external_contract_indexing_flag_can_disable_runtime_registration() {
-        let cfg = Config::parse_from([
-            "torii-arcade",
-            "--index-external-contracts=false",
-        ]);
+        let cfg = Config::parse_from(["torii-arcade", "--index-external-contracts=false"]);
         assert!(!cfg.index_external_contracts);
     }
 

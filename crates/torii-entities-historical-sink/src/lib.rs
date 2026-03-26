@@ -59,7 +59,7 @@ impl HistoricalNamespace {
 }
 
 impl From<()> for HistoricalNamespace {
-    fn from(_: ()) -> Self {
+    fn from((): ()) -> Self {
         Self::Default
     }
 }
@@ -191,7 +191,12 @@ impl EntitiesHistoricalSink {
     }
 
     async fn resolve_tracked_table(&self, table_id: Felt) -> Result<Option<TrackedTable>> {
-        if let Some(table) = self.tracked_tables.read().await.get(&table_id).cloned() {
+        let tracked = {
+            let tracked_tables = self.tracked_tables.read().await;
+            tracked_tables.get(&table_id).cloned()
+        };
+
+        if let Some(table) = tracked {
             return Ok(Some(table));
         }
 

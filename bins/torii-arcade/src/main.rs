@@ -17,8 +17,8 @@ use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{
     ContractEventConfig, EventExtractor, EventExtractorConfig, Extractor, RetryPolicy,
 };
-use torii::etl::EngineDb;
 use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
+use torii::etl::EngineDb;
 use torii::etl::TypeId;
 use torii::EtlConcurrencyConfig;
 use torii_arcade_sink::proto::arcade::arcade_server::ArcadeServer;
@@ -27,8 +27,8 @@ use torii_common::{MetadataFetcher, TokenUriService};
 use torii_config_common::apply_observability_env;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::external_contract::{
-    contract_type_from_decoder_ids, RegisterExternalContractCommandHandler,
-    RegisteredContractType, SharedContractTypeRegistry, SharedDecoderRegistry,
+    contract_type_from_decoder_ids, RegisterExternalContractCommandHandler, RegisteredContractType,
+    SharedContractTypeRegistry, SharedDecoderRegistry,
 };
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::store::sqlite::SqliteStore;
@@ -104,6 +104,7 @@ async fn load_persisted_contract_registries(
     Ok(())
 }
 
+#[allow(clippy::fn_params_excessive_bools)]
 fn installed_external_decoder_ids(
     enabled: bool,
     install_erc20: bool,
