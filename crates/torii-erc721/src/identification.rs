@@ -67,7 +67,7 @@ impl IdentificationRule for Erc721Rule {
 
         // ERC721 must have owner_of (which ERC20 doesn't have)
         if has_owner_of && has_balance_of && has_transfer_event {
-            tracing::trace!(
+            tracing::debug!(
                 target: "torii_erc721::identification",
                 "Contract matches ERC721 pattern"
             );

@@ -514,6 +514,7 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
         .database_root(&config.db_dir)
+        .cycle_interval(config.cycle_interval)
         .etl_concurrency(EtlConcurrencyConfig {
             max_prefetch_batches: config.max_prefetch_batches,
         })
@@ -745,8 +746,9 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("Torii configured, starting ETL pipeline...");
     tracing::info!("Enabled token types: {}", enabled_types.join(", "));
     tracing::info!(
-        "ETL concurrency: prefetch_batches={} rpc_parallelism={} metadata_parallelism={} metadata_queue_capacity={} metadata_max_retries={}",
+        "ETL concurrency: prefetch_batches={} cycle_interval={}s rpc_parallelism={} metadata_parallelism={} metadata_queue_capacity={} metadata_max_retries={}",
         config.max_prefetch_batches,
+        config.cycle_interval,
         config.rpc_parallelism,
         config.metadata_parallelism,
         config.metadata_queue_capacity,

@@ -1320,7 +1320,9 @@ fn build_tls_acceptor(
     let mut server_config = tokio_rustls::rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(cert_chain, private_key)?;
-    server_config.alpn_protocols = config.alpn_protocols.clone();
+    server_config
+        .alpn_protocols
+        .clone_from(&config.alpn_protocols);
 
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)))
 }

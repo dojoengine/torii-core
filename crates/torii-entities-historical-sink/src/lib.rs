@@ -13,6 +13,7 @@ use torii::etl::extractor::ExtractionBatch;
 use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
 use torii_introspect::events::{CreateTable, IntrospectBody, IntrospectMsg, UpdateTable};
 use torii_introspect::schema::TableSchema;
+use torii_runtime_common::database::DEFAULT_SQLITE_MAX_CONNECTIONS;
 
 const INTROSPECT_TYPE: TypeId = TypeId::new("introspect");
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,7 +128,7 @@ impl EntitiesHistoricalSink {
         };
         let pool = AnyPoolOptions::new()
             .max_connections(max_connections.unwrap_or(if backend == DbBackend::Sqlite {
-                1
+                DEFAULT_SQLITE_MAX_CONNECTIONS
             } else {
                 5
             }))

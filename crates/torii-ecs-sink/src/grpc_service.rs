@@ -37,6 +37,7 @@ use torii_dojo::store::DojoStoreTrait;
 use torii_dojo::DojoTable;
 use torii_introspect::events::{CreateTable, Record, UpdateTable};
 use torii_introspect::schema::TableSchema;
+use torii_runtime_common::database::DEFAULT_SQLITE_MAX_CONNECTIONS;
 
 use crate::proto::types::{
     self, clause::ClauseType, member_value::ValueType, ComparisonOperator, ContractType,
@@ -59,7 +60,6 @@ use crate::proto::world::{
     WorldsResponse,
 };
 
-const DEFAULT_SQLITE_MAX_CONNECTIONS: u32 = 500;
 const SUBSCRIPTION_SEEN_CACHE_CAPACITY: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -272,7 +272,7 @@ struct TokenBalanceSubscription {
     contract_addresses: Vec<Vec<u8>>,
     account_addresses: Vec<Vec<u8>>,
     token_ids: Vec<Vec<u8>>,
-    seen: SeenCache,
+    latest: HashMap<String, Vec<u8>>,
     sender: mpsc::Sender<Result<SubscribeTokenBalancesResponse, Status>>,
 }
 
@@ -291,14 +291,12 @@ struct TransactionSubscription {
 }
 
 impl EntitySubscriptionKey {
-    fn new(clause: &Option<types::Clause>, world_addresses: &HashSet<Vec<u8>>) -> Self {
+    fn new(clause: Option<&types::Clause>, world_addresses: &HashSet<Vec<u8>>) -> Self {
         let mut world_addresses = world_addresses.iter().cloned().collect::<Vec<_>>();
         world_addresses.sort();
 
         Self {
-            clause_bytes: clause
-                .as_ref()
-                .map_or_else(Vec::new, Message::encode_to_vec),
+            clause_bytes: clause.map_or_else(Vec::new, Message::encode_to_vec),
             world_addresses,
         }
     }
@@ -306,7 +304,8 @@ impl EntitySubscriptionKey {
 
 impl EntitySubscriptionRegistry {
     fn insert(&mut self, subscription_id: u64, subscription: EntitySubscription) {
-        let key = EntitySubscriptionKey::new(&subscription.clause, &subscription.world_addresses);
+        let key =
+            EntitySubscriptionKey::new(subscription.clause.as_ref(), &subscription.world_addresses);
         let sender = subscription.sender.clone();
 
         self.groups
@@ -333,18 +332,19 @@ impl EntitySubscriptionRegistry {
             return false;
         };
 
-        let next_key = EntitySubscriptionKey::new(&clause, &world_addresses);
+        let next_key = EntitySubscriptionKey::new(clause.as_ref(), &world_addresses);
         if entry.key == next_key {
             return false;
         }
 
         let sender = entry.sender.clone();
         let previous_key = entry.key.clone();
-        let mut remove_previous_group = false;
-        if let Some(group) = self.groups.get_mut(&previous_key) {
+        let remove_previous_group = if let Some(group) = self.groups.get_mut(&previous_key) {
             group.senders.remove(&subscription_id);
-            remove_previous_group = group.senders.is_empty();
-        }
+            group.senders.is_empty()
+        } else {
+            false
+        };
         if remove_previous_group {
             self.groups.remove(&previous_key);
         }
@@ -368,11 +368,12 @@ impl EntitySubscriptionRegistry {
             return false;
         };
 
-        let mut remove_group = false;
-        if let Some(group) = self.groups.get_mut(&entry.key) {
+        let remove_group = if let Some(group) = self.groups.get_mut(&entry.key) {
             group.senders.remove(&subscription_id);
-            remove_group = group.senders.is_empty();
-        }
+            group.senders.is_empty()
+        } else {
+            false
+        };
         if remove_group {
             self.groups.remove(&entry.key);
         }
@@ -2878,12 +2879,12 @@ impl EcsService {
         ))
     }
 
-    async fn snapshot_token_balance_seen(
+    async fn snapshot_token_balance_state(
         &self,
         account_addresses: &[Vec<u8>],
         contract_addresses: &[Vec<u8>],
         token_ids: &[Vec<u8>],
-    ) -> Result<SeenCache> {
+    ) -> Result<HashMap<String, Vec<u8>>> {
         let (balances, _) = self
             .load_token_balances(&types::TokenBalanceQuery {
                 account_addresses: account_addresses.to_vec(),
@@ -2897,12 +2898,7 @@ impl EcsService {
                 }),
             })
             .await?;
-        Ok(SeenCache::from_items(
-            balances
-                .into_iter()
-                .map(|balance| token_balance_subscription_key(&balance)),
-            SUBSCRIPTION_SEEN_CACHE_CAPACITY,
-        ))
+        Ok(token_balance_subscription_state(&balances))
     }
 
     async fn snapshot_token_transfer_seen(
@@ -3031,7 +3027,7 @@ impl EcsService {
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(1)).await;
-                let (account_addresses, contract_addresses, token_ids, seen, sender) = {
+                let (account_addresses, contract_addresses, token_ids, latest, sender) = {
                     let subscriptions = service.state.token_balance_subscriptions.lock().await;
                     let Some(subscription) = subscriptions.get(&subscription_id) else {
                         break;
@@ -3040,7 +3036,7 @@ impl EcsService {
                         subscription.account_addresses.clone(),
                         subscription.contract_addresses.clone(),
                         subscription.token_ids.clone(),
-                        subscription.seen.snapshot(),
+                        subscription.latest.clone(),
                         subscription.sender.clone(),
                     )
                 };
@@ -3061,10 +3057,11 @@ impl EcsService {
                     Ok((balances, _)) => balances,
                     Err(_) => continue,
                 };
-                let mut sent = Vec::new();
+                let current = token_balance_subscription_state(&balances);
                 for balance in balances {
-                    let key = token_balance_subscription_key(&balance);
-                    if seen.contains(&key) {
+                    let identity = token_balance_identity_key(&balance);
+                    let fingerprint = token_balance_state_fingerprint(&balance);
+                    if latest.get(&identity) == Some(&fingerprint) {
                         continue;
                     }
                     if sender
@@ -3083,18 +3080,15 @@ impl EcsService {
                             .remove(&subscription_id);
                         return;
                     }
-                    sent.push(key);
                 }
-                if !sent.is_empty() {
-                    if let Some(subscription) = service
-                        .state
-                        .token_balance_subscriptions
-                        .lock()
-                        .await
-                        .get_mut(&subscription_id)
-                    {
-                        subscription.seen.extend(sent);
-                    }
+                if let Some(subscription) = service
+                    .state
+                    .token_balance_subscriptions
+                    .lock()
+                    .await
+                    .get_mut(&subscription_id)
+                {
+                    subscription.latest = current;
                 }
             }
         });
@@ -4441,8 +4435,8 @@ impl World for EcsService {
             }))
             .await
             .map_err(|_| Status::internal("subscription setup failed"))?;
-        let seen = self
-            .snapshot_token_balance_seen(
+        let latest = self
+            .snapshot_token_balance_state(
                 &request.account_addresses,
                 &request.contract_addresses,
                 &request.token_ids,
@@ -4455,7 +4449,7 @@ impl World for EcsService {
                 contract_addresses: request.contract_addresses,
                 account_addresses: request.account_addresses,
                 token_ids: request.token_ids,
-                seen,
+                latest,
                 sender,
             },
         );
@@ -4473,8 +4467,8 @@ impl World for EcsService {
         request: Request<UpdateTokenBalancesSubscriptionRequest>,
     ) -> Result<Response<()>, Status> {
         let request = request.into_inner();
-        let seen = self
-            .snapshot_token_balance_seen(
+        let latest = self
+            .snapshot_token_balance_state(
                 &request.account_addresses,
                 &request.contract_addresses,
                 &request.token_ids,
@@ -4491,7 +4485,7 @@ impl World for EcsService {
             subscription.contract_addresses = request.contract_addresses;
             subscription.account_addresses = request.account_addresses;
             subscription.token_ids = request.token_ids;
-            subscription.seen = seen;
+            subscription.latest = latest;
         }
         Ok(Response::new(()))
     }
@@ -5329,14 +5323,14 @@ fn type_to_proto_value(type_def: &TypeDef, value: &Value) -> Result<types::Ty> {
             )),
         }),
         TypeDef::U64 => TyType::Primitive(types::Primitive {
-            primitive_type: Some(types::primitive::PrimitiveType::U64(value_as_u64(&value))),
+            primitive_type: Some(types::primitive::PrimitiveType::U64(value_as_u64(value))),
         }),
         TypeDef::Felt252
         | TypeDef::ClassHash
         | TypeDef::ContractAddress
         | TypeDef::StorageAddress
         | TypeDef::StorageBaseAddress => {
-            let bytes = value_as_felt_bytes(&value)?;
+            let bytes = value_as_felt_bytes(value)?;
             let primitive = match type_def {
                 TypeDef::ClassHash => types::primitive::PrimitiveType::ClassHash(bytes),
                 TypeDef::ContractAddress
@@ -5352,27 +5346,27 @@ fn type_to_proto_value(type_def: &TypeDef, value: &Value) -> Result<types::Ty> {
         }
         TypeDef::EthAddress => TyType::Primitive(types::Primitive {
             primitive_type: Some(types::primitive::PrimitiveType::EthAddress(
-                value_as_fixed_unsigned_bytes(&value, 20)?,
+                value_as_fixed_unsigned_bytes(value, 20)?,
             )),
         }),
         TypeDef::U128 => TyType::Primitive(types::Primitive {
             primitive_type: Some(types::primitive::PrimitiveType::U128(
-                value_as_fixed_unsigned_bytes(&value, 16)?,
+                value_as_fixed_unsigned_bytes(value, 16)?,
             )),
         }),
         TypeDef::I128 => TyType::Primitive(types::Primitive {
             primitive_type: Some(types::primitive::PrimitiveType::I128(
-                value_as_fixed_signed_bytes(&value, 16)?,
+                value_as_fixed_signed_bytes(value, 16)?,
             )),
         }),
         TypeDef::U256 => TyType::Primitive(types::Primitive {
             primitive_type: Some(types::primitive::PrimitiveType::U256(
-                value_as_fixed_unsigned_bytes(&value, 32)?,
+                value_as_fixed_unsigned_bytes(value, 32)?,
             )),
         }),
         TypeDef::U512 => TyType::Primitive(types::Primitive {
             primitive_type: Some(types::primitive::PrimitiveType::U256(
-                value_as_fixed_unsigned_bytes(&value, 64)?,
+                value_as_fixed_unsigned_bytes(value, 64)?,
             )),
         }),
         TypeDef::Utf8String
@@ -5380,7 +5374,7 @@ fn type_to_proto_value(type_def: &TypeDef, value: &Value) -> Result<types::Ty> {
         | TypeDef::ByteArray
         | TypeDef::ByteArrayEncoded(_)
         | TypeDef::Bytes31
-        | TypeDef::Bytes31Encoded(_) => TyType::Bytearray(value_as_string(&value)),
+        | TypeDef::Bytes31Encoded(_) => TyType::Bytearray(value_as_string(value)),
         TypeDef::Struct(def) => {
             let object = value.as_object();
             TyType::Struct(types::Struct {
@@ -5404,8 +5398,7 @@ fn type_to_proto_value(type_def: &TypeDef, value: &Value) -> Result<types::Ty> {
         TypeDef::Tuple(def) => TyType::Tuple(types::Array {
             children: value
                 .as_array()
-                .map(Vec::as_slice)
-                .unwrap_or(&[])
+                .map_or(&[] as &[Value], Vec::as_slice)
                 .iter()
                 .zip(def.elements.iter())
                 .map(|(item, inner)| type_to_proto_value(inner, item))
@@ -5414,8 +5407,7 @@ fn type_to_proto_value(type_def: &TypeDef, value: &Value) -> Result<types::Ty> {
         TypeDef::Array(def) => TyType::Array(types::Array {
             children: value
                 .as_array()
-                .map(Vec::as_slice)
-                .unwrap_or(&[])
+                .map_or(&[] as &[Value], Vec::as_slice)
                 .iter()
                 .map(|item| type_to_proto_value(&def.type_def, item))
                 .collect::<Result<Vec<_>>>()?,
@@ -5423,8 +5415,7 @@ fn type_to_proto_value(type_def: &TypeDef, value: &Value) -> Result<types::Ty> {
         TypeDef::FixedArray(def) => TyType::FixedSizeArray(types::FixedSizeArray {
             children: value
                 .as_array()
-                .map(Vec::as_slice)
-                .unwrap_or(&[])
+                .map_or(&[] as &[Value], Vec::as_slice)
                 .iter()
                 .map(|item| type_to_proto_value(&def.type_def, item))
                 .collect::<Result<Vec<_>>>()?,
@@ -5500,10 +5491,10 @@ fn type_to_proto_value(type_def: &TypeDef, value: &Value) -> Result<types::Ty> {
             if let Some(err) = object.and_then(|object| object.get("Err")) {
                 return type_to_proto_value(&def.err, err);
             }
-            TyType::Bytearray(value_as_string(&value))
+            TyType::Bytearray(value_as_string(value))
         }
         TypeDef::None | TypeDef::Felt252Dict(_) | TypeDef::Ref(_) | TypeDef::Custom(_) => {
-            TyType::Bytearray(value_as_string(&value))
+            TyType::Bytearray(value_as_string(value))
         }
     };
 
@@ -5848,7 +5839,7 @@ fn token_subscription_key(token: &types::Token) -> String {
     )
 }
 
-fn token_balance_subscription_key(balance: &types::TokenBalance) -> String {
+fn token_balance_identity_key(balance: &types::TokenBalance) -> String {
     format!(
         "{}:{}:{}",
         hex::encode(&balance.contract_address),
@@ -5859,6 +5850,22 @@ fn token_balance_subscription_key(balance: &types::TokenBalance) -> String {
             .map(hex::encode)
             .unwrap_or_default()
     )
+}
+
+fn token_balance_state_fingerprint(balance: &types::TokenBalance) -> Vec<u8> {
+    balance.balance.clone()
+}
+
+fn token_balance_subscription_state(balances: &[types::TokenBalance]) -> HashMap<String, Vec<u8>> {
+    balances
+        .iter()
+        .map(|balance| {
+            (
+                token_balance_identity_key(balance),
+                token_balance_state_fingerprint(balance),
+            )
+        })
+        .collect()
 }
 
 fn canonical_felt_bytes_from_db(bytes: &[u8]) -> Result<Vec<u8>> {
@@ -6370,6 +6377,7 @@ mod tests {
     }
 
     async fn explain_query_plan_details(conn: &mut PoolConnection<Any>, sql: &str) -> Vec<String> {
+        // sqlite-dynamic-ok: test-only helper that needs to wrap arbitrary SQL in EXPLAIN QUERY PLAN.
         sqlx::query(&format!("EXPLAIN QUERY PLAN {sql}"))
             .fetch_all(&mut **conn)
             .await
@@ -7415,6 +7423,122 @@ mod tests {
         drop(stream);
 
         wait_for_subscription_count(&service, SubscriptionKind::Token, 0).await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_token_balances_emits_updates_for_existing_balance_rows() {
+        let db_path = test_db_path("token-balances-live-updates");
+        let erc20_url = temp_sqlite_url("erc20-token-balances-live-updates");
+        let service = EcsService::new(&db_path, Some(1), Some(&erc20_url), None, None)
+            .await
+            .expect("service init");
+        service
+            .attach_erc_databases()
+            .await
+            .expect("attach erc dbs");
+
+        sqlx::query(
+            "CREATE TABLE erc20.balances (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token BLOB NOT NULL,
+                wallet BLOB NOT NULL,
+                balance BLOB NOT NULL,
+                last_block TEXT NOT NULL,
+                last_tx_hash BLOB NOT NULL
+            )",
+        )
+        .execute(&service.state.pool)
+        .await
+        .expect("create erc20 balances");
+
+        let token = Felt::from(0x99_u64).to_bytes_be().to_vec();
+        let wallet = Felt::from(0x55_u64).to_bytes_be().to_vec();
+        let original_balance = u256_bytes_from_u64(1);
+        let updated_balance = u256_bytes_from_u64(5);
+
+        sqlx::query(
+            "INSERT INTO erc20.balances (token, wallet, balance, last_block, last_tx_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(&token)
+        .bind(&wallet)
+        .bind(&original_balance)
+        .bind("1")
+        .bind(vec![0_u8; 32])
+        .execute(&service.state.pool)
+        .await
+        .expect("insert erc20 balance");
+
+        let response = service
+            .subscribe_token_balances(Request::new(SubscribeTokenBalancesRequest {
+                account_addresses: vec![wallet.clone()],
+                contract_addresses: vec![token.clone()],
+                token_ids: vec![],
+            }))
+            .await
+            .expect("subscribe token balances");
+        let mut stream = response.into_inner();
+
+        let setup = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("setup timeout")
+            .expect("setup frame")
+            .expect("setup ok");
+        let subscription_id = setup.subscription_id;
+        assert!(setup.balance.is_none());
+
+        sqlx::query(
+            "UPDATE erc20.balances
+             SET balance = ?1, last_block = ?2, last_tx_hash = ?3
+             WHERE token = ?4 AND wallet = ?5",
+        )
+        .bind(&updated_balance)
+        .bind("2")
+        .bind(vec![1_u8; 32])
+        .bind(&token)
+        .bind(&wallet)
+        .execute(&service.state.pool)
+        .await
+        .expect("update erc20 balance");
+
+        let first_update = timeout(Duration::from_secs(3), stream.next())
+            .await
+            .expect("first update timeout")
+            .expect("first update frame")
+            .expect("first update ok");
+        assert_eq!(first_update.subscription_id, subscription_id);
+        assert_eq!(
+            first_update.balance.expect("first balance payload").balance,
+            updated_balance
+        );
+
+        sqlx::query(
+            "UPDATE erc20.balances
+             SET balance = ?1, last_block = ?2, last_tx_hash = ?3
+             WHERE token = ?4 AND wallet = ?5",
+        )
+        .bind(&original_balance)
+        .bind("3")
+        .bind(vec![2_u8; 32])
+        .bind(&token)
+        .bind(&wallet)
+        .execute(&service.state.pool)
+        .await
+        .expect("restore erc20 balance");
+
+        let second_update = timeout(Duration::from_secs(3), stream.next())
+            .await
+            .expect("second update timeout")
+            .expect("second update frame")
+            .expect("second update ok");
+        assert_eq!(second_update.subscription_id, subscription_id);
+        assert_eq!(
+            second_update
+                .balance
+                .expect("second balance payload")
+                .balance,
+            original_balance
+        );
     }
 
     #[tokio::test]
