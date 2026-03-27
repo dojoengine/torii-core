@@ -74,53 +74,61 @@ impl PgTableUpgrade for Table {
             Uint8,
         };
         use introspect_types::PrimaryTypeDef::{
+            Bool as PBool, Bytes31 as PBytes31, Bytes31Encoded as PBytes31Encoded,
+            ClassHash as PClassHash, ContractAddress as PContractAddress,
+            EthAddress as PEthAddress, Felt252 as PFelt252, ShortUtf8 as PShortUtf8,
+            StorageAddress as PStorageAddress, StorageBaseAddress as PStorageBaseAddress,
+            I128 as PI128, I16 as PI16, I32 as PI32, I64 as PI64, I8 as PI8, U128 as PU128,
+            U16 as PU16, U32 as PU32, U64 as PU64, U8 as PU8,
+        };
+        use introspect_types::TypeDef::{
             Bool, Bytes31, Bytes31Encoded, ClassHash, ContractAddress, EthAddress, Felt252,
             ShortUtf8, StorageAddress, StorageBaseAddress, I128, I16, I32, I64, I8, U128, U16, U32,
             U64, U8,
         };
         match (&self.primary.type_def, new) {
-            (Bool, Bool)
-            | (U8, U8)
-            | (U16, U16)
-            | (U32, U32)
-            | (U64, U64)
-            | (U128, U128)
-            | (I8, I8)
-            | (I16, I16)
-            | (I32, I32)
-            | (I64, I64)
-            | (I128, I128)
-            | (ShortUtf8, ShortUtf8)
-            | (EthAddress, EthAddress)
-            | (ClassHash, ClassHash)
-            | (ContractAddress, ContractAddress)
-            | (StorageAddress, StorageAddress)
-            | (StorageBaseAddress, StorageBaseAddress)
-            | (Bytes31, Bytes31)
-            | (Bytes31Encoded(_), Bytes31Encoded(_))
-            | (Felt252, Felt252) => Ok(None),
-            (Bool, U8) => self.primary.type_def.update_as(U8, Uint8),
-            (Bool | U8, U16) => self.primary.type_def.update_as(U16, Uint16),
-            (Bool | U8 | U16, U32) => self.primary.type_def.update_as(U32, Uint32),
-            (Bool | U8 | U16 | U32, U64) => self.primary.type_def.update_as(U64, Uint64),
-            (Bool | U8 | U16 | U32 | U64, U128) => self.primary.type_def.update_as(U128, Uint128),
-            (Bool | U8, I8) => self.primary.type_def.update_as(I8, SmallInt),
-            (Bool | U8 | I8, I16) => self.primary.type_def.update_as(I16, SmallInt),
-            (Bool | U8 | U16 | I8 | I16, I32) => self.primary.type_def.update_as(I32, Int),
-            (Bool | U8 | U16 | U32 | I8 | I16 | I32, I64) => {
+            (Bool, PBool)
+            | (U8, PU8)
+            | (U16, PU16)
+            | (U32, PU32)
+            | (U64, PU64)
+            | (U128, PU128)
+            | (I8, PI8)
+            | (I16, PI16)
+            | (I32, PI32)
+            | (I64, PI64)
+            | (I128, PI128)
+            | (ShortUtf8, PShortUtf8)
+            | (EthAddress, PEthAddress)
+            | (ClassHash, PClassHash)
+            | (ContractAddress, PContractAddress)
+            | (StorageAddress, PStorageAddress)
+            | (StorageBaseAddress, PStorageBaseAddress)
+            | (Bytes31, PBytes31)
+            | (Bytes31Encoded(_), PBytes31Encoded(_))
+            | (Felt252, PFelt252) => Ok(None),
+            (Bool, PU8) => self.primary.type_def.update_as(U8, Uint8),
+            (Bool | U8, PU16) => self.primary.type_def.update_as(U16, Uint16),
+            (Bool | U8 | U16, PU32) => self.primary.type_def.update_as(U32, Uint32),
+            (Bool | U8 | U16 | U32, PU64) => self.primary.type_def.update_as(U64, Uint64),
+            (Bool | U8 | U16 | U32 | U64, PU128) => self.primary.type_def.update_as(U128, Uint128),
+            (Bool | U8, PI8) => self.primary.type_def.update_as(I8, SmallInt),
+            (Bool | U8 | I8, PI16) => self.primary.type_def.update_as(I16, SmallInt),
+            (Bool | U8 | U16 | I8 | I16, PI32) => self.primary.type_def.update_as(I32, Int),
+            (Bool | U8 | U16 | U32 | I8 | I16 | I32, PI64) => {
                 self.primary.type_def.update_as(I64, BigInt)
             }
-            (Bool | U8 | U16 | U32 | U64 | I8 | I16 | I32 | I64, I128) => {
+            (Bool | U8 | U16 | U32 | U64 | I8 | I16 | I32 | I64, PI128) => {
                 self.primary.type_def.update_as(I128, Int128)
             }
             (
                 EthAddress,
-                ClassHash | ContractAddress | StorageAddress | StorageBaseAddress | Felt252,
-            ) => self.primary.type_def.update_to(new, PgFelt252),
+                PClassHash | PContractAddress | PStorageAddress | PStorageBaseAddress | PFelt252,
+            ) => self.primary.type_def.update_to(&new.into(), PgFelt252),
             (
                 ClassHash | ContractAddress | StorageAddress | StorageBaseAddress | Felt252,
-                ClassHash | ContractAddress | StorageAddress | StorageBaseAddress | Felt252,
-            ) => self.primary.type_def.update_no_change(new),
+                PClassHash | PContractAddress | PStorageAddress | PStorageBaseAddress | PFelt252,
+            ) => self.primary.type_def.update_no_change(&new.into()),
             _ => UpgradeError::primary_upgrade_err(&self.primary.type_def, new),
         }
     }

@@ -158,7 +158,7 @@ impl From<DbTable> for ((String, Felt), Table) {
                 namespace: value.namespace,
                 name: value.name,
                 owner: value.owner,
-                primary: value.primary,
+                primary: value.primary.into(),
                 columns: value.columns.into_hash_map(),
                 dead: value.dead.into_hash_map(),
                 alive: value.alive,

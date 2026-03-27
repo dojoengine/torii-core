@@ -113,14 +113,14 @@ struct ActivityInsertRow {
     token: Vec<u8>,
     ref_id: i64,
     role: &'static str,
-    block_number: i64,
+    block_number: String,
 }
 
 struct BalanceUpsertRow {
     token: Vec<u8>,
     wallet: Vec<u8>,
     balance: Vec<u8>,
-    last_block: i64,
+    last_block: String,
     last_tx_hash: Vec<u8>,
 }
 
@@ -129,7 +129,7 @@ struct AdjustmentInsertRow {
     wallet: Vec<u8>,
     computed_balance: Vec<u8>,
     actual_balance: Vec<u8>,
-    adjusted_at_block: i64,
+    adjusted_at_block: String,
     tx_hash: Vec<u8>,
 }
 
@@ -357,9 +357,9 @@ impl Erc20Storage {
                     from_addr BYTEA NOT NULL,
                     to_addr BYTEA NOT NULL,
                     amount BYTEA NOT NULL,
-                    block_number BIGINT NOT NULL,
+                    block_number TEXT NOT NULL,
                     tx_hash BYTEA NOT NULL,
-                    timestamp BIGINT DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+                    timestamp TEXT DEFAULT (EXTRACT(EPOCH FROM NOW())::TEXT),
                     UNIQUE(token, tx_hash, from_addr, to_addr)
                 );
                 CREATE INDEX IF NOT EXISTS idx_transfers_token ON erc20.transfers(token);
@@ -376,9 +376,9 @@ impl Erc20Storage {
                     owner BYTEA NOT NULL,
                     spender BYTEA NOT NULL,
                     amount BYTEA NOT NULL,
-                    block_number BIGINT NOT NULL,
+                    block_number TEXT NOT NULL,
                     tx_hash BYTEA NOT NULL,
-                    timestamp BIGINT DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+                    timestamp TEXT DEFAULT (EXTRACT(EPOCH FROM NOW())::TEXT),
                     UNIQUE(token, tx_hash, owner, spender)
                 );
                 CREATE INDEX IF NOT EXISTS idx_approvals_owner ON erc20.approvals(owner, block_number DESC);
@@ -391,7 +391,7 @@ impl Erc20Storage {
                     token BYTEA NOT NULL,
                     transfer_id BIGINT NOT NULL REFERENCES erc20.transfers(id),
                     direction TEXT NOT NULL CHECK(direction IN ('sent', 'received', 'both')),
-                    block_number BIGINT NOT NULL
+                    block_number TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_wallet_activity_wallet_block ON erc20.wallet_activity(wallet_address, block_number DESC);
                 CREATE INDEX IF NOT EXISTS idx_wallet_activity_wallet_token ON erc20.wallet_activity(wallet_address, token, block_number DESC);
@@ -403,7 +403,7 @@ impl Erc20Storage {
                     token BYTEA NOT NULL,
                     approval_id BIGINT NOT NULL REFERENCES erc20.approvals(id),
                     role TEXT NOT NULL CHECK(role IN ('owner', 'spender', 'both')),
-                    block_number BIGINT NOT NULL
+                    block_number TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_approval_activity_account_block ON erc20.approval_activity(account_address, block_number DESC);
                 CREATE INDEX IF NOT EXISTS idx_approval_activity_account_token ON erc20.approval_activity(account_address, token, block_number DESC);
@@ -414,9 +414,9 @@ impl Erc20Storage {
                     token BYTEA NOT NULL,
                     wallet BYTEA NOT NULL,
                     balance BYTEA NOT NULL,
-                    last_block BIGINT NOT NULL,
+                    last_block TEXT NOT NULL,
                     last_tx_hash BYTEA NOT NULL,
-                    updated_at BIGINT DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+                    updated_at TEXT DEFAULT (EXTRACT(EPOCH FROM NOW())::TEXT),
                     UNIQUE(token, wallet)
                 );
                 CREATE INDEX IF NOT EXISTS idx_balances_token ON erc20.balances(token);
@@ -428,9 +428,9 @@ impl Erc20Storage {
                     wallet BYTEA NOT NULL,
                     computed_balance BYTEA NOT NULL,
                     actual_balance BYTEA NOT NULL,
-                    adjusted_at_block BIGINT NOT NULL,
+                    adjusted_at_block TEXT NOT NULL,
                     tx_hash BYTEA NOT NULL,
-                    created_at BIGINT DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT)
+                    created_at TEXT DEFAULT (EXTRACT(EPOCH FROM NOW())::TEXT)
                 );
                 CREATE INDEX IF NOT EXISTS idx_adjustments_wallet ON erc20.balance_adjustments(wallet);
                 CREATE INDEX IF NOT EXISTS idx_adjustments_token ON erc20.balance_adjustments(token);
@@ -439,7 +439,8 @@ impl Erc20Storage {
                     token BYTEA PRIMARY KEY,
                     name TEXT,
                     symbol TEXT,
-                    decimals BIGINT
+                    decimals TEXT,
+                    total_supply BYTEA
                 );
                 ",
                 )
@@ -515,9 +516,9 @@ impl Erc20Storage {
                 from_addr BLOB NOT NULL,
                 to_addr BLOB NOT NULL,
                 amount BLOB NOT NULL,
-                block_number INTEGER NOT NULL,
+                block_number TEXT NOT NULL,
                 tx_hash BLOB NOT NULL,
-                timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                timestamp TEXT DEFAULT (strftime('%s', 'now')),
                 UNIQUE(token, tx_hash, from_addr, to_addr)
             )",
             [],
@@ -567,9 +568,9 @@ impl Erc20Storage {
                 owner BLOB NOT NULL,
                 spender BLOB NOT NULL,
                 amount BLOB NOT NULL,
-                block_number INTEGER NOT NULL,
+                block_number TEXT NOT NULL,
                 tx_hash BLOB NOT NULL,
-                timestamp INTEGER DEFAULT (strftime('%s', 'now')),
+                timestamp TEXT DEFAULT (strftime('%s', 'now')),
                 UNIQUE(token, tx_hash, owner, spender)
             )",
             [],
@@ -610,7 +611,7 @@ impl Erc20Storage {
                 token BLOB NOT NULL,
                 transfer_id INTEGER NOT NULL,
                 direction TEXT NOT NULL CHECK(direction IN ('sent', 'received', 'both')),
-                block_number INTEGER NOT NULL,
+                block_number TEXT NOT NULL,
                 FOREIGN KEY (transfer_id) REFERENCES transfers(id)
             )",
             [],
@@ -645,7 +646,7 @@ impl Erc20Storage {
                 token BLOB NOT NULL,
                 approval_id INTEGER NOT NULL,
                 role TEXT NOT NULL CHECK(role IN ('owner', 'spender', 'both')),
-                block_number INTEGER NOT NULL,
+                block_number TEXT NOT NULL,
                 FOREIGN KEY (approval_id) REFERENCES approvals(id)
             )",
             [],
@@ -677,9 +678,9 @@ impl Erc20Storage {
                 token BLOB NOT NULL,
                 wallet BLOB NOT NULL,
                 balance BLOB NOT NULL,
-                last_block INTEGER NOT NULL,
+                last_block TEXT NOT NULL,
                 last_tx_hash BLOB NOT NULL,
-                updated_at INTEGER DEFAULT (strftime('%s', 'now')),
+                updated_at TEXT DEFAULT (strftime('%s', 'now')),
                 UNIQUE(token, wallet)
             )",
             [],
@@ -704,9 +705,9 @@ impl Erc20Storage {
                 wallet BLOB NOT NULL,
                 computed_balance BLOB NOT NULL,
                 actual_balance BLOB NOT NULL,
-                adjusted_at_block INTEGER NOT NULL,
+                adjusted_at_block TEXT NOT NULL,
                 tx_hash BLOB NOT NULL,
-                created_at INTEGER DEFAULT (strftime('%s', 'now'))
+                created_at TEXT DEFAULT (strftime('%s', 'now'))
             )",
             [],
         )?;
@@ -727,7 +728,8 @@ impl Erc20Storage {
                 token BLOB PRIMARY KEY,
                 name TEXT,
                 symbol TEXT,
-                decimals INTEGER
+                decimals TEXT,
+                total_supply BLOB
             )",
             [],
         )?;
@@ -950,21 +952,20 @@ impl Erc20Storage {
                 let amount_blob = u256_to_blob(transfer.amount);
                 let tx_hash_blob = felt_to_blob(transfer.tx_hash);
 
-                // Insert transfer
                 let rows = transfer_stmt.execute(params![
                     &token_blob,
                     &from_blob,
                     &to_blob,
                     &amount_blob,
-                    transfer.block_number,
+                    transfer.block_number.to_string(),
                     &tx_hash_blob,
-                    transfer.timestamp,
+                    transfer.timestamp.map(|t| t.to_string()),
                 ])?;
 
                 if rows > 0 {
                     inserted += 1;
                     let transfer_id = tx.last_insert_rowid();
-                    let block_number = transfer.block_number as i64;
+                    let block_number = transfer.block_number.to_string();
 
                     // Insert wallet activity records
                     // This enables O(log n) wallet queries instead of O(n) OR scans
@@ -987,7 +988,7 @@ impl Erc20Storage {
                                 token: token_blob.clone(),
                                 ref_id: transfer_id,
                                 role: "sent",
-                                block_number,
+                                block_number: block_number.clone(),
                             });
                         }
                         // Receiver record
@@ -1047,21 +1048,20 @@ impl Erc20Storage {
                 let amount_blob = u256_to_blob(approval.amount);
                 let tx_hash_blob = felt_to_blob(approval.tx_hash);
 
-                // Insert approval
                 let rows = approval_stmt.execute(params![
                     &token_blob,
                     &owner_blob,
                     &spender_blob,
                     &amount_blob,
-                    approval.block_number,
+                    approval.block_number.to_string(),
                     &tx_hash_blob,
-                    approval.timestamp,
+                    approval.timestamp.map(|t| t.to_string()),
                 ])?;
 
                 if rows > 0 {
                     inserted += 1;
                     let approval_id = tx.last_insert_rowid();
-                    let block_number = approval.block_number as i64;
+                    let block_number = approval.block_number.to_string();
 
                     // Insert approval activity records
                     if approval.owner != Felt::ZERO
@@ -1083,7 +1083,7 @@ impl Erc20Storage {
                                 token: token_blob.clone(),
                                 ref_id: approval_id,
                                 role: "owner",
-                                block_number,
+                                block_number: block_number.clone(),
                             });
                         }
                         // Spender record
@@ -1210,19 +1210,19 @@ impl Erc20Storage {
         // Block range filters
         if let Some(block_min) = block_from {
             query.push_str(" AND t.block_number >= ?");
-            params_vec.push(Box::new(block_min as i64));
+            params_vec.push(Box::new(block_min.to_string()));
         }
 
         if let Some(block_max) = block_to {
             query.push_str(" AND t.block_number <= ?");
-            params_vec.push(Box::new(block_max as i64));
+            params_vec.push(Box::new(block_max.to_string()));
         }
 
         // Cursor-based pagination
         if let Some(c) = cursor {
             query.push_str(" AND (t.block_number < ? OR (t.block_number = ? AND t.id < ?))");
-            params_vec.push(Box::new(c.block_number as i64));
-            params_vec.push(Box::new(c.block_number as i64));
+            params_vec.push(Box::new(c.block_number.to_string()));
+            params_vec.push(Box::new(c.block_number.to_string()));
             params_vec.push(Box::new(c.id));
         }
 
@@ -1239,9 +1239,9 @@ impl Erc20Storage {
             let from_bytes: Vec<u8> = row.get(2)?;
             let to_bytes: Vec<u8> = row.get(3)?;
             let amount_bytes: Vec<u8> = row.get(4)?;
-            let block_number: i64 = row.get(5)?;
+            let block_number_str: String = row.get(5)?;
             let tx_hash_bytes: Vec<u8> = row.get(6)?;
-            let timestamp: Option<i64> = row.get(7)?;
+            let timestamp_str: Option<String> = row.get(7)?;
 
             Ok(TransferData {
                 id: Some(id),
@@ -1249,9 +1249,9 @@ impl Erc20Storage {
                 from: blob_to_felt(&from_bytes),
                 to: blob_to_felt(&to_bytes),
                 amount: blob_to_u256(&amount_bytes),
-                block_number: block_number as u64,
+                block_number: block_number_str.parse::<u64>().unwrap_or(0),
                 tx_hash: blob_to_felt(&tx_hash_bytes),
-                timestamp,
+                timestamp: timestamp_str.and_then(|s| s.parse::<i64>().ok()),
             })
         })?;
 
@@ -1352,19 +1352,19 @@ impl Erc20Storage {
         // Block range filters
         if let Some(block_min) = block_from {
             query.push_str(" AND a.block_number >= ?");
-            params_vec.push(Box::new(block_min as i64));
+            params_vec.push(Box::new(block_min.to_string()));
         }
 
         if let Some(block_max) = block_to {
             query.push_str(" AND a.block_number <= ?");
-            params_vec.push(Box::new(block_max as i64));
+            params_vec.push(Box::new(block_max.to_string()));
         }
 
         // Cursor-based pagination
         if let Some(c) = cursor {
             query.push_str(" AND (a.block_number < ? OR (a.block_number = ? AND a.id < ?))");
-            params_vec.push(Box::new(c.block_number as i64));
-            params_vec.push(Box::new(c.block_number as i64));
+            params_vec.push(Box::new(c.block_number.to_string()));
+            params_vec.push(Box::new(c.block_number.to_string()));
             params_vec.push(Box::new(c.id));
         }
 
@@ -1381,9 +1381,9 @@ impl Erc20Storage {
             let owner_bytes: Vec<u8> = row.get(2)?;
             let spender_bytes: Vec<u8> = row.get(3)?;
             let amount_bytes: Vec<u8> = row.get(4)?;
-            let block_number: i64 = row.get(5)?;
+            let block_number_str: String = row.get(5)?;
             let tx_hash_bytes: Vec<u8> = row.get(6)?;
-            let timestamp: Option<i64> = row.get(7)?;
+            let timestamp_str: Option<String> = row.get(7)?;
 
             Ok(ApprovalData {
                 id: Some(id),
@@ -1391,9 +1391,9 @@ impl Erc20Storage {
                 owner: blob_to_felt(&owner_bytes),
                 spender: blob_to_felt(&spender_bytes),
                 amount: blob_to_u256(&amount_bytes),
-                block_number: block_number as u64,
+                block_number: block_number_str.parse::<u64>().unwrap_or(0),
                 tx_hash: blob_to_felt(&tx_hash_bytes),
-                timestamp,
+                timestamp: timestamp_str.and_then(|s| s.parse::<i64>().ok()),
             })
         })?;
 
@@ -1451,12 +1451,13 @@ impl Erc20Storage {
             return self.pg_get_latest_block().await;
         }
         let conn = self.conn.lock().unwrap();
-        let block: Option<i64> = conn
+        let block: Option<String> = conn
             .query_row("SELECT MAX(block_number) FROM transfers", [], |row| {
                 row.get(0)
             })
-            .ok();
-        Ok(block.map(|b| b as u64))
+            .ok()
+            .flatten();
+        Ok(block.and_then(|b| b.parse::<u64>().ok()))
     }
 
     // ===== Balance Tracking Methods =====
@@ -1494,7 +1495,7 @@ impl Erc20Storage {
         let token_blob = felt_to_blob(token);
         let wallet_blob = felt_to_blob(wallet);
 
-        let result: Option<(Vec<u8>, i64)> = conn
+        let result: Option<(Vec<u8>, String)> = conn
             .query_row(
                 "SELECT balance, last_block FROM balances WHERE token = ? AND wallet = ?",
                 params![&token_blob, &wallet_blob],
@@ -1502,7 +1503,9 @@ impl Erc20Storage {
             )
             .ok();
 
-        Ok(result.map(|(bytes, block)| (blob_to_u256(&bytes), block as u64)))
+        Ok(result.map(|(bytes, block_str)| {
+            (blob_to_u256(&bytes), block_str.parse::<u64>().unwrap_or(0))
+        }))
     }
 
     /// Get balances with optional token/wallet filters and cursor pagination.
@@ -1557,7 +1560,7 @@ impl Erc20Storage {
             let token_bytes: Vec<u8> = row.get(1)?;
             let wallet_bytes: Vec<u8> = row.get(2)?;
             let balance_bytes: Vec<u8> = row.get(3)?;
-            let last_block: i64 = row.get(4)?;
+            let last_block_str: String = row.get(4)?;
             let last_tx_hash_bytes: Vec<u8> = row.get(5)?;
 
             Ok((
@@ -1566,7 +1569,7 @@ impl Erc20Storage {
                     token: blob_to_felt(&token_bytes),
                     wallet: blob_to_felt(&wallet_bytes),
                     balance: blob_to_u256(&balance_bytes),
-                    last_block: last_block as u64,
+                    last_block: last_block_str.parse::<u64>().unwrap_or(0),
                     last_tx_hash: blob_to_felt(&last_tx_hash_bytes),
                 },
             ))
@@ -1882,7 +1885,7 @@ impl Erc20Storage {
                 token: felt_to_blob(*token),
                 wallet: felt_to_blob(*wallet),
                 balance: u256_to_blob(balance),
-                last_block: *last_block as i64,
+                last_block: last_block.to_string(),
                 last_tx_hash: felt_to_blob(*last_tx_hash),
             });
         }
@@ -1897,7 +1900,7 @@ impl Erc20Storage {
                     wallet: felt_to_blob(adj.wallet),
                     computed_balance: u256_to_blob(adj.computed_balance),
                     actual_balance: u256_to_blob(adj.actual_balance),
-                    adjusted_at_block: adj.adjusted_at_block as i64,
+                    adjusted_at_block: adj.adjusted_at_block.to_string(),
                     tx_hash: felt_to_blob(adj.tx_hash),
                 })
                 .collect::<Vec<_>>();
@@ -1992,9 +1995,8 @@ impl Erc20Storage {
         name: Option<&str>,
         symbol: Option<&str>,
         decimals: Option<u8>,
+        total_supply: Option<U256>,
     ) -> Result<()> {
-        // Some on-chain metadata payloads include embedded NUL bytes.
-        // PostgreSQL TEXT rejects '\0', so normalize before persistence.
         let clean_name = name.map(|s| s.replace('\0', ""));
         let clean_symbol = symbol.map(|s| s.replace('\0', ""));
         if self.backend == StorageBackend::Postgres {
@@ -2004,23 +2006,27 @@ impl Erc20Storage {
                     clean_name.as_deref(),
                     clean_symbol.as_deref(),
                     decimals,
+                    total_supply,
                 )
                 .await;
         }
         let conn = self.conn.lock().unwrap();
         let token_blob = felt_to_blob(token);
+        let supply_blob = total_supply.map(u256_to_blob);
         conn.execute(
-            "INSERT INTO token_metadata (token, name, symbol, decimals)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO token_metadata (token, name, symbol, decimals, total_supply)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(token) DO UPDATE SET
                  name = COALESCE(excluded.name, token_metadata.name),
                  symbol = COALESCE(excluded.symbol, token_metadata.symbol),
-                 decimals = COALESCE(excluded.decimals, token_metadata.decimals)",
+                 decimals = COALESCE(excluded.decimals, token_metadata.decimals),
+                 total_supply = COALESCE(excluded.total_supply, token_metadata.total_supply)",
             params![
                 &token_blob,
                 clean_name.as_deref(),
                 clean_symbol.as_deref(),
-                decimals.map(|d| d as i64)
+                decimals.map(|d| d.to_string()),
+                supply_blob.as_deref()
             ],
         )?;
         Ok(())
@@ -2030,7 +2036,7 @@ impl Erc20Storage {
     pub async fn get_token_metadata(
         &self,
         token: Felt,
-    ) -> Result<Option<(Option<String>, Option<String>, Option<u8>)>> {
+    ) -> Result<Option<(Option<String>, Option<String>, Option<u8>, Option<U256>)>> {
         if self.backend == StorageBackend::Postgres {
             return self.pg_get_token_metadata(token).await;
         }
@@ -2038,13 +2044,19 @@ impl Erc20Storage {
         let token_blob = felt_to_blob(token);
         let result = conn
             .query_row(
-                "SELECT name, symbol, decimals FROM token_metadata WHERE token = ?",
+                "SELECT name, symbol, decimals, total_supply FROM token_metadata WHERE token = ?",
                 params![&token_blob],
                 |row| {
                     let name: Option<String> = row.get(0)?;
                     let symbol: Option<String> = row.get(1)?;
-                    let decimals: Option<i64> = row.get(2)?;
-                    Ok((name, symbol, decimals.map(|d| d as u8)))
+                    let decimals: Option<String> = row.get(2)?;
+                    let total_supply: Option<Vec<u8>> = row.get(3)?;
+                    Ok((
+                        name,
+                        symbol,
+                        decimals.and_then(|d| d.parse::<u8>().ok()),
+                        total_supply.map(|b| blob_to_u256(&b)),
+                    ))
                 },
             )
             .ok();
@@ -2054,19 +2066,30 @@ impl Erc20Storage {
     /// Get all token metadata
     pub async fn get_all_token_metadata(
         &self,
-    ) -> Result<Vec<(Felt, Option<String>, Option<String>, Option<u8>)>> {
+    ) -> Result<
+        Vec<(
+            Felt,
+            Option<String>,
+            Option<String>,
+            Option<u8>,
+            Option<U256>,
+        )>,
+    > {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT token, name, symbol, decimals FROM token_metadata")?;
+        let mut stmt =
+            conn.prepare("SELECT token, name, symbol, decimals, total_supply FROM token_metadata")?;
         let rows = stmt.query_map([], |row| {
             let token_bytes: Vec<u8> = row.get(0)?;
             let name: Option<String> = row.get(1)?;
             let symbol: Option<String> = row.get(2)?;
-            let decimals: Option<i64> = row.get(3)?;
+            let decimals: Option<String> = row.get(3)?;
+            let total_supply: Option<Vec<u8>> = row.get(4)?;
             Ok((
                 blob_to_felt(&token_bytes),
                 name,
                 symbol,
-                decimals.map(|d| d as u8),
+                decimals.and_then(|d| d.parse::<u8>().ok()),
+                total_supply.map(|b| blob_to_u256(&b)),
             ))
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -2080,7 +2103,13 @@ impl Erc20Storage {
         cursor: Option<Felt>,
         limit: u32,
     ) -> Result<(
-        Vec<(Felt, Option<String>, Option<String>, Option<u8>)>,
+        Vec<(
+            Felt,
+            Option<String>,
+            Option<String>,
+            Option<u8>,
+            Option<U256>,
+        )>,
         Option<Felt>,
     )> {
         if self.backend == StorageBackend::Postgres {
@@ -2092,7 +2121,7 @@ impl Erc20Storage {
         let mut out = if let Some(cursor_token) = cursor {
             let cursor_blob = felt_to_blob(cursor_token);
             let mut stmt = conn.prepare(
-                "SELECT token, name, symbol, decimals
+                "SELECT token, name, symbol, decimals, total_supply
                  FROM token_metadata
                  WHERE token > ?1
                  ORDER BY token ASC
@@ -2102,18 +2131,20 @@ impl Erc20Storage {
                 let token_bytes: Vec<u8> = row.get(0)?;
                 let name: Option<String> = row.get(1)?;
                 let symbol: Option<String> = row.get(2)?;
-                let decimals: Option<i64> = row.get(3)?;
+                let decimals: Option<String> = row.get(3)?;
+                let total_supply: Option<Vec<u8>> = row.get(4)?;
                 Ok((
                     blob_to_felt(&token_bytes),
                     name,
                     symbol,
-                    decimals.map(|d| d as u8),
+                    decimals.and_then(|d| d.parse::<u8>().ok()),
+                    total_supply.map(|b| blob_to_u256(&b)),
                 ))
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         } else {
             let mut stmt = conn.prepare(
-                "SELECT token, name, symbol, decimals
+                "SELECT token, name, symbol, decimals, total_supply
                  FROM token_metadata
                  ORDER BY token ASC
                  LIMIT ?1",
@@ -2122,12 +2153,14 @@ impl Erc20Storage {
                 let token_bytes: Vec<u8> = row.get(0)?;
                 let name: Option<String> = row.get(1)?;
                 let symbol: Option<String> = row.get(2)?;
-                let decimals: Option<i64> = row.get(3)?;
+                let decimals: Option<String> = row.get(3)?;
+                let total_supply: Option<Vec<u8>> = row.get(4)?;
                 Ok((
                     blob_to_felt(&token_bytes),
                     name,
                     symbol,
-                    decimals.map(|d| d as u8),
+                    decimals.and_then(|d| d.parse::<u8>().ok()),
+                    total_supply.map(|b| blob_to_u256(&b)),
                 ))
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -2172,21 +2205,22 @@ impl Erc20Storage {
         let mut from_vec = Vec::with_capacity(transfers.len());
         let mut to_vec = Vec::with_capacity(transfers.len());
         let mut amount_vec = Vec::with_capacity(transfers.len());
-        let mut block_vec = Vec::with_capacity(transfers.len());
+        let mut block_vec: Vec<String> = Vec::with_capacity(transfers.len());
         let mut tx_hash_vec = Vec::with_capacity(transfers.len());
-        let mut ts_vec = Vec::with_capacity(transfers.len());
+        let mut ts_vec: Vec<String> = Vec::with_capacity(transfers.len());
 
         for transfer in transfers {
             token_vec.push(felt_to_blob(transfer.token));
             from_vec.push(felt_to_blob(transfer.from));
             to_vec.push(felt_to_blob(transfer.to));
             amount_vec.push(u256_to_blob(transfer.amount));
-            block_vec.push(transfer.block_number as i64);
+            block_vec.push(transfer.block_number.to_string());
             tx_hash_vec.push(felt_to_blob(transfer.tx_hash));
             ts_vec.push(
                 transfer
                     .timestamp
-                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp())
+                    .to_string(),
             );
         }
 
@@ -2201,9 +2235,9 @@ impl Erc20Storage {
                         $2::bytea[],
                         $3::bytea[],
                         $4::bytea[],
-                        $5::bigint[],
+                        $5::text[],
                         $6::bytea[],
-                        $7::bigint[]
+                        $7::text[]
                     ) AS i(token, from_addr, to_addr, amount, block_number, tx_hash, timestamp)
                     ON CONFLICT (token, tx_hash, from_addr, to_addr) DO NOTHING
                     RETURNING id, token, from_addr, to_addr, block_number
@@ -2248,21 +2282,22 @@ impl Erc20Storage {
         let mut owner_vec = Vec::with_capacity(approvals.len());
         let mut spender_vec = Vec::with_capacity(approvals.len());
         let mut amount_vec = Vec::with_capacity(approvals.len());
-        let mut block_vec = Vec::with_capacity(approvals.len());
+        let mut block_vec: Vec<String> = Vec::with_capacity(approvals.len());
         let mut tx_hash_vec = Vec::with_capacity(approvals.len());
-        let mut ts_vec = Vec::with_capacity(approvals.len());
+        let mut ts_vec: Vec<String> = Vec::with_capacity(approvals.len());
 
         for approval in approvals {
             token_vec.push(felt_to_blob(approval.token));
             owner_vec.push(felt_to_blob(approval.owner));
             spender_vec.push(felt_to_blob(approval.spender));
             amount_vec.push(u256_to_blob(approval.amount));
-            block_vec.push(approval.block_number as i64);
+            block_vec.push(approval.block_number.to_string());
             tx_hash_vec.push(felt_to_blob(approval.tx_hash));
             ts_vec.push(
                 approval
                     .timestamp
-                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp())
+                    .to_string(),
             );
         }
 
@@ -2277,9 +2312,9 @@ impl Erc20Storage {
                         $2::bytea[],
                         $3::bytea[],
                         $4::bytea[],
-                        $5::bigint[],
+                        $5::text[],
                         $6::bytea[],
-                        $7::bigint[]
+                        $7::text[]
                     ) AS i(token, owner, spender, amount, block_number, tx_hash, timestamp)
                     ON CONFLICT (token, tx_hash, owner, spender) DO NOTHING
                     RETURNING id, token, owner, spender, block_number
@@ -2385,17 +2420,17 @@ impl Erc20Storage {
 
         if let Some(block_min) = block_from {
             query.push_str(" AND t.block_number >= ");
-            query.push_str(&Self::pg_next_param(&mut params, block_min as i64));
+            query.push_str(&Self::pg_next_param(&mut params, block_min.to_string()));
         }
 
         if let Some(block_max) = block_to {
             query.push_str(" AND t.block_number <= ");
-            query.push_str(&Self::pg_next_param(&mut params, block_max as i64));
+            query.push_str(&Self::pg_next_param(&mut params, block_max.to_string()));
         }
 
         if let Some(c) = cursor {
-            let p1 = Self::pg_next_param(&mut params, c.block_number as i64);
-            let p2 = Self::pg_next_param(&mut params, c.block_number as i64);
+            let p1 = Self::pg_next_param(&mut params, c.block_number.to_string());
+            let p2 = Self::pg_next_param(&mut params, c.block_number.to_string());
             let p3 = Self::pg_next_param(&mut params, c.id);
             query.push_str(&format!(
                 " AND (t.block_number < {p1} OR (t.block_number = {p2} AND t.id < {p3}))"
@@ -2420,9 +2455,11 @@ impl Erc20Storage {
                 from: blob_to_felt(&row.get::<usize, Vec<u8>>(2)),
                 to: blob_to_felt(&row.get::<usize, Vec<u8>>(3)),
                 amount: blob_to_u256(&row.get::<usize, Vec<u8>>(4)),
-                block_number: row.get::<usize, i64>(5) as u64,
+                block_number: row.get::<usize, String>(5).parse::<u64>().unwrap_or(0),
                 tx_hash: blob_to_felt(&row.get::<usize, Vec<u8>>(6)),
-                timestamp: Some(row.get::<usize, i64>(7)),
+                timestamp: row
+                    .get::<usize, Option<String>>(7)
+                    .and_then(|s| s.parse::<i64>().ok()),
             })
             .collect();
 
@@ -2502,15 +2539,15 @@ impl Erc20Storage {
 
         if let Some(block_min) = block_from {
             query.push_str(" AND a.block_number >= ");
-            query.push_str(&Self::pg_next_param(&mut params, block_min as i64));
+            query.push_str(&Self::pg_next_param(&mut params, block_min.to_string()));
         }
         if let Some(block_max) = block_to {
             query.push_str(" AND a.block_number <= ");
-            query.push_str(&Self::pg_next_param(&mut params, block_max as i64));
+            query.push_str(&Self::pg_next_param(&mut params, block_max.to_string()));
         }
         if let Some(c) = cursor {
-            let p1 = Self::pg_next_param(&mut params, c.block_number as i64);
-            let p2 = Self::pg_next_param(&mut params, c.block_number as i64);
+            let p1 = Self::pg_next_param(&mut params, c.block_number.to_string());
+            let p2 = Self::pg_next_param(&mut params, c.block_number.to_string());
             let p3 = Self::pg_next_param(&mut params, c.id);
             query.push_str(&format!(
                 " AND (a.block_number < {p1} OR (a.block_number = {p2} AND a.id < {p3}))"
@@ -2534,9 +2571,11 @@ impl Erc20Storage {
                 owner: blob_to_felt(&row.get::<usize, Vec<u8>>(2)),
                 spender: blob_to_felt(&row.get::<usize, Vec<u8>>(3)),
                 amount: blob_to_u256(&row.get::<usize, Vec<u8>>(4)),
-                block_number: row.get::<usize, i64>(5) as u64,
+                block_number: row.get::<usize, String>(5).parse::<u64>().unwrap_or(0),
                 tx_hash: blob_to_felt(&row.get::<usize, Vec<u8>>(6)),
-                timestamp: Some(row.get::<usize, i64>(7)),
+                timestamp: row
+                    .get::<usize, Option<String>>(7)
+                    .and_then(|s| s.parse::<i64>().ok()),
             })
             .collect();
 
@@ -2580,8 +2619,8 @@ impl Erc20Storage {
         let row = client
             .query_one("SELECT MAX(block_number) FROM erc20.transfers", &[])
             .await?;
-        let v: Option<i64> = row.get(0);
-        Ok(v.map(|x| x as u64))
+        let v: Option<String> = row.get(0);
+        Ok(v.and_then(|x| x.parse::<u64>().ok()))
     }
 
     async fn pg_get_balance(&self, token: Felt, wallet: Felt) -> Result<Option<U256>> {
@@ -2610,7 +2649,7 @@ impl Erc20Storage {
         Ok(row.map(|r| {
             (
                 blob_to_u256(&r.get::<usize, Vec<u8>>(0)),
-                r.get::<usize, i64>(1) as u64,
+                r.get::<usize, String>(1).parse::<u64>().unwrap_or(0),
             )
         }))
     }
@@ -2656,7 +2695,7 @@ impl Erc20Storage {
                 token: blob_to_felt(&row.get::<usize, Vec<u8>>(1)),
                 wallet: blob_to_felt(&row.get::<usize, Vec<u8>>(2)),
                 balance: blob_to_u256(&row.get::<usize, Vec<u8>>(3)),
-                last_block: row.get::<usize, i64>(4) as u64,
+                last_block: row.get::<usize, String>(4).parse::<u64>().unwrap_or(0),
                 last_tx_hash: blob_to_felt(&row.get::<usize, Vec<u8>>(5)),
             });
         }
@@ -2805,7 +2844,7 @@ impl Erc20Storage {
                 felt_to_blob(*token),
                 felt_to_blob(*wallet),
                 u256_to_blob(balance),
-                *last_block as i64,
+                last_block.to_string(),
                 felt_to_blob(*last_tx_hash),
             ));
         }
@@ -2814,27 +2853,27 @@ impl Erc20Storage {
             let mut tokens = Vec::with_capacity(chunk.len());
             let mut wallets = Vec::with_capacity(chunk.len());
             let mut balances = Vec::with_capacity(chunk.len());
-            let mut last_blocks = Vec::with_capacity(chunk.len());
+            let mut last_blocks: Vec<String> = Vec::with_capacity(chunk.len());
             let mut tx_hashes = Vec::with_capacity(chunk.len());
 
             for (token, wallet, balance, last_block, tx_hash) in chunk {
                 tokens.push(token.clone());
                 wallets.push(wallet.clone());
                 balances.push(balance.clone());
-                last_blocks.push(*last_block);
+                last_blocks.push(last_block.clone());
                 tx_hashes.push(tx_hash.clone());
             }
 
             tx.execute(
                 "INSERT INTO erc20.balances (token, wallet, balance, last_block, last_tx_hash, updated_at)
-                 SELECT token, wallet, balance, last_block, last_tx_hash, EXTRACT(EPOCH FROM NOW())::BIGINT
-                 FROM unnest($1::bytea[], $2::bytea[], $3::bytea[], $4::bigint[], $5::bytea[])
+                 SELECT token, wallet, balance, last_block, last_tx_hash, EXTRACT(EPOCH FROM NOW())::TEXT
+                 FROM unnest($1::bytea[], $2::bytea[], $3::bytea[], $4::text[], $5::bytea[])
                       AS b(token, wallet, balance, last_block, last_tx_hash)
                  ON CONFLICT (token, wallet) DO UPDATE SET
                      balance = EXCLUDED.balance,
                      last_block = EXCLUDED.last_block,
                      last_tx_hash = EXCLUDED.last_tx_hash,
-                     updated_at = EXTRACT(EPOCH FROM NOW())::BIGINT
+                     updated_at = EXTRACT(EPOCH FROM NOW())::TEXT
                  WHERE erc20.balances.balance IS DISTINCT FROM EXCLUDED.balance
                     OR erc20.balances.last_block IS DISTINCT FROM EXCLUDED.last_block
                     OR erc20.balances.last_tx_hash IS DISTINCT FROM EXCLUDED.last_tx_hash",
@@ -2848,7 +2887,7 @@ impl Erc20Storage {
             let mut wallets = Vec::with_capacity(chunk.len());
             let mut computed = Vec::with_capacity(chunk.len());
             let mut actual = Vec::with_capacity(chunk.len());
-            let mut blocks = Vec::with_capacity(chunk.len());
+            let mut blocks: Vec<String> = Vec::with_capacity(chunk.len());
             let mut tx_hashes = Vec::with_capacity(chunk.len());
 
             for adj in chunk {
@@ -2856,7 +2895,7 @@ impl Erc20Storage {
                 wallets.push(felt_to_blob(adj.wallet));
                 computed.push(u256_to_blob(adj.computed_balance));
                 actual.push(u256_to_blob(adj.actual_balance));
-                blocks.push(adj.adjusted_at_block as i64);
+                blocks.push(adj.adjusted_at_block.to_string());
                 tx_hashes.push(felt_to_blob(adj.tx_hash));
             }
 
@@ -2864,7 +2903,7 @@ impl Erc20Storage {
                 "INSERT INTO erc20.balance_adjustments
                  (token, wallet, computed_balance, actual_balance, adjusted_at_block, tx_hash)
                  SELECT token, wallet, computed_balance, actual_balance, adjusted_at_block, tx_hash
-                 FROM unnest($1::bytea[], $2::bytea[], $3::bytea[], $4::bytea[], $5::bigint[], $6::bytea[])
+                 FROM unnest($1::bytea[], $2::bytea[], $3::bytea[], $4::bytea[], $5::text[], $6::bytea[])
                       AS a(token, wallet, computed_balance, actual_balance, adjusted_at_block, tx_hash)",
                 &[&tokens, &wallets, &computed, &actual, &blocks, &tx_hashes],
             )
@@ -2932,23 +2971,28 @@ impl Erc20Storage {
         name: Option<&str>,
         symbol: Option<&str>,
         decimals: Option<u8>,
+        total_supply: Option<U256>,
     ) -> Result<()> {
         let clean_name = name.map(|s| s.replace('\0', ""));
         let clean_symbol = symbol.map(|s| s.replace('\0', ""));
+        let supply_blob: Option<Vec<u8>> = total_supply.map(u256_to_blob);
+        let decimals_str = decimals.map(|d| d.to_string());
         let client = self.pg_client().await?;
         client
             .execute(
-                "INSERT INTO erc20.token_metadata (token, name, symbol, decimals)
-             VALUES ($1, $2, $3, $4)
+                "INSERT INTO erc20.token_metadata (token, name, symbol, decimals, total_supply)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (token) DO UPDATE SET
                  name = COALESCE(EXCLUDED.name, erc20.token_metadata.name),
                  symbol = COALESCE(EXCLUDED.symbol, erc20.token_metadata.symbol),
-                 decimals = COALESCE(EXCLUDED.decimals, erc20.token_metadata.decimals)",
+                 decimals = COALESCE(EXCLUDED.decimals, erc20.token_metadata.decimals),
+                 total_supply = COALESCE(EXCLUDED.total_supply, erc20.token_metadata.total_supply)",
                 &[
                     &felt_to_blob(token),
                     &clean_name.as_deref(),
                     &clean_symbol.as_deref(),
-                    &decimals.map(|d| d as i64),
+                    &decimals_str.as_deref(),
+                    &supply_blob,
                 ],
             )
             .await?;
@@ -2958,17 +3002,23 @@ impl Erc20Storage {
     async fn pg_get_token_metadata(
         &self,
         token: Felt,
-    ) -> Result<Option<(Option<String>, Option<String>, Option<u8>)>> {
+    ) -> Result<Option<(Option<String>, Option<String>, Option<u8>, Option<U256>)>> {
         let client = self.pg_client().await?;
         let row = client
             .query_opt(
-                "SELECT name, symbol, decimals FROM erc20.token_metadata WHERE token = $1",
+                "SELECT name, symbol, decimals, total_supply FROM erc20.token_metadata WHERE token = $1",
                 &[&felt_to_blob(token)],
             )
             .await?;
         Ok(row.map(|r| {
-            let decimals: Option<i64> = r.get(2);
-            (r.get(0), r.get(1), decimals.map(|d| d as u8))
+            let decimals: Option<String> = r.get(2);
+            let total_supply: Option<Vec<u8>> = r.get(3);
+            (
+                r.get(0),
+                r.get(1),
+                decimals.and_then(|d| d.parse::<u8>().ok()),
+                total_supply.map(|b| blob_to_u256(&b)),
+            )
         }))
     }
 
@@ -2977,7 +3027,13 @@ impl Erc20Storage {
         cursor: Option<Felt>,
         limit: u32,
     ) -> Result<(
-        Vec<(Felt, Option<String>, Option<String>, Option<u8>)>,
+        Vec<(
+            Felt,
+            Option<String>,
+            Option<String>,
+            Option<u8>,
+            Option<U256>,
+        )>,
         Option<Felt>,
     )> {
         let client = self.pg_client().await?;
@@ -2985,7 +3041,7 @@ impl Erc20Storage {
         let rows = if let Some(cursor_token) = cursor {
             client
                 .query(
-                    "SELECT token, name, symbol, decimals
+                    "SELECT token, name, symbol, decimals, total_supply
                  FROM erc20.token_metadata
                  WHERE token > $1
                  ORDER BY token ASC
@@ -2996,7 +3052,7 @@ impl Erc20Storage {
         } else {
             client
                 .query(
-                    "SELECT token, name, symbol, decimals
+                    "SELECT token, name, symbol, decimals, total_supply
                  FROM erc20.token_metadata
                  ORDER BY token ASC
                  LIMIT $1",
@@ -3005,15 +3061,23 @@ impl Erc20Storage {
                 .await?
         };
 
-        let mut out: Vec<(Felt, Option<String>, Option<String>, Option<u8>)> = rows
+        let mut out: Vec<(
+            Felt,
+            Option<String>,
+            Option<String>,
+            Option<u8>,
+            Option<U256>,
+        )> = rows
             .into_iter()
             .map(|row| {
-                let decimals: Option<i64> = row.get(3);
+                let decimals: Option<String> = row.get(3);
+                let total_supply: Option<Vec<u8>> = row.get(4);
                 (
                     blob_to_felt(&row.get::<usize, Vec<u8>>(0)),
                     row.get(1),
                     row.get(2),
-                    decimals.map(|d| d as u8),
+                    decimals.and_then(|d| d.parse::<u8>().ok()),
+                    total_supply.map(|b| blob_to_u256(&b)),
                 )
             })
             .collect();

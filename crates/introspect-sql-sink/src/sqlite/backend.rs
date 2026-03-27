@@ -1,20 +1,26 @@
+use super::query::create_table_query;
+use crate::sqlite::record::{coalesce_sql, SqliteDeserializer};
+use crate::sqlite::types::SqliteColumn;
 use crate::{
     DbColumn, DbDeadField, DbResult, DbTable, DeadField, IntrospectDb, IntrospectInitialize,
-    IntrospectQueryMaker, IntrospectSqlSink, RecordResult, Table, TableResult,
+    IntrospectQueryMaker, IntrospectSqlSink, RecordResult, Table, TableResult, TypeResult,
 };
 use async_trait::async_trait;
+use introspect_types::bytes::IntoByteSource;
+use introspect_types::schema::{Names, TypeDefs};
 use introspect_types::{ColumnDef, ColumnInfo, PrimaryDef, ResultInto};
 use itertools::Itertools;
 use sqlx::prelude::FromRow;
 use sqlx::types::Json;
+use sqlx::Arguments;
+use sqlx::Error::Encode as EncodeError;
 use starknet_types_core::felt::{Felt, FromStrError};
 use std::collections::HashMap;
 use std::ops::Deref;
+use std::sync::Arc;
 use torii_introspect::tables::RecordSchema;
 use torii_introspect::Record;
-use torii_sql::{DbPool, Queries, Sqlite, SqlitePool, SqliteQuery};
-
-use super::query::create_table_query;
+use torii_sql::{DbPool, Queries, Sqlite, SqliteArguments, SqlitePool, SqliteQuery};
 
 pub const INTROSPECT_SQLITE_SINK_MIGRATIONS: sqlx::migrate::Migrator =
     sqlx::migrate!("./migrations/sqlite");
@@ -100,15 +106,57 @@ impl IntrospectQueryMaker for SqliteBackend {
         Ok(())
     }
     fn insert_record_queries(
-        _namespace: &str,
-        _table_name: &str,
-        _schema: &RecordSchema<'_>,
-        _records: &[Record],
+        namespace: &str,
+        table_name: &str,
+        schema: &RecordSchema<'_>,
+        records: &[Record],
         _from_address: &Felt,
         _block_number: u64,
         _transaction_hash: &Felt,
-        _queries: &mut Vec<SqliteQuery>,
+        queries: &mut Vec<SqliteQuery>,
     ) -> RecordResult<()> {
+        let qualified_table_name = qualified_table_name(namespace, table_name);
+        let all_columns = schema.all_columns();
+        let sql_columns = all_columns
+            .iter()
+            .map(|c| (*c).try_into())
+            .collect::<TypeResult<Vec<SqliteColumn>>>()?;
+        let column_names = all_columns.names();
+        let placeholders = sql_columns.iter().map(SqliteColumn::placeholder).join(", ");
+        let coalesce = sql_columns[1..]
+            .iter()
+            .map(|col| coalesce_sql(&qualified_table_name, col))
+            .join(", ");
+        let sql: Arc<str> = format!(
+            r#"INSERT INTO "{qualified_table_name}" ({}) VALUES ({}) ON CONFLICT("{}") DO UPDATE SET {}"#,
+            column_names
+                .iter()
+                .map(|name| format!(r#""{name}""#))
+                .collect::<Vec<_>>()
+                .join(", "),
+            placeholders,
+            schema.primary_name(),
+            coalesce
+        ).into();
+
+        for record in records {
+            let mut arguments: SqliteArguments<'static> = SqliteArguments::default();
+            let mut primary_data = record.id.as_slice().into_source();
+            let mut data = record.values.as_slice().into_source();
+            arguments
+                .add(
+                    schema
+                        .primary_type_def()
+                        .deserialize_column(&mut primary_data)?,
+                )
+                .map_err(EncodeError)?;
+            for type_def in schema.columns().type_defs() {
+                arguments
+                    .add(type_def.deserialize_column(&mut data)?)
+                    .map_err(EncodeError)?;
+            }
+            queries.add((sql.clone(), arguments));
+        }
         Ok(())
     }
 }
@@ -146,5 +194,13 @@ impl IntrospectInitialize for SqliteBackend {
         self.migrate(Some("introspect"), INTROSPECT_SQLITE_SINK_MIGRATIONS)
             .await
             .err_into()
+    }
+}
+
+pub fn qualified_table_name(namespace: &str, table_name: &str) -> String {
+    if namespace.is_empty() {
+        table_name.to_string()
+    } else {
+        format!("{}_{}", namespace, table_name)
     }
 }

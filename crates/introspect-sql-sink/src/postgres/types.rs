@@ -68,7 +68,10 @@ impl From<PostgresScalar> for PostgresType {
 
 impl Display for SchemaName {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, r#""{}"."{}""#, self.0, self.1)
+        match self.0.is_empty() {
+            true => write!(f, r#""{}""#, self.1),
+            false => write!(f, r#""{}"."{}""#, self.0, self.1),
+        }
     }
 }
 

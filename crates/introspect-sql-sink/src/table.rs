@@ -1,5 +1,5 @@
 use crate::{TableError, TableResult};
-use introspect_types::{ColumnInfo, MemberDef, PrimaryDef, TypeDef};
+use introspect_types::{ColumnInfo, MemberDef, TypeDef};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
@@ -14,7 +14,7 @@ pub struct Table {
     pub namespace: String,
     pub name: String,
     pub owner: Felt,
-    pub primary: PrimaryDef,
+    pub primary: ColumnInfo,
     pub columns: HashMap<Felt, ColumnInfo>,
     pub alive: bool,
     pub dead: HashMap<u128, DeadField>,
@@ -112,7 +112,7 @@ impl Table {
             namespace,
             owner,
             name: info.name,
-            primary: info.primary,
+            primary: info.primary.into(),
             columns: info.columns.into_iter().map_into().collect(),
             alive: true,
             dead: dead.unwrap_or_default().into_iter().collect(),

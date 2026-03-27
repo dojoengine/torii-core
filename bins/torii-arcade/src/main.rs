@@ -6,15 +6,18 @@ use config::{Config, MetadataMode};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::SqlitePoolOptions;
 use starknet::core::types::Felt;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::RwLock;
+use tonic::codec::CompressionEncoding;
 use tonic_reflection::server::Builder as ReflectionBuilder;
 use torii::axum::Router;
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{
     ContractEventConfig, EventExtractor, EventExtractorConfig, Extractor, RetryPolicy,
 };
+use torii::etl::EngineDb;
 use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
 use torii::etl::TypeId;
 use torii::EtlConcurrencyConfig;
@@ -23,10 +26,15 @@ use torii_arcade_sink::{ArcadeSink, FILE_DESCRIPTOR_SET as ARCADE_DESCRIPTOR_SET
 use torii_common::{MetadataFetcher, TokenUriService};
 use torii_config_common::apply_observability_env;
 use torii_dojo::decoder::DojoDecoder;
+use torii_dojo::external_contract::{
+    contract_type_from_decoder_ids, RegisterExternalContractCommandHandler,
+    RegisteredContractType, SharedContractTypeRegistry, SharedDecoderRegistry,
+};
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::store::sqlite::SqliteStore;
 use torii_ecs_sink::proto::world::world_server::WorldServer;
 use torii_ecs_sink::{EcsSink, FILE_DESCRIPTOR_SET as ECS_DESCRIPTOR_SET};
+use torii_entities_historical_sink::EntitiesHistoricalSink;
 use torii_erc1155::proto::erc1155_server::Erc1155Server;
 use torii_erc1155::{
     Erc1155Decoder, Erc1155MetadataCommandHandler, Erc1155Service, Erc1155Sink, Erc1155Storage,
@@ -54,17 +62,77 @@ const TOKEN_METADATA_COMMAND_PARALLELISM: usize = 1;
 const TOKEN_METADATA_MAX_RETRIES: u8 = 3;
 const TOKEN_URI_FETCH_PARALLELISM: usize = 8;
 
+fn build_contract_type_registry(
+    dojo_event_contracts: &[Felt],
+    erc20_addresses: &[Felt],
+    erc721_addresses: &[Felt],
+    erc1155_addresses: &[Felt],
+) -> SharedContractTypeRegistry {
+    let mut contract_types = HashMap::new();
+    for &contract in dojo_event_contracts {
+        contract_types.insert(contract, RegisteredContractType::World);
+    }
+    for &contract in erc20_addresses {
+        contract_types.insert(contract, RegisteredContractType::Erc20);
+    }
+    for &contract in erc721_addresses {
+        contract_types.insert(contract, RegisteredContractType::Erc721);
+    }
+    for &contract in erc1155_addresses {
+        contract_types.insert(contract, RegisteredContractType::Erc1155);
+    }
+    Arc::new(RwLock::new(contract_types))
+}
+
+async fn load_persisted_contract_registries(
+    engine_db: &EngineDb,
+    decoder_registry: &SharedDecoderRegistry,
+    contract_type_registry: &SharedContractTypeRegistry,
+) -> Result<()> {
+    let mappings = engine_db.get_all_contract_decoders().await?;
+    let mut decoders = decoder_registry.write().await;
+    let mut contract_types = contract_type_registry.write().await;
+
+    for (contract, decoder_ids, _) in mappings {
+        decoders.insert(contract, decoder_ids.clone());
+        if let Some(contract_type) = contract_type_from_decoder_ids(&decoder_ids) {
+            contract_types.insert(contract, contract_type);
+        }
+    }
+
+    Ok(())
+}
+
+fn installed_external_decoder_ids(
+    enabled: bool,
+    install_erc20: bool,
+    install_erc721: bool,
+    install_erc1155: bool,
+) -> HashSet<DecoderId> {
+    if !enabled {
+        return HashSet::new();
+    }
+
+    let mut installed = HashSet::from([DecoderId::new("dojo-introspect")]);
+    if install_erc20 {
+        installed.insert(DecoderId::new("erc20"));
+    }
+    if install_erc721 {
+        installed.insert(DecoderId::new("erc721"));
+    }
+    if install_erc1155 {
+        installed.insert(DecoderId::new("erc1155"));
+    }
+    installed
+}
+
 struct ArcadeProjectionPipeline {
-    introspect_sink: Box<dyn Sink>,
-    arcade_sink: Box<dyn Sink>,
+    sinks: Vec<Box<dyn Sink>>,
 }
 
 impl ArcadeProjectionPipeline {
-    fn new(introspect_sink: Box<dyn Sink>, arcade_sink: Box<dyn Sink>) -> Self {
-        Self {
-            introspect_sink,
-            arcade_sink,
-        }
+    fn new(sinks: Vec<Box<dyn Sink>>) -> Self {
+        Self { sinks }
     }
 
     fn abort_on_sink_failure(stage: &str, sink_name: &str, error: anyhow::Error) -> ! {
@@ -88,12 +156,7 @@ impl Sink for ArcadeProjectionPipeline {
     fn interested_types(&self) -> Vec<TypeId> {
         let mut seen = HashSet::new();
         let mut interested = Vec::new();
-        for type_id in self
-            .introspect_sink
-            .interested_types()
-            .into_iter()
-            .chain(self.arcade_sink.interested_types())
-        {
+        for type_id in self.sinks.iter().flat_map(|sink| sink.interested_types()) {
             if seen.insert(type_id) {
                 interested.push(type_id);
             }
@@ -106,25 +169,28 @@ impl Sink for ArcadeProjectionPipeline {
         envelopes: &[torii::etl::Envelope],
         batch: &torii::etl::extractor::ExtractionBatch,
     ) -> anyhow::Result<()> {
-        if let Err(error) = self.introspect_sink.process(envelopes, batch).await {
-            Self::abort_on_sink_failure("process", self.introspect_sink.name(), error);
-        }
-        if let Err(error) = self.arcade_sink.process(envelopes, batch).await {
-            Self::abort_on_sink_failure("process", self.arcade_sink.name(), error);
+        for sink in &self.sinks {
+            if let Err(error) = sink.process(envelopes, batch).await {
+                Self::abort_on_sink_failure("process", sink.name(), error);
+            }
         }
         Ok(())
     }
 
     fn topics(&self) -> Vec<TopicInfo> {
-        let mut topics = self.introspect_sink.topics();
-        topics.extend(self.arcade_sink.topics());
+        let mut topics = Vec::new();
+        for sink in &self.sinks {
+            topics.extend(sink.topics());
+        }
         topics
     }
 
     fn build_routes(&self) -> Router {
-        self.introspect_sink
-            .build_routes()
-            .merge(self.arcade_sink.build_routes())
+        let mut router = Router::new();
+        for sink in &self.sinks {
+            router = router.merge(sink.build_routes());
+        }
+        router
     }
 
     async fn initialize(
@@ -132,10 +198,9 @@ impl Sink for ArcadeProjectionPipeline {
         event_bus: Arc<EventBus>,
         context: &SinkContext,
     ) -> anyhow::Result<()> {
-        self.introspect_sink
-            .initialize(event_bus.clone(), context)
-            .await?;
-        self.arcade_sink.initialize(event_bus, context).await?;
+        for sink in &mut self.sinks {
+            sink.initialize(event_bus.clone(), context).await?;
+        }
         Ok(())
     }
 }
@@ -183,6 +248,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     let dojo_event_contracts = config.dojo_event_contract_addresses()?;
     let introspect_contracts = config.introspect_contract_addresses()?;
+    let historical_models = config.historical_models();
     let mut erc20_addresses = config.erc20_addresses()?;
     let erc721_addresses = config.erc721_addresses()?;
     let erc1155_addresses = config.erc1155_addresses()?;
@@ -245,12 +311,51 @@ async fn run_indexer(config: Config) -> Result<()> {
             "disabled"
         }
     );
+    tracing::info!(
+        "External contract indexing: {}",
+        if config.index_external_contracts {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    tracing::info!("Historical models tracked: {}", historical_models.len());
 
     let excluded_dojo_contracts: Vec<Felt> = dojo_event_contracts
         .iter()
         .copied()
         .filter(|contract| !introspect_contracts.contains(contract))
         .collect();
+
+    let registry_engine_db = Arc::new(
+        EngineDb::new(torii::etl::engine_db::EngineDbConfig {
+            path: engine_database_url.clone(),
+        })
+        .await?,
+    );
+    let decoder_registry: SharedDecoderRegistry = Arc::new(RwLock::new(HashMap::new()));
+    let contract_type_registry = build_contract_type_registry(
+        &dojo_event_contracts,
+        &erc20_addresses,
+        &erc721_addresses,
+        &erc1155_addresses,
+    );
+    load_persisted_contract_registries(
+        registry_engine_db.as_ref(),
+        &decoder_registry,
+        &contract_type_registry,
+    )
+    .await?;
+
+    let install_erc20 = config.index_external_contracts || !erc20_addresses.is_empty();
+    let install_erc721 = config.index_external_contracts || !erc721_addresses.is_empty();
+    let install_erc1155 = config.index_external_contracts || !erc1155_addresses.is_empty();
+    let installed_external_decoders = installed_external_decoder_ids(
+        config.index_external_contracts,
+        install_erc20,
+        install_erc721,
+        install_erc1155,
+    );
 
     let extractor = build_extractor(
         provider.clone(),
@@ -316,7 +421,18 @@ async fn run_indexer(config: Config) -> Result<()> {
         }
     };
 
-    let ecs_sink = EcsSink::new(&storage_database_url, config.max_db_connections).await?;
+    let ecs_sink = EcsSink::new(
+        &storage_database_url,
+        config.max_db_connections,
+        Some(erc20_db_url.as_str()),
+        Some(erc721_db_url.as_str()),
+        Some(erc1155_db_url.as_str()),
+        contract_type_registry.clone(),
+        config.from_block,
+        config.index_external_contracts,
+        installed_external_decoders.clone(),
+    )
+    .await?;
     let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
     let arcade_sink = ArcadeSink::new(
         &storage_database_url,
@@ -331,8 +447,20 @@ async fn run_indexer(config: Config) -> Result<()> {
         .register_encoded_file_descriptor_set(ECS_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(ARCADE_DESCRIPTOR_SET);
 
-    let arcade_projection_pipeline =
-        ArcadeProjectionPipeline::new(introspect_sink, Box::new(arcade_sink));
+    let historical_sink = Box::new(
+        EntitiesHistoricalSink::new(
+            &storage_database_url,
+            config.max_db_connections,
+            (),
+            historical_models,
+        )
+        .await?,
+    );
+    let arcade_projection_pipeline = ArcadeProjectionPipeline::new(vec![
+        introspect_sink,
+        historical_sink,
+        Box::new(arcade_sink),
+    ]);
 
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
@@ -346,6 +474,16 @@ async fn run_indexer(config: Config) -> Result<()> {
         .add_decoder(dojo_decoder)
         .add_sink_boxed(Box::new(ecs_sink))
         .add_sink_boxed(Box::new(arcade_projection_pipeline));
+
+    if config.index_external_contracts {
+        torii_config = torii_config
+            .with_registry_cache(decoder_registry.clone())
+            .with_command_handler(Box::new(RegisterExternalContractCommandHandler::new(
+                registry_engine_db.clone(),
+                decoder_registry.clone(),
+                contract_type_registry.clone(),
+            )));
+    }
 
     if !excluded_dojo_contracts.is_empty() {
         torii_config = torii_config.blacklist_contracts(excluded_dojo_contracts.clone());
@@ -369,7 +507,7 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut erc1155_grpc_service: Option<Erc1155Service> = None;
     let mut token_uri_services = Vec::new();
 
-    if !erc20_addresses.is_empty() {
+    if install_erc20 {
         let storage = Arc::new(Erc20Storage::new(&erc20_db_url).await?);
         let grpc_service = Erc20Service::new(storage.clone());
         let sink = Box::new(
@@ -399,7 +537,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         erc20_grpc_service = Some(grpc_service);
     }
 
-    if !erc721_addresses.is_empty() {
+    if install_erc721 {
         let storage = Arc::new(Erc721Storage::new(&erc721_db_url).await?);
         let grpc_service = Erc721Service::new(storage.clone());
         let mut sink = Erc721Sink::new(storage.clone()).with_grpc_service(grpc_service.clone());
@@ -434,7 +572,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         erc721_grpc_service = Some(grpc_service);
     }
 
-    if !erc1155_addresses.is_empty() {
+    if install_erc1155 {
         let storage = Arc::new(Erc1155Storage::new(&erc1155_db_url).await?);
         let grpc_service = Erc1155Service::new(storage.clone());
         let mut sink = Erc1155Sink::new(storage.clone())
@@ -472,89 +610,65 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     let reflection = reflection_builder
         .build_v1()
-        .expect("failed to build Arcade reflection service");
+        .expect("failed to build Arcade reflection service")
+        .accept_compressed(CompressionEncoding::Gzip);
+
+    let world_server =
+        WorldServer::new((*ecs_grpc_service).clone()).accept_compressed(CompressionEncoding::Gzip);
+    let arcade_server = ArcadeServer::new((*arcade_grpc_service).clone())
+        .accept_compressed(CompressionEncoding::Gzip);
+    let erc20_server = erc20_grpc_service
+        .map(|service| Erc20Server::new(service).accept_compressed(CompressionEncoding::Gzip));
+    let erc721_server = erc721_grpc_service
+        .map(|service| Erc721Server::new(service).accept_compressed(CompressionEncoding::Gzip));
+    let erc1155_server = erc1155_grpc_service
+        .map(|service| Erc1155Server::new(service).accept_compressed(CompressionEncoding::Gzip));
 
     let mut grpc_builder = tonic::transport::Server::builder().accept_http1(true);
-    let grpc_router = match (
-        erc20_grpc_service,
-        erc721_grpc_service,
-        erc1155_grpc_service,
-    ) {
+    let grpc_router = match (erc20_server, erc721_server, erc1155_server) {
         (Some(erc20), Some(erc721), Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(world_server.clone()))
+            .add_service(tonic_web::enable(arcade_server.clone()))
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (Some(erc20), Some(erc721), None) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(world_server.clone()))
+            .add_service(tonic_web::enable(arcade_server.clone()))
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(reflection.clone())),
         (Some(erc20), None, Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(world_server.clone()))
+            .add_service(tonic_web::enable(arcade_server.clone()))
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, Some(erc721), Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(world_server.clone()))
+            .add_service(tonic_web::enable(arcade_server.clone()))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (Some(erc20), None, None) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(world_server.clone()))
+            .add_service(tonic_web::enable(arcade_server.clone()))
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, Some(erc721), None) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(world_server.clone()))
+            .add_service(tonic_web::enable(arcade_server.clone()))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, None, Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(tonic_web::enable(reflection)),
+            .add_service(tonic_web::enable(world_server.clone()))
+            .add_service(tonic_web::enable(arcade_server.clone()))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(tonic_web::enable(reflection.clone())),
         (None, None, None) => grpc_builder
-            .add_service(tonic_web::enable(WorldServer::new(
-                (*ecs_grpc_service).clone(),
-            )))
-            .add_service(tonic_web::enable(ArcadeServer::new(
-                (*arcade_grpc_service).clone(),
-            )))
+            .add_service(tonic_web::enable(world_server))
+            .add_service(tonic_web::enable(arcade_server))
             .add_service(tonic_web::enable(reflection)),
     };
 

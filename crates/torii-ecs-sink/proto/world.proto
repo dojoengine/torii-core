@@ -12,9 +12,119 @@ service World {
   rpc RetrieveEntities (RetrieveEntitiesRequest) returns (RetrieveEntitiesResponse);
   rpc SubscribeEventMessages (SubscribeEntitiesRequest) returns (stream SubscribeEntityResponse);
   rpc UpdateEventMessagesSubscription (UpdateEntitiesSubscriptionRequest) returns (google.protobuf.Empty);
+  rpc SubscribeTokenBalances (SubscribeTokenBalancesRequest) returns (stream SubscribeTokenBalancesResponse);
+  rpc UpdateTokenBalancesSubscription (UpdateTokenBalancesSubscriptionRequest) returns (google.protobuf.Empty);
+  rpc SubscribeTokens (SubscribeTokensRequest) returns (stream SubscribeTokensResponse);
+  rpc UpdateTokensSubscription (UpdateTokenSubscriptionRequest) returns (google.protobuf.Empty);
+  rpc SubscribeTokenTransfers (SubscribeTokenTransfersRequest) returns (stream SubscribeTokenTransfersResponse);
+  rpc UpdateTokenTransfersSubscription (UpdateTokenTransfersSubscriptionRequest) returns (google.protobuf.Empty);
   rpc RetrieveEventMessages (RetrieveEntitiesRequest) returns (RetrieveEntitiesResponse);
   rpc RetrieveEvents (RetrieveEventsRequest) returns (RetrieveEventsResponse);
   rpc SubscribeEvents (SubscribeEventsRequest) returns (stream SubscribeEventsResponse);
+  rpc RetrieveTokens (RetrieveTokensRequest) returns (RetrieveTokensResponse);
+  rpc RetrieveTokenTransfers (RetrieveTokenTransfersRequest) returns (RetrieveTokenTransfersResponse);
+  rpc RetrieveTokenBalances (RetrieveTokenBalancesRequest) returns (RetrieveTokenBalancesResponse);
+  rpc RetrieveTransactions (RetrieveTransactionsRequest) returns (RetrieveTransactionsResponse);
+  rpc SubscribeTransactions (SubscribeTransactionsRequest) returns (stream SubscribeTransactionsResponse);
+  rpc RetrieveControllers (RetrieveControllersRequest) returns (RetrieveControllersResponse);
+  rpc RetrieveContracts (RetrieveContractsRequest) returns (RetrieveContractsResponse);
+  rpc RetrieveTokenContracts (RetrieveTokenContractsRequest) returns (RetrieveTokenContractsResponse);
+  rpc ExecuteSql (types.SqlQueryRequest) returns (types.SqlQueryResponse);
+}
+
+message SubscribeTransactionsRequest {
+  types.TransactionFilter filter = 1;
+}
+
+message SubscribeTransactionsResponse {
+  types.Transaction transaction = 1;
+}
+
+message RetrieveControllersRequest {
+  types.ControllerQuery query = 1;
+}
+
+message RetrieveControllersResponse {
+  string next_cursor = 1;
+  repeated types.Controller controllers = 2;
+}
+
+message RetrieveContractsRequest {
+  types.ContractQuery query = 1;
+}
+
+message RetrieveContractsResponse {
+  repeated types.Contract contracts = 1;
+}
+
+message UpdateTokenBalancesSubscriptionRequest {
+  uint64 subscription_id = 1;
+  repeated bytes contract_addresses = 2;
+  repeated bytes account_addresses = 3;
+  repeated bytes token_ids = 4;
+}
+
+message SubscribeTokenBalancesResponse {
+  uint64 subscription_id = 1;
+  types.TokenBalance balance = 2;
+}
+
+message RetrieveTokensRequest {
+  types.TokenQuery query = 1;
+}
+
+message SubscribeTokensRequest {
+  repeated bytes contract_addresses = 1;
+  repeated bytes token_ids = 2;
+}
+
+message RetrieveTokensResponse {
+  string next_cursor = 1;
+  repeated types.Token tokens = 2;
+}
+
+message SubscribeTokensResponse {
+  uint64 subscription_id = 1;
+  types.Token token = 2;
+}
+
+message UpdateTokenSubscriptionRequest {
+  uint64 subscription_id = 1;
+  repeated bytes contract_addresses = 2;
+  repeated bytes token_ids = 3;
+}
+
+message RetrieveTokenBalancesRequest {
+  types.TokenBalanceQuery query = 1;
+}
+
+message SubscribeTokenBalancesRequest {
+  repeated bytes account_addresses = 1;
+  repeated bytes contract_addresses = 2;
+  repeated bytes token_ids = 3;
+}
+
+message RetrieveTokenBalancesResponse {
+  string next_cursor = 1;
+  repeated types.TokenBalance balances = 2;
+}
+
+message RetrieveTransactionsRequest {
+  types.TransactionQuery query = 1;
+}
+
+message RetrieveTransactionsResponse {
+  string next_cursor = 1;
+  repeated types.Transaction transactions = 2;
+}
+
+message RetrieveTokenContractsRequest {
+  types.TokenContractQuery query = 1;
+}
+
+message RetrieveTokenContractsResponse {
+  string next_cursor = 1;
+  repeated types.TokenContract token_contracts = 2;
 }
 
 message SubscribeContractsRequest {
@@ -73,4 +183,31 @@ message SubscribeEventsRequest {
 
 message SubscribeEventsResponse {
   types.Event event = 1;
+}
+
+message SubscribeTokenTransfersRequest {
+  repeated bytes contract_addresses = 1;
+  repeated bytes account_addresses = 2;
+  repeated bytes token_ids = 3;
+}
+
+message SubscribeTokenTransfersResponse {
+  uint64 subscription_id = 1;
+  types.TokenTransfer transfer = 2;
+}
+
+message UpdateTokenTransfersSubscriptionRequest {
+  uint64 subscription_id = 1;
+  repeated bytes contract_addresses = 2;
+  repeated bytes account_addresses = 3;
+  repeated bytes token_ids = 4;
+}
+
+message RetrieveTokenTransfersRequest {
+  types.TokenTransferQuery query = 1;
+}
+
+message RetrieveTokenTransfersResponse {
+  string next_cursor = 1;
+  repeated types.TokenTransfer transfers = 2;
 }

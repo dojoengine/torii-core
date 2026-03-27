@@ -309,7 +309,9 @@ impl CreatePgTable {
         })
     }
     pub fn make_queries(&self, queries: &mut Vec<PgQuery>) {
-        queries.add(make_schema_query(&self.name.0));
+        if !self.name.1.is_empty() {
+            queries.add(make_schema_query(&self.name.0));
+        }
         for pg_type in &self.pg_types {
             queries.add(pg_type.to_string());
         }

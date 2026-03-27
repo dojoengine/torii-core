@@ -17,7 +17,7 @@ pub trait DbPool<DB: Database> {
     {
         let result = match schema {
             Some(schema) => {
-                let mut conn = AcquiredSchema {
+                let mut conn: AcquiredSchema<DB, <DB as Database>::Connection> = AcquiredSchema {
                     connection: self.pool().acquire().await?.detach(),
                     schema,
                 };
@@ -45,3 +45,17 @@ pub enum DbConn {
     Postgres,
     Sqlite,
 }
+
+// #[async_trait]
+// pub trait Committable<DB: Database> {
+//     async fn commit(self, pool: &Pool<DB>) -> SqlxResult<()>;
+// }
+
+// #[async_trait]y
+// impl<DB: Database, E: Executable<DB> + Send> Committable<DB> for E {
+//     async fn commit(self, pool: &Pool<DB>) -> SqlxResult<()> {
+//         let mut transaction: Transaction<'_, DB> = pool.begin().await?;
+//         self.execute(&mut transaction).await?;
+//         transaction.commit().await
+//     }
+// }

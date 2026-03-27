@@ -1,6 +1,9 @@
 pub mod backend;
 pub mod json;
 pub mod query;
+pub mod record;
+pub mod types;
+
 use sqlx::migrate::Migrator;
 
 pub use backend::{IntrospectSqliteDb, SqliteBackend};

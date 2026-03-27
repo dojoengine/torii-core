@@ -51,7 +51,16 @@ impl<T: Send + Sync + DbConnection<Sqlite>> Sink for IntrospectSqliteDb<T> {
                 }
             }
         }
-        self.process_messages(msgs).await?;
+        let results = self.process_messages(msgs).await?;
+        let failed = results.iter().filter(|r| r.is_err()).count();
+        if failed > 0 {
+            tracing::error!(
+                target: LOGGING_TARGET,
+                failed,
+                total = results.len(),
+                "Introspect messages failed — data may be missing from SQL tables"
+            );
+        }
 
         if processed > 0 {
             tracing::info!(

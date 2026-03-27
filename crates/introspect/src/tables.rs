@@ -1,5 +1,6 @@
 use crate::Record;
 use introspect_types::bytes::IntoByteSource;
+use introspect_types::schema::Names;
 use introspect_types::serialize::CairoSeFrom;
 use introspect_types::serialize_def::CairoTypeSerialization;
 use introspect_types::{CairoDeserializer, ColumnInfo, PrimaryDef, PrimaryTypeDef, TypeDef};
@@ -8,24 +9,31 @@ use serde::{Serialize, Serializer};
 use std::ops::Deref;
 
 pub struct RecordSchema<'a> {
-    primary: &'a PrimaryDef,
+    primary: &'a ColumnInfo,
     columns: Vec<&'a ColumnInfo>,
 }
 
 impl<'a> RecordSchema<'a> {
-    pub fn new(primary: &'a PrimaryDef, columns: Vec<&'a ColumnInfo>) -> Self {
+    pub fn new(primary: &'a ColumnInfo, columns: Vec<&'a ColumnInfo>) -> Self {
         Self { primary, columns }
     }
     pub fn columns(&self) -> &[&'a ColumnInfo] {
         &self.columns
     }
-
+    pub fn all_columns(&self) -> Vec<&'a ColumnInfo> {
+        std::iter::once(self.primary)
+            .chain(self.columns.iter().copied())
+            .collect()
+    }
     pub fn column_names(&self) -> Vec<&str> {
-        self.columns.iter().map(|col| col.name.as_str()).collect()
+        self.columns.names()
     }
 
-    pub fn primary(&self) -> &PrimaryDef {
+    pub fn primary(&self) -> &ColumnInfo {
         self.primary
+    }
+    pub fn primary_type_def(&self) -> &TypeDef {
+        &self.primary.type_def
     }
 
     pub fn primary_name(&self) -> &str {
@@ -130,7 +138,7 @@ impl<'a, M: SerializeEntries> RecordWithMetadata<'a, M> {
 }
 
 pub struct RecordFrame<'a, C: CairoTypeSerialization, M: SerializeEntries> {
-    primary: &'a PrimaryDef,
+    primary: &'a ColumnInfo,
     columns: &'a [&'a ColumnInfo],
     id: &'a [u8; 32],
     values: &'a [u8],
@@ -159,7 +167,7 @@ impl<'a, C: CairoTypeSerialization, M: SerializeEntries> RecordFrame<'a, C, M> {
         &self,
         map: &mut <S as Serializer>::SerializeMap,
     ) -> Result<(), S::Error> {
-        let mut id: introspect_types::bytes::DerefBytesSource<&[u8]> = self.id.into_source();
+        let mut id = self.id.into_source();
         map.serialize_entry(
             &self.primary.name,
             &CairoSeFrom::new(&self.primary.type_def, &mut id, self.cairo_se),

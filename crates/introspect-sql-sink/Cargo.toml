@@ -22,7 +22,7 @@ starknet-types-core.workspace = true
 thiserror.workspace = true
 introspect-types.workspace = true
 itertools.workspace = true
-arrayvec.workspace = true
+primitive-types.workspace = true
 
 # Local crates
 torii-introspect.workspace = true

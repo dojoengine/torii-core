@@ -160,6 +160,18 @@ pub struct Config {
     #[arg(long)]
     pub ignore_saved_state: bool,
 
+    /// Enable runtime indexing for Dojo `ExternalContractRegistered` events.
+    ///
+    /// Enabled by default. Pass `--index-external-contracts=false` to disable.
+    #[arg(
+        long,
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    pub index_external_contracts: bool,
+
     #[arg(long)]
     pub allow_unsafe_latest_schema_bootstrap: bool,
 
@@ -177,6 +189,9 @@ pub struct Config {
 
     #[arg(long, value_delimiter = ',', default_values = DEFAULT_ERC1155_CONTRACTS)]
     pub erc1155: Vec<String>,
+
+    #[arg(long, value_delimiter = ',')]
+    pub historical: Vec<String>,
 }
 
 impl Config {
@@ -218,6 +233,16 @@ impl Config {
 
     pub fn erc1155_addresses(&self) -> Result<Vec<Felt>> {
         parse_unique_addresses(&self.erc1155, "ERC1155 contract")
+    }
+
+    pub fn historical_models(&self) -> Vec<String> {
+        let mut models = Vec::with_capacity(self.historical.len());
+        for model in &self.historical {
+            if !model.is_empty() && !models.contains(model) {
+                models.push(model.clone());
+            }
+        }
+        models
     }
 
     pub fn well_known_erc20_contracts() -> Vec<(Felt, &'static str)> {
@@ -437,5 +462,34 @@ mod tests {
         assert_eq!(cfg.event_block_batch_size, 8888);
         assert_eq!(cfg.max_prefetch_batches, 4);
         assert_eq!(cfg.rpc_parallelism, 6);
+    }
+
+    #[test]
+    fn external_contract_indexing_defaults_to_enabled() {
+        let cfg = Config::parse_from(["torii-arcade"]);
+        assert!(cfg.index_external_contracts);
+    }
+
+    #[test]
+    fn external_contract_indexing_flag_can_disable_runtime_registration() {
+        let cfg = Config::parse_from([
+            "torii-arcade",
+            "--index-external-contracts=false",
+        ]);
+        assert!(!cfg.index_external_contracts);
+    }
+
+    #[test]
+    fn historical_models_parse_as_exact_names() {
+        let cfg = Config::parse_from([
+            "torii-arcade",
+            "--historical",
+            "NUMS-Game,NUMS-Config,NUMS-Game",
+        ]);
+
+        assert_eq!(
+            cfg.historical_models(),
+            vec!["NUMS-Game".to_string(), "NUMS-Config".to_string()]
+        );
     }
 }

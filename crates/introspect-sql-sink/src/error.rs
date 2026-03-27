@@ -1,5 +1,5 @@
 use crate::TableKey;
-use introspect_types::{PrimaryTypeDef, TypeDef};
+use introspect_types::{DecodeError, PrimaryTypeDef, TypeDef};
 use sqlx::error::BoxDynError;
 use sqlx::Error as SqlxError;
 use starknet_types_core::felt::{Felt, FromStrError};
@@ -80,7 +80,7 @@ impl UpgradeError {
     pub fn array_shorten_err<T>(old: u32, new: u32) -> UpgradeResult<T> {
         Err(Self::ArrayLengthDecreaseError { old, new })
     }
-    pub fn primary_upgrade_err<T>(old: &PrimaryTypeDef, new: &PrimaryTypeDef) -> UpgradeResult<T> {
+    pub fn primary_upgrade_err<T>(old: &TypeDef, new: &PrimaryTypeDef) -> UpgradeResult<T> {
         Err(Self::PrimaryUpgradeError {
             old: old.item_name(),
             new: new.item_name(),
@@ -106,6 +106,14 @@ impl<T> UpgradeResultExt<T> for UpgradeResult<T> {
 pub enum RecordError {
     #[error(transparent)]
     JsonError(#[from] serde_json::Error),
+    #[error(transparent)]
+    TypeError(#[from] TypeError),
+    #[error("Record does not match table schema")]
+    SchemaMismatch,
+    #[error(transparent)]
+    DecodeError(#[from] DecodeError),
+    #[error(transparent)]
+    SqlxError(#[from] SqlxError),
 }
 
 pub type RecordResult<T> = std::result::Result<T, RecordError>;

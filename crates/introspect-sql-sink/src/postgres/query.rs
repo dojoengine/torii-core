@@ -304,8 +304,6 @@ impl TableUpgrade {
         transaction_hash: &Felt,
         queries: &mut Vec<PgQuery>,
     ) -> TableResult<()> {
-        let schema = &self.schema;
-        let name = &self.name;
         queries.add(
             insert_dead_member_query(
                 &self.schema,
@@ -318,12 +316,15 @@ impl TableUpgrade {
         );
         if let Some(old_name) = &self.old_name {
             queries.add(format!(
-                r#"ALTER TABLE "{schema}"."{old_name}" RENAME TO "{name}";"#
+                r#"ALTER TABLE {} RENAME TO "{}";"#,
+                SchemaName::new(&self.schema, old_name),
+                self.name
             ));
         }
         self.atomic.iter().for_each(|m| m.to_queries(queries));
+        let name = SchemaName::new(&self.schema, &self.name);
         if let Some((last, columns)) = self.columns.split_last() {
-            let mut alterations = format!(r#"ALTER TABLE "{schema}"."{name}" "#);
+            let mut alterations = format!(r#"ALTER TABLE {name} "#);
             columns
                 .iter()
                 .for_each(|m| write!(alterations, "{m}, ").unwrap());
@@ -336,8 +337,8 @@ impl TableUpgrade {
 
     fn alter_queries(&self, queries: &mut Vec<PgQuery>) {
         if let Some((last, others)) = self.col_alters.split_last() {
-            let (schema, name) = (&self.schema, &self.name);
-            let mut forward = format!(r#"ALTER TABLE "{schema}"."{name}" "#);
+            let table_name = SchemaName::new(&self.schema, &self.name);
+            let mut forward = format!(r#"ALTER TABLE {table_name} "#);
             let mut reverse = forward.clone();
             for PostgresField { name: col, pg_type } in others {
                 write!(

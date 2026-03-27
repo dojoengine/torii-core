@@ -9,6 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 pub enum NamespaceMode {
+    None,
     Single(Arc<str>),
     Address,
     Named(HashMap<Felt, Arc<str>>),
@@ -29,6 +30,7 @@ impl TableKey {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NamespaceKey {
+    None,
     Single(Arc<str>),
     Address(Felt),
     Named(Arc<str>),
@@ -51,6 +53,7 @@ impl Hash for NamespaceKey {
             NamespaceKey::Address(addr) => addr.hash(state),
             NamespaceKey::Named(name) => name.hash(state),
             NamespaceKey::Single(_) => {}
+            NamespaceKey::None => {}
         }
     }
 }
@@ -60,13 +63,14 @@ impl Display for NamespaceKey {
         match self {
             NamespaceKey::Address(addr) => write!(f, "{addr:063x}"),
             NamespaceKey::Named(name) | NamespaceKey::Single(name) => name.fmt(f),
+            NamespaceKey::None => Ok(()),
         }
     }
 }
 
 impl Display for TableKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if !matches!(self.namespace, NamespaceKey::Single(_)) {
+        if !matches!(self.namespace, NamespaceKey::Single(_) | NamespaceKey::None) {
             write!(f, "{} ", self.namespace)?;
         }
         write!(f, "{:#063x}", self.id)
@@ -140,6 +144,7 @@ fn felt_try_from_namespace(namespace: &str) -> NamespaceResult<Felt> {
 impl NamespaceMode {
     pub fn namespaces(&self) -> Option<Vec<String>> {
         match self {
+            NamespaceMode::None => Some(vec!["".to_string()]),
             NamespaceMode::Single(name) => Some(vec![name.to_string()]),
             NamespaceMode::Address => None,
             NamespaceMode::Named(map) => {
@@ -155,6 +160,7 @@ impl NamespaceMode {
         owner: &Felt,
     ) -> NamespaceResult<NamespaceKey> {
         match self {
+            NamespaceMode::None => Ok(NamespaceKey::None),
             NamespaceMode::Single(s) => match **s == *namespace {
                 true => Ok(NamespaceKey::Single(s.clone())),
                 false => Err(NamespaceError::NamespaceMismatch(namespace, s.to_string())),
@@ -184,6 +190,7 @@ impl NamespaceMode {
 
     pub fn to_namespace(&self, from_address: &Felt) -> DbResult<NamespaceKey> {
         match self {
+            NamespaceMode::None => Ok(NamespaceKey::None),
             NamespaceMode::Single(name) => Ok(NamespaceKey::Single(name.clone())),
             NamespaceMode::Address => Ok(NamespaceKey::Address(*from_address)),
             NamespaceMode::Named(map) => match map.get(from_address) {

@@ -129,9 +129,9 @@ impl Erc721Storage {
                     token BYTEA NOT NULL,
                     token_id BYTEA NOT NULL,
                     owner BYTEA NOT NULL,
-                    block_number BIGINT NOT NULL,
+                    block_number TEXT NOT NULL,
                     tx_hash BYTEA NOT NULL,
-                    timestamp BIGINT,
+                    timestamp TEXT,
                     UNIQUE(token, token_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_nft_ownership_owner ON erc721.nft_ownership(owner);
@@ -143,9 +143,9 @@ impl Erc721Storage {
                     token_id BYTEA NOT NULL,
                     from_addr BYTEA NOT NULL,
                     to_addr BYTEA NOT NULL,
-                    block_number BIGINT NOT NULL,
+                    block_number TEXT NOT NULL,
                     tx_hash BYTEA NOT NULL,
-                    timestamp BIGINT,
+                    timestamp TEXT,
                     UNIQUE(token, tx_hash, token_id, from_addr, to_addr)
                 );
                 CREATE INDEX IF NOT EXISTS idx_nft_transfers_token ON erc721.nft_transfers(token);
@@ -160,7 +160,7 @@ impl Erc721Storage {
                     token BYTEA NOT NULL,
                     transfer_id BIGINT NOT NULL REFERENCES erc721.nft_transfers(id),
                     direction TEXT NOT NULL CHECK(direction IN ('sent', 'received', 'both')),
-                    block_number BIGINT NOT NULL
+                    block_number TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_nft_wallet_activity_wallet_block ON erc721.nft_wallet_activity(wallet_address, block_number DESC);
                 CREATE INDEX IF NOT EXISTS idx_nft_wallet_activity_wallet_token ON erc721.nft_wallet_activity(wallet_address, token, block_number DESC);
@@ -171,9 +171,9 @@ impl Erc721Storage {
                     token_id BYTEA NOT NULL,
                     owner BYTEA NOT NULL,
                     approved BYTEA NOT NULL,
-                    block_number BIGINT NOT NULL,
+                    block_number TEXT NOT NULL,
                     tx_hash BYTEA NOT NULL,
-                    timestamp BIGINT
+                    timestamp TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS erc721.nft_operators (
@@ -181,10 +181,10 @@ impl Erc721Storage {
                     token BYTEA NOT NULL,
                     owner BYTEA NOT NULL,
                     operator BYTEA NOT NULL,
-                    approved BIGINT NOT NULL,
-                    block_number BIGINT NOT NULL,
+                    approved TEXT NOT NULL,
+                    block_number TEXT NOT NULL,
                     tx_hash BYTEA NOT NULL,
-                    timestamp BIGINT,
+                    timestamp TEXT,
                     UNIQUE(token, owner, operator)
                 );
 
@@ -200,7 +200,7 @@ impl Erc721Storage {
                     token_id BYTEA NOT NULL,
                     uri TEXT,
                     metadata_json TEXT,
-                    updated_at BIGINT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT),
+                    updated_at TEXT NOT NULL DEFAULT (EXTRACT(EPOCH FROM NOW())::BIGINT::TEXT),
                     PRIMARY KEY (token, token_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_token_uris_token ON erc721.token_uris(token);
@@ -233,7 +233,7 @@ impl Erc721Storage {
                     facet_key_id BIGINT NOT NULL REFERENCES erc721.facet_keys(id) ON DELETE CASCADE,
                     value_norm TEXT NOT NULL,
                     value_display TEXT NOT NULL,
-                    token_count BIGINT NOT NULL DEFAULT 0,
+                    token_count TEXT NOT NULL DEFAULT '0',
                     UNIQUE(token, facet_key_id, value_norm)
                 );
                 CREATE INDEX IF NOT EXISTS idx_facet_values_token_key_value ON erc721.facet_values(token, facet_key_id, value_norm);
@@ -282,9 +282,9 @@ impl Erc721Storage {
                 token BLOB NOT NULL,
                 token_id BLOB NOT NULL,
                 owner BLOB NOT NULL,
-                block_number INTEGER NOT NULL,
+                block_number TEXT NOT NULL,
                 tx_hash BLOB NOT NULL,
-                timestamp INTEGER,
+                timestamp TEXT,
                 UNIQUE(token, token_id)
             )",
             [],
@@ -308,9 +308,9 @@ impl Erc721Storage {
                 token_id BLOB NOT NULL,
                 from_addr BLOB NOT NULL,
                 to_addr BLOB NOT NULL,
-                block_number INTEGER NOT NULL,
+                block_number TEXT NOT NULL,
                 tx_hash BLOB NOT NULL,
-                timestamp INTEGER,
+                timestamp TEXT,
                 UNIQUE(token, tx_hash, token_id, from_addr, to_addr)
             )",
             [],
@@ -349,7 +349,7 @@ impl Erc721Storage {
                 token BLOB NOT NULL,
                 transfer_id INTEGER NOT NULL,
                 direction TEXT NOT NULL CHECK(direction IN ('sent', 'received', 'both')),
-                block_number INTEGER NOT NULL,
+                block_number TEXT NOT NULL,
                 FOREIGN KEY (transfer_id) REFERENCES nft_transfers(id)
             )",
             [],
@@ -375,9 +375,9 @@ impl Erc721Storage {
                 token_id BLOB NOT NULL,
                 owner BLOB NOT NULL,
                 approved BLOB NOT NULL,
-                block_number INTEGER NOT NULL,
+                block_number TEXT NOT NULL,
                 tx_hash BLOB NOT NULL,
-                timestamp INTEGER
+                timestamp TEXT
             )",
             [],
         )?;
@@ -389,10 +389,10 @@ impl Erc721Storage {
                 token BLOB NOT NULL,
                 owner BLOB NOT NULL,
                 operator BLOB NOT NULL,
-                approved INTEGER NOT NULL,
-                block_number INTEGER NOT NULL,
+                approved TEXT NOT NULL,
+                block_number TEXT NOT NULL,
                 tx_hash BLOB NOT NULL,
-                timestamp INTEGER,
+                timestamp TEXT,
                 UNIQUE(token, owner, operator)
             )",
             [],
@@ -415,7 +415,7 @@ impl Erc721Storage {
                 token_id BLOB NOT NULL,
                 uri TEXT,
                 metadata_json TEXT,
-                updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%s', 'now')),
                 PRIMARY KEY (token, token_id)
             );
             CREATE INDEX IF NOT EXISTS idx_token_uris_token ON token_uris(token);
@@ -449,7 +449,7 @@ impl Erc721Storage {
                 facet_key_id INTEGER NOT NULL,
                 value_norm TEXT NOT NULL,
                 value_display TEXT NOT NULL,
-                token_count INTEGER NOT NULL DEFAULT 0,
+                token_count TEXT NOT NULL DEFAULT '0',
                 UNIQUE(token, facet_key_id, value_norm),
                 FOREIGN KEY (facet_key_id) REFERENCES facet_keys(id) ON DELETE CASCADE
             );
@@ -527,9 +527,9 @@ impl Erc721Storage {
                     &token_id_blob,
                     &from_blob,
                     &to_blob,
-                    transfer.block_number,
+                    transfer.block_number.to_string(),
                     &tx_hash_blob,
-                    transfer.timestamp,
+                    transfer.timestamp.map(|t| t.to_string()),
                 ])?;
 
                 if rows > 0 {
@@ -542,9 +542,9 @@ impl Erc721Storage {
                             &token_blob,
                             &token_id_blob,
                             &to_blob,
-                            transfer.block_number,
+                            transfer.block_number.to_string(),
                             &tx_hash_blob,
-                            transfer.timestamp,
+                            transfer.timestamp.map(|t| t.to_string()),
                         ])?;
                     }
 
@@ -557,7 +557,7 @@ impl Erc721Storage {
                             &from_blob,
                             &token_blob,
                             transfer_id,
-                            transfer.block_number
+                            transfer.block_number.to_string()
                         ])?;
                     } else {
                         if transfer.from != Felt::ZERO {
@@ -565,7 +565,7 @@ impl Erc721Storage {
                                 &from_blob,
                                 &token_blob,
                                 transfer_id,
-                                transfer.block_number
+                                transfer.block_number.to_string()
                             ])?;
                         }
                         if transfer.to != Felt::ZERO {
@@ -573,7 +573,7 @@ impl Erc721Storage {
                                 &to_blob,
                                 &token_blob,
                                 transfer_id,
-                                transfer.block_number
+                                transfer.block_number.to_string()
                             ])?;
                         }
                     }
@@ -618,10 +618,10 @@ impl Erc721Storage {
                     &token_blob,
                     &owner_blob,
                     &operator_blob,
-                    approval.approved as i32,
-                    approval.block_number,
+                    (approval.approved as u64).to_string(),
+                    approval.block_number.to_string(),
                     &tx_hash_blob,
-                    approval.timestamp,
+                    approval.timestamp.map(|t| t.to_string()),
                 ])?;
 
                 inserted += 1;
@@ -709,18 +709,18 @@ impl Erc721Storage {
 
         if let Some(block_min) = block_from {
             query.push_str(" AND t.block_number >= ?");
-            params_vec.push(Box::new(block_min as i64));
+            params_vec.push(Box::new(block_min.to_string()));
         }
 
         if let Some(block_max) = block_to {
             query.push_str(" AND t.block_number <= ?");
-            params_vec.push(Box::new(block_max as i64));
+            params_vec.push(Box::new(block_max.to_string()));
         }
 
         if let Some(c) = cursor {
             query.push_str(" AND (t.block_number < ? OR (t.block_number = ? AND t.id < ?))");
-            params_vec.push(Box::new(c.block_number as i64));
-            params_vec.push(Box::new(c.block_number as i64));
+            params_vec.push(Box::new(c.block_number.to_string()));
+            params_vec.push(Box::new(c.block_number.to_string()));
             params_vec.push(Box::new(c.id));
         }
 
@@ -737,9 +737,9 @@ impl Erc721Storage {
             let token_id_bytes: Vec<u8> = row.get(2)?;
             let from_bytes: Vec<u8> = row.get(3)?;
             let to_bytes: Vec<u8> = row.get(4)?;
-            let block_number: i64 = row.get(5)?;
+            let block_number_str: String = row.get(5)?;
             let tx_hash_bytes: Vec<u8> = row.get(6)?;
-            let timestamp: Option<i64> = row.get(7)?;
+            let timestamp_str: Option<String> = row.get(7)?;
 
             Ok(NftTransferData {
                 id: Some(id),
@@ -747,9 +747,9 @@ impl Erc721Storage {
                 token_id: blob_to_u256(&token_id_bytes),
                 from: blob_to_felt(&from_bytes),
                 to: blob_to_felt(&to_bytes),
-                block_number: block_number as u64,
+                block_number: block_number_str.parse::<u64>().unwrap_or(0),
                 tx_hash: blob_to_felt(&tx_hash_bytes),
-                timestamp,
+                timestamp: timestamp_str.and_then(|s| s.parse::<i64>().ok()),
             })
         })?;
 
@@ -817,8 +817,8 @@ impl Erc721Storage {
 
         if let Some(c) = cursor {
             query.push_str(" AND (block_number < ? OR (block_number = ? AND id < ?))");
-            params_vec.push(Box::new(c.block_number as i64));
-            params_vec.push(Box::new(c.block_number as i64));
+            params_vec.push(Box::new(c.block_number.to_string()));
+            params_vec.push(Box::new(c.block_number.to_string()));
             params_vec.push(Box::new(c.id));
         }
 
@@ -834,14 +834,14 @@ impl Erc721Storage {
             let token_bytes: Vec<u8> = row.get(1)?;
             let token_id_bytes: Vec<u8> = row.get(2)?;
             let owner_bytes: Vec<u8> = row.get(3)?;
-            let block_number: i64 = row.get(4)?;
+            let block_number_str: String = row.get(4)?;
 
             Ok(NftOwnershipData {
                 id: Some(id),
                 token: blob_to_felt(&token_bytes),
                 token_id: blob_to_u256(&token_id_bytes),
                 owner: blob_to_felt(&owner_bytes),
-                block_number: block_number as u64,
+                block_number: block_number_str.parse::<u64>().unwrap_or(0),
             })
         })?;
 
@@ -964,12 +964,13 @@ impl Erc721Storage {
             return self.pg_get_latest_block().await;
         }
         let conn = self.conn.lock().unwrap();
-        let block: Option<i64> = conn
+        let block: Option<String> = conn
             .query_row("SELECT MAX(block_number) FROM nft_transfers", [], |row| {
                 row.get(0)
             })
-            .ok();
-        Ok(block.map(|b| b as u64))
+            .ok()
+            .flatten();
+        Ok(block.and_then(|b| b.parse::<u64>().ok()))
     }
 
     // ===== Token Metadata Methods =====
@@ -1623,21 +1624,22 @@ impl Erc721Storage {
         let mut token_id_vec = Vec::with_capacity(transfers.len());
         let mut from_vec = Vec::with_capacity(transfers.len());
         let mut to_vec = Vec::with_capacity(transfers.len());
-        let mut block_vec = Vec::with_capacity(transfers.len());
+        let mut block_vec: Vec<String> = Vec::with_capacity(transfers.len());
         let mut tx_hash_vec = Vec::with_capacity(transfers.len());
-        let mut ts_vec = Vec::with_capacity(transfers.len());
+        let mut ts_vec: Vec<String> = Vec::with_capacity(transfers.len());
 
         for transfer in transfers {
             token_vec.push(felt_to_blob(transfer.token));
             token_id_vec.push(u256_to_blob(transfer.token_id));
             from_vec.push(felt_to_blob(transfer.from));
             to_vec.push(felt_to_blob(transfer.to));
-            block_vec.push(transfer.block_number as i64);
+            block_vec.push(transfer.block_number.to_string());
             tx_hash_vec.push(felt_to_blob(transfer.tx_hash));
             ts_vec.push(
                 transfer
                     .timestamp
-                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp())
+                    .to_string(),
             );
         }
 
@@ -1652,9 +1654,9 @@ impl Erc721Storage {
                         $2::bytea[],
                         $3::bytea[],
                         $4::bytea[],
-                        $5::bigint[],
+                        $5::text[],
                         $6::bytea[],
-                        $7::bigint[]
+                        $7::text[]
                     ) AS i(token, token_id, from_addr, to_addr, block_number, tx_hash, timestamp)
                     ON CONFLICT (token, tx_hash, token_id, from_addr, to_addr) DO NOTHING
                     RETURNING id, token, token_id, from_addr, to_addr, block_number, tx_hash, timestamp
@@ -1712,22 +1714,23 @@ impl Erc721Storage {
         let mut token_vec = Vec::with_capacity(approvals.len());
         let mut owner_vec = Vec::with_capacity(approvals.len());
         let mut operator_vec = Vec::with_capacity(approvals.len());
-        let mut approved_vec = Vec::with_capacity(approvals.len());
-        let mut block_vec = Vec::with_capacity(approvals.len());
+        let mut approved_vec: Vec<String> = Vec::with_capacity(approvals.len());
+        let mut block_vec: Vec<String> = Vec::with_capacity(approvals.len());
         let mut tx_hash_vec = Vec::with_capacity(approvals.len());
-        let mut ts_vec = Vec::with_capacity(approvals.len());
+        let mut ts_vec: Vec<String> = Vec::with_capacity(approvals.len());
 
         for approval in approvals {
             token_vec.push(felt_to_blob(approval.token));
             owner_vec.push(felt_to_blob(approval.owner));
             operator_vec.push(felt_to_blob(approval.operator));
-            approved_vec.push((approval.approved as i32) as i64);
-            block_vec.push(approval.block_number as i64);
+            approved_vec.push((approval.approved as u64).to_string());
+            block_vec.push(approval.block_number.to_string());
             tx_hash_vec.push(felt_to_blob(approval.tx_hash));
             ts_vec.push(
                 approval
                     .timestamp
-                    .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp())
+                    .to_string(),
             );
         }
 
@@ -1740,10 +1743,10 @@ impl Erc721Storage {
                     $1::bytea[],
                     $2::bytea[],
                     $3::bytea[],
-                    $4::bigint[],
-                    $5::bigint[],
+                    $4::text[],
+                    $5::text[],
                     $6::bytea[],
-                    $7::bigint[]
+                    $7::text[]
                 ) WITH ORDINALITY AS i(token, owner, operator, approved, block_number, tx_hash, timestamp, ord)
                 ORDER BY token, owner, operator, ord DESC
                 ON CONFLICT (token, owner, operator) DO UPDATE SET
@@ -1832,15 +1835,15 @@ impl Erc721Storage {
         }
         if let Some(block_min) = block_from {
             query.push_str(" AND t.block_number >= ");
-            query.push_str(&Self::pg_next_param(&mut params, block_min as i64));
+            query.push_str(&Self::pg_next_param(&mut params, block_min.to_string()));
         }
         if let Some(block_max) = block_to {
             query.push_str(" AND t.block_number <= ");
-            query.push_str(&Self::pg_next_param(&mut params, block_max as i64));
+            query.push_str(&Self::pg_next_param(&mut params, block_max.to_string()));
         }
         if let Some(c) = cursor {
-            let p1 = Self::pg_next_param(&mut params, c.block_number as i64);
-            let p2 = Self::pg_next_param(&mut params, c.block_number as i64);
+            let p1 = Self::pg_next_param(&mut params, c.block_number.to_string());
+            let p2 = Self::pg_next_param(&mut params, c.block_number.to_string());
             let p3 = Self::pg_next_param(&mut params, c.id);
             query.push_str(&format!(
                 " AND (t.block_number < {p1} OR (t.block_number = {p2} AND t.id < {p3}))"
@@ -1862,9 +1865,9 @@ impl Erc721Storage {
                 token_id: blob_to_u256(&row.get::<usize, Vec<u8>>(2)),
                 from: blob_to_felt(&row.get::<usize, Vec<u8>>(3)),
                 to: blob_to_felt(&row.get::<usize, Vec<u8>>(4)),
-                block_number: row.get::<usize, i64>(5) as u64,
+                block_number: row.get::<usize, String>(5).parse::<u64>().unwrap_or(0),
                 tx_hash: blob_to_felt(&row.get::<usize, Vec<u8>>(6)),
-                timestamp: Some(row.get::<usize, i64>(7)),
+                timestamp: row.get::<usize, String>(7).parse::<i64>().ok(),
             })
             .collect();
         let next_cursor = if transfers.len() == limit as usize {
@@ -1911,8 +1914,8 @@ impl Erc721Storage {
             query.push_str(&format!(" AND token IN ({list})"));
         }
         if let Some(c) = cursor {
-            let p1 = Self::pg_next_param(&mut params, c.block_number as i64);
-            let p2 = Self::pg_next_param(&mut params, c.block_number as i64);
+            let p1 = Self::pg_next_param(&mut params, c.block_number.to_string());
+            let p2 = Self::pg_next_param(&mut params, c.block_number.to_string());
             let p3 = Self::pg_next_param(&mut params, c.id);
             query.push_str(&format!(
                 " AND (block_number < {p1} OR (block_number = {p2} AND id < {p3}))"
@@ -1932,7 +1935,7 @@ impl Erc721Storage {
                 token: blob_to_felt(&row.get::<usize, Vec<u8>>(1)),
                 token_id: blob_to_u256(&row.get::<usize, Vec<u8>>(2)),
                 owner: blob_to_felt(&row.get::<usize, Vec<u8>>(3)),
-                block_number: row.get::<usize, i64>(4) as u64,
+                block_number: row.get::<usize, String>(4).parse::<u64>().unwrap_or(0),
             })
             .collect();
         let next_cursor = if ownership.len() == limit as usize {
@@ -2077,8 +2080,8 @@ impl Erc721Storage {
         let row = client
             .query_one("SELECT MAX(block_number) FROM erc721.nft_transfers", &[])
             .await?;
-        let v: Option<i64> = row.get(0);
-        Ok(v.map(|x| x as u64))
+        let v: Option<String> = row.get(0);
+        Ok(v.and_then(|x| x.parse::<u64>().ok()))
     }
 
     async fn pg_has_token_metadata(&self, token: Felt) -> Result<bool> {
@@ -2369,7 +2372,7 @@ impl TokenUriStore for Erc721Storage {
 
                 tx.execute(
                     "INSERT INTO erc721.token_uris (token, token_id, uri, metadata_json, updated_at)
-                     VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::BIGINT)
+                     VALUES ($1, $2, $3, $4, EXTRACT(EPOCH FROM NOW())::BIGINT::TEXT)
                      ON CONFLICT(token, token_id) DO UPDATE SET
                         uri = EXCLUDED.uri,
                         metadata_json = EXCLUDED.metadata_json,
@@ -2734,7 +2737,7 @@ fn sqlite_apply_facet_sync_plan(
     )?;
     let mut update_count_stmt = tx.prepare_cached(
         "UPDATE facet_values
-         SET token_count = MAX(token_count + ?2, 0)
+         SET token_count = CAST(MAX(CAST(token_count AS INTEGER) + ?2, 0) AS TEXT)
          WHERE id = ?1",
     )?;
 
@@ -2912,7 +2915,7 @@ async fn pg_apply_facet_sync_plan(
     for (facet_value_id, delta) in &plan.count_deltas {
         tx.execute(
             "UPDATE erc721.facet_values
-             SET token_count = GREATEST(token_count + $2, 0)
+             SET token_count = CAST(GREATEST(CAST(token_count AS BIGINT) + $2, 0) AS TEXT)
              WHERE id = $1",
             &[facet_value_id, delta],
         )
@@ -3082,7 +3085,7 @@ mod tests {
         {
             let conn = storage.conn.lock().unwrap();
             conn.execute(
-                "UPDATE token_uris SET updated_at = 123 WHERE token = ?1 AND token_id = ?2",
+                "UPDATE token_uris SET updated_at = '123' WHERE token = ?1 AND token_id = ?2",
                 params![felt_to_blob(result.contract), u256_to_blob(result.token_id)],
             )
             .expect("set sentinel updated_at");
@@ -3093,9 +3096,9 @@ mod tests {
             .await
             .expect("store unchanged token uri");
 
-        let (updated_at, attr_count): (i64, i64) = {
+        let (updated_at, attr_count): (String, i64) = {
             let conn = storage.conn.lock().unwrap();
-            let updated_at: i64 = conn
+            let updated_at: String = conn
                 .query_row(
                     "SELECT updated_at FROM token_uris WHERE token = ?1 AND token_id = ?2",
                     params![felt_to_blob(result.contract), u256_to_blob(result.token_id)],
@@ -3112,7 +3115,7 @@ mod tests {
             (updated_at, attr_count)
         };
 
-        assert_eq!(updated_at, 123);
+        assert_eq!(updated_at, "123");
         assert_eq!(attr_count, 1);
 
         let _ = std::fs::remove_file(db_path);
@@ -3192,7 +3195,7 @@ mod tests {
         {
             let conn = storage.conn.lock().unwrap();
             conn.execute(
-                "UPDATE facet_values SET token_count = 0 WHERE id IN (
+                "UPDATE facet_values SET token_count = '0' WHERE id IN (
                     SELECT facet_value_id FROM facet_token_map WHERE token = ?1 AND token_id = ?2
                 )",
                 params![felt_to_blob(result.contract), u256_to_blob(result.token_id)],
@@ -3221,7 +3224,7 @@ mod tests {
                 .expect("count facet mappings");
             let positive_counts: i64 = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM facet_values WHERE token_count > 0",
+                    "SELECT COUNT(*) FROM facet_values WHERE CAST(token_count AS INTEGER) > 0",
                     [],
                     |row| row.get(0),
                 )

@@ -1,9 +1,8 @@
+use crate::SqlxResult;
 use futures::future::BoxFuture;
 use itertools::Itertools;
 use sqlx::{Database, Executor, Transaction};
 use std::sync::Arc;
-
-use crate::SqlxResult;
 
 pub trait Executable<DB: Database> {
     fn execute<'t>(self, transaction: &'t mut Transaction<'_, DB>) -> BoxFuture<'t, SqlxResult<()>>
@@ -102,33 +101,34 @@ impl PartialEq<str> for FlexStr {
 /// A query with optional bind arguments.
 ///
 /// SQL can be any `FlexStr` (String, Arc<str>, &'static str).
-/// When bind arguments are present, the SQL is stored separately as `&'static str`
-/// because SQLite's `Arguments<'q>` requires the SQL lifetime to match exactly.
-/// Dynamic SQL (DDL, schema operations) never has bind parameters.
-pub enum FlexQuery<DB: Database> {
-    Sql(FlexStr),
-    Bound {
-        sql: &'static str,
-        args: <DB as Database>::Arguments<'static>,
-    },
+/// The `Bound` variant carries SQL + pre-built arguments.
+/// The per-database `Executable` impls handle the lifetime requirements:
+/// Postgres needs no special treatment; SQLite uses an unsafe lifetime extension
+/// that is sound because the `FlexStr` outlives the `.await` point.
+pub struct FlexQuery<DB: Database> {
+    pub(crate) sql: FlexStr,
+    pub(crate) args: Option<<DB as Database>::Arguments<'static>>,
 }
 
 impl<DB: Database> FlexQuery<DB> {
-    pub fn new(sql: &'static str, args: <DB as Database>::Arguments<'static>) -> Self {
-        FlexQuery::Bound { sql, args }
+    pub fn new(sql: impl Into<FlexStr>, args: <DB as Database>::Arguments<'static>) -> Self {
+        FlexQuery {
+            sql: sql.into(),
+            args: Some(args),
+        }
     }
 
     pub fn from_sql(sql: impl Into<FlexStr>) -> Self {
-        FlexQuery::Sql(sql.into())
+        FlexQuery {
+            sql: sql.into(),
+            args: None,
+        }
     }
 }
 
 impl<DB: Database> PartialEq<str> for FlexQuery<DB> {
     fn eq(&self, other: &str) -> bool {
-        match self {
-            FlexQuery::Sql(s) => s.as_ref() == other,
-            FlexQuery::Bound { sql, .. } => *sql == other,
-        }
+        self.sql.as_ref() == other
     }
 }
 
@@ -171,6 +171,16 @@ impl<A: Database> From<String> for FlexQuery<A> {
 impl<A: Database> From<Arc<str>> for FlexQuery<A> {
     fn from(sql: Arc<str>) -> Self {
         FlexQuery::from_sql(sql)
+    }
+}
+
+impl<DB: Database, S, A> From<(S, A)> for FlexQuery<DB>
+where
+    S: Into<FlexStr>,
+    A: Into<<DB as Database>::Arguments<'static>>,
+{
+    fn from((sql, args): (S, A)) -> Self {
+        FlexQuery::new(sql, args.into())
     }
 }
 
@@ -249,29 +259,6 @@ where
         Box::pin(async move {
             for item in self {
                 item.execute(transaction).await?;
-            }
-            Ok(())
-        })
-    }
-}
-
-impl<DB: Database> Executable<DB> for FlexQuery<DB>
-where
-    for<'c> &'c mut <DB as Database>::Connection: Executor<'c, Database = DB>,
-    <DB as Database>::Arguments<'static>: sqlx::IntoArguments<'static, DB>,
-{
-    fn execute<'t>(self, transaction: &'t mut Transaction<'_, DB>) -> BoxFuture<'t, SqlxResult<()>>
-    where
-        Self: 't,
-    {
-        Box::pin(async move {
-            match self {
-                FlexQuery::Bound { sql, args } => {
-                    transaction.execute(sqlx::query_with(sql, args)).await?;
-                }
-                FlexQuery::Sql(sql) => {
-                    transaction.execute(sql.as_ref()).await?;
-                }
             }
             Ok(())
         })

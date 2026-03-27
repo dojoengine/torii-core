@@ -84,6 +84,14 @@ pub struct Config {
     #[arg(long, default_value = "3000")]
     pub port: u16,
 
+    /// Cartridge-compatible GraphQL API used to fetch controller usernames.
+    #[arg(long, default_value = "https://api.cartridge.gg/query")]
+    pub controllers_api_url: String,
+
+    /// Enable controller synchronization into the introspect database.
+    #[arg(long)]
+    pub controllers: bool,
+
     /// Enable Prometheus metrics collection.
     #[arg(long)]
     pub observability: bool,
@@ -111,6 +119,22 @@ pub struct Config {
     /// Ignore persisted extractor state and force extraction from `from_block`.
     #[arg(long)]
     pub ignore_saved_state: bool,
+
+    /// Enable runtime indexing for Dojo `ExternalContractRegistered` events.
+    ///
+    /// Enabled by default. Pass `--index-external-contracts=false` to disable.
+    #[arg(
+        long,
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    pub index_external_contracts: bool,
+
+    /// Exact Dojo model names to mirror into append-only `_historical` tables.
+    #[arg(long, value_delimiter = ',')]
+    pub historical: Vec<String>,
 }
 
 impl Config {
@@ -138,6 +162,16 @@ impl Config {
 
     pub fn erc1155_addresses(&self) -> Result<Vec<Felt>> {
         Self::parse_addresses("ERC1155", &self.erc1155)
+    }
+
+    pub fn historical_models(&self) -> Vec<String> {
+        let mut models = Vec::with_capacity(self.historical.len());
+        for model in &self.historical {
+            if !model.is_empty() && !models.contains(model) {
+                models.push(model.clone());
+            }
+        }
+        models
     }
 
     pub fn storage_backend(&self) -> StorageBackend {
@@ -183,6 +217,19 @@ mod tests {
     fn observability_flag_enables_metrics() {
         let cfg = Config::parse_from(["torii-server", "--contract", "0x1", "--observability"]);
         assert!(cfg.observability);
+    }
+
+    #[test]
+    fn controllers_sync_defaults_to_disabled() {
+        let cfg = Config::parse_from(["torii-server", "--contract", "0x1"]);
+        assert_eq!(cfg.controllers_api_url, "https://api.cartridge.gg/query");
+        assert!(!cfg.controllers);
+    }
+
+    #[test]
+    fn controllers_flag_enables_sync() {
+        let cfg = Config::parse_from(["torii-server", "--contract", "0x1", "--controllers"]);
+        assert!(cfg.controllers);
     }
 
     #[test]
@@ -256,5 +303,38 @@ mod tests {
         assert_eq!(cfg.erc20_addresses().unwrap(), vec![Felt::ONE, Felt::TWO]);
         assert_eq!(cfg.erc721_addresses().unwrap(), vec![Felt::from(3_u64)]);
         assert_eq!(cfg.erc1155_addresses().unwrap(), vec![Felt::from(4_u64)]);
+    }
+
+    #[test]
+    fn external_contract_indexing_defaults_to_enabled() {
+        let cfg = Config::parse_from(["torii-server", "--contract", "0x1"]);
+        assert!(cfg.index_external_contracts);
+    }
+
+    #[test]
+    fn external_contract_indexing_flag_can_disable_runtime_registration() {
+        let cfg = Config::parse_from([
+            "torii-server",
+            "--contract",
+            "0x1",
+            "--index-external-contracts=false",
+        ]);
+        assert!(!cfg.index_external_contracts);
+    }
+
+    #[test]
+    fn historical_models_parse_as_exact_names() {
+        let cfg = Config::parse_from([
+            "torii-server",
+            "--contract",
+            "0x1",
+            "--historical",
+            "NUMS-Game,NUMS-Config,NUMS-Game",
+        ]);
+
+        assert_eq!(
+            cfg.historical_models(),
+            vec!["NUMS-Game".to_string(), "NUMS-Config".to_string()]
+        );
     }
 }
