@@ -595,50 +595,6 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
             .map(|id| &table.columns[id].type_def)
             .collect();
 
-        let placeholders = std::iter::once("?".to_string())
-            .chain(column_type_defs.iter().map(|td| {
-                if is_json_type(td) {
-                    "jsonb(?)".to_string()
-                } else {
-                    "?".to_string()
-                }
-            }))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let update_columns = column_names
-            .iter()
-            .skip(1)
-            .zip(column_type_defs.iter())
-            .map(|(name, td)| {
-                if is_json_type(td) {
-                    format!(
-                        r#""{name}" = COALESCE(jsonb(excluded."{name}"), "{table_name}"."{name}")"#,
-                        table_name = table.storage_name
-                    )
-                } else {
-                    format!(
-                        r#""{name}" = COALESCE(excluded."{name}", "{table_name}"."{name}")"#,
-                        table_name = table.storage_name
-                    )
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let sql = format!(
-            r#"INSERT INTO "{}" ({}) VALUES ({}) ON CONFLICT("{}") DO UPDATE SET {}"#,
-            table.storage_name,
-            column_names
-                .iter()
-                .map(|name| format!(r#""{name}""#))
-                .collect::<Vec<_>>()
-                .join(", "),
-            placeholders,
-            table.primary.name,
-            update_columns
-        );
-
         let mut bytes = Vec::new();
         let mut serializer = JsonSerializer::new(&mut bytes);
         record_schema.parse_records_with_metadata(
@@ -653,7 +609,7 @@ impl<T: SqliteConnection + Send + Sync> IntrospectSqliteDb<T> {
         for value in rows {
             let object = value.as_object().ok_or(SqliteDbError::InvalidRecordFrame)?;
 
-            let mut query = sqlx::query(&sql);
+            let mut query = sqlx::query(&table.upsert_sql);
 
             let primary_value = object
                 .get(table.primary.name.as_str())

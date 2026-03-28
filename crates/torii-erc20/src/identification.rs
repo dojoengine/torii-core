@@ -64,7 +64,7 @@ impl IdentificationRule for Erc20Rule {
         let has_transfer_event = abi.has_event("Transfer");
 
         if has_transfer && has_balance_of && has_transfer_event {
-            tracing::trace!(
+            tracing::debug!(
                 target: "torii_erc20::identification",
                 "Contract matches ERC20 pattern"
             );

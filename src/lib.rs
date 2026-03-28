@@ -26,14 +26,17 @@ pub use tonic;
 pub use grpc::UpdateType;
 
 use axum::Router as AxumRouter;
+use std::fs::File;
+use std::io::{self, BufReader};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
+use tower::Service;
 use tower_http::cors::{Any as CorsAny, CorsLayer};
 
 use command::{CommandBus, CommandHandler};
@@ -189,11 +192,43 @@ pub struct ToriiConfig {
 
     /// Command bus queue size.
     pub command_bus_queue_size: usize,
+
+    /// Optional TLS listener configuration.
+    pub tls: Option<ToriiTlsConfig>,
 }
 
 impl ToriiConfig {
     pub fn builder() -> ToriiConfigBuilder {
         ToriiConfigBuilder::default()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ToriiTlsConfig {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    pub alpn_protocols: Vec<Vec<u8>>,
+}
+
+impl ToriiTlsConfig {
+    pub fn new(cert_path: impl Into<PathBuf>, key_path: impl Into<PathBuf>) -> Self {
+        Self {
+            cert_path: cert_path.into(),
+            key_path: key_path.into(),
+            alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+        }
+    }
+
+    pub fn with_alpn_protocols(mut self, alpn_protocols: Vec<Vec<u8>>) -> Self {
+        self.alpn_protocols = alpn_protocols;
+        self
+    }
+
+    fn alpn_names(&self) -> Vec<String> {
+        self.alpn_protocols
+            .iter()
+            .map(|protocol| String::from_utf8_lossy(protocol).into_owned())
+            .collect()
     }
 }
 
@@ -226,6 +261,7 @@ pub struct ToriiConfigBuilder {
     etl_concurrency: Option<EtlConcurrencyConfig>,
     command_handlers: Vec<Box<dyn CommandHandler>>,
     command_bus_queue_size: Option<usize>,
+    tls: Option<ToriiTlsConfig>,
 }
 
 impl ToriiConfigBuilder {
@@ -540,6 +576,11 @@ impl ToriiConfigBuilder {
         self
     }
 
+    pub fn with_tls(mut self, tls: ToriiTlsConfig) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
     /// Builds the Torii configuration.
     ///
     /// # Panics
@@ -575,6 +616,7 @@ impl ToriiConfigBuilder {
             etl_concurrency: self.etl_concurrency.unwrap_or_default(),
             command_handlers: self.command_handlers,
             command_bus_queue_size: self.command_bus_queue_size.unwrap_or(4096),
+            tls: self.tls,
         }
     }
 }
@@ -741,7 +783,17 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
         .layer(cors);
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
+    let tls_acceptor = config.tls.as_ref().map(build_tls_acceptor).transpose()?;
     tracing::info!(target: "torii::main", "Server listening on {}", addr);
+    if let Some(tls) = &config.tls {
+        tracing::info!(
+            target: "torii::main",
+            cert = %tls.cert_path.display(),
+            key = %tls.key_path.display(),
+            alpn = ?tls.alpn_names(),
+            "TLS enabled for listener"
+        );
+    }
 
     tracing::info!(target: "torii::main", "gRPC Services:");
     tracing::info!(target: "torii::main", "   torii.Torii - Core service");
@@ -1154,7 +1206,62 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
     };
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal);
+    let mut make_svc = app.into_make_service();
+    let http = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+
+    let server = async move {
+        tokio::pin!(shutdown_signal);
+        loop {
+            let (tcp, _remote_addr) = tokio::select! {
+                result = listener.accept() => match result {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        tracing::error!(target: "torii::main", "Accept error: {}", e);
+                        continue;
+                    }
+                },
+                () = &mut shutdown_signal => break,
+            };
+            let tower_service = make_svc.call(()).await.expect("infallible");
+            let hyper_service = hyper_util::service::TowerToHyperService::new(tower_service);
+            let builder = http.clone();
+            let tls_acceptor = tls_acceptor.clone();
+            tokio::spawn(async move {
+                if let Some(tls_acceptor) = tls_acceptor {
+                    let tls_stream = match tls_acceptor.accept(tcp).await {
+                        Ok(stream) => stream,
+                        Err(err) => {
+                            tracing::debug!(
+                                target: "torii::main",
+                                error = %err,
+                                "TLS handshake failed"
+                            );
+                            return;
+                        }
+                    };
+
+                    if let Err(err) = builder
+                        .serve_connection_with_upgrades(
+                            hyper_util::rt::TokioIo::new(tls_stream),
+                            hyper_service,
+                        )
+                        .await
+                    {
+                        tracing::debug!(target: "torii::main", error = %err, "Connection ended");
+                    }
+                } else if let Err(err) = builder
+                    .serve_connection_with_upgrades(
+                        hyper_util::rt::TokioIo::new(tcp),
+                        hyper_service,
+                    )
+                    .await
+                {
+                    tracing::debug!(target: "torii::main", error = %err, "Connection ended");
+                }
+            });
+        }
+        Ok::<_, std::io::Error>(())
+    };
 
     // Give active connections 15 seconds to close gracefully, then force shutdown.
     // This prevents hanging on long-lived gRPC streaming connections.
@@ -1201,4 +1308,61 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
     command_bus.shutdown().await;
 
     Ok(())
+}
+
+fn build_tls_acceptor(
+    config: &ToriiTlsConfig,
+) -> Result<tokio_rustls::TlsAcceptor, Box<dyn std::error::Error>> {
+    ensure_rustls_crypto_provider();
+    let cert_chain = load_cert_chain(&config.cert_path)?;
+    let private_key = load_private_key(&config.key_path)?;
+
+    let mut server_config = tokio_rustls::rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, private_key)?;
+    server_config
+        .alpn_protocols
+        .clone_from(&config.alpn_protocols);
+
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)))
+}
+
+fn ensure_rustls_crypto_provider() {
+    if tokio_rustls::rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    }
+}
+
+fn load_cert_chain(
+    path: &Path,
+) -> Result<Vec<tokio_rustls::rustls::pki_types::CertificateDer<'static>>, Box<dyn std::error::Error>>
+{
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, io::Error>>()?;
+
+    if certs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("no certificates found in {}", path.display()),
+        )
+        .into());
+    }
+
+    Ok(certs)
+}
+
+fn load_private_key(
+    path: &Path,
+) -> Result<tokio_rustls::rustls::pki_types::PrivateKeyDer<'static>, Box<dyn std::error::Error>> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let private_key = rustls_pemfile::private_key(&mut reader)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("no private key found in {}", path.display()),
+        )
+    })?;
+
+    Ok(private_key)
 }

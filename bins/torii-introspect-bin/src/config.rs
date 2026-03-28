@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use clap::{ArgGroup, Parser};
 use starknet::core::types::Felt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StorageBackend {
@@ -85,6 +85,14 @@ pub struct Config {
     #[arg(long, default_value = "3000")]
     pub port: u16,
 
+    /// PEM-encoded TLS certificate for the local HTTP/gRPC listener.
+    #[arg(long, env = "TORII_TLS_CERT")]
+    pub tls_cert: Option<PathBuf>,
+
+    /// PEM-encoded TLS private key for the local HTTP/gRPC listener.
+    #[arg(long, env = "TORII_TLS_KEY")]
+    pub tls_key: Option<PathBuf>,
+
     /// Cartridge-compatible GraphQL API used to fetch controller usernames.
     #[arg(long, default_value = "https://api.cartridge.gg/query")]
     pub controllers_api_url: String,
@@ -108,6 +116,10 @@ pub struct Config {
     /// Number of extracted batches to prefetch ahead of decode/store.
     #[arg(long, default_value = "2")]
     pub max_prefetch_batches: usize,
+
+    /// Delay between ETL idle/retry cycles in seconds.
+    #[arg(long, default_value = "3")]
+    pub cycle_interval: u64,
 
     /// Maximum chunked RPC requests to run concurrently (`0` = auto).
     #[arg(long, default_value = "0")]
@@ -201,6 +213,16 @@ impl Config {
             None => Ok(db_dir.join("introspect.db").to_string_lossy().to_string()),
         }
     }
+
+    pub fn tls_config(&self) -> Result<Option<torii::ToriiTlsConfig>> {
+        match (&self.tls_cert, &self.tls_key) {
+            (Some(cert), Some(key)) => {
+                Ok(Some(torii::ToriiTlsConfig::new(cert.clone(), key.clone())))
+            }
+            (None, None) => Ok(None),
+            _ => bail!("--tls-cert and --tls-key must be provided together"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +309,40 @@ mod tests {
         assert_eq!(cfg.event_block_batch_size, 8888);
         assert_eq!(cfg.max_prefetch_batches, 4);
         assert_eq!(cfg.rpc_parallelism, 6);
+    }
+
+    #[test]
+    fn tls_flags_parse_when_both_paths_are_present() {
+        let cfg = Config::parse_from([
+            "torii-server",
+            "--contract",
+            "0x1",
+            "--tls-cert",
+            "./certs/dev-cert.pem",
+            "--tls-key",
+            "./certs/dev-key.pem",
+        ]);
+
+        let tls = cfg.tls_config().unwrap().unwrap();
+        assert_eq!(tls.cert_path, PathBuf::from("./certs/dev-cert.pem"));
+        assert_eq!(tls.key_path, PathBuf::from("./certs/dev-key.pem"));
+        assert_eq!(
+            tls.alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
+    }
+
+    #[test]
+    fn tls_flags_require_both_cert_and_key() {
+        let cfg = Config::parse_from([
+            "torii-server",
+            "--contract",
+            "0x1",
+            "--tls-cert",
+            "./certs/dev-cert.pem",
+        ]);
+
+        assert!(cfg.tls_config().is_err());
     }
 
     #[test]

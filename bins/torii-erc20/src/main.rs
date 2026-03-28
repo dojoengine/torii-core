@@ -74,6 +74,7 @@ async fn main() -> Result<()> {
     tracing::info!("RPC URL: {}", config.rpc_url);
     tracing::info!("From block: {}", config.from_block);
     tracing::info!("Database: {}", config.db_path);
+    tracing::info!("ETL cycle interval: {}s", config.cycle_interval);
     if let Some(url) = &config.database_url {
         tracing::info!("Engine database URL: {}", url);
     }
@@ -146,6 +147,7 @@ async fn main() -> Result<()> {
         .port(config.port)
         .database_root(&db_setup.database_root)
         .command_bus_queue_size(ERC20_METADATA_COMMAND_QUEUE_SIZE)
+        .cycle_interval(config.cycle_interval)
         .engine_database_url(db_setup.engine_url.clone())
         .with_extractor(extractor)
         .add_decoder(decoder)

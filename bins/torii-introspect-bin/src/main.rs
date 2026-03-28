@@ -49,7 +49,10 @@ use torii_erc721::{
 };
 use torii_introspect_postgres_sink::processor::IntrospectPgDb;
 use torii_introspect_sqlite_sink::processor::IntrospectSqliteDb;
-use torii_runtime_common::database::{resolve_token_db_setup, TokenDbSetup};
+use torii_runtime_common::database::{
+    resolve_token_db_setup, TokenDbSetup, DEFAULT_SQLITE_MAX_CONNECTIONS,
+};
+use torii_runtime_common::token_support::{resolve_installed_token_support, InstalledTokenSupport};
 use torii_sqlite::{is_sqlite_memory_path, sqlite_connect_options};
 
 type StarknetProvider =
@@ -154,10 +157,6 @@ impl TokenTargets {
             erc721: config.erc721_addresses()?,
             erc1155: config.erc1155_addresses()?,
         })
-    }
-
-    fn has_any(&self) -> bool {
-        !self.erc20.is_empty() || !self.erc721.is_empty() || !self.erc1155.is_empty()
     }
 
     fn total_len(&self) -> usize {
@@ -290,10 +289,45 @@ fn apply_contract_mappings(
     torii_config
 }
 
-async fn configure_token_support(
-    token_targets: &TokenTargets,
+fn ecs_token_storage_urls(
     token_db_setup: Option<&TokenDbSetup>,
-    enable_external_contracts: bool,
+    installed_token_support: InstalledTokenSupport,
+) -> (Option<&str>, Option<&str>, Option<&str>) {
+    if !installed_token_support.any() {
+        return (None, None, None);
+    }
+
+    let db_setup =
+        token_db_setup.expect("token DB setup must exist when installed token support is enabled");
+
+    (
+        installed_token_support
+            .erc20
+            .then_some(db_setup.erc20_url.as_str()),
+        installed_token_support
+            .erc721
+            .then_some(db_setup.erc721_url.as_str()),
+        installed_token_support
+            .erc1155
+            .then_some(db_setup.erc1155_url.as_str()),
+    )
+}
+
+fn log_installed_token_services(installed_token_support: InstalledTokenSupport) {
+    if installed_token_support.erc20 {
+        tracing::info!("  - torii.sinks.erc20.Erc20");
+    }
+    if installed_token_support.erc721 {
+        tracing::info!("  - torii.sinks.erc721.Erc721");
+    }
+    if installed_token_support.erc1155 {
+        tracing::info!("  - torii.sinks.erc1155.Erc1155");
+    }
+}
+
+async fn configure_token_support(
+    installed_token_support: InstalledTokenSupport,
+    token_db_setup: Option<&TokenDbSetup>,
     provider: Arc<StarknetProvider>,
     mut torii_config: ToriiConfigBuilder,
     mut reflection_builder: ReflectionBuilder,
@@ -305,11 +339,8 @@ async fn configure_token_support(
 )> {
     let mut services = TokenGrpcServices::default();
     let mut token_uri_services = Vec::new();
-    let install_erc20 = enable_external_contracts || !token_targets.erc20.is_empty();
-    let install_erc721 = enable_external_contracts || !token_targets.erc721.is_empty();
-    let install_erc1155 = enable_external_contracts || !token_targets.erc1155.is_empty();
 
-    if !install_erc20 && !install_erc721 && !install_erc1155 {
+    if !installed_token_support.any() {
         return Ok((
             torii_config,
             reflection_builder,
@@ -321,7 +352,7 @@ async fn configure_token_support(
     let db_setup =
         token_db_setup.expect("token DB setup must exist when token support is configured");
 
-    if install_erc20 {
+    if installed_token_support.erc20 {
         let storage = Arc::new(Erc20Storage::new(&db_setup.erc20_url).await?);
         tracing::info!("ERC20 database initialized: {}", db_setup.erc20_url);
 
@@ -351,7 +382,7 @@ async fn configure_token_support(
             reflection_builder.register_encoded_file_descriptor_set(ERC20_DESCRIPTOR_SET);
     }
 
-    if install_erc721 {
+    if installed_token_support.erc721 {
         let storage = Arc::new(Erc721Storage::new(&db_setup.erc721_url).await?);
         tracing::info!("ERC721 database initialized: {}", db_setup.erc721_url);
 
@@ -386,7 +417,7 @@ async fn configure_token_support(
             reflection_builder.register_encoded_file_descriptor_set(ERC721_DESCRIPTOR_SET);
     }
 
-    if install_erc1155 {
+    if installed_token_support.erc1155 {
         let storage = Arc::new(Erc1155Storage::new(&db_setup.erc1155_url).await?);
         tracing::info!("ERC1155 database initialized: {}", db_setup.erc1155_url);
 
@@ -453,8 +484,16 @@ async fn run_indexer(config: Config) -> Result<()> {
     let engine_database_url = config.engine_database_url(db_dir);
     let contracts = config.contract_addresses()?;
     let token_targets = TokenTargets::from_config(&config)?;
+    let installed_token_support = resolve_installed_token_support(
+        config.index_external_contracts,
+        InstalledTokenSupport {
+            erc20: !token_targets.erc20.is_empty(),
+            erc721: !token_targets.erc721.is_empty(),
+            erc1155: !token_targets.erc1155.is_empty(),
+        },
+    );
     let historical_models = config.historical_models();
-    let token_db_setup = if token_targets.has_any() || config.index_external_contracts {
+    let token_db_setup = if installed_token_support.any() {
         Some(resolve_token_db_setup(
             db_dir,
             config.database_url.as_deref(),
@@ -501,8 +540,9 @@ async fn run_indexer(config: Config) -> Result<()> {
     }
     tracing::info!("Database backend: {:?}", backend);
     tracing::info!(
-        "ETL concurrency: prefetch_batches={} rpc_parallelism={}",
+        "ETL concurrency: prefetch_batches={} cycle_interval={}s rpc_parallelism={}",
         config.max_prefetch_batches,
+        config.cycle_interval,
         config.rpc_parallelism,
     );
     tracing::info!(
@@ -610,6 +650,7 @@ async fn run_indexer(config: Config) -> Result<()> {
                 engine_database_url,
                 contracts,
                 token_targets,
+                installed_token_support,
                 token_db_setup,
                 registry_engine_db.clone(),
                 decoder_registry.clone(),
@@ -628,6 +669,7 @@ async fn run_indexer(config: Config) -> Result<()> {
                 engine_database_url,
                 contracts,
                 token_targets,
+                installed_token_support,
                 token_db_setup,
                 registry_engine_db.clone(),
                 decoder_registry.clone(),
@@ -651,6 +693,7 @@ async fn run_with_postgres(
     engine_database_url: String,
     contracts: Vec<Felt>,
     token_targets: TokenTargets,
+    installed_token_support: InstalledTokenSupport,
     token_db_setup: Option<TokenDbSetup>,
     registry_engine_db: Arc<EngineDb>,
     decoder_registry: SharedDecoderRegistry,
@@ -676,18 +719,8 @@ async fn run_with_postgres(
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
 
-    let erc20_url = token_db_setup
-        .as_ref()
-        .filter(|_| !token_targets.erc20.is_empty())
-        .map(|s| s.erc20_url.as_str());
-    let erc721_url = token_db_setup
-        .as_ref()
-        .filter(|_| !token_targets.erc721.is_empty())
-        .map(|s| s.erc721_url.as_str());
-    let erc1155_url = token_db_setup
-        .as_ref()
-        .filter(|_| !token_targets.erc1155.is_empty())
-        .map(|s| s.erc1155_url.as_str());
+    let (erc20_url, erc721_url, erc1155_url) =
+        ecs_token_storage_urls(token_db_setup.as_ref(), installed_token_support);
     let ecs_sink = EcsSink::new(
         storage_database_url,
         config.max_db_connections,
@@ -710,6 +743,7 @@ async fn run_with_postgres(
         .port(config.port)
         .command_bus_queue_size(TOKEN_COMMAND_QUEUE_SIZE)
         .with_custom_reflection(true)
+        .cycle_interval(config.cycle_interval)
         .etl_concurrency(EtlConcurrencyConfig {
             max_prefetch_batches: config.max_prefetch_batches,
         })
@@ -730,6 +764,9 @@ async fn run_with_postgres(
                     .await?,
                 )),
         ));
+    if let Some(tls) = config.tls_config()? {
+        torii_config = torii_config.with_tls(tls);
+    }
     if config.index_external_contracts {
         torii_config = torii_config
             .with_registry_cache(decoder_registry.clone())
@@ -754,9 +791,8 @@ async fn run_with_postgres(
 
     let (torii_config, reflection_builder, token_services, _token_uri_services) =
         configure_token_support(
-            &token_targets,
+            installed_token_support,
             token_db_setup.as_ref(),
-            config.index_external_contracts,
             token_provider,
             torii_config,
             reflection_builder,
@@ -823,15 +859,7 @@ async fn run_with_postgres(
     tracing::info!("gRPC service available on port {}", config.port);
     tracing::info!("  - torii.Torii (core subscriptions and metrics endpoint)");
     tracing::info!("  - world.World (legacy ECS gRPC service)");
-    if !token_targets.erc20.is_empty() {
-        tracing::info!("  - torii.sinks.erc20.Erc20");
-    }
-    if !token_targets.erc721.is_empty() {
-        tracing::info!("  - torii.sinks.erc721.Erc721");
-    }
-    if !token_targets.erc1155.is_empty() {
-        tracing::info!("  - torii.sinks.erc1155.Erc1155");
-    }
+    log_installed_token_services(installed_token_support);
 
     torii::run(torii_config.build())
         .await
@@ -845,6 +873,7 @@ async fn run_with_sqlite(
     engine_database_url: String,
     contracts: Vec<Felt>,
     token_targets: TokenTargets,
+    installed_token_support: InstalledTokenSupport,
     token_db_setup: Option<TokenDbSetup>,
     registry_engine_db: Arc<EngineDb>,
     decoder_registry: SharedDecoderRegistry,
@@ -859,7 +888,7 @@ async fn run_with_sqlite(
     let max_db_connections = match config.max_db_connections {
         Some(limit) => limit.max(1),
         None if is_sqlite_memory_path(storage_database_url) => 1,
-        None => 1,
+        None => DEFAULT_SQLITE_MAX_CONNECTIONS,
     };
     let pool = Arc::new(
         SqlitePoolOptions::new()
@@ -884,18 +913,8 @@ async fn run_with_sqlite(
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
 
-    let erc20_url = token_db_setup
-        .as_ref()
-        .filter(|_| !token_targets.erc20.is_empty())
-        .map(|s| s.erc20_url.as_str());
-    let erc721_url = token_db_setup
-        .as_ref()
-        .filter(|_| !token_targets.erc721.is_empty())
-        .map(|s| s.erc721_url.as_str());
-    let erc1155_url = token_db_setup
-        .as_ref()
-        .filter(|_| !token_targets.erc1155.is_empty())
-        .map(|s| s.erc1155_url.as_str());
+    let (erc20_url, erc721_url, erc1155_url) =
+        ecs_token_storage_urls(token_db_setup.as_ref(), installed_token_support);
     let ecs_sink = EcsSink::new(
         storage_database_url,
         config.max_db_connections,
@@ -918,6 +937,7 @@ async fn run_with_sqlite(
         .port(config.port)
         .command_bus_queue_size(TOKEN_COMMAND_QUEUE_SIZE)
         .with_custom_reflection(true)
+        .cycle_interval(config.cycle_interval)
         .etl_concurrency(EtlConcurrencyConfig {
             max_prefetch_batches: config.max_prefetch_batches,
         })
@@ -938,6 +958,9 @@ async fn run_with_sqlite(
                     .await?,
                 )),
         ));
+    if let Some(tls) = config.tls_config()? {
+        torii_config = torii_config.with_tls(tls);
+    }
     if config.index_external_contracts {
         torii_config = torii_config
             .with_registry_cache(decoder_registry.clone())
@@ -962,9 +985,8 @@ async fn run_with_sqlite(
 
     let (torii_config, reflection_builder, token_services, _token_uri_services) =
         configure_token_support(
-            &token_targets,
+            installed_token_support,
             token_db_setup.as_ref(),
-            config.index_external_contracts,
             token_provider,
             torii_config,
             reflection_builder,
@@ -1031,18 +1053,53 @@ async fn run_with_sqlite(
     tracing::info!("gRPC service available on port {}", config.port);
     tracing::info!("  - torii.Torii (core subscriptions and metrics endpoint)");
     tracing::info!("  - world.World (legacy ECS gRPC service)");
-    if !token_targets.erc20.is_empty() {
-        tracing::info!("  - torii.sinks.erc20.Erc20");
-    }
-    if !token_targets.erc721.is_empty() {
-        tracing::info!("  - torii.sinks.erc721.Erc721");
-    }
-    if !token_targets.erc1155.is_empty() {
-        tracing::info!("  - torii.sinks.erc1155.Erc1155");
-    }
+    log_installed_token_services(installed_token_support);
 
     torii::run(torii_config.build())
         .await
         .map_err(|e| anyhow::anyhow!("Torii error: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ecs_token_storage_urls, InstalledTokenSupport};
+    use torii_runtime_common::database::{DatabaseBackend, TokenDbSetup};
+
+    fn token_db_setup() -> TokenDbSetup {
+        TokenDbSetup {
+            engine_url: "./torii-data/engine.db".to_string(),
+            erc20_url: "./torii-data/erc20.db".to_string(),
+            erc721_url: "./torii-data/erc721.db".to_string(),
+            erc1155_url: "./torii-data/erc1155.db".to_string(),
+            engine_backend: DatabaseBackend::Sqlite,
+            erc20_backend: DatabaseBackend::Sqlite,
+            erc721_backend: DatabaseBackend::Sqlite,
+            erc1155_backend: DatabaseBackend::Sqlite,
+        }
+    }
+
+    #[test]
+    fn ecs_token_storage_urls_follow_installed_support() {
+        let db_setup = token_db_setup();
+        let (erc20_url, erc721_url, erc1155_url) = ecs_token_storage_urls(
+            Some(&db_setup),
+            InstalledTokenSupport {
+                erc20: true,
+                erc721: false,
+                erc1155: true,
+            },
+        );
+
+        assert_eq!(erc20_url, Some("./torii-data/erc20.db"));
+        assert_eq!(erc721_url, None);
+        assert_eq!(erc1155_url, Some("./torii-data/erc1155.db"));
+    }
+
+    #[test]
+    fn ecs_token_storage_urls_are_none_when_no_token_support_is_installed() {
+        let db_setup = token_db_setup();
+        let urls = ecs_token_storage_urls(Some(&db_setup), InstalledTokenSupport::default());
+        assert_eq!(urls, (None, None, None));
+    }
 }

@@ -1,6 +1,8 @@
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
+pub const DEFAULT_SQLITE_MAX_CONNECTIONS: u32 = 500;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DatabaseBackend {
     Postgres,

@@ -445,7 +445,7 @@ impl EventExtractor {
             .map(|state| {
                 let range_end = state.range_end(self.config.block_batch_size, self.chain_head);
                 if state.continuation_token.is_none() {
-                    tracing::info!(
+                    tracing::trace!(
                         target: "torii::etl::event",
                         contract = %state.state_key(),
                         from_block = state.current_block,
@@ -585,7 +585,7 @@ impl Extractor for EventExtractor {
             .map(|(_, r)| r)
             .collect();
 
-        tracing::info!(
+        tracing::trace!(
             target: "torii::etl::event",
             contracts = requests.len(),
             chain_head = ?self.chain_head,
@@ -649,7 +649,7 @@ impl Extractor for EventExtractor {
                     state.advance_block_range(self.config.block_batch_size, self.chain_head);
                     any_advanced = true;
 
-                    tracing::info!(
+                    tracing::trace!(
                         target: "torii::etl::event",
                         contract = %state.state_key(),
                         range_from = completed_from,
@@ -685,7 +685,7 @@ impl Extractor for EventExtractor {
             return Ok(ExtractionBatch::empty());
         }
 
-        tracing::info!(
+        tracing::trace!(
             target: "torii::etl::event",
             events = all_events.len(),
             "Extracted events from batch"
@@ -709,7 +709,7 @@ impl Extractor for EventExtractor {
         let filtered_events =
             Self::filter_events_by_tx_hashes(all_events, &successful_transaction_hashes);
 
-        tracing::info!(
+        tracing::trace!(
             target: "torii::etl::event",
             events_before_filter,
             events_after_filter = filtered_events.len(),

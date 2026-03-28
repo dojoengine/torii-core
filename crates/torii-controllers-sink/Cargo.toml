@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 torii = { path = "../.." }
+torii-runtime-common.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true

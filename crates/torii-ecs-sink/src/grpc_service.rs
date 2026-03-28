@@ -1,6 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use anyhow::{anyhow, Result};
@@ -13,9 +15,11 @@ use introspect_types::{
 };
 use num_bigint::{BigInt, BigUint, Sign};
 use primitive_types::{U256, U512};
+use prost::Message;
 use serde::ser::SerializeMap;
 use serde::Serializer;
 use serde_json::{Map, Serializer as JsonSerializer, Value};
+use sqlx::AnyConnection;
 use sqlx::{
     any::AnyPoolOptions, pool::PoolConnection, postgres::PgPoolOptions,
     sqlite::SqliteConnectOptions, sqlite::SqlitePoolOptions, Any, Column, ConnectOptions, Pool,
@@ -23,9 +27,9 @@ use sqlx::{
 };
 use starknet::core::types::Felt;
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Duration};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{wrappers::ReceiverStream, Stream};
 use tonic::{Request, Response, Status};
 use torii_dojo::store::postgres::PgStore;
 use torii_dojo::store::sqlite::SqliteStore;
@@ -33,6 +37,7 @@ use torii_dojo::store::DojoStoreTrait;
 use torii_dojo::DojoTable;
 use torii_introspect::events::{CreateTable, Record, UpdateTable};
 use torii_introspect::schema::TableSchema;
+use torii_runtime_common::database::DEFAULT_SQLITE_MAX_CONNECTIONS;
 
 use crate::proto::types::{
     self, clause::ClauseType, member_value::ValueType, ComparisonOperator, ContractType,
@@ -54,6 +59,8 @@ use crate::proto::world::{
     UpdateTokenSubscriptionRequest, UpdateTokenTransfersSubscriptionRequest, WorldsRequest,
     WorldsResponse,
 };
+
+const SUBSCRIPTION_SEEN_CACHE_CAPACITY: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TableKind {
@@ -92,11 +99,23 @@ impl DbBackend {
             Self::Sqlite
         }
     }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sqlite => "sqlite",
+            Self::Postgres => "postgres",
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct EcsService {
     state: Arc<EcsState>,
+}
+
+struct CachedViewsSql {
+    controllers: String,
+    token_balances: String,
 }
 
 struct EcsState {
@@ -110,8 +129,9 @@ struct EcsState {
     erc721_url: Option<String>,
     erc1155_url: Option<String>,
     managed_tables: Mutex<Option<Arc<HashMap<String, ManagedTable>>>>,
-    entity_subscriptions: Mutex<HashMap<u64, EntitySubscription>>,
-    event_message_subscriptions: Mutex<HashMap<u64, EntitySubscription>>,
+    cached_views_sql: RwLock<Option<CachedViewsSql>>,
+    entity_subscriptions: RwLock<EntitySubscriptionRegistry>,
+    event_message_subscriptions: RwLock<EntitySubscriptionRegistry>,
     event_subscriptions: Mutex<HashMap<u64, EventSubscription>>,
     contract_subscriptions: Mutex<HashMap<u64, ContractSubscription>>,
     token_subscriptions: Mutex<HashMap<u64, TokenSubscription>>,
@@ -124,6 +144,111 @@ struct EntitySubscription {
     clause: Option<types::Clause>,
     world_addresses: HashSet<Vec<u8>>,
     sender: mpsc::Sender<Result<SubscribeEntityResponse, Status>>,
+}
+
+#[derive(Default)]
+struct EntitySubscriptionRegistry {
+    subscriptions: HashMap<u64, EntitySubscriptionEntry>,
+    groups: HashMap<EntitySubscriptionKey, SharedEntitySubscription>,
+}
+
+#[derive(Clone)]
+struct EntitySubscriptionEntry {
+    key: EntitySubscriptionKey,
+    sender: mpsc::Sender<Result<SubscribeEntityResponse, Status>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct EntitySubscriptionKey {
+    clause_bytes: Vec<u8>,
+    world_addresses: Vec<Vec<u8>>,
+}
+
+struct SharedEntitySubscription {
+    clause: Option<types::Clause>,
+    world_addresses: HashSet<Vec<u8>>,
+    senders: HashMap<u64, mpsc::Sender<Result<SubscribeEntityResponse, Status>>>,
+}
+
+#[derive(Clone)]
+struct EntitySubscriptionGroupSnapshot {
+    clause: Option<types::Clause>,
+    world_addresses: HashSet<Vec<u8>>,
+    senders: Vec<(u64, mpsc::Sender<Result<SubscribeEntityResponse, Status>>)>,
+}
+
+pub struct ManagedSubscriptionStream<T> {
+    stream: ReceiverStream<Result<T, Status>>,
+    cleanup: Option<SubscriptionCleanup>,
+}
+
+struct SubscriptionCleanup {
+    state: Arc<EcsState>,
+    kind: SubscriptionKind,
+    subscription_id: u64,
+}
+
+#[derive(Clone, Copy)]
+enum SubscriptionKind {
+    Entity(TableKind),
+    Event,
+    Contract,
+    Token,
+    TokenBalance,
+    TokenTransfer,
+    Transaction,
+}
+
+#[derive(Clone, Default)]
+struct SeenCache {
+    items: HashSet<String>,
+    order: VecDeque<String>,
+    capacity: usize,
+}
+
+impl SeenCache {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            items: HashSet::new(),
+            order: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    fn from_items<I>(items: I, capacity: usize) -> Self
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut cache = Self::with_capacity(capacity);
+        cache.extend(items);
+        cache
+    }
+
+    fn contains(&self, item: &str) -> bool {
+        self.items.contains(item)
+    }
+
+    fn extend<I>(&mut self, items: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
+        for item in items {
+            if self.items.insert(item.clone()) {
+                self.order.push_back(item);
+            }
+            while self.items.len() > self.capacity {
+                if let Some(evicted) = self.order.pop_front() {
+                    self.items.remove(&evicted);
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn snapshot(&self) -> Self {
+        self.clone()
+    }
 }
 
 struct EventSubscription {
@@ -139,7 +264,7 @@ struct ContractSubscription {
 struct TokenSubscription {
     contract_addresses: Vec<Vec<u8>>,
     token_ids: Vec<Vec<u8>>,
-    seen: HashSet<String>,
+    seen: SeenCache,
     sender: mpsc::Sender<Result<SubscribeTokensResponse, Status>>,
 }
 
@@ -147,7 +272,7 @@ struct TokenBalanceSubscription {
     contract_addresses: Vec<Vec<u8>>,
     account_addresses: Vec<Vec<u8>>,
     token_ids: Vec<Vec<u8>>,
-    seen: HashSet<String>,
+    latest: HashMap<String, Vec<u8>>,
     sender: mpsc::Sender<Result<SubscribeTokenBalancesResponse, Status>>,
 }
 
@@ -155,14 +280,330 @@ struct TokenTransferSubscription {
     contract_addresses: Vec<Vec<u8>>,
     account_addresses: Vec<Vec<u8>>,
     token_ids: Vec<Vec<u8>>,
-    seen: HashSet<String>,
+    seen: SeenCache,
     sender: mpsc::Sender<Result<SubscribeTokenTransfersResponse, Status>>,
 }
 
 struct TransactionSubscription {
     filter: types::TransactionFilter,
-    seen: HashSet<String>,
+    seen: SeenCache,
     sender: mpsc::Sender<Result<SubscribeTransactionsResponse, Status>>,
+}
+
+impl EntitySubscriptionKey {
+    fn new(clause: Option<&types::Clause>, world_addresses: &HashSet<Vec<u8>>) -> Self {
+        let mut world_addresses = world_addresses.iter().cloned().collect::<Vec<_>>();
+        world_addresses.sort();
+
+        Self {
+            clause_bytes: clause.map_or_else(Vec::new, Message::encode_to_vec),
+            world_addresses,
+        }
+    }
+}
+
+impl EntitySubscriptionRegistry {
+    fn insert(&mut self, subscription_id: u64, subscription: EntitySubscription) {
+        let key =
+            EntitySubscriptionKey::new(subscription.clause.as_ref(), &subscription.world_addresses);
+        let sender = subscription.sender.clone();
+
+        self.groups
+            .entry(key.clone())
+            .or_insert_with(|| SharedEntitySubscription {
+                clause: subscription.clause,
+                world_addresses: subscription.world_addresses,
+                senders: HashMap::new(),
+            })
+            .senders
+            .insert(subscription_id, sender.clone());
+
+        self.subscriptions
+            .insert(subscription_id, EntitySubscriptionEntry { key, sender });
+    }
+
+    fn update(
+        &mut self,
+        subscription_id: u64,
+        clause: Option<types::Clause>,
+        world_addresses: HashSet<Vec<u8>>,
+    ) -> bool {
+        let Some(entry) = self.subscriptions.get_mut(&subscription_id) else {
+            return false;
+        };
+
+        let next_key = EntitySubscriptionKey::new(clause.as_ref(), &world_addresses);
+        if entry.key == next_key {
+            return false;
+        }
+
+        let sender = entry.sender.clone();
+        let previous_key = entry.key.clone();
+        let remove_previous_group = if let Some(group) = self.groups.get_mut(&previous_key) {
+            group.senders.remove(&subscription_id);
+            group.senders.is_empty()
+        } else {
+            false
+        };
+        if remove_previous_group {
+            self.groups.remove(&previous_key);
+        }
+
+        self.groups
+            .entry(next_key.clone())
+            .or_insert_with(|| SharedEntitySubscription {
+                clause,
+                world_addresses,
+                senders: HashMap::new(),
+            })
+            .senders
+            .insert(subscription_id, sender);
+
+        entry.key = next_key;
+        true
+    }
+
+    fn remove(&mut self, subscription_id: u64) -> bool {
+        let Some(entry) = self.subscriptions.remove(&subscription_id) else {
+            return false;
+        };
+
+        let remove_group = if let Some(group) = self.groups.get_mut(&entry.key) {
+            group.senders.remove(&subscription_id);
+            group.senders.is_empty()
+        } else {
+            false
+        };
+        if remove_group {
+            self.groups.remove(&entry.key);
+        }
+
+        true
+    }
+
+    fn group_count(&self) -> usize {
+        self.groups.len()
+    }
+
+    fn subscription_count(&self) -> usize {
+        self.subscriptions.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.subscriptions.is_empty()
+    }
+
+    fn snapshot_groups(&self) -> Vec<EntitySubscriptionGroupSnapshot> {
+        self.groups
+            .values()
+            .map(|group| EntitySubscriptionGroupSnapshot {
+                clause: group.clause.clone(),
+                world_addresses: group.world_addresses.clone(),
+                senders: group
+                    .senders
+                    .iter()
+                    .map(|(&subscription_id, sender)| (subscription_id, sender.clone()))
+                    .collect(),
+            })
+            .collect()
+    }
+}
+
+impl EcsState {
+    fn entity_subscription_registry(&self, kind: TableKind) -> &RwLock<EntitySubscriptionRegistry> {
+        match kind {
+            TableKind::Entity => &self.entity_subscriptions,
+            TableKind::EventMessage => &self.event_message_subscriptions,
+        }
+    }
+
+    async fn insert_entity_subscription(
+        &self,
+        kind: TableKind,
+        subscription_id: u64,
+        subscription: EntitySubscription,
+    ) {
+        let (subscription_count, group_count) = {
+            let mut subscriptions = self.entity_subscription_registry(kind).write().await;
+            subscriptions.insert(subscription_id, subscription);
+            (
+                subscriptions.subscription_count(),
+                subscriptions.group_count(),
+            )
+        };
+        record_active_entity_subscriptions(kind, subscription_count);
+        record_active_entity_subscription_groups(kind, group_count);
+    }
+
+    async fn update_entity_subscription(
+        &self,
+        kind: TableKind,
+        subscription_id: u64,
+        clause: Option<types::Clause>,
+        world_addresses: HashSet<Vec<u8>>,
+    ) {
+        let group_count = {
+            let mut subscriptions = self.entity_subscription_registry(kind).write().await;
+            if !subscriptions.update(subscription_id, clause, world_addresses) {
+                return;
+            }
+            subscriptions.group_count()
+        };
+        record_active_entity_subscription_groups(kind, group_count);
+    }
+
+    async fn remove_entity_subscription(&self, kind: TableKind, subscription_id: u64) -> bool {
+        let (subscription_count, group_count) = {
+            let mut subscriptions = self.entity_subscription_registry(kind).write().await;
+            if !subscriptions.remove(subscription_id) {
+                return false;
+            }
+            (
+                subscriptions.subscription_count(),
+                subscriptions.group_count(),
+            )
+        };
+        record_active_entity_subscriptions(kind, subscription_count);
+        record_active_entity_subscription_groups(kind, group_count);
+        true
+    }
+
+    async fn remove_subscription(&self, kind: SubscriptionKind, subscription_id: u64) -> bool {
+        match kind {
+            SubscriptionKind::Entity(kind) => {
+                self.remove_entity_subscription(kind, subscription_id).await
+            }
+            SubscriptionKind::Event => self
+                .event_subscriptions
+                .lock()
+                .await
+                .remove(&subscription_id)
+                .is_some(),
+            SubscriptionKind::Contract => self
+                .contract_subscriptions
+                .lock()
+                .await
+                .remove(&subscription_id)
+                .is_some(),
+            SubscriptionKind::Token => self
+                .token_subscriptions
+                .lock()
+                .await
+                .remove(&subscription_id)
+                .is_some(),
+            SubscriptionKind::TokenBalance => self
+                .token_balance_subscriptions
+                .lock()
+                .await
+                .remove(&subscription_id)
+                .is_some(),
+            SubscriptionKind::TokenTransfer => self
+                .token_transfer_subscriptions
+                .lock()
+                .await
+                .remove(&subscription_id)
+                .is_some(),
+            SubscriptionKind::Transaction => self
+                .transaction_subscriptions
+                .lock()
+                .await
+                .remove(&subscription_id)
+                .is_some(),
+        }
+    }
+}
+
+impl<T> ManagedSubscriptionStream<T> {
+    fn new(
+        state: Arc<EcsState>,
+        kind: SubscriptionKind,
+        subscription_id: u64,
+        receiver: mpsc::Receiver<Result<T, Status>>,
+    ) -> Self {
+        Self {
+            stream: ReceiverStream::new(receiver),
+            cleanup: Some(SubscriptionCleanup {
+                state,
+                kind,
+                subscription_id,
+            }),
+        }
+    }
+}
+
+impl<T> Stream for ManagedSubscriptionStream<T> {
+    type Item = Result<T, Status>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        Pin::new(&mut this.stream).poll_next(cx)
+    }
+}
+
+impl<T> Drop for ManagedSubscriptionStream<T> {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup.schedule();
+        }
+    }
+}
+
+impl SubscriptionCleanup {
+    fn schedule(self) {
+        let state = self.state;
+        let kind = self.kind;
+        let subscription_id = self.subscription_id;
+
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = state.remove_subscription(kind, subscription_id).await;
+            });
+            return;
+        }
+
+        match kind {
+            SubscriptionKind::Entity(kind) => {
+                let mut subscriptions = match state.entity_subscription_registry(kind).try_write() {
+                    Ok(subscriptions) => subscriptions,
+                    Err(_) => return,
+                };
+                if subscriptions.remove(subscription_id) {
+                    record_active_entity_subscriptions(kind, subscriptions.subscription_count());
+                    record_active_entity_subscription_groups(kind, subscriptions.group_count());
+                }
+            }
+            SubscriptionKind::Event => {
+                if let Ok(mut subscriptions) = state.event_subscriptions.try_lock() {
+                    subscriptions.remove(&subscription_id);
+                }
+            }
+            SubscriptionKind::Contract => {
+                if let Ok(mut subscriptions) = state.contract_subscriptions.try_lock() {
+                    subscriptions.remove(&subscription_id);
+                }
+            }
+            SubscriptionKind::Token => {
+                if let Ok(mut subscriptions) = state.token_subscriptions.try_lock() {
+                    subscriptions.remove(&subscription_id);
+                }
+            }
+            SubscriptionKind::TokenBalance => {
+                if let Ok(mut subscriptions) = state.token_balance_subscriptions.try_lock() {
+                    subscriptions.remove(&subscription_id);
+                }
+            }
+            SubscriptionKind::TokenTransfer => {
+                if let Ok(mut subscriptions) = state.token_transfer_subscriptions.try_lock() {
+                    subscriptions.remove(&subscription_id);
+                }
+            }
+            SubscriptionKind::Transaction => {
+                if let Ok(mut subscriptions) = state.transaction_subscriptions.try_lock() {
+                    subscriptions.remove(&subscription_id);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -211,18 +652,47 @@ impl EcsService {
             DbBackend::Sqlite => sqlite_url(database_url)?,
         };
 
-        let pool = AnyPoolOptions::new()
-            .max_connections(max_connections.unwrap_or(if backend == DbBackend::Sqlite {
-                1
-            } else {
-                5
-            }))
-            .connect(&database_url)
-            .await?;
-
         let has_erc20 = erc20_url.is_some();
         let has_erc721 = erc721_url.is_some();
         let has_erc1155 = erc1155_url.is_some();
+        let erc20_url = erc20_url.map(std::string::ToString::to_string);
+        let erc721_url = erc721_url.map(std::string::ToString::to_string);
+        let erc1155_url = erc1155_url.map(std::string::ToString::to_string);
+
+        let pool_options = AnyPoolOptions::new().max_connections(max_connections.unwrap_or(
+            if backend == DbBackend::Sqlite {
+                DEFAULT_SQLITE_MAX_CONNECTIONS
+            } else {
+                5
+            },
+        ));
+        let pool = match backend {
+            DbBackend::Sqlite => {
+                pool_options
+                    .after_connect({
+                        let erc20_url = erc20_url.clone();
+                        let erc721_url = erc721_url.clone();
+                        let erc1155_url = erc1155_url.clone();
+                        move |conn, _meta| {
+                            let erc20_url = erc20_url.clone();
+                            let erc721_url = erc721_url.clone();
+                            let erc1155_url = erc1155_url.clone();
+                            Box::pin(async move {
+                                attach_sqlite_databases(
+                                    conn,
+                                    erc20_url.as_deref(),
+                                    erc721_url.as_deref(),
+                                    erc1155_url.as_deref(),
+                                )
+                                .await
+                            })
+                        }
+                    })
+                    .connect(&database_url)
+                    .await?
+            }
+            DbBackend::Postgres => pool_options.connect(&database_url).await?,
+        };
 
         let service = Self {
             state: Arc::new(EcsState {
@@ -232,12 +702,13 @@ impl EcsService {
                 has_erc20,
                 has_erc721,
                 has_erc1155,
-                erc20_url: erc20_url.map(std::string::ToString::to_string),
-                erc721_url: erc721_url.map(std::string::ToString::to_string),
-                erc1155_url: erc1155_url.map(std::string::ToString::to_string),
+                erc20_url,
+                erc721_url,
+                erc1155_url,
                 managed_tables: Mutex::new(None),
-                entity_subscriptions: Mutex::new(HashMap::new()),
-                event_message_subscriptions: Mutex::new(HashMap::new()),
+                cached_views_sql: RwLock::new(None),
+                entity_subscriptions: RwLock::new(EntitySubscriptionRegistry::default()),
+                event_message_subscriptions: RwLock::new(EntitySubscriptionRegistry::default()),
                 event_subscriptions: Mutex::new(HashMap::new()),
                 contract_subscriptions: Mutex::new(HashMap::new()),
                 token_subscriptions: Mutex::new(HashMap::new()),
@@ -379,12 +850,10 @@ impl EcsService {
         .execute(&self.state.pool)
         .await?;
 
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS torii_ecs_entity_models_key_lookup_idx
-             ON torii_ecs_entity_models(kind, world_address, entity_id)",
-        )
-        .execute(&self.state.pool)
-        .await?;
+        sqlx::query("DROP INDEX IF EXISTS torii_ecs_entity_models_key_lookup_idx")
+            .execute(&self.state.pool)
+            .await
+            .ok();
 
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS torii_ecs_events_cursor_idx
@@ -392,6 +861,42 @@ impl EcsService {
         )
         .execute(&self.state.pool)
         .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS torii_ecs_entity_meta_page_idx
+             ON torii_ecs_entity_meta(kind, deleted, entity_id, world_address, table_id, created_at, updated_at, executed_at)",
+        )
+        .execute(&self.state.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS torii_ecs_entity_meta_kind_table_page_idx
+             ON torii_ecs_entity_meta(kind, deleted, table_id, entity_id, world_address)",
+        )
+        .execute(&self.state.pool)
+        .await?;
+
+        let emh_sql = self.event_messages_historical_view_sql().await?;
+        match self.state.backend {
+            DbBackend::Sqlite => {
+                // sqlite-dynamic-ok: persistent view DDL for event_messages_historical.
+                sqlx::query(&format!(
+                    "CREATE VIEW IF NOT EXISTS event_messages_historical AS {emh_sql}"
+                ))
+                .execute(&self.state.pool)
+                .await
+                .ok();
+            }
+            DbBackend::Postgres => {
+                // sqlite-dynamic-ok: persistent view DDL for event_messages_historical.
+                sqlx::query(&format!(
+                    "CREATE OR REPLACE VIEW event_messages_historical AS {emh_sql}"
+                ))
+                .execute(&self.state.pool)
+                .await
+                .ok();
+            }
+        }
 
         Ok(())
     }
@@ -416,11 +921,9 @@ impl EcsService {
                     "Attaching ERC database"
                 );
                 attach_sqlite_database(&mut conn, schema, url).await?;
-                match sqlx::query(&format!(
-                    "SELECT name FROM {schema}.sqlite_master WHERE type='table' LIMIT 5"
-                ))
-                .fetch_all(&mut *conn)
-                .await
+                match sqlx::query(sqlite_master_preview_sql(schema))
+                    .fetch_all(&mut *conn)
+                    .await
                 {
                     Ok(rows) => {
                         let tables: Vec<String> =
@@ -441,16 +944,21 @@ impl EcsService {
     }
 
     async fn acquire_initialized_connection(&self) -> Result<PoolConnection<Any>> {
-        let mut conn = self.state.pool.acquire().await?;
-        if self.state.backend == DbBackend::Sqlite {
-            attach_sqlite_databases(
-                &mut conn,
-                self.state.erc20_url.as_deref(),
-                self.state.erc721_url.as_deref(),
-                self.state.erc1155_url.as_deref(),
-            )
-            .await?;
-        }
+        Ok(self.state.pool.acquire().await?)
+    }
+
+    async fn acquire_query_connection(
+        &self,
+        operation: &'static str,
+    ) -> Result<PoolConnection<Any>> {
+        let start = Instant::now();
+        let conn = self.state.pool.acquire().await?;
+        ::metrics::histogram!(
+            "torii_ecs_db_pool_acquire_seconds",
+            "operation" => operation,
+            "backend" => self.state.backend.as_str()
+        )
+        .record(start.elapsed().as_secs_f64());
         Ok(conn)
     }
 
@@ -777,13 +1285,14 @@ impl EcsService {
         entity_id: Felt,
     ) -> Result<()> {
         let start = Instant::now();
-        let subscriptions = match kind {
-            TableKind::Entity => &self.state.entity_subscriptions,
-            TableKind::EventMessage => &self.state.event_message_subscriptions,
+        let subscriptions = self.state.entity_subscription_registry(kind);
+        let group_snapshots = {
+            let subscriptions = subscriptions.read().await;
+            if subscriptions.is_empty() {
+                return Ok(());
+            }
+            subscriptions.snapshot_groups()
         };
-        if subscriptions.lock().await.is_empty() {
-            return Ok(());
-        }
 
         let entity = self
             .load_entity_by_id(kind, world_address, entity_id)
@@ -793,53 +1302,62 @@ impl EcsService {
             return Ok(());
         };
 
-        let (checked, targets) = {
-            let subscriptions = subscriptions.lock().await;
-            let checked = subscriptions.len();
-            let targets = subscriptions
-                .iter()
-                .filter_map(|(&subscription_id, subscription)| {
-                    if !subscription.world_addresses.is_empty()
-                        && !subscription.world_addresses.contains(&entity.world_address)
-                    {
+        let checked_groups = group_snapshots.len();
+        let checked_subscribers = group_snapshots
+            .iter()
+            .map(|group| group.senders.len())
+            .sum::<usize>();
+        let targets = group_snapshots
+            .into_iter()
+            .filter_map(|group| {
+                if !group.world_addresses.is_empty()
+                    && !group.world_addresses.contains(&entity.world_address)
+                {
+                    return None;
+                }
+                if let Some(clause) = &group.clause {
+                    if !entity_matches_clause(&entity, clause) {
                         return None;
                     }
-                    if let Some(clause) = &subscription.clause {
-                        if !entity_matches_clause(&entity, clause) {
-                            return None;
-                        }
-                    }
-                    Some((subscription_id, subscription.sender.clone()))
-                })
-                .collect::<Vec<_>>();
-            (checked, targets)
-        };
-        let matched = targets.len();
+                }
+                Some(group.senders)
+            })
+            .collect::<Vec<_>>();
+        let matched_groups = targets.len();
+        let matched_subscribers = targets.iter().map(Vec::len).sum::<usize>();
 
         let mut closed = Vec::new();
-        for (subscription_id, sender) in targets {
-            if let Err(err) = sender.try_send(Ok(SubscribeEntityResponse {
-                entity: Some(entity.clone()),
-                subscription_id,
-            })) {
-                if matches!(err, TrySendError::Closed(_)) {
-                    closed.push(subscription_id);
+        for group_targets in targets {
+            for (subscription_id, sender) in group_targets {
+                if let Err(err) = sender.try_send(Ok(SubscribeEntityResponse {
+                    entity: Some(entity.clone()),
+                    subscription_id,
+                })) {
+                    if matches!(err, TrySendError::Closed(_)) {
+                        closed.push(subscription_id);
+                    }
                 }
             }
         }
 
         if !closed.is_empty() {
-            let mut subscriptions = subscriptions.lock().await;
             for subscription_id in closed {
-                subscriptions.remove(&subscription_id);
+                let _ = self
+                    .state
+                    .remove_entity_subscription(kind, subscription_id)
+                    .await;
             }
         }
         ::metrics::histogram!("torii_ecs_publish_entity_update_seconds")
             .record(start.elapsed().as_secs_f64());
+        ::metrics::counter!("torii_ecs_publish_entity_subscription_groups_checked_total")
+            .increment(checked_groups as u64);
+        ::metrics::counter!("torii_ecs_publish_entity_subscription_groups_matched_total")
+            .increment(matched_groups as u64);
         ::metrics::counter!("torii_ecs_publish_entity_subscribers_checked_total")
-            .increment(checked as u64);
+            .increment(checked_subscribers as u64);
         ::metrics::counter!("torii_ecs_publish_entity_subscribers_matched_total")
-            .increment(matched as u64);
+            .increment(matched_subscribers as u64);
         Ok(())
     }
 
@@ -1008,7 +1526,7 @@ impl EcsService {
             direction: PaginationDirection::Forward as i32,
             order_by: Vec::new(),
         });
-        let limit = Self::pagination_limit(Some(&pagination), 100);
+        let limit = Self::pagination_limit_with_max(Some(&pagination), 100, None);
         let target_limit = limit.saturating_add(1);
         let direction_is_backward = pagination.direction == PaginationDirection::Backward as i32;
         let order_sql = if direction_is_backward { "DESC" } else { "ASC" };
@@ -1177,14 +1695,17 @@ impl EcsService {
     ) -> Result<()> {
         match self.state.backend {
             DbBackend::Sqlite => {
+                // sqlite-dynamic-ok: view DDL requires the target view identifier in SQL text.
                 sqlx::query(&format!("DROP VIEW IF EXISTS {view_name}"))
                     .execute(&mut **conn)
                     .await?;
+                // sqlite-dynamic-ok: view DDL requires the target view identifier and SELECT body in SQL text.
                 sqlx::query(&format!("CREATE TEMP VIEW {view_name} AS {select_sql}"))
                     .execute(&mut **conn)
                     .await?;
             }
             DbBackend::Postgres => {
+                // sqlite-dynamic-ok: compatibility view DDL is an intentional dynamic exception.
                 sqlx::query(&format!(
                     "CREATE OR REPLACE VIEW {view_name} AS {select_sql}"
                 ))
@@ -1195,28 +1716,81 @@ impl EcsService {
         Ok(())
     }
 
+    async fn compat_view_exists_on_connection(
+        &self,
+        conn: &mut PoolConnection<Any>,
+        name: &str,
+    ) -> Result<bool> {
+        if self
+            .sql_object_exists_on_connection(conn, None, name)
+            .await?
+        {
+            return Ok(true);
+        }
+        if self.state.backend == DbBackend::Sqlite {
+            return self
+                .sql_object_exists_on_connection(conn, Some("temp"), name)
+                .await;
+        }
+        Ok(false)
+    }
+
     async fn ensure_sql_compat_views_on_connection(
         &self,
         conn: &mut PoolConnection<Any>,
     ) -> Result<()> {
+        {
+            let cached = self.state.cached_views_sql.read().await;
+            if let Some(views) = cached.as_ref() {
+                if !self
+                    .compat_view_exists_on_connection(conn, "controllers")
+                    .await?
+                {
+                    self.replace_sql_compat_view_on_connection(
+                        conn,
+                        "controllers",
+                        &views.controllers,
+                    )
+                    .await?;
+                }
+                if !self
+                    .compat_view_exists_on_connection(conn, "token_balances")
+                    .await?
+                {
+                    self.replace_sql_compat_view_on_connection(
+                        conn,
+                        "token_balances",
+                        &views.token_balances,
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
+        }
+
+        let controllers_sql = self.controllers_view_sql(conn).await?;
+        let token_balances_sql = self.token_balances_view_sql(conn).await?;
+
         if !self
-            .sql_object_exists_on_connection(conn, None, "controllers")
+            .compat_view_exists_on_connection(conn, "controllers")
             .await?
         {
-            let controllers_sql = self.controllers_view_sql(conn).await?;
             self.replace_sql_compat_view_on_connection(conn, "controllers", &controllers_sql)
                 .await?;
         }
-        let event_messages_historical_sql = self.event_messages_historical_view_sql().await?;
-        self.replace_sql_compat_view_on_connection(
-            conn,
-            "event_messages_historical",
-            &event_messages_historical_sql,
-        )
-        .await?;
-        let token_balances_sql = self.token_balances_view_sql(conn).await?;
-        self.replace_sql_compat_view_on_connection(conn, "token_balances", &token_balances_sql)
-            .await?;
+        if !self
+            .compat_view_exists_on_connection(conn, "token_balances")
+            .await?
+        {
+            self.replace_sql_compat_view_on_connection(conn, "token_balances", &token_balances_sql)
+                .await?;
+        }
+
+        let mut cached = self.state.cached_views_sql.write().await;
+        *cached = Some(CachedViewsSql {
+            controllers: controllers_sql,
+            token_balances: token_balances_sql,
+        });
         Ok(())
     }
 
@@ -1372,10 +1946,19 @@ impl EcsService {
     }
 
     fn pagination_limit(pagination: Option<&types::Pagination>, default: usize) -> usize {
+        Self::pagination_limit_with_max(pagination, default, Some(1000))
+    }
+
+    fn pagination_limit_with_max(
+        pagination: Option<&types::Pagination>,
+        default: usize,
+        max: Option<usize>,
+    ) -> usize {
         pagination
             .map(|pagination| pagination.limit)
             .filter(|limit| *limit > 0)
-            .map_or(default, |limit| limit.min(1000) as usize)
+            .map_or(default, |limit| limit as usize)
+            .min(max.unwrap_or(usize::MAX))
     }
 
     async fn load_token_contracts(
@@ -1664,32 +2247,64 @@ impl EcsService {
         query: &types::TokenBalanceQuery,
     ) -> Result<(Vec<types::TokenBalance>, String)> {
         let limit = Self::pagination_limit(query.pagination.as_ref(), 100);
-        let mut items = Vec::new();
+        let mut items = Vec::with_capacity(limit.saturating_mul(3));
+        let acquire_start = Instant::now();
         let mut conn = self.acquire_initialized_connection().await?;
+        ::metrics::histogram!(
+            "torii_ecs_retrieve_token_balances_stage_seconds",
+            "stage" => "acquire",
+            "backend" => self.state.backend.as_str()
+        )
+        .record(acquire_start.elapsed().as_secs_f64());
+        tracing::debug!(
+            target: "torii::ecs_sink",
+            limit,
+            account_filters = query.account_addresses.len(),
+            contract_filters = query.contract_addresses.len(),
+            token_id_filters = query.token_ids.len(),
+            acquire_ms = acquire_start.elapsed().as_millis(),
+            "RetrieveTokenBalances acquired initialized connection"
+        );
+
+        let normalized_token_ids = normalize_token_filter_values(&query.token_ids);
 
         if self.state.has_erc20 {
             let table = self.scoped_table("erc20", "balances");
             let mut builder =
                 QueryBuilder::<Any>::new(format!("SELECT wallet, token, balance FROM {table}"));
             let mut has_where = false;
-            has_where |= push_blob_in_filter(&mut builder, "wallet", &query.account_addresses);
-            if !query.contract_addresses.is_empty() {
-                if has_where {
-                    builder.push(" AND ");
-                } else {
-                    builder.push(" WHERE ");
-                }
-                builder.push("hex(token) IN (");
-                {
-                    let mut separated = builder.separated(", ");
-                    for contract in &query.contract_addresses {
-                        separated.push_bind(hex::encode_upper(contract));
-                    }
-                }
-                builder.push(")");
-            }
-            match builder.build().fetch_all(&mut *conn).await {
+            has_where = push_blob_in_filter_with_mode(
+                &mut builder,
+                "wallet",
+                &query.account_addresses,
+                has_where,
+            );
+            push_blob_in_filter_with_mode(
+                &mut builder,
+                "token",
+                &query.contract_addresses,
+                has_where,
+            );
+            builder.push(" ORDER BY token ASC, wallet ASC");
+            builder.push(" LIMIT ");
+            builder.push_bind(limit as i64);
+
+            let query_start = Instant::now();
+            let result = builder.build().fetch_all(&mut *conn).await;
+            ::metrics::histogram!(
+                "torii_ecs_retrieve_token_balances_stage_seconds",
+                "stage" => "erc20_query",
+                "backend" => self.state.backend.as_str()
+            )
+            .record(query_start.elapsed().as_secs_f64());
+            match result {
                 Ok(rows) => {
+                    tracing::debug!(
+                        target: "torii::ecs_sink",
+                        rows = rows.len(),
+                        elapsed_ms = query_start.elapsed().as_millis(),
+                        "RetrieveTokenBalances queried ERC20 balances"
+                    );
                     for row in rows {
                         let balance =
                             canonical_u256_bytes_from_db(&row.try_get::<Vec<u8>, _>("balance")?)?;
@@ -1707,6 +2322,7 @@ impl EcsService {
                 }
                 Err(e) => {
                     tracing::warn!(
+                        target: "torii::ecs_sink",
                         error = %e,
                         "Failed to query erc20.balances — returning empty ERC20 balances"
                     );
@@ -1719,40 +2335,46 @@ impl EcsService {
             let mut builder =
                 QueryBuilder::<Any>::new(format!("SELECT owner, token, token_id FROM {table}"));
             let mut has_where = false;
-            has_where |= push_blob_in_filter(&mut builder, "owner", &query.account_addresses);
-            if !query.contract_addresses.is_empty() {
-                if has_where {
-                    builder.push(" AND ");
-                } else {
-                    builder.push(" WHERE ");
-                    has_where = true;
-                }
-                builder.push("hex(token) IN (");
-                {
-                    let mut separated = builder.separated(", ");
-                    for contract in &query.contract_addresses {
-                        separated.push_bind(hex::encode_upper(contract));
-                    }
-                }
-                builder.push(")");
-            }
-            if !query.token_ids.is_empty() {
-                if has_where {
-                    builder.push(" AND ");
-                } else {
-                    builder.push(" WHERE ");
-                }
-                builder.push("hex(token_id) IN (");
-                {
-                    let mut separated = builder.separated(", ");
-                    for token_id in &query.token_ids {
-                        separated.push_bind(hex::encode_upper(token_id));
-                    }
-                }
-                builder.push(")");
-            }
-            match builder.build().fetch_all(&mut *conn).await {
+            has_where = push_blob_in_filter_with_mode(
+                &mut builder,
+                "owner",
+                &query.account_addresses,
+                has_where,
+            );
+            has_where = push_blob_in_filter_with_mode(
+                &mut builder,
+                "token",
+                &query.contract_addresses,
+                has_where,
+            );
+            push_blob_in_filter_with_mode(
+                &mut builder,
+                "token_id",
+                &normalized_token_ids,
+                has_where,
+            );
+            builder.push(" ORDER BY token ASC, owner ASC, ");
+            builder.push(sql_blob_numeric_order_expr(self.state.backend, "token_id"));
+            builder.push(" ASC, token_id ASC");
+            builder.push(" LIMIT ");
+            builder.push_bind(limit as i64);
+
+            let query_start = Instant::now();
+            let result = builder.build().fetch_all(&mut *conn).await;
+            ::metrics::histogram!(
+                "torii_ecs_retrieve_token_balances_stage_seconds",
+                "stage" => "erc721_query",
+                "backend" => self.state.backend.as_str()
+            )
+            .record(query_start.elapsed().as_secs_f64());
+            match result {
                 Ok(rows) => {
+                    tracing::debug!(
+                        target: "torii::ecs_sink",
+                        rows = rows.len(),
+                        elapsed_ms = query_start.elapsed().as_millis(),
+                        "RetrieveTokenBalances queried ERC721 ownership"
+                    );
                     for row in rows {
                         let account_address =
                             canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("owner")?)?;
@@ -1770,6 +2392,7 @@ impl EcsService {
                 }
                 Err(e) => {
                     tracing::warn!(
+                        target: "torii::ecs_sink",
                         error = %e,
                         "Failed to query erc721.nft_ownership — returning empty ERC721 balances"
                     );
@@ -1783,40 +2406,46 @@ impl EcsService {
                 "SELECT wallet, contract, token_id, balance FROM {table}"
             ));
             let mut has_where = false;
-            has_where |= push_blob_in_filter(&mut builder, "wallet", &query.account_addresses);
-            if !query.contract_addresses.is_empty() {
-                if has_where {
-                    builder.push(" AND ");
-                } else {
-                    builder.push(" WHERE ");
-                    has_where = true;
-                }
-                builder.push("hex(contract) IN (");
-                {
-                    let mut separated = builder.separated(", ");
-                    for contract in &query.contract_addresses {
-                        separated.push_bind(hex::encode_upper(contract));
-                    }
-                }
-                builder.push(")");
-            }
-            if !query.token_ids.is_empty() {
-                if has_where {
-                    builder.push(" AND ");
-                } else {
-                    builder.push(" WHERE ");
-                }
-                builder.push("hex(token_id) IN (");
-                {
-                    let mut separated = builder.separated(", ");
-                    for token_id in &query.token_ids {
-                        separated.push_bind(hex::encode_upper(token_id));
-                    }
-                }
-                builder.push(")");
-            }
-            match builder.build().fetch_all(&mut *conn).await {
+            has_where = push_blob_in_filter_with_mode(
+                &mut builder,
+                "wallet",
+                &query.account_addresses,
+                has_where,
+            );
+            has_where = push_blob_in_filter_with_mode(
+                &mut builder,
+                "contract",
+                &query.contract_addresses,
+                has_where,
+            );
+            push_blob_in_filter_with_mode(
+                &mut builder,
+                "token_id",
+                &normalized_token_ids,
+                has_where,
+            );
+            builder.push(" ORDER BY contract ASC, wallet ASC, ");
+            builder.push(sql_blob_numeric_order_expr(self.state.backend, "token_id"));
+            builder.push(" ASC, token_id ASC");
+            builder.push(" LIMIT ");
+            builder.push_bind(limit as i64);
+
+            let query_start = Instant::now();
+            let result = builder.build().fetch_all(&mut *conn).await;
+            ::metrics::histogram!(
+                "torii_ecs_retrieve_token_balances_stage_seconds",
+                "stage" => "erc1155_query",
+                "backend" => self.state.backend.as_str()
+            )
+            .record(query_start.elapsed().as_secs_f64());
+            match result {
                 Ok(rows) => {
+                    tracing::debug!(
+                        target: "torii::ecs_sink",
+                        rows = rows.len(),
+                        elapsed_ms = query_start.elapsed().as_millis(),
+                        "RetrieveTokenBalances queried ERC1155 balances"
+                    );
                     for row in rows {
                         let balance =
                             canonical_u256_bytes_from_db(&row.try_get::<Vec<u8>, _>("balance")?)?;
@@ -1836,6 +2465,7 @@ impl EcsService {
                 }
                 Err(e) => {
                     tracing::warn!(
+                        target: "torii::ecs_sink",
                         error = %e,
                         "Failed to query erc1155.erc1155_balances — returning empty ERC1155 balances"
                     );
@@ -1850,6 +2480,11 @@ impl EcsService {
                 .then_with(|| a.token_id.cmp(&b.token_id))
         });
         items.truncate(limit);
+        tracing::debug!(
+            target: "torii::ecs_sink",
+            balances = items.len(),
+            "RetrieveTokenBalances merged and truncated results"
+        );
         Ok((items, String::new()))
     }
 
@@ -2222,7 +2857,7 @@ impl EcsService {
         &self,
         contract_addresses: &[Vec<u8>],
         token_ids: &[Vec<u8>],
-    ) -> Result<HashSet<String>> {
+    ) -> Result<SeenCache> {
         let (tokens, _) = self
             .load_tokens(&types::TokenQuery {
                 contract_addresses: contract_addresses.to_vec(),
@@ -2236,18 +2871,20 @@ impl EcsService {
                 }),
             })
             .await?;
-        Ok(tokens
-            .into_iter()
-            .map(|token| token_subscription_key(&token))
-            .collect())
+        Ok(SeenCache::from_items(
+            tokens
+                .into_iter()
+                .map(|token| token_subscription_key(&token)),
+            SUBSCRIPTION_SEEN_CACHE_CAPACITY,
+        ))
     }
 
-    async fn snapshot_token_balance_seen(
+    async fn snapshot_token_balance_state(
         &self,
         account_addresses: &[Vec<u8>],
         contract_addresses: &[Vec<u8>],
         token_ids: &[Vec<u8>],
-    ) -> Result<HashSet<String>> {
+    ) -> Result<HashMap<String, Vec<u8>>> {
         let (balances, _) = self
             .load_token_balances(&types::TokenBalanceQuery {
                 account_addresses: account_addresses.to_vec(),
@@ -2261,10 +2898,7 @@ impl EcsService {
                 }),
             })
             .await?;
-        Ok(balances
-            .into_iter()
-            .map(|balance| token_balance_subscription_key(&balance))
-            .collect())
+        Ok(token_balance_subscription_state(&balances))
     }
 
     async fn snapshot_token_transfer_seen(
@@ -2272,7 +2906,7 @@ impl EcsService {
         account_addresses: &[Vec<u8>],
         contract_addresses: &[Vec<u8>],
         token_ids: &[Vec<u8>],
-    ) -> Result<HashSet<String>> {
+    ) -> Result<SeenCache> {
         let (transfers, _) = self
             .load_token_transfers(&types::TokenTransferQuery {
                 account_addresses: account_addresses.to_vec(),
@@ -2286,13 +2920,16 @@ impl EcsService {
                 }),
             })
             .await?;
-        Ok(transfers.into_iter().map(|transfer| transfer.id).collect())
+        Ok(SeenCache::from_items(
+            transfers.into_iter().map(|transfer| transfer.id),
+            SUBSCRIPTION_SEEN_CACHE_CAPACITY,
+        ))
     }
 
     async fn snapshot_transaction_seen(
         &self,
         filter: &types::TransactionFilter,
-    ) -> Result<HashSet<String>> {
+    ) -> Result<SeenCache> {
         let (transactions, _) = self
             .load_transactions(&types::TransactionQuery {
                 filter: Some(filter.clone()),
@@ -2304,10 +2941,12 @@ impl EcsService {
                 }),
             })
             .await?;
-        Ok(transactions
-            .into_iter()
-            .map(|transaction| hex::encode(transaction.transaction_hash))
-            .collect())
+        Ok(SeenCache::from_items(
+            transactions
+                .into_iter()
+                .map(|transaction| hex::encode(transaction.transaction_hash)),
+            SUBSCRIPTION_SEEN_CACHE_CAPACITY,
+        ))
     }
 
     fn spawn_token_poll(&self, subscription_id: u64) {
@@ -2323,7 +2962,7 @@ impl EcsService {
                     (
                         subscription.contract_addresses.clone(),
                         subscription.token_ids.clone(),
-                        subscription.seen.clone(),
+                        subscription.seen.snapshot(),
                         subscription.sender.clone(),
                     )
                 };
@@ -2388,7 +3027,7 @@ impl EcsService {
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(1)).await;
-                let (account_addresses, contract_addresses, token_ids, seen, sender) = {
+                let (account_addresses, contract_addresses, token_ids, latest, sender) = {
                     let subscriptions = service.state.token_balance_subscriptions.lock().await;
                     let Some(subscription) = subscriptions.get(&subscription_id) else {
                         break;
@@ -2397,7 +3036,7 @@ impl EcsService {
                         subscription.account_addresses.clone(),
                         subscription.contract_addresses.clone(),
                         subscription.token_ids.clone(),
-                        subscription.seen.clone(),
+                        subscription.latest.clone(),
                         subscription.sender.clone(),
                     )
                 };
@@ -2418,10 +3057,11 @@ impl EcsService {
                     Ok((balances, _)) => balances,
                     Err(_) => continue,
                 };
-                let mut sent = Vec::new();
+                let current = token_balance_subscription_state(&balances);
                 for balance in balances {
-                    let key = token_balance_subscription_key(&balance);
-                    if seen.contains(&key) {
+                    let identity = token_balance_identity_key(&balance);
+                    let fingerprint = token_balance_state_fingerprint(&balance);
+                    if latest.get(&identity) == Some(&fingerprint) {
                         continue;
                     }
                     if sender
@@ -2440,18 +3080,15 @@ impl EcsService {
                             .remove(&subscription_id);
                         return;
                     }
-                    sent.push(key);
                 }
-                if !sent.is_empty() {
-                    if let Some(subscription) = service
-                        .state
-                        .token_balance_subscriptions
-                        .lock()
-                        .await
-                        .get_mut(&subscription_id)
-                    {
-                        subscription.seen.extend(sent);
-                    }
+                if let Some(subscription) = service
+                    .state
+                    .token_balance_subscriptions
+                    .lock()
+                    .await
+                    .get_mut(&subscription_id)
+                {
+                    subscription.latest = current;
                 }
             }
         });
@@ -2471,7 +3108,7 @@ impl EcsService {
                         subscription.account_addresses.clone(),
                         subscription.contract_addresses.clone(),
                         subscription.token_ids.clone(),
-                        subscription.seen.clone(),
+                        subscription.seen.snapshot(),
                         subscription.sender.clone(),
                     )
                 };
@@ -2542,7 +3179,7 @@ impl EcsService {
                     };
                     (
                         subscription.filter.clone(),
-                        subscription.seen.clone(),
+                        subscription.seen.snapshot(),
                         subscription.sender.clone(),
                     )
                 };
@@ -2772,41 +3409,33 @@ impl EcsService {
             .iter()
             .map(String::as_str)
             .collect::<HashSet<_>>();
-        let models = self
-            .load_managed_tables(Some(kind))
-            .await?
-            .into_iter()
-            .filter(|table| {
-                (world_filter_set.is_empty() || world_filter_set.contains(&table.world_address))
-                    && (model_filter_set.is_empty()
-                        || model_filter_set.contains(table.table.name.as_str()))
-            })
-            .collect::<Vec<_>>();
-        if models.is_empty() {
-            return Ok((Vec::new(), String::new()));
+        let mut model_map = HashMap::new();
+        let mut all_model_map = HashMap::new();
+        for table in self.load_managed_tables(Some(kind)).await? {
+            if !world_filter_set.is_empty() && !world_filter_set.contains(&table.world_address) {
+                continue;
+            }
+
+            let table_id = felt_hex(table.table.id);
+            if model_filter_set.is_empty() || model_filter_set.contains(table.table.name.as_str()) {
+                model_map.insert(table_id.clone(), table.clone());
+            }
+            all_model_map.insert(table_id, table);
         }
 
-        let model_map = models
-            .into_iter()
-            .map(|table| (felt_hex(table.table.id), table))
-            .collect::<HashMap<_, _>>();
+        if model_map.is_empty() {
+            return Ok((Vec::new(), String::new()));
+        }
         let table_ids = model_map.keys().cloned().collect::<Vec<_>>();
         let table_id_filter = if query.models.is_empty() {
             None
         } else {
             Some(table_ids.as_slice())
         };
-        let all_model_map = if table_id_filter.is_some() {
-            self.load_managed_tables(Some(kind))
-                .await?
-                .into_iter()
-                .filter(|t| {
-                    world_filter_set.is_empty() || world_filter_set.contains(&t.world_address)
-                })
-                .map(|t| (felt_hex(t.table.id), t))
-                .collect::<HashMap<_, _>>()
+        let models_for_entity = if table_id_filter.is_some() {
+            &all_model_map
         } else {
-            model_map.clone()
+            &model_map
         };
         let member_pushdown = member_pushdown_from_clause(query.clause.as_ref(), &model_map);
         let target_limit = query.pagination.as_ref().map_or(100, |pagination| {
@@ -2832,10 +3461,13 @@ impl EcsService {
         let mut next_cursor = String::new();
         let mut candidate_cursor = cursor;
 
+        let mut conn = self.acquire_query_connection("load_entity_page").await?;
+
         loop {
             let keys_start = Instant::now();
             let mut candidate_keys = self
                 .load_entity_page_keys(
+                    &mut conn,
                     kind,
                     &world_filters,
                     table_id_filter,
@@ -2865,38 +3497,42 @@ impl EcsService {
                 .map(|(_, entity_id)| entity_id.trim_start_matches("0x").to_string())
                 .unwrap_or_default();
 
-            let meta_start = Instant::now();
-            let candidate_meta = self
-                .load_entity_meta_for_keys(kind, None, candidate_keys.as_slice())
-                .await?;
-            ::metrics::histogram!("torii_ecs_load_entity_page_meta_rows_seconds")
-                .record(meta_start.elapsed().as_secs_f64());
-
             for chunk in candidate_keys.chunks(256) {
                 let rows_start = Instant::now();
                 let rows = self
-                    .load_entity_page_rows(kind, &world_filters, None, chunk)
+                    .load_entity_page_rows(&mut conn, kind, &world_filters, None, chunk)
                     .await?;
                 ::metrics::histogram!("torii_ecs_load_entity_page_rows_seconds")
                     .record(rows_start.elapsed().as_secs_f64());
                 ::metrics::counter!("torii_ecs_load_entity_page_rows_total")
                     .increment(rows.len() as u64);
-                let row_map = rows.into_iter().fold(
-                    HashMap::<(String, String), Vec<(String, String)>>::new(),
-                    |mut acc, row| {
-                        acc.entry((row.world_address, row.entity_id))
-                            .or_default()
-                            .push((row.table_id, row.row_json));
-                        acc
-                    },
-                );
+
+                let mut row_map = HashMap::<(String, String), Vec<(String, String)>>::new();
+                let mut meta_map =
+                    HashMap::<(String, String), HashMap<String, EntityMetaRow>>::new();
+                for row in rows {
+                    let key = (row.world_address.clone(), row.entity_id.clone());
+                    meta_map.entry(key.clone()).or_default().insert(
+                        row.table_id.clone(),
+                        EntityMetaRow {
+                            created_at: row.created_at,
+                            updated_at: row.updated_at,
+                            executed_at: row.executed_at,
+                            deleted: false,
+                        },
+                    );
+                    row_map
+                        .entry(key)
+                        .or_default()
+                        .push((row.table_id, row.row_json));
+                }
 
                 for key in chunk {
-                    let Some(meta) = candidate_meta.get(key) else {
+                    let Some(meta) = meta_map.get(key) else {
                         continue;
                     };
                     let Some(entity) =
-                        build_entity_from_snapshot(key, meta, row_map.get(key), &all_model_map)?
+                        build_entity_from_snapshot(key, meta, row_map.get(key), models_for_entity)?
                     else {
                         continue;
                     };
@@ -3115,6 +3751,7 @@ impl EcsService {
 
     async fn load_entity_page_keys(
         &self,
+        conn: &mut PoolConnection<Any>,
         kind: TableKind,
         world_filters: &[Felt],
         table_ids: Option<&[String]>,
@@ -3139,8 +3776,11 @@ impl EcsService {
             "ASC"
         };
 
+        let single_table = table_ids.is_some_and(|ids| ids.len() == 1);
+        let needs_group_by = table_ids.is_none_or(|ids| ids.len() > 1);
+
         let mut builder = QueryBuilder::<Any>::new(
-            "SELECT DISTINCT m.world_address, m.entity_id \
+            "SELECT m.world_address, m.entity_id \
              FROM torii_ecs_entity_meta m \
              WHERE m.kind = ",
         );
@@ -3182,6 +3822,9 @@ impl EcsService {
         if let Some(member_pushdown) = member_pushdown {
             append_member_pushdown_sql(&mut builder, self.state.backend, member_pushdown);
         }
+        if needs_group_by && !single_table {
+            builder.push(" GROUP BY m.world_address, m.entity_id");
+        }
         builder.push(" ORDER BY m.entity_id ");
         builder.push(order);
         builder.push(", m.world_address ");
@@ -3189,7 +3832,13 @@ impl EcsService {
         builder.push(" LIMIT ");
         builder.push_bind(limit as i64);
 
-        let rows = builder.build().fetch_all(&self.state.pool).await?;
+        let start = Instant::now();
+        let rows = builder.build().fetch_all(&mut **conn).await?;
+        ::metrics::histogram!(
+            "torii_ecs_load_entity_page_keys_query_seconds",
+            "backend" => self.state.backend.as_str()
+        )
+        .record(start.elapsed().as_secs_f64());
         rows.into_iter()
             .map(|row| {
                 Ok((
@@ -3200,98 +3849,9 @@ impl EcsService {
             .collect()
     }
 
-    async fn load_entity_meta_for_keys(
-        &self,
-        kind: TableKind,
-        table_ids: Option<&[String]>,
-        entity_keys: &[(String, String)],
-    ) -> Result<HashMap<(String, String), HashMap<String, EntityMetaRow>>> {
-        if table_ids.is_some_and(<[String]>::is_empty) || entity_keys.is_empty() {
-            return Ok(HashMap::new());
-        }
-
-        let deleted_sql = match self.state.backend {
-            DbBackend::Sqlite => "CAST(m.deleted AS INTEGER)",
-            DbBackend::Postgres => "CASE WHEN m.deleted THEN 1 ELSE 0 END",
-        };
-
-        let mut builder = QueryBuilder::<Any>::new(format!(
-            "SELECT m.world_address, m.table_id, m.entity_id, m.created_at, m.updated_at, m.executed_at, \
-                    {deleted_sql} AS deleted \
-             FROM torii_ecs_entity_meta m WHERE m.kind = "
-        ));
-        builder.push_bind(kind.as_str());
-        if let Some(table_ids) = table_ids {
-            builder.push(" AND m.table_id IN (");
-            {
-                let mut separated = builder.separated(", ");
-                for table_id in table_ids {
-                    separated.push_bind(table_id);
-                }
-            }
-            builder.push(")");
-        }
-
-        let world_addresses = entity_keys
-            .iter()
-            .map(|(world_address, _)| world_address.clone())
-            .collect::<HashSet<_>>();
-        let entity_ids = entity_keys
-            .iter()
-            .map(|(_, entity_id)| entity_id.clone())
-            .collect::<HashSet<_>>();
-        let allowed = entity_keys.iter().cloned().collect::<HashSet<_>>();
-
-        builder.push(" AND m.world_address IN (");
-        {
-            let mut separated = builder.separated(", ");
-            for world_address in &world_addresses {
-                separated.push_bind(world_address);
-            }
-        }
-        builder.push(")");
-        builder.push(" AND m.entity_id IN (");
-        {
-            let mut separated = builder.separated(", ");
-            for entity_id in &entity_ids {
-                separated.push_bind(entity_id);
-            }
-        }
-        builder.push(")");
-        match self.state.backend {
-            DbBackend::Sqlite => {
-                builder.push(" AND m.deleted = 0");
-            }
-            DbBackend::Postgres => {
-                builder.push(" AND m.deleted = FALSE");
-            }
-        }
-
-        let rows = builder.build().fetch_all(&self.state.pool).await?;
-        let mut meta = HashMap::new();
-        for row in rows {
-            let world_address = row.try_get::<String, _>("world_address")?;
-            let entity_id = row.try_get::<String, _>("entity_id")?;
-            if !allowed.contains(&(world_address.clone(), entity_id.clone())) {
-                continue;
-            }
-            meta.entry((world_address, entity_id))
-                .or_insert_with(HashMap::new)
-                .insert(
-                    row.try_get::<String, _>("table_id")?,
-                    EntityMetaRow {
-                        created_at: row.try_get::<i64, _>("created_at")? as u64,
-                        updated_at: row.try_get::<i64, _>("updated_at")? as u64,
-                        executed_at: row.try_get::<i64, _>("executed_at")? as u64,
-                        deleted: row.try_get::<i64, _>("deleted")? != 0,
-                    },
-                );
-        }
-        Ok(meta)
-    }
-
     async fn load_entity_page_rows(
         &self,
+        conn: &mut PoolConnection<Any>,
         kind: TableKind,
         _world_filters: &[Felt],
         table_ids: Option<&[String]>,
@@ -3301,13 +3861,24 @@ impl EcsService {
             return Ok(Vec::new());
         }
 
-        let mut builder = QueryBuilder::<Any>::new(
-            "SELECT world_address, table_id, entity_id, row_json \
-             FROM torii_ecs_entity_models WHERE kind = ",
-        );
+        let deleted_sql = match self.state.backend {
+            DbBackend::Sqlite => "m.deleted = 0",
+            DbBackend::Postgres => "m.deleted = FALSE",
+        };
+
+        let mut builder = QueryBuilder::<Any>::new(format!(
+            "SELECT em.world_address, em.table_id, em.entity_id, em.row_json, \
+                    m.created_at, m.updated_at, m.executed_at \
+             FROM torii_ecs_entity_models em \
+             JOIN torii_ecs_entity_meta m \
+               ON m.kind = em.kind AND m.world_address = em.world_address \
+              AND m.table_id = em.table_id AND m.entity_id = em.entity_id \
+              AND {deleted_sql} \
+             WHERE em.kind = "
+        ));
         builder.push_bind(kind.as_str());
         if let Some(table_ids) = table_ids {
-            builder.push(" AND table_id IN (");
+            builder.push(" AND em.table_id IN (");
             {
                 let mut separated = builder.separated(", ");
                 for table_id in table_ids {
@@ -3316,47 +3887,30 @@ impl EcsService {
             }
             builder.push(")");
         }
+        append_entity_key_pairs_filter(
+            &mut builder,
+            "em.world_address",
+            "em.entity_id",
+            entity_keys,
+        );
 
-        let world_addresses = entity_keys
-            .iter()
-            .map(|(world_address, _)| world_address.clone())
-            .collect::<HashSet<_>>();
-        let entity_ids = entity_keys
-            .iter()
-            .map(|(_, entity_id)| entity_id.clone())
-            .collect::<HashSet<_>>();
-        let allowed = entity_keys.iter().cloned().collect::<HashSet<_>>();
-
-        builder.push(" AND world_address IN (");
-        {
-            let mut separated = builder.separated(", ");
-            for world_address in &world_addresses {
-                separated.push_bind(world_address);
-            }
-        }
-        builder.push(")");
-        builder.push(" AND entity_id IN (");
-        {
-            let mut separated = builder.separated(", ");
-            for entity_id in &entity_ids {
-                separated.push_bind(entity_id);
-            }
-        }
-        builder.push(")");
-
-        let rows = builder.build().fetch_all(&self.state.pool).await?;
+        let start = Instant::now();
+        let rows = builder.build().fetch_all(&mut **conn).await?;
+        ::metrics::histogram!(
+            "torii_ecs_load_entity_page_rows_query_seconds",
+            "backend" => self.state.backend.as_str()
+        )
+        .record(start.elapsed().as_secs_f64());
         let mut output = Vec::new();
         for row in rows {
-            let world_address: String = row.try_get("world_address")?;
-            let entity_id: String = row.try_get("entity_id")?;
-            if !allowed.contains(&(world_address.clone(), entity_id.clone())) {
-                continue;
-            }
             output.push(EntityModelRow {
-                world_address,
+                world_address: row.try_get("world_address")?,
                 table_id: row.try_get("table_id")?,
-                entity_id,
+                entity_id: row.try_get("entity_id")?,
                 row_json: row.try_get("row_json")?,
+                created_at: row.try_get::<i64, _>("created_at")? as u64,
+                updated_at: row.try_get::<i64, _>("updated_at")? as u64,
+                executed_at: row.try_get::<i64, _>("executed_at")? as u64,
             });
         }
         Ok(output)
@@ -3413,11 +3967,7 @@ impl EcsService {
             }
 
             let row_json: String = row.try_get("row_json")?;
-            let value: Value = serde_json::from_str(&row_json)?;
-            let object = value
-                .as_object()
-                .cloned()
-                .ok_or_else(|| anyhow!("entity snapshot row must be an object"))?;
+            let object: Map<String, Value> = serde_json::from_str(&row_json)?;
             aggregate
                 .models
                 .push(row_to_model_struct(&table.table, &object)?);
@@ -3641,19 +4191,39 @@ impl EcsService {
     }
 }
 
+fn record_active_entity_subscriptions(kind: TableKind, count: usize) {
+    match kind {
+        TableKind::Entity => {
+            ::metrics::gauge!("torii_ecs_entity_subscriptions_active").set(count as f64);
+        }
+        TableKind::EventMessage => {
+            ::metrics::gauge!("torii_ecs_event_message_subscriptions_active").set(count as f64);
+        }
+    }
+}
+
+fn record_active_entity_subscription_groups(kind: TableKind, count: usize) {
+    match kind {
+        TableKind::Entity => {
+            ::metrics::gauge!("torii_ecs_entity_subscription_groups_active").set(count as f64);
+        }
+        TableKind::EventMessage => {
+            ::metrics::gauge!("torii_ecs_event_message_subscription_groups_active")
+                .set(count as f64);
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl World for EcsService {
-    type SubscribeContractsStream = ReceiverStream<Result<SubscribeContractsResponse, Status>>;
-    type SubscribeEntitiesStream = ReceiverStream<Result<SubscribeEntityResponse, Status>>;
-    type SubscribeEventMessagesStream = ReceiverStream<Result<SubscribeEntityResponse, Status>>;
-    type SubscribeTokenBalancesStream =
-        ReceiverStream<Result<SubscribeTokenBalancesResponse, Status>>;
-    type SubscribeTokensStream = ReceiverStream<Result<SubscribeTokensResponse, Status>>;
-    type SubscribeTokenTransfersStream =
-        ReceiverStream<Result<SubscribeTokenTransfersResponse, Status>>;
-    type SubscribeEventsStream = ReceiverStream<Result<SubscribeEventsResponse, Status>>;
-    type SubscribeTransactionsStream =
-        ReceiverStream<Result<SubscribeTransactionsResponse, Status>>;
+    type SubscribeContractsStream = ManagedSubscriptionStream<SubscribeContractsResponse>;
+    type SubscribeEntitiesStream = ManagedSubscriptionStream<SubscribeEntityResponse>;
+    type SubscribeEventMessagesStream = ManagedSubscriptionStream<SubscribeEntityResponse>;
+    type SubscribeTokenBalancesStream = ManagedSubscriptionStream<SubscribeTokenBalancesResponse>;
+    type SubscribeTokensStream = ManagedSubscriptionStream<SubscribeTokensResponse>;
+    type SubscribeTokenTransfersStream = ManagedSubscriptionStream<SubscribeTokenTransfersResponse>;
+    type SubscribeEventsStream = ManagedSubscriptionStream<SubscribeEventsResponse>;
+    type SubscribeTransactionsStream = ManagedSubscriptionStream<SubscribeTransactionsResponse>;
 
     async fn subscribe_contracts(
         &self,
@@ -3671,11 +4241,18 @@ impl World for EcsService {
                 }))
                 .await;
         }
-        self.state.contract_subscriptions.lock().await.insert(
-            Self::next_subscription_id().await,
-            ContractSubscription { query, sender },
-        );
-        Ok(Response::new(ReceiverStream::new(receiver)))
+        let subscription_id = Self::next_subscription_id().await;
+        self.state
+            .contract_subscriptions
+            .lock()
+            .await
+            .insert(subscription_id, ContractSubscription { query, sender });
+        Ok(Response::new(ManagedSubscriptionStream::new(
+            Arc::clone(&self.state),
+            SubscriptionKind::Contract,
+            subscription_id,
+            receiver,
+        )))
     }
 
     async fn worlds(
@@ -3701,25 +4278,36 @@ impl World for EcsService {
         &self,
         request: Request<SubscribeEntitiesRequest>,
     ) -> Result<Response<Self::SubscribeEntitiesStream>, Status> {
+        let start = Instant::now();
+        ::metrics::counter!("torii_ecs_subscribe_entities_requests_total").increment(1);
         let request = request.into_inner();
         let subscription_id = Self::next_subscription_id().await;
-        let (sender, receiver) = mpsc::channel(256);
+        let (sender, receiver) = mpsc::channel(2096);
         sender
-            .send(Ok(SubscribeEntityResponse {
+            .try_send(Ok(SubscribeEntityResponse {
                 entity: None,
                 subscription_id,
             }))
-            .await
             .map_err(|_| Status::internal("subscription setup failed"))?;
-        self.state.entity_subscriptions.lock().await.insert(
+        self.state
+            .insert_entity_subscription(
+                TableKind::Entity,
+                subscription_id,
+                EntitySubscription {
+                    clause: request.clause,
+                    world_addresses: request.world_addresses.into_iter().collect(),
+                    sender,
+                },
+            )
+            .await;
+        ::metrics::histogram!("torii_ecs_subscribe_entities_setup_seconds")
+            .record(start.elapsed().as_secs_f64());
+        Ok(Response::new(ManagedSubscriptionStream::new(
+            Arc::clone(&self.state),
+            SubscriptionKind::Entity(TableKind::Entity),
             subscription_id,
-            EntitySubscription {
-                clause: request.clause,
-                world_addresses: request.world_addresses.into_iter().collect(),
-                sender,
-            },
-        );
-        Ok(Response::new(ReceiverStream::new(receiver)))
+            receiver,
+        )))
     }
 
     async fn update_entities_subscription(
@@ -3727,16 +4315,12 @@ impl World for EcsService {
         request: Request<UpdateEntitiesSubscriptionRequest>,
     ) -> Result<Response<()>, Status> {
         let request = request.into_inner();
-        if let Some(subscription) = self
-            .state
-            .entity_subscriptions
-            .lock()
-            .await
-            .get_mut(&request.subscription_id)
-        {
-            subscription.clause = request.clause;
-            subscription.world_addresses = request.world_addresses.into_iter().collect();
-        }
+        let subscription_id = request.subscription_id;
+        let clause = request.clause;
+        let world_addresses = request.world_addresses.into_iter().collect();
+        self.state
+            .update_entity_subscription(TableKind::Entity, subscription_id, clause, world_addresses)
+            .await;
         Ok(Response::new(()))
     }
 
@@ -3765,25 +4349,36 @@ impl World for EcsService {
         &self,
         request: Request<SubscribeEntitiesRequest>,
     ) -> Result<Response<Self::SubscribeEventMessagesStream>, Status> {
+        let start = Instant::now();
+        ::metrics::counter!("torii_ecs_subscribe_event_messages_requests_total").increment(1);
         let request = request.into_inner();
         let subscription_id = Self::next_subscription_id().await;
         let (sender, receiver) = mpsc::channel(256);
         sender
-            .send(Ok(SubscribeEntityResponse {
+            .try_send(Ok(SubscribeEntityResponse {
                 entity: None,
                 subscription_id,
             }))
-            .await
             .map_err(|_| Status::internal("subscription setup failed"))?;
-        self.state.event_message_subscriptions.lock().await.insert(
+        self.state
+            .insert_entity_subscription(
+                TableKind::EventMessage,
+                subscription_id,
+                EntitySubscription {
+                    clause: request.clause,
+                    world_addresses: request.world_addresses.into_iter().collect(),
+                    sender,
+                },
+            )
+            .await;
+        ::metrics::histogram!("torii_ecs_subscribe_event_messages_setup_seconds")
+            .record(start.elapsed().as_secs_f64());
+        Ok(Response::new(ManagedSubscriptionStream::new(
+            Arc::clone(&self.state),
+            SubscriptionKind::Entity(TableKind::EventMessage),
             subscription_id,
-            EntitySubscription {
-                clause: request.clause,
-                world_addresses: request.world_addresses.into_iter().collect(),
-                sender,
-            },
-        );
-        Ok(Response::new(ReceiverStream::new(receiver)))
+            receiver,
+        )))
     }
 
     async fn update_event_messages_subscription(
@@ -3791,16 +4386,17 @@ impl World for EcsService {
         request: Request<UpdateEntitiesSubscriptionRequest>,
     ) -> Result<Response<()>, Status> {
         let request = request.into_inner();
-        if let Some(subscription) = self
-            .state
-            .event_message_subscriptions
-            .lock()
-            .await
-            .get_mut(&request.subscription_id)
-        {
-            subscription.clause = request.clause;
-            subscription.world_addresses = request.world_addresses.into_iter().collect();
-        }
+        let subscription_id = request.subscription_id;
+        let clause = request.clause;
+        let world_addresses = request.world_addresses.into_iter().collect();
+        self.state
+            .update_entity_subscription(
+                TableKind::EventMessage,
+                subscription_id,
+                clause,
+                world_addresses,
+            )
+            .await;
         Ok(Response::new(()))
     }
 
@@ -3839,8 +4435,8 @@ impl World for EcsService {
             }))
             .await
             .map_err(|_| Status::internal("subscription setup failed"))?;
-        let seen = self
-            .snapshot_token_balance_seen(
+        let latest = self
+            .snapshot_token_balance_state(
                 &request.account_addresses,
                 &request.contract_addresses,
                 &request.token_ids,
@@ -3853,12 +4449,17 @@ impl World for EcsService {
                 contract_addresses: request.contract_addresses,
                 account_addresses: request.account_addresses,
                 token_ids: request.token_ids,
-                seen,
+                latest,
                 sender,
             },
         );
         self.spawn_token_balance_poll(subscription_id);
-        Ok(Response::new(ReceiverStream::new(receiver)))
+        Ok(Response::new(ManagedSubscriptionStream::new(
+            Arc::clone(&self.state),
+            SubscriptionKind::TokenBalance,
+            subscription_id,
+            receiver,
+        )))
     }
 
     async fn update_token_balances_subscription(
@@ -3866,8 +4467,8 @@ impl World for EcsService {
         request: Request<UpdateTokenBalancesSubscriptionRequest>,
     ) -> Result<Response<()>, Status> {
         let request = request.into_inner();
-        let seen = self
-            .snapshot_token_balance_seen(
+        let latest = self
+            .snapshot_token_balance_state(
                 &request.account_addresses,
                 &request.contract_addresses,
                 &request.token_ids,
@@ -3884,7 +4485,7 @@ impl World for EcsService {
             subscription.contract_addresses = request.contract_addresses;
             subscription.account_addresses = request.account_addresses;
             subscription.token_ids = request.token_ids;
-            subscription.seen = seen;
+            subscription.latest = latest;
         }
         Ok(Response::new(()))
     }
@@ -3917,7 +4518,12 @@ impl World for EcsService {
             },
         );
         self.spawn_token_poll(subscription_id);
-        Ok(Response::new(ReceiverStream::new(receiver)))
+        Ok(Response::new(ManagedSubscriptionStream::new(
+            Arc::clone(&self.state),
+            SubscriptionKind::Token,
+            subscription_id,
+            receiver,
+        )))
     }
 
     async fn update_tokens_subscription(
@@ -3976,7 +4582,12 @@ impl World for EcsService {
             },
         );
         self.spawn_token_transfer_poll(subscription_id);
-        Ok(Response::new(ReceiverStream::new(receiver)))
+        Ok(Response::new(ManagedSubscriptionStream::new(
+            Arc::clone(&self.state),
+            SubscriptionKind::TokenTransfer,
+            subscription_id,
+            receiver,
+        )))
     }
 
     async fn update_token_transfers_subscription(
@@ -4033,19 +4644,25 @@ impl World for EcsService {
         request: Request<SubscribeEventsRequest>,
     ) -> Result<Response<Self::SubscribeEventsStream>, Status> {
         let request = request.into_inner();
+        let subscription_id = Self::next_subscription_id().await;
         let (sender, receiver) = mpsc::channel(256);
         sender
             .send(Ok(SubscribeEventsResponse { event: None }))
             .await
             .map_err(|_| Status::internal("subscription setup failed"))?;
         self.state.event_subscriptions.lock().await.insert(
-            Self::next_subscription_id().await,
+            subscription_id,
             EventSubscription {
                 keys: request.keys,
                 sender,
             },
         );
-        Ok(Response::new(ReceiverStream::new(receiver)))
+        Ok(Response::new(ManagedSubscriptionStream::new(
+            Arc::clone(&self.state),
+            SubscriptionKind::Event,
+            subscription_id,
+            receiver,
+        )))
     }
 
     async fn retrieve_tokens(
@@ -4085,14 +4702,17 @@ impl World for EcsService {
         &self,
         request: Request<RetrieveTokenBalancesRequest>,
     ) -> Result<Response<RetrieveTokenBalancesResponse>, Status> {
+        let start = Instant::now();
         let query = request
             .into_inner()
             .query
             .ok_or_else(|| Status::invalid_argument("Missing query argument"))?;
-        let (balances, next_cursor) = self
-            .load_token_balances(&query)
-            .await
-            .map_err(internal_status)?;
+        let result = self.load_token_balances(&query).await;
+        ::metrics::histogram!("torii_ecs_retrieve_token_balances_latency_seconds")
+            .record(start.elapsed().as_secs_f64());
+        let (balances, next_cursor) = result.map_err(internal_status)?;
+        ::metrics::counter!("torii_ecs_retrieve_token_balances_returned_total")
+            .increment(balances.len() as u64);
         Ok(Response::new(RetrieveTokenBalancesResponse {
             next_cursor,
             balances,
@@ -4142,7 +4762,12 @@ impl World for EcsService {
             },
         );
         self.spawn_transaction_poll(subscription_id);
-        Ok(Response::new(ReceiverStream::new(receiver)))
+        Ok(Response::new(ManagedSubscriptionStream::new(
+            Arc::clone(&self.state),
+            SubscriptionKind::Transaction,
+            subscription_id,
+            receiver,
+        )))
     }
 
     async fn retrieve_contracts(
@@ -4228,12 +4853,39 @@ struct EntityModelRow {
     table_id: String,
     entity_id: String,
     row_json: String,
+    created_at: u64,
+    updated_at: u64,
+    executed_at: u64,
 }
 
 struct SnapshotJsonSerializer;
 
 fn internal_status(error: anyhow::Error) -> Status {
     Status::internal(error.to_string())
+}
+
+fn append_entity_key_pairs_filter<'a>(
+    builder: &mut QueryBuilder<'a, Any>,
+    world_column: &str,
+    entity_column: &str,
+    entity_keys: &'a [(String, String)],
+) {
+    builder.push(" AND (");
+    builder.push(world_column);
+    builder.push(", ");
+    builder.push(entity_column);
+    builder.push(") IN (");
+    for (i, (world_address, entity_id)) in entity_keys.iter().enumerate() {
+        if i > 0 {
+            builder.push(", ");
+        }
+        builder.push("(");
+        builder.push_bind(world_address);
+        builder.push(", ");
+        builder.push_bind(entity_id);
+        builder.push(")");
+    }
+    builder.push(")");
 }
 
 fn sql_hex_blob_expr(backend: DbBackend, column: &str, width: usize) -> String {
@@ -4259,11 +4911,11 @@ fn sql_hex_literal_expr(backend: DbBackend, value: &str, width: usize) -> String
 }
 
 async fn attach_sqlite_databases(
-    conn: &mut PoolConnection<Any>,
+    conn: &mut AnyConnection,
     erc20_url: Option<&str>,
     erc721_url: Option<&str>,
     erc1155_url: Option<&str>,
-) -> Result<()> {
+) -> sqlx::Result<()> {
     for (schema, url) in [
         ("erc20", erc20_url),
         ("erc721", erc721_url),
@@ -4277,14 +4929,14 @@ async fn attach_sqlite_databases(
 }
 
 async fn attach_sqlite_database(
-    conn: &mut PoolConnection<Any>,
+    conn: &mut AnyConnection,
     schema: &str,
     url: &str,
-) -> Result<()> {
+) -> sqlx::Result<()> {
     let attached =
         sqlx::query_scalar::<Any, i64>("SELECT 1 FROM pragma_database_list WHERE name = ? LIMIT 1")
             .bind(schema)
-            .fetch_optional(&mut **conn)
+            .fetch_optional(&mut *conn)
             .await?
             .is_some();
     if attached {
@@ -4292,10 +4944,20 @@ async fn attach_sqlite_database(
     }
 
     let path = sqlite_db_path(url).replace('\'', "''");
+    // sqlite-dynamic-ok: ATTACH requires the database path and schema identifier in SQL text.
     sqlx::query(&format!("ATTACH DATABASE '{path}' AS {schema}"))
-        .execute(&mut **conn)
+        .execute(&mut *conn)
         .await?;
     Ok(())
+}
+
+fn sqlite_master_preview_sql(schema: &str) -> &'static str {
+    match schema {
+        "erc20" => "SELECT name FROM erc20.sqlite_master WHERE type='table' LIMIT 5",
+        "erc721" => "SELECT name FROM erc721.sqlite_master WHERE type='table' LIMIT 5",
+        "erc1155" => "SELECT name FROM erc1155.sqlite_master WHERE type='table' LIMIT 5",
+        _ => "SELECT name FROM sqlite_master WHERE 1 = 0",
+    }
 }
 
 fn sqlite_db_path(url: &str) -> String {
@@ -4454,7 +5116,7 @@ fn row_to_model_struct(table: &DojoTable, row: &Map<String, Value>) -> Result<ty
         .chain(table.value_fields.iter())
         .filter_map(|column_id| table.columns.get(column_id))
         .map(|column| {
-            let value = row.get(&column.name).cloned().unwrap_or(Value::Null);
+            let value = row.get(&column.name).unwrap_or(&Value::Null);
             Ok(types::Member {
                 name: column.name.clone(),
                 ty: Some(type_to_proto_value(&column.type_def, value)?),
@@ -4531,11 +5193,12 @@ fn build_entity_from_snapshot(
     };
 
     let mut aggregate = EntityAggregate {
-        world_address: felt_from_hex(&key.0)?.to_bytes_be().to_vec(),
-        hashed_keys: felt_from_hex(&key.1)?.to_bytes_be().to_vec(),
+        world_address: felt_like_string_to_bytes(&key.0)?,
+        hashed_keys: felt_like_string_to_bytes(&key.1)?,
         ..EntityAggregate::default()
     };
 
+    let build_start = Instant::now();
     for (table_id, row_json) in rows {
         let Some(table_meta) = meta.get(table_id) else {
             continue;
@@ -4547,14 +5210,13 @@ fn build_entity_from_snapshot(
             continue;
         };
 
-        let value: Value = serde_json::from_str(row_json)?;
-        let object = value
-            .as_object()
-            .cloned()
-            .ok_or_else(|| anyhow!("entity snapshot row must be an object"))?;
+        let row_decode_start = Instant::now();
+        let object: Map<String, Value> = serde_json::from_str(row_json)?;
         aggregate
             .models
             .push(row_to_model_struct(&table.table, &object)?);
+        ::metrics::histogram!("torii_ecs_entity_snapshot_row_decode_seconds")
+            .record(row_decode_start.elapsed().as_secs_f64());
         if aggregate.created_at == 0 || table_meta.created_at < aggregate.created_at {
             aggregate.created_at = table_meta.created_at;
         }
@@ -4565,6 +5227,8 @@ fn build_entity_from_snapshot(
     if aggregate.models.is_empty() {
         return Ok(None);
     }
+    ::metrics::histogram!("torii_ecs_build_entity_from_snapshot_seconds")
+        .record(build_start.elapsed().as_secs_f64());
     Ok(Some(aggregate))
 }
 
@@ -4634,7 +5298,7 @@ fn is_json_text_type(type_def: &TypeDef) -> bool {
     )
 }
 
-fn type_to_proto_value(type_def: &TypeDef, value: Value) -> Result<types::Ty> {
+fn type_to_proto_value(type_def: &TypeDef, value: &Value) -> Result<types::Ty> {
     use types::ty::TyType;
 
     let ty_type = match type_def {
@@ -4659,14 +5323,14 @@ fn type_to_proto_value(type_def: &TypeDef, value: Value) -> Result<types::Ty> {
             )),
         }),
         TypeDef::U64 => TyType::Primitive(types::Primitive {
-            primitive_type: Some(types::primitive::PrimitiveType::U64(value_as_u64(&value))),
+            primitive_type: Some(types::primitive::PrimitiveType::U64(value_as_u64(value))),
         }),
         TypeDef::Felt252
         | TypeDef::ClassHash
         | TypeDef::ContractAddress
         | TypeDef::StorageAddress
         | TypeDef::StorageBaseAddress => {
-            let bytes = value_as_felt_bytes(&value)?;
+            let bytes = value_as_felt_bytes(value)?;
             let primitive = match type_def {
                 TypeDef::ClassHash => types::primitive::PrimitiveType::ClassHash(bytes),
                 TypeDef::ContractAddress
@@ -4682,27 +5346,27 @@ fn type_to_proto_value(type_def: &TypeDef, value: Value) -> Result<types::Ty> {
         }
         TypeDef::EthAddress => TyType::Primitive(types::Primitive {
             primitive_type: Some(types::primitive::PrimitiveType::EthAddress(
-                value_as_fixed_unsigned_bytes(&value, 20)?,
+                value_as_fixed_unsigned_bytes(value, 20)?,
             )),
         }),
         TypeDef::U128 => TyType::Primitive(types::Primitive {
             primitive_type: Some(types::primitive::PrimitiveType::U128(
-                value_as_fixed_unsigned_bytes(&value, 16)?,
+                value_as_fixed_unsigned_bytes(value, 16)?,
             )),
         }),
         TypeDef::I128 => TyType::Primitive(types::Primitive {
             primitive_type: Some(types::primitive::PrimitiveType::I128(
-                value_as_fixed_signed_bytes(&value, 16)?,
+                value_as_fixed_signed_bytes(value, 16)?,
             )),
         }),
         TypeDef::U256 => TyType::Primitive(types::Primitive {
             primitive_type: Some(types::primitive::PrimitiveType::U256(
-                value_as_fixed_unsigned_bytes(&value, 32)?,
+                value_as_fixed_unsigned_bytes(value, 32)?,
             )),
         }),
         TypeDef::U512 => TyType::Primitive(types::Primitive {
             primitive_type: Some(types::primitive::PrimitiveType::U256(
-                value_as_fixed_unsigned_bytes(&value, 64)?,
+                value_as_fixed_unsigned_bytes(value, 64)?,
             )),
         }),
         TypeDef::Utf8String
@@ -4710,21 +5374,21 @@ fn type_to_proto_value(type_def: &TypeDef, value: Value) -> Result<types::Ty> {
         | TypeDef::ByteArray
         | TypeDef::ByteArrayEncoded(_)
         | TypeDef::Bytes31
-        | TypeDef::Bytes31Encoded(_) => TyType::Bytearray(value_as_string(&value)),
+        | TypeDef::Bytes31Encoded(_) => TyType::Bytearray(value_as_string(value)),
         TypeDef::Struct(def) => {
-            let object = value.as_object().cloned().unwrap_or_default();
+            let object = value.as_object();
             TyType::Struct(types::Struct {
                 name: def.name.clone(),
                 children: def
                     .members
                     .iter()
                     .map(|member| {
+                        let member_value = object
+                            .and_then(|object| object.get(&member.name))
+                            .unwrap_or(&Value::Null);
                         Ok(types::Member {
                             name: member.name.clone(),
-                            ty: Some(type_to_proto_value(
-                                &member.type_def,
-                                object.get(&member.name).cloned().unwrap_or(Value::Null),
-                            )?),
+                            ty: Some(type_to_proto_value(&member.type_def, member_value)?),
                             key: member.attributes.has_attribute("key"),
                         })
                     })
@@ -4734,9 +5398,8 @@ fn type_to_proto_value(type_def: &TypeDef, value: Value) -> Result<types::Ty> {
         TypeDef::Tuple(def) => TyType::Tuple(types::Array {
             children: value
                 .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
+                .map_or(&[] as &[Value], Vec::as_slice)
+                .iter()
                 .zip(def.elements.iter())
                 .map(|(item, inner)| type_to_proto_value(inner, item))
                 .collect::<Result<Vec<_>>>()?,
@@ -4744,26 +5407,24 @@ fn type_to_proto_value(type_def: &TypeDef, value: Value) -> Result<types::Ty> {
         TypeDef::Array(def) => TyType::Array(types::Array {
             children: value
                 .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
+                .map_or(&[] as &[Value], Vec::as_slice)
+                .iter()
                 .map(|item| type_to_proto_value(&def.type_def, item))
                 .collect::<Result<Vec<_>>>()?,
         }),
         TypeDef::FixedArray(def) => TyType::FixedSizeArray(types::FixedSizeArray {
             children: value
                 .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
+                .map_or(&[] as &[Value], Vec::as_slice)
+                .iter()
                 .map(|item| type_to_proto_value(&def.type_def, item))
                 .collect::<Result<Vec<_>>>()?,
             size: def.size,
         }),
         TypeDef::Enum(def) => {
-            let object = value.as_object().cloned().unwrap_or_default();
+            let object = value.as_object();
             let variant_name = object
-                .get("option")
+                .and_then(|object| object.get("option"))
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
@@ -4776,8 +5437,7 @@ fn type_to_proto_value(type_def: &TypeDef, value: Value) -> Result<types::Ty> {
                 })
                 .map(|(index, variant)| {
                     let ty = object
-                        .get(&variant.name)
-                        .cloned()
+                        .and_then(|object| object.get(&variant.name))
                         .map(|value| type_to_proto_value(&variant.type_def, value))
                         .transpose()?
                         .unwrap_or_default();
@@ -4824,17 +5484,17 @@ fn type_to_proto_value(type_def: &TypeDef, value: Value) -> Result<types::Ty> {
             }
         }
         TypeDef::Result(def) => {
-            let object = value.as_object().cloned().unwrap_or_default();
-            if let Some(ok) = object.get("Ok").cloned() {
+            let object = value.as_object();
+            if let Some(ok) = object.and_then(|object| object.get("Ok")) {
                 return type_to_proto_value(&def.ok, ok);
             }
-            if let Some(err) = object.get("Err").cloned() {
+            if let Some(err) = object.and_then(|object| object.get("Err")) {
                 return type_to_proto_value(&def.err, err);
             }
-            TyType::Bytearray(value_as_string(&value))
+            TyType::Bytearray(value_as_string(value))
         }
         TypeDef::None | TypeDef::Felt252Dict(_) | TypeDef::Ref(_) | TypeDef::Custom(_) => {
-            TyType::Bytearray(value_as_string(&value))
+            TyType::Bytearray(value_as_string(value))
         }
     };
 
@@ -4870,10 +5530,17 @@ fn value_as_felt_bytes(value: &Value) -> Result<Vec<u8>> {
         return Ok(Felt::ZERO.to_bytes_be().to_vec());
     }
 
-    Ok(felt_from_hex(trimmed)?.to_bytes_be().to_vec())
+    felt_like_string_to_bytes(trimmed)
 }
 
 fn value_as_fixed_unsigned_bytes(value: &Value, width: usize) -> Result<Vec<u8>> {
+    if let Some(value) = value.as_str() {
+        let trimmed = value.trim();
+        if let Some(bytes) = decode_prefixed_hex_to_padded_bytes(trimmed, width)? {
+            return Ok(bytes);
+        }
+    }
+
     let unsigned = value_as_big_uint(value)?;
     let bytes = unsigned.to_bytes_be();
     if bytes.len() > width {
@@ -5001,6 +5668,41 @@ fn parse_big_uint_with_radix(raw: &str, radix: u32) -> Result<BigUint> {
         .ok_or_else(|| anyhow!("failed to parse integer value: {raw}"))
 }
 
+fn felt_like_string_to_bytes(raw: &str) -> Result<Vec<u8>> {
+    let trimmed = raw.trim();
+    if let Some(bytes) = decode_prefixed_hex_to_padded_bytes(trimmed, 32)? {
+        return Ok(bytes);
+    }
+
+    Ok(felt_from_hex(trimmed)?.to_bytes_be().to_vec())
+}
+
+fn decode_prefixed_hex_to_padded_bytes(raw: &str, width: usize) -> Result<Option<Vec<u8>>> {
+    let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) else {
+        return Ok(None);
+    };
+
+    if hex.is_empty() {
+        return Ok(Some(vec![0_u8; width]));
+    }
+
+    let mut normalized = String::with_capacity(hex.len() + (hex.len() % 2));
+    if hex.len() % 2 != 0 {
+        normalized.push('0');
+    }
+    normalized.push_str(hex);
+
+    let bytes = hex::decode(&normalized)
+        .map_err(|err| anyhow!("failed to parse hex value {raw}: {err}"))?;
+    if bytes.len() > width {
+        anyhow::bail!("value does not fit in {width} bytes");
+    }
+
+    let mut out = vec![0_u8; width];
+    out[width - bytes.len()..].copy_from_slice(&bytes);
+    Ok(Some(out))
+}
+
 fn push_blob_in_filter(
     builder: &mut QueryBuilder<'_, Any>,
     column: &str,
@@ -5018,6 +5720,52 @@ fn push_blob_in_filter(
     }
     builder.push(")");
     true
+}
+
+fn push_blob_in_filter_with_mode(
+    builder: &mut QueryBuilder<'_, Any>,
+    column: &str,
+    values: &[Vec<u8>],
+    has_where: bool,
+) -> bool {
+    if values.is_empty() {
+        return has_where;
+    }
+    if has_where {
+        builder.push(" AND ");
+    } else {
+        builder.push(" WHERE ");
+    }
+    builder.push(column);
+    builder.push(" IN (");
+    {
+        let mut separated = builder.separated(", ");
+        for value in values {
+            separated.push_bind(value.clone());
+        }
+    }
+    builder.push(")");
+    true
+}
+
+fn normalize_token_filter_values(values: &[Vec<u8>]) -> Vec<Vec<u8>> {
+    values
+        .iter()
+        .map(|value| {
+            let first_non_zero = value.iter().position(|byte| *byte != 0);
+            match first_non_zero {
+                Some(index) => value[index..].to_vec(),
+                None => vec![0],
+            }
+        })
+        .collect()
+}
+
+fn sql_blob_numeric_order_expr(backend: DbBackend, column: &str) -> String {
+    match backend {
+        DbBackend::Sqlite => format!("length({column})"),
+        DbBackend::Postgres => format!("octet_length({column})"),
+    }
 }
 
 fn push_transfer_filters(
@@ -5091,7 +5839,7 @@ fn token_subscription_key(token: &types::Token) -> String {
     )
 }
 
-fn token_balance_subscription_key(balance: &types::TokenBalance) -> String {
+fn token_balance_identity_key(balance: &types::TokenBalance) -> String {
     format!(
         "{}:{}:{}",
         hex::encode(&balance.contract_address),
@@ -5102,6 +5850,22 @@ fn token_balance_subscription_key(balance: &types::TokenBalance) -> String {
             .map(hex::encode)
             .unwrap_or_default()
     )
+}
+
+fn token_balance_state_fingerprint(balance: &types::TokenBalance) -> Vec<u8> {
+    balance.balance.clone()
+}
+
+fn token_balance_subscription_state(balances: &[types::TokenBalance]) -> HashMap<String, Vec<u8>> {
+    balances
+        .iter()
+        .map(|balance| {
+            (
+                token_balance_identity_key(balance),
+                token_balance_state_fingerprint(balance),
+            )
+        })
+        .collect()
 }
 
 fn canonical_felt_bytes_from_db(bytes: &[u8]) -> Result<Vec<u8>> {
@@ -5612,6 +6376,105 @@ mod tests {
             .collect()
     }
 
+    async fn explain_query_plan_details(conn: &mut PoolConnection<Any>, sql: &str) -> Vec<String> {
+        // sqlite-dynamic-ok: test-only helper that needs to wrap arbitrary SQL in EXPLAIN QUERY PLAN.
+        sqlx::query(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .fetch_all(&mut **conn)
+            .await
+            .expect("explain query plan")
+            .into_iter()
+            .map(|row| row.try_get::<String, _>("detail").expect("detail column"))
+            .collect()
+    }
+
+    async fn wait_for_entity_subscription_count(
+        service: &EcsService,
+        kind: TableKind,
+        expected: usize,
+    ) {
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let count = service
+                    .state
+                    .entity_subscription_registry(kind)
+                    .read()
+                    .await
+                    .subscription_count();
+                if count == expected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("subscription count timeout");
+    }
+
+    async fn wait_for_entity_subscription_group_count(
+        service: &EcsService,
+        kind: TableKind,
+        expected: usize,
+    ) {
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let count = service
+                    .state
+                    .entity_subscription_registry(kind)
+                    .read()
+                    .await
+                    .group_count();
+                if count == expected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("subscription group count timeout");
+    }
+
+    async fn wait_for_subscription_count(
+        service: &EcsService,
+        kind: SubscriptionKind,
+        expected: usize,
+    ) {
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let count = match kind {
+                    SubscriptionKind::Entity(kind) => service
+                        .state
+                        .entity_subscription_registry(kind)
+                        .read()
+                        .await
+                        .subscription_count(),
+                    SubscriptionKind::Event => service.state.event_subscriptions.lock().await.len(),
+                    SubscriptionKind::Contract => {
+                        service.state.contract_subscriptions.lock().await.len()
+                    }
+                    SubscriptionKind::Token => service.state.token_subscriptions.lock().await.len(),
+                    SubscriptionKind::TokenBalance => {
+                        service.state.token_balance_subscriptions.lock().await.len()
+                    }
+                    SubscriptionKind::TokenTransfer => service
+                        .state
+                        .token_transfer_subscriptions
+                        .lock()
+                        .await
+                        .len(),
+                    SubscriptionKind::Transaction => {
+                        service.state.transaction_subscriptions.lock().await.len()
+                    }
+                };
+                if count == expected {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("subscription count timeout");
+    }
+
     fn member_bool_clause(model: &str, member: &str, value: bool) -> types::Clause {
         types::Clause {
             clause_type: Some(ClauseType::Member(types::MemberClause {
@@ -5629,7 +6492,8 @@ mod tests {
 
     #[test]
     fn serializes_u128_as_fixed_width_u128() {
-        let ty = type_to_proto_value(&TypeDef::U128, serde_json::json!(10000_u64)).expect("u128");
+        let input = serde_json::json!(10000_u64);
+        let ty = type_to_proto_value(&TypeDef::U128, &input).expect("u128");
 
         let types::ty::TyType::Primitive(primitive) = ty.ty_type.expect("primitive") else {
             panic!("expected primitive");
@@ -5647,11 +6511,8 @@ mod tests {
 
     #[test]
     fn serializes_eth_address_as_20_bytes() {
-        let ty = type_to_proto_value(
-            &TypeDef::EthAddress,
-            serde_json::json!("0x11223344556677889900aabbccddeeff00112233"),
-        )
-        .expect("eth address");
+        let input = serde_json::json!("0x11223344556677889900aabbccddeeff00112233");
+        let ty = type_to_proto_value(&TypeDef::EthAddress, &input).expect("eth address");
 
         let types::ty::TyType::Primitive(primitive) = ty.ty_type.expect("primitive") else {
             panic!("expected primitive");
@@ -5670,7 +6531,8 @@ mod tests {
 
     #[test]
     fn serializes_u256_as_fixed_width_u256() {
-        let ty = type_to_proto_value(&TypeDef::U256, serde_json::json!("0x1234")).expect("u256");
+        let input = serde_json::json!("0x1234");
+        let ty = type_to_proto_value(&TypeDef::U256, &input).expect("u256");
 
         let types::ty::TyType::Primitive(primitive) = ty.ty_type.expect("primitive") else {
             panic!("expected primitive");
@@ -5689,6 +6551,19 @@ mod tests {
         let value = parse_big_int("1.5495265022047578e+21").expect("scientific integer");
 
         assert_eq!(value.to_string(), "1549526502204757800000");
+    }
+
+    #[test]
+    fn seen_cache_caps_growth() {
+        let mut cache = SeenCache::with_capacity(2);
+        cache.extend(["first".to_string(), "second".to_string()]);
+        assert!(cache.contains("first"));
+        assert!(cache.contains("second"));
+
+        cache.extend(["third".to_string()]);
+        assert!(!cache.contains("first"));
+        assert!(cache.contains("second"));
+        assert!(cache.contains("third"));
     }
 
     async fn seed_entity(
@@ -6057,6 +6932,172 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subscribe_entities_drop_cleans_up_subscription() {
+        let db_path = test_db_path("entities-drop-cleanup");
+        let service = EcsService::new(&db_path, Some(1), None, None, None)
+            .await
+            .expect("service init");
+        let world = Felt::from(42_u64);
+
+        let response = service
+            .subscribe_entities(Request::new(SubscribeEntitiesRequest {
+                clause: None,
+                world_addresses: vec![world.to_bytes_be().to_vec()],
+            }))
+            .await
+            .expect("subscribe entities");
+        let mut stream = response.into_inner();
+
+        let _setup = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("setup timeout")
+            .expect("setup frame")
+            .expect("setup ok");
+        wait_for_entity_subscription_count(&service, TableKind::Entity, 1).await;
+
+        drop(stream);
+
+        wait_for_entity_subscription_count(&service, TableKind::Entity, 0).await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_entities_repeated_drop_keeps_registry_flat() {
+        let db_path = test_db_path("entities-drop-loop");
+        let service = EcsService::new(&db_path, Some(1), None, None, None)
+            .await
+            .expect("service init");
+        let world = Felt::from(43_u64);
+
+        for _ in 0..5 {
+            let response = service
+                .subscribe_entities(Request::new(SubscribeEntitiesRequest {
+                    clause: None,
+                    world_addresses: vec![world.to_bytes_be().to_vec()],
+                }))
+                .await
+                .expect("subscribe entities");
+            let mut stream = response.into_inner();
+
+            let _setup = timeout(Duration::from_secs(1), stream.next())
+                .await
+                .expect("setup timeout")
+                .expect("setup frame")
+                .expect("setup ok");
+            wait_for_entity_subscription_count(&service, TableKind::Entity, 1).await;
+
+            drop(stream);
+
+            wait_for_entity_subscription_count(&service, TableKind::Entity, 0).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn subscribe_entities_identical_filters_share_group() {
+        let db_path = test_db_path("entities-shared-group");
+        let service = EcsService::new(&db_path, Some(1), None, None, None)
+            .await
+            .expect("service init");
+        let world = Felt::from(44_u64);
+        let clause = member_bool_clause("test-Lobby", "open", true);
+
+        let response_a = service
+            .subscribe_entities(Request::new(SubscribeEntitiesRequest {
+                clause: Some(clause.clone()),
+                world_addresses: vec![world.to_bytes_be().to_vec()],
+            }))
+            .await
+            .expect("subscribe entities a");
+        let response_b = service
+            .subscribe_entities(Request::new(SubscribeEntitiesRequest {
+                clause: Some(clause),
+                world_addresses: vec![world.to_bytes_be().to_vec()],
+            }))
+            .await
+            .expect("subscribe entities b");
+
+        let mut stream_a = response_a.into_inner();
+        let mut stream_b = response_b.into_inner();
+
+        let _setup_a = timeout(Duration::from_secs(1), stream_a.next())
+            .await
+            .expect("setup timeout a")
+            .expect("setup frame a")
+            .expect("setup ok a");
+        let _setup_b = timeout(Duration::from_secs(1), stream_b.next())
+            .await
+            .expect("setup timeout b")
+            .expect("setup frame b")
+            .expect("setup ok b");
+
+        wait_for_entity_subscription_count(&service, TableKind::Entity, 2).await;
+        wait_for_entity_subscription_group_count(&service, TableKind::Entity, 1).await;
+
+        drop(stream_a);
+        wait_for_entity_subscription_count(&service, TableKind::Entity, 1).await;
+        wait_for_entity_subscription_group_count(&service, TableKind::Entity, 1).await;
+
+        drop(stream_b);
+        wait_for_entity_subscription_count(&service, TableKind::Entity, 0).await;
+        wait_for_entity_subscription_group_count(&service, TableKind::Entity, 0).await;
+    }
+
+    #[tokio::test]
+    async fn update_entities_subscription_moves_between_groups() {
+        let db_path = test_db_path("entities-update-groups");
+        let service = EcsService::new(&db_path, Some(1), None, None, None)
+            .await
+            .expect("service init");
+        let world = Felt::from(45_u64);
+
+        let response_a = service
+            .subscribe_entities(Request::new(SubscribeEntitiesRequest {
+                clause: Some(member_bool_clause("test-Lobby", "open", true)),
+                world_addresses: vec![world.to_bytes_be().to_vec()],
+            }))
+            .await
+            .expect("subscribe entities a");
+        let response_b = service
+            .subscribe_entities(Request::new(SubscribeEntitiesRequest {
+                clause: Some(member_bool_clause("test-Lobby", "open", true)),
+                world_addresses: vec![world.to_bytes_be().to_vec()],
+            }))
+            .await
+            .expect("subscribe entities b");
+
+        let mut stream_a = response_a.into_inner();
+        let mut stream_b = response_b.into_inner();
+        let setup_a = timeout(Duration::from_secs(1), stream_a.next())
+            .await
+            .expect("setup timeout a")
+            .expect("setup frame a")
+            .expect("setup ok a");
+        let _setup_b = timeout(Duration::from_secs(1), stream_b.next())
+            .await
+            .expect("setup timeout b")
+            .expect("setup frame b")
+            .expect("setup ok b");
+
+        wait_for_entity_subscription_group_count(&service, TableKind::Entity, 1).await;
+
+        service
+            .update_entities_subscription(Request::new(UpdateEntitiesSubscriptionRequest {
+                subscription_id: setup_a.subscription_id,
+                clause: Some(member_bool_clause("test-Lobby", "open", false)),
+                world_addresses: vec![world.to_bytes_be().to_vec()],
+            }))
+            .await
+            .expect("update entities subscription");
+
+        wait_for_entity_subscription_count(&service, TableKind::Entity, 2).await;
+        wait_for_entity_subscription_group_count(&service, TableKind::Entity, 2).await;
+
+        drop(stream_a);
+        drop(stream_b);
+        wait_for_entity_subscription_count(&service, TableKind::Entity, 0).await;
+        wait_for_entity_subscription_group_count(&service, TableKind::Entity, 0).await;
+    }
+
+    #[tokio::test]
     async fn subscribe_event_messages_update_flow() {
         let db_path = test_db_path("event-messages-sub");
         let service = EcsService::new(&db_path, Some(1), None, None, None)
@@ -6120,6 +7161,35 @@ mod tests {
             .expect("publish filtered event message update");
         let filtered = timeout(Duration::from_millis(150), stream.next()).await;
         assert!(filtered.is_err(), "event message should be filtered out");
+    }
+
+    #[tokio::test]
+    async fn subscribe_event_messages_drop_cleans_up_subscription() {
+        let db_path = test_db_path("event-messages-drop-cleanup");
+        let service = EcsService::new(&db_path, Some(1), None, None, None)
+            .await
+            .expect("service init");
+        let world = Felt::from(44_u64);
+
+        let response = service
+            .subscribe_event_messages(Request::new(SubscribeEntitiesRequest {
+                clause: None,
+                world_addresses: vec![world.to_bytes_be().to_vec()],
+            }))
+            .await
+            .expect("subscribe event messages");
+        let mut stream = response.into_inner();
+
+        let _setup = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("setup timeout")
+            .expect("setup frame")
+            .expect("setup ok");
+        wait_for_entity_subscription_count(&service, TableKind::EventMessage, 1).await;
+
+        drop(stream);
+
+        wait_for_entity_subscription_count(&service, TableKind::EventMessage, 0).await;
     }
 
     #[tokio::test]
@@ -6188,6 +7258,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn subscribe_events_drop_cleans_up_subscription() {
+        let db_path = test_db_path("events-drop-cleanup");
+        let service = EcsService::new(&db_path, Some(1), None, None, None)
+            .await
+            .expect("service init");
+
+        let response = service
+            .subscribe_events(Request::new(SubscribeEventsRequest { keys: vec![] }))
+            .await
+            .expect("subscribe events");
+        let mut stream = response.into_inner();
+
+        let _setup = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("setup timeout")
+            .expect("setup frame")
+            .expect("setup ok");
+        wait_for_subscription_count(&service, SubscriptionKind::Event, 1).await;
+
+        drop(stream);
+
+        wait_for_subscription_count(&service, SubscriptionKind::Event, 0).await;
+    }
+
+    #[tokio::test]
     async fn subscribe_contracts_query_filter() {
         let db_path = test_db_path("contracts-sub");
         let service = EcsService::new(&db_path, Some(1), None, None, None)
@@ -6232,6 +7327,314 @@ mod tests {
             world_contract.to_bytes_be().to_vec()
         );
         assert_eq!(contract.contract_type, ContractType::World as i32);
+    }
+
+    #[tokio::test]
+    async fn subscribe_contracts_drop_cleans_up_subscription() {
+        let db_path = test_db_path("contracts-drop-cleanup");
+        let service = EcsService::new(&db_path, Some(1), None, None, None)
+            .await
+            .expect("service init");
+
+        let response = service
+            .subscribe_contracts(Request::new(SubscribeContractsRequest {
+                query: Some(types::ContractQuery {
+                    contract_addresses: vec![],
+                    contract_types: vec![],
+                }),
+            }))
+            .await
+            .expect("subscribe contracts");
+        let stream = response.into_inner();
+
+        wait_for_subscription_count(&service, SubscriptionKind::Contract, 1).await;
+
+        drop(stream);
+
+        wait_for_subscription_count(&service, SubscriptionKind::Contract, 0).await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_transactions_drop_cleans_up_subscription() {
+        let db_path = test_db_path("transactions-drop-cleanup");
+        let service = EcsService::new(&db_path, Some(1), None, None, None)
+            .await
+            .expect("service init");
+
+        let response = service
+            .subscribe_transactions(Request::new(SubscribeTransactionsRequest { filter: None }))
+            .await
+            .expect("subscribe transactions");
+        let mut stream = response.into_inner();
+
+        let _setup = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("setup timeout")
+            .expect("setup frame")
+            .expect("setup ok");
+        wait_for_subscription_count(&service, SubscriptionKind::Transaction, 1).await;
+
+        drop(stream);
+
+        wait_for_subscription_count(&service, SubscriptionKind::Transaction, 0).await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_tokens_drop_cleans_up_subscription() {
+        let db_path = test_db_path("tokens-drop-cleanup");
+        let erc20_url = temp_sqlite_url("erc20-tokens-drop-cleanup");
+        let service = EcsService::new(&db_path, Some(1), Some(&erc20_url), None, None)
+            .await
+            .expect("service init");
+        service
+            .attach_erc_databases()
+            .await
+            .expect("attach erc dbs");
+
+        sqlx::query(
+            "CREATE TABLE erc20.token_metadata (
+                token BLOB PRIMARY KEY,
+                name TEXT,
+                symbol TEXT,
+                decimals TEXT,
+                total_supply BLOB
+            )",
+        )
+        .execute(&service.state.pool)
+        .await
+        .expect("create erc20 token metadata");
+
+        let response = service
+            .subscribe_tokens(Request::new(SubscribeTokensRequest {
+                contract_addresses: vec![],
+                token_ids: vec![],
+            }))
+            .await
+            .expect("subscribe tokens");
+        let mut stream = response.into_inner();
+
+        let _setup = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("setup timeout")
+            .expect("setup frame")
+            .expect("setup ok");
+        wait_for_subscription_count(&service, SubscriptionKind::Token, 1).await;
+
+        drop(stream);
+
+        wait_for_subscription_count(&service, SubscriptionKind::Token, 0).await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_token_balances_emits_updates_for_existing_balance_rows() {
+        let db_path = test_db_path("token-balances-live-updates");
+        let erc20_url = temp_sqlite_url("erc20-token-balances-live-updates");
+        let service = EcsService::new(&db_path, Some(1), Some(&erc20_url), None, None)
+            .await
+            .expect("service init");
+        service
+            .attach_erc_databases()
+            .await
+            .expect("attach erc dbs");
+
+        sqlx::query(
+            "CREATE TABLE erc20.balances (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token BLOB NOT NULL,
+                wallet BLOB NOT NULL,
+                balance BLOB NOT NULL,
+                last_block TEXT NOT NULL,
+                last_tx_hash BLOB NOT NULL
+            )",
+        )
+        .execute(&service.state.pool)
+        .await
+        .expect("create erc20 balances");
+
+        let token = Felt::from(0x99_u64).to_bytes_be().to_vec();
+        let wallet = Felt::from(0x55_u64).to_bytes_be().to_vec();
+        let original_balance = u256_bytes_from_u64(1);
+        let updated_balance = u256_bytes_from_u64(5);
+
+        sqlx::query(
+            "INSERT INTO erc20.balances (token, wallet, balance, last_block, last_tx_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(&token)
+        .bind(&wallet)
+        .bind(&original_balance)
+        .bind("1")
+        .bind(vec![0_u8; 32])
+        .execute(&service.state.pool)
+        .await
+        .expect("insert erc20 balance");
+
+        let response = service
+            .subscribe_token_balances(Request::new(SubscribeTokenBalancesRequest {
+                account_addresses: vec![wallet.clone()],
+                contract_addresses: vec![token.clone()],
+                token_ids: vec![],
+            }))
+            .await
+            .expect("subscribe token balances");
+        let mut stream = response.into_inner();
+
+        let setup = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("setup timeout")
+            .expect("setup frame")
+            .expect("setup ok");
+        let subscription_id = setup.subscription_id;
+        assert!(setup.balance.is_none());
+
+        sqlx::query(
+            "UPDATE erc20.balances
+             SET balance = ?1, last_block = ?2, last_tx_hash = ?3
+             WHERE token = ?4 AND wallet = ?5",
+        )
+        .bind(&updated_balance)
+        .bind("2")
+        .bind(vec![1_u8; 32])
+        .bind(&token)
+        .bind(&wallet)
+        .execute(&service.state.pool)
+        .await
+        .expect("update erc20 balance");
+
+        let first_update = timeout(Duration::from_secs(3), stream.next())
+            .await
+            .expect("first update timeout")
+            .expect("first update frame")
+            .expect("first update ok");
+        assert_eq!(first_update.subscription_id, subscription_id);
+        assert_eq!(
+            first_update.balance.expect("first balance payload").balance,
+            updated_balance
+        );
+
+        sqlx::query(
+            "UPDATE erc20.balances
+             SET balance = ?1, last_block = ?2, last_tx_hash = ?3
+             WHERE token = ?4 AND wallet = ?5",
+        )
+        .bind(&original_balance)
+        .bind("3")
+        .bind(vec![2_u8; 32])
+        .bind(&token)
+        .bind(&wallet)
+        .execute(&service.state.pool)
+        .await
+        .expect("restore erc20 balance");
+
+        let second_update = timeout(Duration::from_secs(3), stream.next())
+            .await
+            .expect("second update timeout")
+            .expect("second update frame")
+            .expect("second update ok");
+        assert_eq!(second_update.subscription_id, subscription_id);
+        assert_eq!(
+            second_update
+                .balance
+                .expect("second balance payload")
+                .balance,
+            original_balance
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_token_balances_drop_cleans_up_subscription() {
+        let db_path = test_db_path("token-balances-drop-cleanup");
+        let erc20_url = temp_sqlite_url("erc20-token-balances-drop-cleanup");
+        let service = EcsService::new(&db_path, Some(1), Some(&erc20_url), None, None)
+            .await
+            .expect("service init");
+        service
+            .attach_erc_databases()
+            .await
+            .expect("attach erc dbs");
+
+        sqlx::query(
+            "CREATE TABLE erc20.balances (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token BLOB NOT NULL,
+                wallet BLOB NOT NULL,
+                balance BLOB NOT NULL,
+                last_block TEXT NOT NULL,
+                last_tx_hash BLOB NOT NULL
+            )",
+        )
+        .execute(&service.state.pool)
+        .await
+        .expect("create erc20 balances");
+
+        let response = service
+            .subscribe_token_balances(Request::new(SubscribeTokenBalancesRequest {
+                account_addresses: vec![],
+                contract_addresses: vec![],
+                token_ids: vec![],
+            }))
+            .await
+            .expect("subscribe token balances");
+        let mut stream = response.into_inner();
+
+        let _setup = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("setup timeout")
+            .expect("setup frame")
+            .expect("setup ok");
+        wait_for_subscription_count(&service, SubscriptionKind::TokenBalance, 1).await;
+
+        drop(stream);
+
+        wait_for_subscription_count(&service, SubscriptionKind::TokenBalance, 0).await;
+    }
+
+    #[tokio::test]
+    async fn subscribe_token_transfers_drop_cleans_up_subscription() {
+        let db_path = test_db_path("token-transfers-drop-cleanup");
+        let erc20_url = temp_sqlite_url("erc20-token-transfers-drop-cleanup");
+        let service = EcsService::new(&db_path, Some(1), Some(&erc20_url), None, None)
+            .await
+            .expect("service init");
+        service
+            .attach_erc_databases()
+            .await
+            .expect("attach erc dbs");
+
+        sqlx::query(
+            "CREATE TABLE erc20.transfers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token BLOB NOT NULL,
+                from_addr BLOB NOT NULL,
+                to_addr BLOB NOT NULL,
+                amount BLOB NOT NULL,
+                timestamp TEXT
+            )",
+        )
+        .execute(&service.state.pool)
+        .await
+        .expect("create erc20 transfers");
+
+        let response = service
+            .subscribe_token_transfers(Request::new(SubscribeTokenTransfersRequest {
+                account_addresses: vec![],
+                contract_addresses: vec![],
+                token_ids: vec![],
+            }))
+            .await
+            .expect("subscribe token transfers");
+        let mut stream = response.into_inner();
+
+        let _setup = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("setup timeout")
+            .expect("setup frame")
+            .expect("setup ok");
+        wait_for_subscription_count(&service, SubscriptionKind::TokenTransfer, 1).await;
+
+        drop(stream);
+
+        wait_for_subscription_count(&service, SubscriptionKind::TokenTransfer, 0).await;
     }
 
     #[test]
@@ -6367,6 +7770,69 @@ mod tests {
             }))
             .await
             .expect("retrieve entities")
+            .into_inner();
+
+        assert_eq!(response.entities.len(), 1);
+        let model_names = response.entities[0]
+            .models
+            .iter()
+            .map(|model| model.name.clone())
+            .collect::<HashSet<_>>();
+        assert_eq!(model_names.len(), 2);
+        assert!(model_names.contains("NUMS-QuestDefinition"));
+        assert!(model_names.contains("NUMS-QuestAssociation"));
+    }
+
+    #[tokio::test]
+    async fn retrieve_event_messages_includes_co_located_models_for_matching_entity() {
+        let db_path = test_db_path("retrieve-event-messages-colocated");
+        let service = EcsService::new(&db_path, Some(1), None, None, None)
+            .await
+            .expect("service init");
+        let world = Felt::from(910_u64);
+        let entity = Felt::from(10_110_u64);
+
+        seed_model_with_bool(
+            &service,
+            TableKind::EventMessage,
+            world,
+            Felt::from(9_111_u64),
+            "NUMS-QuestDefinition",
+            entity,
+            "enabled",
+            true,
+        )
+        .await;
+        seed_model_with_bool(
+            &service,
+            TableKind::EventMessage,
+            world,
+            Felt::from(9_112_u64),
+            "NUMS-QuestAssociation",
+            entity,
+            "linked",
+            true,
+        )
+        .await;
+
+        let response = service
+            .retrieve_event_messages(Request::new(RetrieveEntitiesRequest {
+                query: Some(types::Query {
+                    pagination: Some(types::Pagination {
+                        cursor: String::new(),
+                        limit: 10,
+                        direction: PaginationDirection::Forward as i32,
+                        order_by: vec![],
+                    }),
+                    world_addresses: vec![world.to_bytes_be().to_vec()],
+                    models: vec![],
+                    clause: Some(member_bool_clause("NUMS-QuestDefinition", "enabled", true)),
+                    no_hashed_keys: false,
+                    historical: false,
+                }),
+            }))
+            .await
+            .expect("retrieve event messages")
             .into_inner();
 
         assert_eq!(response.entities.len(), 1);
@@ -6789,6 +8255,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retrieve_token_balances_erc721_query_plan_uses_ordered_index() {
+        let db_path = test_db_path("token-balances-erc721-plan");
+        let erc721_url = temp_sqlite_url("erc721-token-balances-plan");
+        let service = EcsService::new(&db_path, Some(1), None, Some(&erc721_url), None)
+            .await
+            .expect("service init");
+        service
+            .attach_erc_databases()
+            .await
+            .expect("attach erc dbs");
+
+        let mut conn = service
+            .acquire_initialized_connection()
+            .await
+            .expect("setup connection");
+        sqlx::query(
+            "CREATE TABLE erc721.nft_ownership (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token BLOB NOT NULL,
+                token_id BLOB NOT NULL,
+                owner BLOB NOT NULL
+            )",
+        )
+        .execute(&mut *conn)
+        .await
+        .expect("create ownership");
+        sqlx::query(
+            "CREATE INDEX erc721.idx_nft_ownership_owner_token_token_id_ord
+             ON nft_ownership(owner, token, length(token_id), token_id)",
+        )
+        .execute(&mut *conn)
+        .await
+        .expect("create ordered ownership index");
+
+        let details = explain_query_plan_details(
+            &mut conn,
+            "SELECT owner, token, token_id
+             FROM erc721.nft_ownership
+             WHERE owner IN (x'01') AND token IN (x'02')
+             ORDER BY token ASC, owner ASC, length(token_id) ASC, token_id ASC
+             LIMIT 10",
+        )
+        .await;
+        let combined = details.join(" | ");
+
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("idx_nft_ownership_owner_token_token_id_ord")),
+            "expected ordered ownership index in plan, got: {combined}"
+        );
+        assert!(
+            !details
+                .iter()
+                .any(|detail| detail.contains("USE TEMP B-TREE")),
+            "expected planner to avoid temp sort, got: {combined}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieve_token_balances_erc1155_query_plan_uses_ordered_index() {
+        let db_path = test_db_path("token-balances-erc1155-plan");
+        let erc1155_url = temp_sqlite_url("erc1155-token-balances-plan");
+        let service = EcsService::new(&db_path, Some(1), None, None, Some(&erc1155_url))
+            .await
+            .expect("service init");
+        service
+            .attach_erc_databases()
+            .await
+            .expect("attach erc dbs");
+
+        let mut conn = service
+            .acquire_initialized_connection()
+            .await
+            .expect("setup connection");
+        sqlx::query(
+            "CREATE TABLE erc1155.erc1155_balances (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contract BLOB NOT NULL,
+                wallet BLOB NOT NULL,
+                token_id BLOB NOT NULL,
+                balance BLOB NOT NULL,
+                last_block TEXT NOT NULL
+            )",
+        )
+        .execute(&mut *conn)
+        .await
+        .expect("create erc1155 balances");
+        sqlx::query(
+            "CREATE INDEX erc1155.idx_erc1155_balances_wallet_contract_token_id_ord
+             ON erc1155_balances(wallet, contract, length(token_id), token_id)",
+        )
+        .execute(&mut *conn)
+        .await
+        .expect("create ordered erc1155 index");
+
+        let details = explain_query_plan_details(
+            &mut conn,
+            "SELECT wallet, contract, token_id, balance
+             FROM erc1155.erc1155_balances
+             WHERE wallet IN (x'01') AND contract IN (x'02')
+             ORDER BY contract ASC, wallet ASC, length(token_id) ASC, token_id ASC
+             LIMIT 10",
+        )
+        .await;
+        let combined = details.join(" | ");
+
+        assert!(
+            details
+                .iter()
+                .any(|detail| detail.contains("idx_erc1155_balances_wallet_contract_token_id_ord")),
+            "expected ordered erc1155 index in plan, got: {combined}"
+        );
+        assert!(
+            !details
+                .iter()
+                .any(|detail| detail.contains("USE TEMP B-TREE")),
+            "expected planner to avoid temp sort, got: {combined}"
+        );
+    }
+
+    #[tokio::test]
     async fn retrieve_token_contracts_normalizes_total_supply_to_u256_width() {
         let db_path = test_db_path("token-contracts-encoding");
         let erc20_url = temp_sqlite_url("erc20-token-contracts-encoding");
@@ -6933,6 +8521,222 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retrieve_token_balances_limits_merged_results_in_sorted_order() {
+        let db_path = test_db_path("token-balances-limit-order");
+        let erc20_url = temp_sqlite_url("erc20-token-balances-limit-order");
+        let erc721_url = temp_sqlite_url("erc721-token-balances-limit-order");
+        let erc1155_url = temp_sqlite_url("erc1155-token-balances-limit-order");
+        let service = EcsService::new(
+            &db_path,
+            Some(1),
+            Some(&erc20_url),
+            Some(&erc721_url),
+            Some(&erc1155_url),
+        )
+        .await
+        .expect("service init");
+        service
+            .attach_erc_databases()
+            .await
+            .expect("attach erc dbs");
+
+        let mut conn = service
+            .acquire_initialized_connection()
+            .await
+            .expect("setup connection");
+        sqlx::query(
+            "CREATE TABLE erc20.balances (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token BLOB NOT NULL,
+                wallet BLOB NOT NULL,
+                balance BLOB NOT NULL,
+                last_block TEXT NOT NULL,
+                last_tx_hash BLOB NOT NULL
+            )",
+        )
+        .execute(&mut *conn)
+        .await
+        .expect("create erc20 balances");
+        sqlx::query(
+            "CREATE TABLE erc721.nft_ownership (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token BLOB NOT NULL,
+                token_id BLOB NOT NULL,
+                owner BLOB NOT NULL
+            )",
+        )
+        .execute(&mut *conn)
+        .await
+        .expect("create erc721 ownership");
+        sqlx::query(
+            "CREATE TABLE erc1155.erc1155_balances (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                contract BLOB NOT NULL,
+                wallet BLOB NOT NULL,
+                token_id BLOB NOT NULL,
+                balance BLOB NOT NULL,
+                last_block TEXT NOT NULL
+            )",
+        )
+        .execute(&mut *conn)
+        .await
+        .expect("create erc1155 balances");
+
+        sqlx::query(
+            "INSERT INTO erc20.balances (token, wallet, balance, last_block, last_tx_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(Felt::from(0x30_u64).to_bytes_be().to_vec())
+        .bind(Felt::from(0x10_u64).to_bytes_be().to_vec())
+        .bind(vec![9_u8])
+        .bind("1")
+        .bind(vec![0_u8; 32])
+        .execute(&mut *conn)
+        .await
+        .expect("insert erc20 balance");
+        sqlx::query(
+            "INSERT INTO erc721.nft_ownership (token, token_id, owner)
+             VALUES (?1, ?2, ?3)",
+        )
+        .bind(Felt::from(0x10_u64).to_bytes_be().to_vec())
+        .bind(vec![0x02_u8])
+        .bind(Felt::from(0x20_u64).to_bytes_be().to_vec())
+        .execute(&mut *conn)
+        .await
+        .expect("insert erc721 ownership");
+        sqlx::query(
+            "INSERT INTO erc1155.erc1155_balances (contract, wallet, token_id, balance, last_block)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(Felt::from(0x20_u64).to_bytes_be().to_vec())
+        .bind(Felt::from(0x05_u64).to_bytes_be().to_vec())
+        .bind(vec![0x01_u8])
+        .bind(vec![7_u8])
+        .bind("1")
+        .execute(&mut *conn)
+        .await
+        .expect("insert erc1155 balance");
+        drop(conn);
+
+        let response = service
+            .retrieve_token_balances(Request::new(RetrieveTokenBalancesRequest {
+                query: Some(types::TokenBalanceQuery {
+                    account_addresses: vec![],
+                    contract_addresses: vec![],
+                    token_ids: vec![],
+                    pagination: Some(types::Pagination {
+                        cursor: String::new(),
+                        limit: 2,
+                        direction: PaginationDirection::Forward as i32,
+                        order_by: vec![],
+                    }),
+                }),
+            }))
+            .await
+            .expect("retrieve token balances")
+            .into_inner();
+
+        assert_eq!(response.balances.len(), 2);
+        assert_eq!(
+            response.balances[0].contract_address,
+            Felt::from(0x10_u64).to_bytes_be().to_vec()
+        );
+        assert_eq!(
+            response.balances[0].account_address,
+            Felt::from(0x20_u64).to_bytes_be().to_vec()
+        );
+        assert_eq!(
+            response.balances[0].token_id.as_ref(),
+            Some(&u256_bytes_from_u64(2))
+        );
+
+        assert_eq!(
+            response.balances[1].contract_address,
+            Felt::from(0x20_u64).to_bytes_be().to_vec()
+        );
+        assert_eq!(
+            response.balances[1].account_address,
+            Felt::from(0x05_u64).to_bytes_be().to_vec()
+        );
+        assert_eq!(
+            response.balances[1].token_id.as_ref(),
+            Some(&u256_bytes_from_u64(1))
+        );
+    }
+
+    #[tokio::test]
+    async fn retrieve_token_balances_matches_canonical_token_id_filters() {
+        let db_path = test_db_path("token-balances-token-filter");
+        let erc721_url = temp_sqlite_url("erc721-token-balances-token-filter");
+        let service = EcsService::new(&db_path, Some(1), None, Some(&erc721_url), None)
+            .await
+            .expect("service init");
+        service
+            .attach_erc_databases()
+            .await
+            .expect("attach erc dbs");
+
+        let mut conn = service
+            .acquire_initialized_connection()
+            .await
+            .expect("setup connection");
+        sqlx::query(
+            "CREATE TABLE erc721.nft_ownership (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                token BLOB NOT NULL,
+                token_id BLOB NOT NULL,
+                owner BLOB NOT NULL
+            )",
+        )
+        .execute(&mut *conn)
+        .await
+        .expect("create ownership");
+        sqlx::query(
+            "INSERT INTO erc721.nft_ownership (token, token_id, owner)
+             VALUES (?1, ?2, ?3)",
+        )
+        .bind(Felt::from(0x99_u64).to_bytes_be().to_vec())
+        .bind(vec![0x04_u8])
+        .bind(Felt::from(0x77_u64).to_bytes_be().to_vec())
+        .execute(&mut *conn)
+        .await
+        .expect("insert ownership");
+        drop(conn);
+
+        let response = service
+            .retrieve_token_balances(Request::new(RetrieveTokenBalancesRequest {
+                query: Some(types::TokenBalanceQuery {
+                    account_addresses: vec![],
+                    contract_addresses: vec![],
+                    token_ids: vec![u256_bytes_from_u64(4)],
+                    pagination: Some(types::Pagination {
+                        cursor: String::new(),
+                        limit: 10,
+                        direction: PaginationDirection::Forward as i32,
+                        order_by: vec![],
+                    }),
+                }),
+            }))
+            .await
+            .expect("retrieve token balances")
+            .into_inner();
+
+        assert_eq!(response.balances.len(), 1);
+        assert_eq!(
+            response.balances[0].contract_address,
+            Felt::from(0x99_u64).to_bytes_be().to_vec()
+        );
+        assert_eq!(
+            response.balances[0].account_address,
+            Felt::from(0x77_u64).to_bytes_be().to_vec()
+        );
+        assert_eq!(
+            response.balances[0].token_id.as_ref(),
+            Some(&u256_bytes_from_u64(4))
+        );
+    }
+
+    #[tokio::test]
     async fn retrieve_controllers_reads_backing_table() {
         let db_path = test_db_path("retrieve-controllers");
         let service = EcsService::new(&db_path, Some(1), None, None, None)
@@ -6990,5 +8794,83 @@ mod tests {
         );
         assert_eq!(response.controllers[0].username, "alice");
         assert_eq!(response.controllers[0].deployed_at_timestamp, 1_710_936_000);
+    }
+
+    #[tokio::test]
+    async fn retrieve_controllers_respects_requested_limit_above_shared_cap() {
+        let db_path = test_db_path("retrieve-controllers-limit");
+        let service = EcsService::new(&db_path, Some(1), None, None, None)
+            .await
+            .expect("service init");
+
+        sqlx::query(
+            "CREATE TABLE controllers (
+                id TEXT PRIMARY KEY,
+                address TEXT NOT NULL UNIQUE,
+                username TEXT NOT NULL,
+                deployed_at TEXT NOT NULL,
+                updated_at BIGINT NOT NULL
+            )",
+        )
+        .execute(&service.state.pool)
+        .await
+        .expect("create controllers table");
+
+        let mut tx = service
+            .state
+            .pool
+            .begin()
+            .await
+            .expect("begin controller insert tx");
+        for i in 0..1_500_u64 {
+            let controller = format!("{:#066x}", Felt::from(i + 1));
+            sqlx::query(
+                "INSERT INTO controllers (id, address, username, deployed_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .bind(&controller)
+            .bind(&controller)
+            .bind(format!("user-{i}"))
+            .bind("2024-03-20T12:00:00Z")
+            .bind(i as i64)
+            .execute(&mut *tx)
+            .await
+            .expect("insert controller");
+        }
+        tx.commit().await.expect("commit controller inserts");
+
+        let response = service
+            .retrieve_controllers(Request::new(RetrieveControllersRequest {
+                query: Some(types::ControllerQuery {
+                    contract_addresses: Vec::new(),
+                    usernames: Vec::new(),
+                    pagination: Some(types::Pagination {
+                        cursor: String::new(),
+                        limit: 1_200,
+                        direction: PaginationDirection::Forward as i32,
+                        order_by: Vec::new(),
+                    }),
+                }),
+            }))
+            .await
+            .expect("retrieve controllers")
+            .into_inner();
+
+        assert_eq!(response.controllers.len(), 1_200);
+        assert!(!response.next_cursor.is_empty());
+        assert_eq!(
+            response
+                .controllers
+                .first()
+                .map(|controller| controller.address.clone()),
+            Some(Felt::from(1_u64).to_bytes_be().to_vec())
+        );
+        assert_eq!(
+            response
+                .controllers
+                .last()
+                .map(|controller| controller.address.clone()),
+            Some(Felt::from(1_200_u64).to_bytes_be().to_vec())
+        );
     }
 }

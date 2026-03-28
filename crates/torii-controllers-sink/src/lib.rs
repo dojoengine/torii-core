@@ -14,6 +14,7 @@ use torii::axum::Router;
 use torii::etl::extractor::ExtractionBatch;
 use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
 use torii::etl::TypeId;
+use torii_runtime_common::database::DEFAULT_SQLITE_MAX_CONNECTIONS;
 
 pub const DEFAULT_API_QUERY_URL: &str = "https://api.cartridge.gg/query";
 pub const CONTROLLERS_TABLE: &str = "controllers";
@@ -133,7 +134,7 @@ impl ControllersStore {
 
         let pool = AnyPoolOptions::new()
             .max_connections(max_connections.unwrap_or(if backend == DbBackend::Sqlite {
-                1
+                DEFAULT_SQLITE_MAX_CONNECTIONS
             } else {
                 5
             }))

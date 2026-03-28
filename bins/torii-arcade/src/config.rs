@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use clap::{Parser, ValueEnum};
 use starknet::core::types::Felt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const DEFAULT_RPC_URL: &str = "https://api.cartridge.gg/x/starknet/mainnet";
 const DEFAULT_WORLD_ADDRESS: &str =
@@ -139,6 +139,14 @@ pub struct Config {
     #[arg(long, default_value = "3000")]
     pub port: u16,
 
+    /// PEM-encoded TLS certificate for the local HTTP/gRPC listener.
+    #[arg(long, env = "TORII_TLS_CERT")]
+    pub tls_cert: Option<PathBuf>,
+
+    /// PEM-encoded TLS private key for the local HTTP/gRPC listener.
+    #[arg(long, env = "TORII_TLS_KEY")]
+    pub tls_key: Option<PathBuf>,
+
     #[arg(long)]
     pub observability: bool,
 
@@ -150,6 +158,10 @@ pub struct Config {
 
     #[arg(long, default_value = "2")]
     pub max_prefetch_batches: usize,
+
+    /// Delay between ETL idle/retry cycles in seconds.
+    #[arg(long, default_value = "3")]
+    pub cycle_interval: u64,
 
     #[arg(long, default_value = "0")]
     pub rpc_parallelism: usize,
@@ -336,6 +348,16 @@ impl Config {
                 .to_string(),
         ))
     }
+
+    pub fn tls_config(&self) -> Result<Option<torii::ToriiTlsConfig>> {
+        match (&self.tls_cert, &self.tls_key) {
+            (Some(cert), Some(key)) => {
+                Ok(Some(torii::ToriiTlsConfig::new(cert.clone(), key.clone())))
+            }
+            (None, None) => Ok(None),
+            _ => bail!("--tls-cert and --tls-key must be provided together"),
+        }
+    }
 }
 
 fn is_postgres_url(url: &str) -> bool {
@@ -414,6 +436,32 @@ mod tests {
         assert!(introspect.contains(&Felt::from_hex_unchecked(
             "0x2d26295d6c541d64740e1ae56abc079b82b22c35ab83985ef8bd15dc0f9edfb"
         )));
+    }
+
+    #[test]
+    fn tls_flags_parse_when_both_paths_are_present() {
+        let cfg = Config::parse_from([
+            "torii-arcade",
+            "--tls-cert",
+            "./certs/dev-cert.pem",
+            "--tls-key",
+            "./certs/dev-key.pem",
+        ]);
+
+        let tls = cfg.tls_config().unwrap().unwrap();
+        assert_eq!(tls.cert_path, PathBuf::from("./certs/dev-cert.pem"));
+        assert_eq!(tls.key_path, PathBuf::from("./certs/dev-key.pem"));
+        assert_eq!(
+            tls.alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
+    }
+
+    #[test]
+    fn tls_flags_require_both_cert_and_key() {
+        let cfg = Config::parse_from(["torii-arcade", "--tls-cert", "./certs/dev-cert.pem"]);
+
+        assert!(cfg.tls_config().is_err());
     }
 
     #[test]
