@@ -4794,6 +4794,7 @@ dependencies = [
  "tokio",
  "torii",
  "torii-introspect",
+ "torii-sql",
  "tracing",
 ]
 
@@ -4864,6 +4865,7 @@ dependencies = [
  "torii",
  "torii-erc20",
  "torii-runtime-common",
+ "torii-sql",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -5119,6 +5121,7 @@ dependencies = [
  "torii-erc20",
  "torii-erc721",
  "torii-runtime-common",
+ "torii-sql",
  "tracing",
  "tracing-subscriber",
  "url",

@@ -281,7 +281,7 @@ pub struct PgStore<T>(pub T);
 
 impl<T: PoolExt<Postgres>> PoolExt<Postgres> for PgStore<T> {
     fn pool(&self) -> &PgPool {
-        &self.0.pool()
+        self.0.pool()
     }
 }
 

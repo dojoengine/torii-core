@@ -113,7 +113,6 @@ impl PartialEq<str> for FlexStr {
 /// The per-database `Executable` impls handle the lifetime requirements:
 /// Postgres needs no special treatment; SQLite uses an unsafe lifetime extension
 /// that is sound because the `FlexStr` outlives the `.await` point.
-
 pub struct FlexQuery<DB: Database> {
     pub(crate) sql: FlexStr,
     pub(crate) args: Option<<DB as Database>::Arguments<'static>>,
@@ -298,7 +297,7 @@ where
     }
 }
 
-impl<'a, const N: usize, DB: Database, T> Executable<DB> for [T; N]
+impl<const N: usize, DB: Database, T> Executable<DB> for [T; N]
 where
     T: Executable<DB> + Send,
 {

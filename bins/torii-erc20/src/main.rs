@@ -38,7 +38,7 @@ use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{BlockRangeConfig, BlockRangeExtractor};
 use torii_runtime_common::database::resolve_single_db_setup;
 #[cfg(feature = "profiling")]
-use torii_runtime_common::database::{backend_from_url_or_path, DatabaseBackend};
+use torii_sql::DbType;
 
 // Import from the library crate
 use torii_erc20::proto::erc20_server::Erc20Server;
@@ -217,10 +217,10 @@ async fn main() -> Result<()> {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let db_backend = match backend_from_url_or_path(&db_setup.storage_url) {
-                DatabaseBackend::Postgres => "postgres",
-                DatabaseBackend::Sqlite => "sqlite",
-            };
+            let db_backend: DbType = db_setup
+                .storage_url
+                .try_into()
+                .map_err(|e: String| anyhow::anyhow!(e))?;
             let filename = format!("flamegraph-torii-erc20-block-range-{db_backend}-{ts}.svg");
             let file = std::fs::File::create(&filename).unwrap();
             report.flamegraph(file).unwrap();

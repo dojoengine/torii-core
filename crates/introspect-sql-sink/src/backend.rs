@@ -32,6 +32,7 @@ pub trait IntrospectInitialize {
     ) -> DbResult<Vec<DbDeadField>>;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub trait IntrospectQueryMaker: Database {
     fn create_table_queries(
         namespace: &str,

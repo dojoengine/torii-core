@@ -6,6 +6,7 @@ use sqlx::migrate::{Migrate, Migrator};
 use sqlx::pool::PoolOptions;
 use sqlx::{Database, Pool, Transaction};
 use std::fmt::Display;
+use std::str::FromStr;
 use std::time::Duration;
 
 const DEFAULT_TEST_BEFORE_ACQUIRE: bool = true;
@@ -59,6 +60,75 @@ impl<DB: Database> PoolExt<DB> for Pool<DB> {
 pub enum DbType {
     Postgres,
     Sqlite,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DbUrl {
+    Postgres(String),
+    Sqlite(String),
+}
+
+pub struct DbOption<T> {
+    postgres: T,
+    sqlite: T,
+}
+
+impl<T> DbOption<T> {
+    pub fn new(postgres: T, sqlite: T) -> Self {
+        Self { postgres, sqlite }
+    }
+
+    pub fn value(self, db_type: &DbType) -> T {
+        match db_type {
+            DbType::Postgres => self.postgres,
+            DbType::Sqlite => self.sqlite,
+        }
+    }
+}
+
+impl FromStr for DbUrl {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.starts_with("postgres") || s.starts_with("postgresql") {
+            Ok(DbUrl::Postgres(s.to_string()))
+        } else if s == ":memory:" || s == "memory" {
+            Ok(DbUrl::Sqlite("sqlite::memory:".to_string()))
+        } else if s.starts_with("sqlite") {
+            Ok(DbUrl::Sqlite(s.to_string()))
+        } else {
+            Err(format!("Unsupported database url: {s}"))
+        }
+    }
+}
+
+impl DbUrl {
+    pub fn from_url(url: String) -> Option<Self> {
+        if url.starts_with("postgres") || url.starts_with("postgresql") {
+            Some(DbUrl::Postgres(url))
+        } else if url == ":memory:" || url == "memory" {
+            Some(DbUrl::Sqlite("sqlite::memory:".to_string()))
+        } else if url.starts_with("sqlite") {
+            Some(DbUrl::Sqlite(url))
+        } else {
+            None
+        }
+    }
+    pub fn as_type(&self) -> DbType {
+        match self {
+            DbUrl::Postgres(_) => DbType::Postgres,
+            DbUrl::Sqlite(_) => DbType::Sqlite,
+        }
+    }
+}
+
+impl From<DbUrl> for (DbType, String) {
+    fn from(value: DbUrl) -> Self {
+        match value {
+            DbUrl::Postgres(url) => (DbType::Postgres, url),
+            DbUrl::Sqlite(url) => (DbType::Sqlite, url),
+        }
+    }
 }
 
 impl Display for DbType {
@@ -241,7 +311,7 @@ impl DbPoolOptions {
     }
 
     pub async fn connect<DB: Database>(&self, url: &str) -> SqlxResult<Pool<DB>> {
-        Ok(self.options::<DB>().connect(url).await?)
+        self.options::<DB>().connect(url).await
     }
 
     pub fn options<DB: Database>(&self) -> PoolOptions<DB> {

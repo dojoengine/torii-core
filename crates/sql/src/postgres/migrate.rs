@@ -11,17 +11,15 @@ impl Migrate for AcquiredSchema<Postgres, PgConnection> {
             self.connection
                 .execute(
                     format!(
-                        r#"
-CREATE SCHEMA IF NOT EXISTS {schema};
-CREATE TABLE IF NOT EXISTS {schema}._sqlx_migrations (
-    version BIGINT PRIMARY KEY,
-    description TEXT NOT NULL,
-    installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
-    success BOOLEAN NOT NULL,
-    checksum BYTEA NOT NULL,
-    execution_time BIGINT NOT NULL
-);
-                "#,
+                        "CREATE SCHEMA IF NOT EXISTS {schema};
+                        CREATE TABLE IF NOT EXISTS {schema}._sqlx_migrations (
+                            version BIGINT PRIMARY KEY,
+                            description TEXT NOT NULL,
+                            installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+                            success BOOLEAN NOT NULL,
+                            checksum BYTEA NOT NULL,
+                            execution_time BIGINT NOT NULL
+                        );",
                         schema = self.schema
                     )
                     .as_str(),
@@ -138,11 +136,7 @@ CREATE TABLE IF NOT EXISTS {schema}._sqlx_migrations (
             // language=SQL
             #[allow(clippy::cast_possible_truncation)]
             let _ = query(&format!(
-                r#"
-    UPDATE {schema}._sqlx_migrations
-    SET execution_time = $1
-    WHERE version = $2
-                "#,
+                "UPDATE {schema}._sqlx_migrations SET execution_time = $1 WHERE version = $2",
                 schema = self.schema
             ))
             .bind(elapsed.as_nanos() as i64)
@@ -203,18 +197,14 @@ async fn execute_migration(
         .map_err(|e| MigrateError::ExecuteMigration(e, migration.version))?;
 
     // language=SQL
-    let _ = query(
-        format!(r#"
-    INSERT INTO {schema}._sqlx_migrations ( version, description, success, checksum, execution_time )
-    VALUES ( $1, $2, TRUE, $3, -1 )
-                "#).as_str()
+    query(
+        format!(r#"INSERT INTO "{schema}"._sqlx_migrations ( version, description, success, checksum, execution_time ) VALUES ( $1, $2, TRUE, $3, -1 )"#).as_str()
     )
     .bind(migration.version)
     .bind(&*migration.description)
     .bind(&*migration.checksum)
     .execute(conn)
     .await?;
-
     Ok(())
 }
 
@@ -228,8 +218,7 @@ async fn revert_migration(
         .await
         .map_err(|e| MigrateError::ExecuteMigration(e, migration.version))?;
 
-    // language=SQL
-    let _ = query(format!(r#"DELETE FROM {schema}._sqlx_migrations WHERE version = $1"#).as_str())
+    query(format!(r#"DELETE FROM "{schema}"._sqlx_migrations WHERE version = $1"#).as_str())
         .bind(migration.version)
         .execute(conn)
         .await?;

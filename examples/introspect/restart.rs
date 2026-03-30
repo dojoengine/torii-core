@@ -38,7 +38,7 @@ async fn run_events(
     decoder.initialize().await.unwrap();
     decoder.load_tables(&[]).await.unwrap();
     let results = db.initialize_introspect_sql_sink().await.unwrap();
-    if results.len() > 0 {
+    if results.is_empty() {
         for err in results {
             println!("Error loading table: {err}");
         }

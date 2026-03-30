@@ -38,7 +38,7 @@ impl SerializeEntries for MetaData<'_> {
         &self,
         map: &mut <S as serde::Serializer>::SerializeMap,
     ) -> Result<(), S::Error> {
-        let tx_hash = pg_json_felt252(&self.transaction_hash);
+        let tx_hash = pg_json_felt252(self.transaction_hash);
         map.serialize_entry("__created_block", &self.block_number)?;
         map.serialize_entry("__updated_block", &self.block_number)?;
         map.serialize_entry("__created_tx", &tx_hash)?;
@@ -46,6 +46,7 @@ impl SerializeEntries for MetaData<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn insert_record_queries(
     namespace: &str,
     table_name: &str,

@@ -164,10 +164,6 @@ name = "test_block_extractor"
 path = "examples/test_block_extractor/main.rs"
 
 [[example]]
-name = "introspect_simple"
-path = "examples/introspect/simple.rs"
-
-[[example]]
 name = "introspect_restart"
 path = "examples/introspect/restart.rs"
 

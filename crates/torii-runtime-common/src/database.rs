@@ -211,8 +211,8 @@ mod tests {
             "mixed backends",
         )
         .expect_err("expected mixed backend error");
-        assert!(err.to_string().contains("mixed backends"));
-        assert!(err.to_string().contains("engine=Postgres"));
-        assert!(err.to_string().contains("storage=Sqlite"));
+        assert!(err.contains("mixed backends"));
+        assert!(err.contains("engine=Postgres"));
+        assert!(err.contains("storage=Sqlite"));
     }
 }

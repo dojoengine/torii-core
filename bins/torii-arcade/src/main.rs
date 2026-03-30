@@ -99,6 +99,7 @@ async fn load_persisted_contract_registries(
     Ok(())
 }
 
+#[allow(clippy::fn_params_excessive_bools)]
 fn installed_external_decoder_ids(
     enabled: bool,
     install_erc20: bool,

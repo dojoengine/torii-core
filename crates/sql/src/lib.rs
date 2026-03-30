@@ -3,7 +3,7 @@ pub mod migrate;
 pub mod query;
 pub mod types;
 
-pub use connection::{DbPoolOptions, PoolConfig, PoolExt};
+pub use connection::{DbPoolOptions, DbType, DbUrl, PoolConfig, PoolExt};
 pub use migrate::{AcquiredSchema, SchemaMigrator};
 pub use query::{Executable, FlexQuery, Queries};
 

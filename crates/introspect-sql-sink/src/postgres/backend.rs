@@ -105,6 +105,7 @@ impl IntrospectQueryMaker for Postgres {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn store_table_queries<CS>(
     schema: &str,
     id: &Felt,
@@ -121,10 +122,10 @@ where
 {
     queries.push(
         insert_table_query(
-            &schema,
-            &id,
-            &name,
-            &primary,
+            schema,
+            id,
+            name,
+            primary,
             from_address,
             block_number,
             transaction_hash,
@@ -133,7 +134,7 @@ where
     );
 
     queries.push(
-        insert_columns_query(&schema, &id, columns, block_number, transaction_hash)
+        insert_columns_query(schema, id, columns, block_number, transaction_hash)
             .map_err(TableError::Encode)?,
     );
     Ok(())

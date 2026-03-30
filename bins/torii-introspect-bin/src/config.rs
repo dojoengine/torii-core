@@ -25,6 +25,7 @@ pub enum StorageBackend {
         .multiple(true)
         .required(true)
 ))]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Config {
     /// Starknet RPC URL.
     #[arg(

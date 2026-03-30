@@ -56,6 +56,7 @@ pub fn serialize_columns<'a>(columns: &'a [impl AsColumnRef<'a>]) -> JsonResult<
     Ok(unsafe { String::from_utf8_unchecked(data) })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn persist_table_state_query<'a>(
     namespace: &str,
     id: &Felt,
@@ -180,7 +181,7 @@ pub fn update_column(
             Felt252 | ClassHash | ContractAddress | EthAddress | StorageAddress
             | StorageBaseAddress,
         ) => Some(format!(r#"printf('0x%064x', "{new_name}")"#)),
-        _ => return UpgradeError::type_upgrade_err(&column.type_def, &new_type),
+        _ => return UpgradeError::type_upgrade_err(&column.type_def, new_type),
     };
     column.type_def = new_type.clone();
     if let Some(cast) = cast {

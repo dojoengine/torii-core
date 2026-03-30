@@ -11,7 +11,12 @@ anyhow.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sqlx = { workspace = true, features = ["any", "postgres", "sqlite", "runtime-tokio-rustls"] }
+sqlx = { workspace = true, features = [
+    "any",
+    "postgres",
+    "sqlite",
+    "runtime-tokio-rustls",
+] }
 starknet.workspace = true
 tokio.workspace = true
 torii.workspace = true
@@ -19,6 +24,7 @@ tracing.workspace = true
 thiserror.workspace = true
 introspect-types.workspace = true
 
+torii-sql.workspace = true
 torii-introspect.workspace = true
 
 [lints]
