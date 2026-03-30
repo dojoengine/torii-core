@@ -258,10 +258,7 @@ pub fn column_info_insert_query(
         id,
         block_number,
         &info.name,
-        info.attributes
-            .iter()
-            .map(|s| s.name.to_string())
-            .collect_vec(),
+        info.attributes.iter().map(|s| s.name.clone()).collect_vec(),
         &info.type_def,
         created_tx,
     )
