@@ -8,20 +8,6 @@ pub enum DbPool {
     Sqlite(Pool<Sqlite>),
 }
 
-impl From<&str> for DbPool {
-    fn from(value: &str) -> Self {
-        match DbType::try_from(value) {
-            Ok(DbType::Postgres) => DbPool::Postgres(
-                Pool::<Postgres>::connect_lazy(value).expect("Failed to create Postgres pool"),
-            ),
-            Ok(DbType::Sqlite) => DbPool::Sqlite(
-                Pool::<Sqlite>::connect_lazy(value).expect("Failed to create Sqlite pool"),
-            ),
-            Err(err) => panic!("Error parsing database connection string: {}", err),
-        }
-    }
-}
-
 impl PoolConfig {
     pub async fn connect_any(&self) -> SqlxResult<DbPool> {
         match DbType::try_from(self.url.as_str()) {
