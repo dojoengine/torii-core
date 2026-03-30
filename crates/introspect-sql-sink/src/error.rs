@@ -30,11 +30,13 @@ pub enum TableError {
         column: String,
         reason: UpgradeError,
     },
+    #[error(transparent)]
+    JsonError(#[from] serde_json::Error),
     #[error("error occurred while encoding a value: {0}")]
-    Encode(#[source] BoxDynError),
+    Encode(#[from] BoxDynError),
 }
 
-pub type TableResult<T> = std::result::Result<T, TableError>;
+pub type TableResult<T = ()> = std::result::Result<T, TableError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum UpgradeError {
@@ -56,7 +58,7 @@ pub enum UpgradeError {
     TupleReductionError,
 }
 
-pub type UpgradeResult<T> = Result<T, UpgradeError>;
+pub type UpgradeResult<T = ()> = Result<T, UpgradeError>;
 
 impl UpgradeError {
     pub fn type_upgrade_err<T>(old: &TypeDef, new: &TypeDef) -> UpgradeResult<T> {

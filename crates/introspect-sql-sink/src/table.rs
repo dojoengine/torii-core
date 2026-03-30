@@ -91,6 +91,10 @@ impl Table {
             .collect::<TableResult<Vec<&ColumnInfo>>>()
     }
 
+    pub fn all_columns(&self) -> Vec<&ColumnInfo> {
+        self.columns.values().collect()
+    }
+
     pub fn columns_with_ids<'a>(
         &'a self,
         ids: &'a [Felt],
@@ -98,6 +102,10 @@ impl Table {
         ids.iter()
             .map(|id| self.column(id).map(|col| (id, col)))
             .collect::<TableResult<Vec<(&Felt, &ColumnInfo)>>>()
+    }
+
+    pub fn all_columns_with_ids(&self) -> Vec<(&Felt, &ColumnInfo)> {
+        self.columns.iter().collect()
     }
 
     pub fn new(

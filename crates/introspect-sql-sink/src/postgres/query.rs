@@ -10,6 +10,7 @@ use sqlx::query::QueryAs;
 use sqlx::types::Json;
 use sqlx::{Arguments, Executor, Postgres};
 use starknet_types_core::felt::Felt;
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Result as FmtResult, Write};
 use std::rc::Rc;
 use torii_introspect::postgres::types::{PgPrimary, Uint128};
@@ -571,8 +572,8 @@ impl From<TableRow> for DbTable {
             owner: value.owner.into(),
             name: value.name,
             primary: value.primary_def.into(),
-            columns: Vec::new(),
-            dead: Vec::new(),
+            columns: HashMap::new(),
+            dead: HashMap::new(),
             alive: true,
         }
     }

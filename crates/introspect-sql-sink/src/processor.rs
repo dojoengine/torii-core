@@ -2,11 +2,11 @@ use crate::backend::{
     IntrospectExecutor, IntrospectInitialize, IntrospectProcessor, IntrospectQueryMaker,
 };
 use crate::error::TableLoadError;
-use crate::table::{DeadField, DeadFieldDef, Table};
+use crate::table::{DeadField, Table};
 use crate::tables::Tables;
 use crate::{DbResult, NamespaceMode};
 use async_trait::async_trait;
-use introspect_types::{ColumnDef, ColumnInfo, PrimaryDef, TypeDef};
+use introspect_types::{ColumnInfo, PrimaryDef, TypeDef};
 use itertools::Itertools;
 use sqlx::Pool;
 use starknet_types_core::felt::Felt;
@@ -28,8 +28,8 @@ pub struct DbTable {
     pub owner: Felt,
     pub name: String,
     pub primary: PrimaryDef,
-    pub columns: Vec<ColumnDef>,
-    pub dead: Vec<DeadFieldDef>,
+    pub columns: HashMap<Felt, ColumnInfo>,
+    pub dead: HashMap<u128, DeadField>,
     pub alive: bool,
 }
 
@@ -159,8 +159,8 @@ impl From<DbTable> for ((String, Felt), Table) {
                 name: value.name,
                 owner: value.owner,
                 primary: value.primary.into(),
-                columns: value.columns.into_hash_map(),
-                dead: value.dead.into_hash_map(),
+                columns: value.columns,
+                dead: value.dead,
                 alive: value.alive,
             },
         )

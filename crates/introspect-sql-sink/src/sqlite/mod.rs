@@ -1,7 +1,7 @@
 pub mod backend;
 pub mod json;
-pub mod query;
 pub mod record;
+pub mod table;
 pub mod types;
 
 use sqlx::migrate::Migrator;

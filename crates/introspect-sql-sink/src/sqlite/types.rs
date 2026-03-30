@@ -1,4 +1,6 @@
-use introspect_types::{ColumnInfo, TypeDef};
+use std::fmt::Display;
+
+use introspect_types::{ColumnDef, ColumnInfo, PrimaryDef, PrimaryTypeDef, TypeDef};
 
 use crate::{TypeError, TypeResult};
 
@@ -9,6 +11,19 @@ pub enum SqliteType {
     Real,
     Blob,
     Json,
+}
+
+impl Display for SqliteType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SqliteType::Null => write!(f, "NULL"),
+            SqliteType::Text => write!(f, "TEXT"),
+            SqliteType::Integer => write!(f, "INTEGER"),
+            SqliteType::Real => write!(f, "REAL"),
+            SqliteType::Blob => write!(f, "BLOB"),
+            SqliteType::Json => write!(f, "TEXT"),
+        }
+    }
 }
 
 pub struct SqliteColumn<'a> {
@@ -55,6 +70,38 @@ impl TryFrom<&TypeDef> for SqliteType {
             TypeDef::Custom(_) => Ok(SqliteType::Blob),
             _ => Err(TypeError::UnsupportedType(value.item_name().to_string())),
         }
+    }
+}
+
+impl TryFrom<&ColumnDef> for SqliteType {
+    type Error = TypeError;
+
+    fn try_from(value: &ColumnDef) -> Result<Self, Self::Error> {
+        (&value.type_def).try_into()
+    }
+}
+
+impl TryFrom<&ColumnInfo> for SqliteType {
+    type Error = TypeError;
+
+    fn try_from(value: &ColumnInfo) -> Result<Self, Self::Error> {
+        (&value.type_def).try_into()
+    }
+}
+
+impl TryFrom<&PrimaryTypeDef> for SqliteType {
+    type Error = TypeError;
+
+    fn try_from(value: &PrimaryTypeDef) -> Result<Self, Self::Error> {
+        (&Into::<TypeDef>::into(value)).try_into()
+    }
+}
+
+impl TryFrom<&PrimaryDef> for SqliteType {
+    type Error = TypeError;
+
+    fn try_from(value: &PrimaryDef) -> Result<Self, Self::Error> {
+        (&value.type_def).try_into()
     }
 }
 

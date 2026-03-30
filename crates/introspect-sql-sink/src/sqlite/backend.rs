@@ -1,9 +1,13 @@
-use super::query::create_table_query;
 use crate::sqlite::record::{coalesce_sql, SqliteDeserializer};
+use crate::sqlite::table::{
+    create_table_query, persist_table_state_query, qualified_table_name, update_column,
+    update_column_query, ColumnInfoRef, FETCH_TABLES_QUERY,
+};
 use crate::sqlite::types::SqliteColumn;
 use crate::{
-    DbColumn, DbDeadField, DbResult, DbTable, DeadField, IntrospectDb, IntrospectInitialize,
+    DbColumn, DbDeadField, DbResult, DbTable, IntrospectDb, IntrospectInitialize,
     IntrospectQueryMaker, IntrospectSqlSink, RecordResult, Table, TableResult, TypeResult,
+    UpgradeResultExt,
 };
 use async_trait::async_trait;
 use introspect_types::bytes::IntoByteSource;
@@ -56,7 +60,6 @@ pub struct SqliteTableRow {
     name: String,
     primary: Json<PrimaryDef>,
     columns: Json<HashMap<Felt, ColumnInfo>>,
-    dead: Json<HashMap<u128, DeadField>>,
     alive: bool,
 }
 
@@ -70,7 +73,7 @@ impl TryFrom<SqliteTableRow> for DbTable {
             name: value.name,
             primary: value.primary.0,
             columns: value.columns.0.into_iter().map_into().collect(),
-            dead: value.dead.0.into_iter().map_into().collect(),
+            dead: HashMap::new(),
             alive: value.alive,
         })
     }
@@ -81,28 +84,60 @@ impl IntrospectQueryMaker for SqliteBackend {
     type DB = Sqlite;
     fn create_table_queries(
         namespace: &str,
-        _id: &Felt,
+        id: &Felt,
         name: &str,
         primary: &PrimaryDef,
         columns: &[ColumnDef],
-        _from_address: &Felt,
-        _block_number: u64,
-        _transaction_hash: &Felt,
+        from_address: &Felt,
+        block_number: u64,
+        transaction_hash: &Felt,
         queries: &mut Vec<SqliteQuery>,
     ) -> TableResult<()> {
-        queries.add(create_table_query(namespace, name, primary, columns));
-        Ok(())
+        queries.add(create_table_query(namespace, name, primary, columns)?);
+        persist_table_state_query(
+            namespace,
+            id,
+            name,
+            primary,
+            columns.iter().map(ColumnInfoRef::from_def).collect(),
+            from_address,
+            block_number,
+            transaction_hash,
+            queries,
+        )
     }
     fn update_table_queries(
-        _table: &mut Table,
-        _name: &str,
-        _primary: &PrimaryDef,
-        _columns: &[ColumnDef],
-        _from_address: &Felt,
-        _block_number: u64,
-        _transaction_hash: &Felt,
-        _queries: &mut Vec<SqliteQuery>,
+        table: &mut Table,
+        name: &str,
+        primary: &PrimaryDef,
+        columns: &[ColumnDef],
+        from_address: &Felt,
+        block_number: u64,
+        transaction_hash: &Felt,
+        queries: &mut Vec<SqliteQuery>,
     ) -> TableResult<()> {
+        let table_name = qualified_table_name(&table.namespace, name);
+        if table.name != name {
+            queries.add(format!(
+                r#"ALTER TABLE "{}" RENAME TO "{table_name}""#,
+                qualified_table_name(&table.namespace, &table.name),
+            ));
+            table.name = name.to_string();
+        }
+        update_column(
+            &table_name,
+            &mut table.primary,
+            &primary.name,
+            &((&primary.type_def).into()),
+            queries,
+        )
+        .to_table_result(&table_name, "primary");
+        // let mut all_columns = table.columns.iter().map(ColumnInfoRef::from_info).collect();
+        // for column in columns{
+        //     match all_columns.get_mut(&column.id){
+        //         Some(mut existing)
+        //     }
+        // }
         Ok(())
     }
     fn insert_record_queries(
@@ -115,7 +150,7 @@ impl IntrospectQueryMaker for SqliteBackend {
         _transaction_hash: &Felt,
         queries: &mut Vec<SqliteQuery>,
     ) -> RecordResult<()> {
-        let qualified_table_name = qualified_table_name(namespace, table_name);
+        let table_name = qualified_table_name(namespace, table_name);
         let all_columns = schema.all_columns();
         let sql_columns = all_columns
             .iter()
@@ -125,10 +160,10 @@ impl IntrospectQueryMaker for SqliteBackend {
         let placeholders = sql_columns.iter().map(SqliteColumn::placeholder).join(", ");
         let coalesce = sql_columns[1..]
             .iter()
-            .map(|col| coalesce_sql(&qualified_table_name, col))
+            .map(|col| coalesce_sql(&table_name, col))
             .join(", ");
         let sql: Arc<str> = format!(
-            r#"INSERT INTO "{qualified_table_name}" ({}) VALUES ({}) ON CONFLICT("{}") DO UPDATE SET {}"#,
+            r#"INSERT INTO "{table_name}" ({}) VALUES ({}) ON CONFLICT("{}") DO UPDATE SET {}"#,
             column_names
                 .iter()
                 .map(|name| format!(r#""{name}""#))
@@ -137,7 +172,8 @@ impl IntrospectQueryMaker for SqliteBackend {
             placeholders,
             schema.primary_name(),
             coalesce
-        ).into();
+        )
+        .into();
 
         for record in records {
             let mut arguments: SqliteArguments<'static> = SqliteArguments::default();
@@ -168,15 +204,9 @@ impl IntrospectSqlSink for SqliteBackend {
 #[async_trait]
 impl IntrospectInitialize for SqliteBackend {
     async fn load_tables(&self, _schemas: &Option<Vec<String>>) -> DbResult<Vec<DbTable>> {
-        let rows: Vec<SqliteTableRow> = sqlx::query_as(
-            r"
-            SELECT namespace, id, owner, name, primary, columns, dead, alive
-            FROM introspect_sink_schema_state
-            ORDER BY updated_at ASC
-            ",
-        )
-        .fetch_all(self.pool())
-        .await?;
+        let rows: Vec<SqliteTableRow> = sqlx::query_as(FETCH_TABLES_QUERY)
+            .fetch_all(self.pool())
+            .await?;
 
         let tables: Vec<DbTable> = rows
             .into_iter()
@@ -194,13 +224,5 @@ impl IntrospectInitialize for SqliteBackend {
         self.migrate(Some("introspect"), INTROSPECT_SQLITE_SINK_MIGRATIONS)
             .await
             .err_into()
-    }
-}
-
-pub fn qualified_table_name(namespace: &str, table_name: &str) -> String {
-    if namespace.is_empty() {
-        table_name.to_string()
-    } else {
-        format!("{}_{}", namespace, table_name)
     }
 }
