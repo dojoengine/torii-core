@@ -2,7 +2,7 @@ use introspect_types::serialize::ToCairoDeSeFrom;
 use introspect_types::serialize_def::CairoTypeSerialization;
 use introspect_types::{CairoDeserializer, ResultDef, TupleDef, TypeDef};
 use primitive_types::{U256, U512};
-use serde::ser::SerializeMap;
+use serde::ser::{SerializeMap, SerializeTuple};
 use serde::Serializer;
 
 pub struct SqliteJsonSerializer;
@@ -54,9 +54,9 @@ impl CairoTypeSerialization for SqliteJsonSerializer {
         serializer: S,
         tuple: &'a TupleDef,
     ) -> Result<S::Ok, S::Error> {
-        let mut seq = serializer.serialize_map(Some(tuple.elements.len()))?;
-        for (index, element) in tuple.elements.iter().enumerate() {
-            seq.serialize_entry(&format!("_{index}"), &element.to_de_se(data, self))?;
+        let mut seq = serializer.serialize_tuple(tuple.elements.len())?;
+        for element in tuple.elements.iter() {
+            seq.serialize_element(&element.to_de_se(data, self))?;
         }
         seq.end()
     }

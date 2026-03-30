@@ -916,7 +916,6 @@ dependencies = [
 [[package]]
 name = "dojo-introspect"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?rev=3f4c646#3f4c646e59cfa68d9dbea46a46e724129bb2bc19"
 dependencies = [
  "async-trait",
  "introspect-rust-macros",
@@ -1863,7 +1862,6 @@ dependencies = [
 [[package]]
 name = "introspect-events"
 version = "0.1.2"
-source = "git+https://github.com/cartridge-gg/introspect?rev=49bf186#49bf18652205d88d57bc0e0a601457793bb711b5"
 dependencies = [
  "cainome-cairo-serde",
  "introspect-types",
@@ -1875,7 +1873,6 @@ dependencies = [
 [[package]]
 name = "introspect-rust-macros"
 version = "0.1.0"
-source = "git+https://github.com/cartridge-gg/introspect?rev=49bf186#49bf18652205d88d57bc0e0a601457793bb711b5"
 dependencies = [
  "paste",
  "proc-macro2",
@@ -1887,7 +1884,6 @@ dependencies = [
 [[package]]
 name = "introspect-types"
 version = "0.1.2"
-source = "git+https://github.com/cartridge-gg/introspect?rev=49bf186#49bf18652205d88d57bc0e0a601457793bb711b5"
 dependencies = [
  "blake3",
  "convert_case",
@@ -5048,6 +5044,7 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "torii",
+ "torii-sql",
  "tracing",
 ]
 
@@ -5059,6 +5056,7 @@ dependencies = [
  "crc",
  "futures",
  "itertools 0.14.0",
+ "log",
  "sqlx",
  "starknet-types-core",
 ]

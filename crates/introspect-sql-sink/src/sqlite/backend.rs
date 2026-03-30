@@ -1,7 +1,7 @@
 use crate::sqlite::record::{coalesce_sql, SqliteDeserializer};
 use crate::sqlite::table::{
     create_table_query, persist_table_state_query, qualified_table_name, update_column,
-    update_column_query, ColumnInfoRef, FETCH_TABLES_QUERY,
+    update_columns, FETCH_TABLES_QUERY,
 };
 use crate::sqlite::types::SqliteColumn;
 use crate::{
@@ -20,37 +20,15 @@ use sqlx::Arguments;
 use sqlx::Error::Encode as EncodeError;
 use starknet_types_core::felt::{Felt, FromStrError};
 use std::collections::HashMap;
-use std::ops::Deref;
 use std::sync::Arc;
 use torii_introspect::tables::RecordSchema;
 use torii_introspect::Record;
-use torii_sql::{DbPool, Queries, Sqlite, SqliteArguments, SqlitePool, SqliteQuery};
+use torii_sql::{PoolExt, Queries, Sqlite, SqliteArguments, SqlitePool, SqliteQuery};
 
 pub const INTROSPECT_SQLITE_SINK_MIGRATIONS: sqlx::migrate::Migrator =
     sqlx::migrate!("./migrations/sqlite");
 
-pub type IntrospectSqliteDb = IntrospectDb<SqliteBackend>;
-
-pub struct SqliteBackend(SqlitePool);
-
-impl Deref for SqliteBackend {
-    type Target = SqlitePool;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl From<SqlitePool> for SqliteBackend {
-    fn from(value: SqlitePool) -> Self {
-        SqliteBackend(value)
-    }
-}
-
-impl DbPool<Sqlite> for SqliteBackend {
-    fn pool(&self) -> &SqlitePool {
-        &self.0
-    }
-}
+pub type IntrospectSqliteDb = IntrospectDb<SqlitePool>;
 
 #[derive(FromRow)]
 pub struct SqliteTableRow {
@@ -80,8 +58,7 @@ impl TryFrom<SqliteTableRow> for DbTable {
 }
 
 #[async_trait]
-impl IntrospectQueryMaker for SqliteBackend {
-    type DB = Sqlite;
+impl IntrospectQueryMaker for Sqlite {
     fn create_table_queries(
         namespace: &str,
         id: &Felt,
@@ -99,7 +76,7 @@ impl IntrospectQueryMaker for SqliteBackend {
             id,
             name,
             primary,
-            columns.iter().map(ColumnInfoRef::from_def).collect(),
+            columns,
             from_address,
             block_number,
             transaction_hash,
@@ -131,14 +108,19 @@ impl IntrospectQueryMaker for SqliteBackend {
             &((&primary.type_def).into()),
             queries,
         )
-        .to_table_result(&table_name, "primary");
-        // let mut all_columns = table.columns.iter().map(ColumnInfoRef::from_info).collect();
-        // for column in columns{
-        //     match all_columns.get_mut(&column.id){
-        //         Some(mut existing)
-        //     }
-        // }
-        Ok(())
+        .to_table_result(&table_name, "primary")?;
+        update_columns(&mut table.columns, &table_name, columns, queries)?;
+        persist_table_state_query(
+            &table.namespace,
+            &table.id,
+            &table.name,
+            primary,
+            &table.columns.iter().collect_vec(),
+            from_address,
+            block_number,
+            transaction_hash,
+            queries,
+        )
     }
     fn insert_record_queries(
         namespace: &str,
@@ -197,12 +179,12 @@ impl IntrospectQueryMaker for SqliteBackend {
     }
 }
 
-impl IntrospectSqlSink for SqliteBackend {
+impl IntrospectSqlSink for SqlitePool {
     const NAME: &'static str = "Introspect Sqlite";
 }
 
 #[async_trait]
-impl IntrospectInitialize for SqliteBackend {
+impl IntrospectInitialize for SqlitePool {
     async fn load_tables(&self, _schemas: &Option<Vec<String>>) -> DbResult<Vec<DbTable>> {
         let rows: Vec<SqliteTableRow> = sqlx::query_as(FETCH_TABLES_QUERY)
             .fetch_all(self.pool())

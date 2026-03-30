@@ -27,8 +27,7 @@ use torii_dojo::external_contract::{
     contract_type_from_decoder_ids, RegisterExternalContractCommandHandler, RegisteredContractType,
     SharedContractTypeRegistry, SharedDecoderRegistry,
 };
-use torii_dojo::store::postgres::PgStore;
-use torii_dojo::store::sqlite::SqliteStore;
+use torii_dojo::store::DojoStoreTrait;
 use torii_ecs_sink::proto::world::world_server::WorldServer;
 use torii_ecs_sink::{EcsSink, FILE_DESCRIPTOR_SET as ECS_DESCRIPTOR_SET};
 use torii_entities_historical_sink::EntitiesHistoricalSink;
@@ -666,9 +665,9 @@ async fn run_with_postgres(
         .connect(storage_database_url)
         .await?;
 
-    let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), provider);
+    let decoder = DojoDecoder::new(pool.clone(), provider);
     let introspect_sink = IntrospectPgDb::new(pool.clone(), NamespaceMode::Address);
-    decoder.store.initialize().await?;
+    decoder.initialize().await?;
     introspect_sink.initialize_introspect_sql_sink().await?;
     decoder.load_tables(&[]).await?;
 
@@ -872,8 +871,8 @@ async fn run_with_sqlite(
         .await?;
     sqlx::query("PRAGMA foreign_keys=ON").execute(&pool).await?;
 
-    let decoder = DojoDecoder::<SqliteStore<_>, _>::new(pool.clone(), provider);
-    decoder.store.initialize().await?;
+    let decoder = DojoDecoder::new(pool.clone(), provider);
+    decoder.initialize().await?;
     decoder.load_tables(&[]).await?;
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);

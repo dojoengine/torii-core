@@ -10,7 +10,7 @@ use sqlx::{Executor, PgTransaction};
 
 pub type PgQuery = crate::FlexQuery<Postgres>;
 
-pub trait PgDbConnection: crate::DbPool<Postgres> {}
+pub trait PgDbConnection: crate::PoolExt<Postgres> {}
 impl<T: PgDbConnection> crate::PgDbConnection for T {}
 
 impl Executable<Postgres> for FlexQuery<Postgres> {

@@ -8,7 +8,7 @@ pub mod types;
 pub mod upgrade;
 pub mod utils;
 
-pub use backend::{IntrospectPgDb, PostgresBackend};
+pub use backend::IntrospectPgDb;
 pub use types::{
     PostgresArray, PostgresField, PostgresScalar, PostgresType, PrimaryKey, SchemaName,
 };

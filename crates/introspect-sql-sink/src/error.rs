@@ -162,7 +162,7 @@ pub enum DbError {
     FeltFromStrError(#[from] FromStrError),
 }
 
-pub type DbResult<T> = std::result::Result<T, DbError>;
+pub type DbResult<T = ()> = std::result::Result<T, DbError>;
 
 impl<T> From<PoisonError<T>> for DbError {
     fn from(err: PoisonError<T>) -> Self {

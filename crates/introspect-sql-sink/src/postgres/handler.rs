@@ -1,16 +1,16 @@
 use super::query::{fetch_columns, fetch_dead_fields, fetch_tables};
-use super::PostgresBackend;
 use crate::backend::IntrospectInitialize;
 use crate::{DbColumn, DbDeadField, DbResult, DbTable};
 use async_trait::async_trait;
 use introspect_types::ResultInto;
-use torii_sql::DbPool;
+use sqlx::PgPool;
+use torii_sql::PoolExt;
 
 pub const INTROSPECT_PG_SINK_MIGRATIONS: sqlx::migrate::Migrator =
     sqlx::migrate!("./migrations/postgres");
 
 #[async_trait]
-impl IntrospectInitialize for PostgresBackend {
+impl IntrospectInitialize for PgPool {
     async fn load_tables(&self, schemas: &Option<Vec<String>>) -> DbResult<Vec<DbTable>> {
         fetch_tables(self.pool(), schemas).await.err_into()
     }

@@ -68,6 +68,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.17"
+log = "0.4.29"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
@@ -106,10 +107,10 @@ bigdecimal = "0.4.10"
 tonic-build = "0.12"
 
 # Introspect
-introspect-events = { git = "https://github.com/cartridge-gg/introspect", rev = "49bf186" }
-introspect-types = { git = "https://github.com/cartridge-gg/introspect", rev = "49bf186" }
-introspect-rust-macros = { git = "https://github.com/cartridge-gg/introspect", rev = "49bf186" }
-dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev = "3f4c646" }
+introspect-events = { git = "https://github.com/cartridge-gg/introspect", rev = "b89ee9e" }
+introspect-types = { git = "https://github.com/cartridge-gg/introspect", rev = "b89ee9e" }
+introspect-rust-macros = { git = "https://github.com/cartridge-gg/introspect", rev = "b89ee9e" }
+dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev = "fd99a0a" }
 
 
 # Utils

@@ -26,7 +26,7 @@ use torii::etl::sink::{EventBus, Sink, SinkContext};
 use torii::etl::Decoder;
 use torii::grpc::SubscriptionManager;
 use torii_dojo::decoder::DojoDecoder;
-use torii_dojo::store::postgres::PgStore;
+use torii_dojo::store::DojoStoreTrait;
 use torii_introspect_sql_sink::IntrospectPgDb;
 
 const EXTRACTOR_TYPE: &str = "synthetic_introspect";
@@ -441,8 +441,8 @@ async fn main() -> Result<()> {
         .await?,
     );
 
-    let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), NeverFetchSchema);
-    decoder.store.initialize().await?;
+    let decoder = DojoDecoder::new(pool.clone(), NeverFetchSchema);
+    decoder.initialize().await?;
     decoder.load_tables(&[]).await?;
     let decoder: Arc<dyn Decoder> = Arc::new(decoder);
     let decoder_context =

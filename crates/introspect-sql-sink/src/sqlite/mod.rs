@@ -6,6 +6,6 @@ pub mod types;
 
 use sqlx::migrate::Migrator;
 
-pub use backend::{IntrospectSqliteDb, SqliteBackend};
+pub use backend::IntrospectSqliteDb;
 
 pub const INTROSPECT_SQLITE_SINK_MIGRATIONS: Migrator = sqlx::migrate!("./migrations/sqlite");

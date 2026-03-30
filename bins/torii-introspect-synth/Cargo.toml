@@ -9,11 +9,8 @@ path = "src/main.rs"
 
 [dependencies]
 torii.workspace = true
-torii-dojo.workspace = true
-torii-introspect-sql-sink = { workspace = true, features = [
-    "postgres",
-    "sqlite",
-] }
+torii-dojo = { workspace = true, features = ["postgres"] }
+torii-introspect-sql-sink = { workspace = true, features = ["postgres"] }
 
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

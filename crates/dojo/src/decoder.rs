@@ -65,12 +65,12 @@ pub trait DojoRecordEvent<Store, F>: Sized + CairoEventInfo + Debug {
 #[async_trait]
 impl<Store, F> DojoStoreTrait for DojoDecoder<Store, F>
 where
-    Store: DojoStoreTrait + Send + Sync,
-    Store::Error: ToString,
-    F: Send + Sync + 'static,
+    Store: DojoStoreTrait + Sync,
+    F: Sync,
 {
-    type Error = DojoToriiError;
-
+    async fn initialize(&self) -> DojoToriiResult<()> {
+        self.store.initialize().await
+    }
     async fn save_table(
         &self,
         owner: &Felt,
@@ -81,14 +81,10 @@ where
         self.store
             .save_table(owner, table, tx_hash, block_number)
             .await
-            .map_err(DojoToriiError::store_error)
     }
 
     async fn read_tables(&self, owners: &[Felt]) -> DojoToriiResult<Vec<DojoTable>> {
-        self.store
-            .read_tables(owners)
-            .await
-            .map_err(DojoToriiError::store_error)
+        self.store.read_tables(owners).await
     }
 }
 
@@ -116,11 +112,10 @@ impl<Store, F> DojoDecoder<Store, F> {
 
 impl<Store, F> DojoDecoder<Store, F>
 where
-    Store: DojoStoreTrait + Sync,
+    Store: DojoStoreTrait + Sync + Send,
     F: DojoSchemaFetcher + Send + Sync + 'static,
 {
-    pub fn new<S: Into<Store>>(store: S, fetcher: F) -> Self {
-        let store = store.into();
+    pub fn new(store: Store, fetcher: F) -> Self {
         Self {
             tables: Default::default(),
             store,
@@ -347,14 +342,9 @@ mod tests {
     use crate::ExternalContractRegisteredBody;
     use async_trait::async_trait;
     use dojo_introspect::DojoIntrospectError;
-    use introspect_types::{
-        utils::string_to_cairo_serialize_byte_array, Attribute, ColumnDef, TypeDef,
-    };
+    use introspect_types::utils::string_to_cairo_serialize_byte_array;
+    use introspect_types::{Attribute, ColumnDef, TypeDef};
     use std::sync::Mutex;
-
-    #[derive(Debug, thiserror::Error)]
-    #[error("{0}")]
-    struct FakeStoreError(String);
 
     #[derive(Default)]
     struct FakeStore {
@@ -363,20 +353,21 @@ mod tests {
 
     #[async_trait]
     impl DojoStoreTrait for FakeStore {
-        type Error = FakeStoreError;
-
+        async fn initialize(&self) -> DojoToriiResult {
+            Ok(())
+        }
         async fn save_table(
             &self,
             _owner: &Felt,
             _table: &DojoTable,
             _tx_hash: &Felt,
             block_number: u64,
-        ) -> Result<(), Self::Error> {
+        ) -> DojoToriiResult {
             self.saved_blocks.lock().unwrap().push(block_number);
             Ok(())
         }
 
-        async fn read_tables(&self, _owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
+        async fn read_tables(&self, _owners: &[Felt]) -> DojoToriiResult<Vec<DojoTable>> {
             Ok(Vec::new())
         }
     }

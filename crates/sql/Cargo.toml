@@ -11,6 +11,7 @@ itertools.workspace = true
 futures.workspace = true
 crc.workspace = true
 starknet-types-core.workspace = true
+log.workspace = true
 
 [features]
 postgres = ["sqlx/postgres"]

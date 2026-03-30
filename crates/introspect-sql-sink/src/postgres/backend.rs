@@ -11,28 +11,27 @@ use introspect_types::{ColumnDef, FeltIds, PrimaryDef};
 use starknet_types_core::felt::Felt;
 use torii_introspect::tables::RecordSchema;
 use torii_introspect::Record;
-use torii_sql::{DbPool, PgPool, PgQuery, Postgres};
+use torii_sql::{PgPool, PgQuery, Postgres};
 
-pub type IntrospectPgDb = IntrospectDb<PostgresBackend>;
+pub type IntrospectPgDb = IntrospectDb<PgPool>;
 
-pub struct PostgresBackend(PgPool);
+// #[derive(Clone)]
+// pub struct PostgresBackend(PgPool);
 
-impl From<PgPool> for PostgresBackend {
-    fn from(value: PgPool) -> Self {
-        PostgresBackend(value)
-    }
-}
+// impl From<PgPool> for PostgresBackend {
+//     fn from(value: PgPool) -> Self {
+//         PostgresBackend(value)
+//     }
+// }
 
-impl DbPool<Postgres> for PostgresBackend {
-    fn pool(&self) -> &PgPool {
-        &self.0
-    }
-}
+// impl DbConnection<Postgres> for PostgresBackend {
+//     fn pool(&self) -> &PgPool {
+//         &self.0
+//     }
+// }
 
 #[async_trait]
-impl IntrospectQueryMaker for PostgresBackend {
-    type DB = Postgres;
-
+impl IntrospectQueryMaker for Postgres {
     fn create_table_queries(
         namespace: &str,
         id: &Felt,
@@ -140,6 +139,6 @@ where
     Ok(())
 }
 
-impl IntrospectSqlSink for PostgresBackend {
+impl IntrospectSqlSink for PgPool {
     const NAME: &'static str = "Introspect Postgres";
 }

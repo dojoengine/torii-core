@@ -1,18 +1,16 @@
-use crate::backend::{
-    IntrospectExecutor, IntrospectInitialize, IntrospectProcessor, IntrospectQueryMaker,
-};
+use crate::backend::{IntrospectInitialize, IntrospectPool, IntrospectProcessor};
 use crate::error::TableLoadError;
 use crate::table::{DeadField, Table};
 use crate::tables::Tables;
-use crate::{DbResult, NamespaceMode};
+use crate::{DbResult, IntrospectQueryMaker, NamespaceMode};
 use async_trait::async_trait;
 use introspect_types::{ColumnInfo, PrimaryDef, TypeDef};
 use itertools::Itertools;
-use sqlx::Pool;
+use sqlx::{Database, Pool};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use torii_introspect::events::IntrospectBody;
-use torii_sql::{DbPool, Executable, FlexQuery};
+use torii_sql::{Executable, FlexQuery, PoolExt};
 
 pub const COMMIT_CMD: &str = "--COMMIT";
 
@@ -49,9 +47,9 @@ pub struct DbDeadField {
     pub type_def: TypeDef,
 }
 
-impl<Backend: IntrospectQueryMaker> DbPool<Backend::DB> for IntrospectDb<Backend> {
-    fn pool(&self) -> &Pool<Backend::DB> {
-        self.db.pool()
+impl<DB: Database> PoolExt<DB> for IntrospectDb<Pool<DB>> {
+    fn pool(&self) -> &Pool<DB> {
+        &self.db
     }
 }
 
@@ -70,9 +68,9 @@ where
 }
 
 #[async_trait]
-impl<Backend: IntrospectExecutor + Send + Sync> IntrospectProcessor for Backend
+impl<DB: Database + Send + Sync + IntrospectQueryMaker> IntrospectProcessor for Pool<DB>
 where
-    Vec<FlexQuery<Backend::DB>>: Executable<Backend::DB>,
+    Vec<FlexQuery<DB>>: Executable<DB>,
 {
     async fn process_msgs(
         &self,
@@ -85,11 +83,11 @@ where
 }
 
 impl<Backend> IntrospectDb<Backend> {
-    pub fn new(pool: impl Into<Backend>, namespaces: impl Into<NamespaceMode>) -> Self {
+    pub fn new(pool: Backend, namespaces: impl Into<NamespaceMode>) -> Self {
         Self {
             tables: Tables::default(),
             namespaces: namespaces.into(),
-            db: pool.into(),
+            db: pool,
         }
     }
 }

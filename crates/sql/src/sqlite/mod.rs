@@ -13,8 +13,8 @@ use crate::{Executable, SqlxResult};
 
 pub type SqliteQuery = super::FlexQuery<Sqlite>;
 
-pub trait SqliteDbConnection: super::DbPool<Sqlite> {}
-impl<T: super::DbPool<Sqlite>> SqliteDbConnection for T {}
+pub trait SqliteDbConnection: super::PoolExt<Sqlite> {}
+impl<T: super::PoolExt<Sqlite>> SqliteDbConnection for T {}
 
 pub fn is_sqlite_memory_path(path: &str) -> bool {
     path == ":memory:"

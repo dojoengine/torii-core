@@ -1,8 +1,9 @@
 use crate::sqlite::types::SqliteType;
-use crate::{TableResult, UpgradeError, UpgradeResult};
-use introspect_types::{Attribute, ColumnDef, ColumnInfo, PrimaryDef, TypeDef};
+use crate::{TableResult, UpgradeError, UpgradeResult, UpgradeResultExt};
+use introspect_types::schema::AsColumnRef;
+use introspect_types::{ColumnDef, ColumnInfo, PrimaryDef, TypeDef};
 use serde::ser::SerializeMap;
-use serde::{Serialize, Serializer};
+use serde::Serializer;
 use serde_json::{Result as JsonResult, Serializer as JsonSerializer};
 use sqlx::Arguments;
 use starknet_types_core::felt::Felt;
@@ -19,9 +20,9 @@ pub const FETCH_TABLES_QUERY: &str = r#"
 
 const INSERT_TABLE_QUERY: &str = r#" INSERT INTO introspect_db_tables
     (namespace, id, owner, name, "primary", columns, updated_at)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unixepoch())
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch())
     ON CONFLICT (namespace, id) DO UPDATE SET 
-    owner = excluded.owner, name = excluded.name, "primary" = excluded."primary", columns = excluded.columns, dead = excluded.dead, alive = excluded.alive, updated_at = unixepoch()
+    owner = excluded.owner, name = excluded.name, "primary" = excluded."primary", columns = excluded.columns, updated_at = unixepoch()
 "#;
 
 struct TableName<'a>(&'a str, &'a str);
@@ -43,13 +44,13 @@ pub fn qualified_table_name(namespace: &str, table_name: &str) -> String {
     }
 }
 
-pub fn serialize_columns<'a>(columns: Vec<impl Into<ColumnDefRef<'a>>>) -> JsonResult<String> {
+pub fn serialize_columns<'a>(columns: &'a [impl AsColumnRef<'a>]) -> JsonResult<String> {
     let mut data = Vec::new();
     let mut serializer = JsonSerializer::new(&mut data);
     let mut array = serializer.serialize_map(Some(columns.len()))?;
     for column in columns {
-        let column_ref: ColumnDefRef = column.into();
-        array.serialize_entry(column_ref.id, &column_ref)?;
+        let (id, info) = column.as_entry();
+        array.serialize_entry(id, &info)?;
     }
     array.end()?;
     Ok(unsafe { String::from_utf8_unchecked(data) })
@@ -60,7 +61,7 @@ pub fn persist_table_state_query<'a>(
     id: &Felt,
     name: &str,
     primary: &PrimaryDef,
-    columns: &[impl Into<ColumnDefRef<'a>>],
+    columns: &'a [impl AsColumnRef<'a>],
     from_address: &Felt,
     _block_number: u64,
     _transaction_hash: &Felt,
@@ -104,18 +105,15 @@ pub fn update_columns(
     queries: &mut Vec<SqliteQuery>,
 ) -> TableResult<()> {
     for column in new {
-        match columns.get_mut(&column.id) {
-            Some(existing) => {
-                update_column(
-                    table_name,
-                    existing,
-                    &column.name,
-                    &column.type_def,
-                    queries,
-                )?;
-            }
+        let result = match columns.get_mut(&column.id) {
+            Some(existing) => update_column(
+                table_name,
+                existing,
+                &column.name,
+                &column.type_def,
+                queries,
+            ),
             None => {
-                queries.add(create_column_query(table_name, column)?);
                 columns.insert(
                     column.id,
                     ColumnInfo {
@@ -124,8 +122,10 @@ pub fn update_columns(
                         attributes: column.attributes.clone(),
                     },
                 );
+                create_column_query(table_name, column).map(|query| queries.add(query))
             }
-        }
+        };
+        result.to_table_result(table_name, &column.name)?;
     }
     Ok(())
 }
@@ -191,7 +191,7 @@ pub fn update_column(
     Ok(())
 }
 
-pub fn create_column_query(table_name: &str, column: &ColumnDef) -> TableResult<String> {
+pub fn create_column_query(table_name: &str, column: &ColumnDef) -> UpgradeResult<String> {
     let sql_type: SqliteType = column.try_into()?;
     Ok(format!(
         r#"ALTER TABLE "{table_name}" ADD COLUMN "{}" {sql_type};"#,

@@ -4,12 +4,12 @@ use crate::tables::Tables;
 use crate::{DbResult, NamespaceMode, RecordResult, TableResult};
 use async_trait::async_trait;
 use introspect_types::{ColumnDef, PrimaryDef};
-use sqlx::Database;
+use sqlx::{Database, Pool};
 use starknet_types_core::felt::Felt;
 use torii_introspect::events::IntrospectBody;
 use torii_introspect::tables::RecordSchema;
 use torii_introspect::Record;
-use torii_sql::{DbPool, Executable, FlexQuery};
+use torii_sql::{Executable, FlexQuery, PoolExt};
 
 #[async_trait]
 pub trait IntrospectProcessor {
@@ -32,8 +32,7 @@ pub trait IntrospectInitialize {
     ) -> DbResult<Vec<DbDeadField>>;
 }
 
-pub trait IntrospectQueryMaker: DbPool<Self::DB> {
-    type DB: Database;
+pub trait IntrospectQueryMaker: Database {
     fn create_table_queries(
         namespace: &str,
         id: &Felt,
@@ -43,7 +42,7 @@ pub trait IntrospectQueryMaker: DbPool<Self::DB> {
         from_address: &Felt,
         block_number: u64,
         transaction_hash: &Felt,
-        queries: &mut Vec<FlexQuery<Self::DB>>,
+        queries: &mut Vec<FlexQuery<Self>>,
     ) -> TableResult<()>;
     fn update_table_queries(
         table: &mut Table,
@@ -53,7 +52,7 @@ pub trait IntrospectQueryMaker: DbPool<Self::DB> {
         from_address: &Felt,
         block_number: u64,
         transaction_hash: &Felt,
-        queries: &mut Vec<FlexQuery<Self::DB>>,
+        queries: &mut Vec<FlexQuery<Self>>,
     ) -> TableResult<()>;
     fn insert_record_queries(
         namespace: &str,
@@ -63,18 +62,18 @@ pub trait IntrospectQueryMaker: DbPool<Self::DB> {
         from_address: &Felt,
         block_number: u64,
         transaction_hash: &Felt,
-        queries: &mut Vec<FlexQuery<Self::DB>>,
+        queries: &mut Vec<FlexQuery<Self>>,
     ) -> RecordResult<()>;
-    fn msgs_to_queries<Backend: IntrospectQueryMaker>(
+    fn msgs_to_queries(
         tables: &Tables,
         namespaces: &NamespaceMode,
         msgs: Vec<&IntrospectBody>,
-        queries: &mut Vec<FlexQuery<Backend::DB>>,
+        queries: &mut Vec<FlexQuery<Self>>,
     ) -> DbResult<Vec<DbResult<()>>> {
         let mut results = Vec::with_capacity(msgs.len());
         for body in msgs {
             let (msg, metadata) = body.into();
-            results.push(tables.handle_message::<Backend>(
+            results.push(tables.handle_message::<Self>(
                 namespaces.to_namespace(&metadata.from_address)?,
                 msg,
                 &metadata.from_address,
@@ -88,8 +87,8 @@ pub trait IntrospectQueryMaker: DbPool<Self::DB> {
 }
 
 #[async_trait]
-pub trait IntrospectExecutor: IntrospectQueryMaker + Sized {
-    async fn process_queries(&self, queries: Vec<FlexQuery<Self::DB>>) -> DbResult<()>;
+pub trait IntrospectPool<DB: IntrospectQueryMaker> {
+    async fn process_queries(&self, queries: Vec<FlexQuery<DB>>) -> DbResult<()>;
     async fn execute_msgs(
         &self,
         tables: &Tables,
@@ -97,18 +96,18 @@ pub trait IntrospectExecutor: IntrospectQueryMaker + Sized {
         msgs: Vec<&IntrospectBody>,
     ) -> DbResult<Vec<DbResult<()>>> {
         let mut queries = Vec::new();
-        let results = Self::msgs_to_queries::<Self>(tables, namespaces, msgs, &mut queries)?;
+        let results = DB::msgs_to_queries(tables, namespaces, msgs, &mut queries)?;
         self.process_queries(queries).await?;
         Ok(results)
     }
 }
 
 #[async_trait]
-impl<Backend: IntrospectQueryMaker + Send + Sync> IntrospectExecutor for Backend
+impl<DB: IntrospectQueryMaker> IntrospectPool<DB> for Pool<DB>
 where
-    Vec<FlexQuery<Backend::DB>>: Executable<Backend::DB>,
+    Vec<FlexQuery<DB>>: Executable<DB>,
 {
-    async fn process_queries(&self, queries: Vec<FlexQuery<Self::DB>>) -> DbResult<()> {
+    async fn process_queries(&self, queries: Vec<FlexQuery<DB>>) -> DbResult<()> {
         let mut batch = Vec::new();
         for query in queries {
             if query == *COMMIT_CMD {

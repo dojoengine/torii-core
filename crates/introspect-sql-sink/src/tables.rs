@@ -25,21 +25,21 @@ impl Deref for Tables {
 }
 
 impl Tables {
-    pub fn create_table<Backend: IntrospectQueryMaker>(
+    pub fn create_table<DB: IntrospectQueryMaker>(
         &self,
         namespace_key: NamespaceKey,
         to_table: impl Into<TableSchema>,
         from_address: &Felt,
         block_number: u64,
         transaction_hash: &Felt,
-        queries: &mut Vec<FlexQuery<Backend::DB>>,
+        queries: &mut Vec<FlexQuery<DB>>,
     ) -> DbResult<()> {
         let (id, info) = Into::<TableSchema>::into(to_table).into();
         let namespace = namespace_key.to_string();
 
         let key = TableKey::new(namespace_key, id);
         self.assert_table_not_exists(&key, &info.name)?;
-        Backend::create_table_queries(
+        DB::create_table_queries(
             &namespace,
             &id,
             &info.name,
@@ -55,14 +55,14 @@ impl Tables {
         Ok(())
     }
 
-    pub fn update_table<Backend: IntrospectQueryMaker>(
+    pub fn update_table<DB: IntrospectQueryMaker>(
         &self,
         namespace_key: NamespaceKey,
         to_table: impl Into<TableSchema>,
         from_address: &Felt,
         block_number: u64,
         transaction_hash: &Felt,
-        queries: &mut Vec<FlexQuery<Backend::DB>>,
+        queries: &mut Vec<FlexQuery<DB>>,
     ) -> DbResult<()> {
         let (id, new) = Into::<TableSchema>::into(to_table).into();
         let mut tables = self.write()?;
@@ -70,7 +70,7 @@ impl Tables {
         let table = tables
             .get_mut(&key)
             .ok_or_else(|| DbError::TableNotFound(key.clone()))?;
-        Backend::update_table_queries(
+        DB::update_table_queries(
             table,
             &new.name,
             &new.primary,
@@ -106,14 +106,14 @@ impl Tables {
         }
     }
 
-    pub fn insert_fields<Backend: IntrospectQueryMaker>(
+    pub fn insert_fields<DB: IntrospectQueryMaker>(
         &self,
         namespace: NamespaceKey,
         event: &InsertsFields,
         from_address: &Felt,
         block_number: u64,
         transaction_hash: &Felt,
-        queries: &mut Vec<FlexQuery<Backend::DB>>,
+        queries: &mut Vec<FlexQuery<DB>>,
     ) -> DbResult<()> {
         let tables = self.read().unwrap();
         let key = TableKey::new(namespace, event.table);
@@ -125,7 +125,7 @@ impl Tables {
             return Ok(());
         }
         let schema = table.get_record_schema(&event.columns)?;
-        Backend::insert_record_queries(
+        DB::insert_record_queries(
             &table.namespace,
             &table.name,
             &schema,
@@ -138,17 +138,17 @@ impl Tables {
         .to_db_result(&table.name)
     }
 
-    pub fn handle_message<Backend: IntrospectQueryMaker>(
+    pub fn handle_message<DB: IntrospectQueryMaker>(
         &self,
         namespace: NamespaceKey,
         msg: &IntrospectMsg,
         from_address: &Felt,
         block_number: u64,
         transaction_hash: &Felt,
-        queries: &mut Vec<FlexQuery<Backend::DB>>,
+        queries: &mut Vec<FlexQuery<DB>>,
     ) -> DbResult<()> {
         match msg {
-            IntrospectMsg::CreateTable(event) => self.create_table::<Backend>(
+            IntrospectMsg::CreateTable(event) => self.create_table::<DB>(
                 namespace,
                 event.clone(),
                 from_address,
@@ -156,7 +156,7 @@ impl Tables {
                 transaction_hash,
                 queries,
             ),
-            IntrospectMsg::UpdateTable(event) => self.update_table::<Backend>(
+            IntrospectMsg::UpdateTable(event) => self.update_table::<DB>(
                 namespace,
                 event.clone(),
                 from_address,
@@ -172,7 +172,7 @@ impl Tables {
             | IntrospectMsg::DropTable(_)
             | IntrospectMsg::RenameColumns(_)
             | IntrospectMsg::RenamePrimary(_) => Ok(()),
-            IntrospectMsg::InsertsFields(event) => self.insert_fields::<Backend>(
+            IntrospectMsg::InsertsFields(event) => self.insert_fields::<DB>(
                 namespace,
                 event,
                 from_address,

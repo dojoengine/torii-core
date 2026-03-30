@@ -13,9 +13,13 @@ pub fn coalesce_sql<'a>(table_name: &str, column: &SqliteColumn<'a>) -> String {
     let column_name = column.name;
     match column.sql_type {
         SqliteType::Json => {
-            format!(r#"COALESCE(jsonb(excluded."{column_name}"), "{table_name}"."{column_name}")"#)
+            format!(
+                r#""{column_name}" = COALESCE(jsonb(excluded."{column_name}"), "{table_name}"."{column_name}")"#
+            )
         }
-        _ => format!(r#"COALESCE(excluded."{column_name}", "{table_name}"."{column_name}")"#),
+        _ => format!(
+            r#""{column_name}" = COALESCE(excluded."{column_name}", "{table_name}"."{column_name}")"#
+        ),
     }
 }
 

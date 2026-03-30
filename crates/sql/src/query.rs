@@ -2,6 +2,7 @@ use crate::SqlxResult;
 use futures::future::BoxFuture;
 use itertools::Itertools;
 use sqlx::{Database, Executor, Transaction};
+use std::fmt::Display;
 use std::sync::Arc;
 
 pub trait Executable<DB: Database> {
@@ -70,10 +71,17 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
 pub enum FlexStr {
     Owned(String),
     Static(&'static str),
     Shared(Arc<str>),
+}
+
+impl Display for FlexStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.as_ref().fmt(f)
+    }
 }
 
 impl FlexStr {
@@ -105,9 +113,34 @@ impl PartialEq<str> for FlexStr {
 /// The per-database `Executable` impls handle the lifetime requirements:
 /// Postgres needs no special treatment; SQLite uses an unsafe lifetime extension
 /// that is sound because the `FlexStr` outlives the `.await` point.
+
 pub struct FlexQuery<DB: Database> {
     pub(crate) sql: FlexStr,
     pub(crate) args: Option<<DB as Database>::Arguments<'static>>,
+}
+
+impl<DB: Database> Clone for FlexQuery<DB>
+where
+    DB::Arguments<'static>: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            sql: self.sql.clone(),
+            args: self.args.clone(),
+        }
+    }
+}
+
+impl<DB: Database> std::fmt::Debug for FlexQuery<DB>
+where
+    DB::Arguments<'static>: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlexQuery")
+            .field("sql", &self.sql)
+            .field("args", &self.args)
+            .finish()
+    }
 }
 
 impl<DB: Database> FlexQuery<DB> {
@@ -251,6 +284,23 @@ impl<'a, DB: Database, T> Executable<DB> for &'a [T]
 where
     &'a T: Executable<DB> + Send,
     T: Send + Sync,
+{
+    fn execute<'t>(self, transaction: &'t mut Transaction<'_, DB>) -> BoxFuture<'t, SqlxResult<()>>
+    where
+        Self: 't,
+    {
+        Box::pin(async move {
+            for item in self {
+                item.execute(transaction).await?;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl<'a, const N: usize, DB: Database, T> Executable<DB> for [T; N]
+where
+    T: Executable<DB> + Send,
 {
     fn execute<'t>(self, transaction: &'t mut Transaction<'_, DB>) -> BoxFuture<'t, SqlxResult<()>>
     where

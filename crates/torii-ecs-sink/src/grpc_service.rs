@@ -48,7 +48,6 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::{sleep, Duration};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use torii_dojo::store::postgres::PgStore;
 use torii_dojo::store::sqlite::SqliteStore;
 use torii_dojo::store::DojoStoreTrait;
 use torii_dojo::DojoTable;
@@ -2740,8 +2739,7 @@ impl EcsService {
                     .max_connections(1)
                     .connect(&self.state.database_url)
                     .await?;
-                let store = PgStore(pool);
-                Ok(store.read_tables(&[]).await?)
+                Ok(pool.read_tables(&[]).await?)
             }
         }
     }
