@@ -1,28 +1,38 @@
-use anyhow::{bail, Result as AnyhowResult};
+use anyhow::{bail, Result as AnyResult};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use torii_sql::connection::DbBackend;
 
 pub const DEFAULT_SQLITE_MAX_CONNECTIONS: u32 = 500;
 
+pub fn backend_from_url_or_path(value: &str) -> DbBackend {
+    if value.starts_with("postgres://") || value.starts_with("postgresql://") {
+        DbBackend::Postgres
+    } else {
+        DbBackend::Sqlite
+    }
+}
+
 pub fn validate_uniform_backends(
     named_urls: &[(&str, &str)],
-    _mixed_backend_message: &str,
-) -> Result<DbBackend, String> {
-    let ((_, first_url), rest) = named_urls
-        .split_first()
-        .ok_or_else(|| "at least one database URL must be provided".to_string())?;
-    let expected_backend = DbBackend::from_str(first_url).map_err(|_| {
-        format!("Error parsing database URL '{first_url}': Unsupported database type")
-    })?;
-    for (name, url) in rest {
-        let backend = DbBackend::from_str(url).map_err(|_| {
-            format!("Error validating database {name} URL '{url}': Unsupported database type")
-        })?;
-        if backend != expected_backend {
-            return Err(format!("{name}={backend}({url})"));
-        }
+    mixed_backend_message: &str,
+) -> AnyResult<DbBackend> {
+    let Some((_, first_url)) = named_urls.first() else {
+        bail!("at least one database URL must be provided");
+    };
+
+    let expected_backend = backend_from_url_or_path(first_url);
+    if named_urls
+        .iter()
+        .any(|(_, url)| backend_from_url_or_path(url) != expected_backend)
+    {
+        let summary = named_urls
+            .iter()
+            .map(|(name, url)| format!("{name}={:?}({url})", backend_from_url_or_path(url)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("{mixed_backend_message}. current: {summary}");
     }
+
     Ok(expected_backend)
 }
 
@@ -73,7 +83,7 @@ pub fn resolve_token_db_setup(
     db_dir: &Path,
     engine_database_url: Option<&str>,
     storage_database_url: Option<&str>,
-) -> AnyhowResult<TokenDbSetup> {
+) -> AnyResult<TokenDbSetup> {
     let engine_url = engine_database_url.map_or_else(
         || db_dir.join("engine.db").to_string_lossy().to_string(),
         ToOwned::to_owned,
@@ -97,37 +107,21 @@ pub fn resolve_token_db_setup(
         "erc1155.db",
     );
 
-    let engine_backend = DbBackend::from_str(&engine_url).map_err(|_| {
-        anyhow::anyhow!(
-            "Error parsing engine database URL '{engine_url}': Unsupported database type"
-        )
-    })?;
-    let erc20_backend = DbBackend::from_str(&erc20_url).map_err(|_| {
-        anyhow::anyhow!("Error parsing ERC20 database URL '{erc20_url}': Unsupported database type")
-    })?;
+    let engine_backend = backend_from_url_or_path(&engine_url);
+    let erc20_backend = backend_from_url_or_path(&erc20_url);
+    let erc721_backend = backend_from_url_or_path(&erc721_url);
+    let erc1155_backend = backend_from_url_or_path(&erc1155_url);
 
-    let erc721_backend = DbBackend::from_str(&erc721_url).map_err(|_| {
-        anyhow::anyhow!(
-            "Error parsing ERC721 database URL '{erc721_url}': Unsupported database type"
-        )
-    })?;
-    let erc1155_backend = DbBackend::from_str(&erc1155_url).map_err(|_| {
-        anyhow::anyhow!(
-            "Error parsing ERC1155 database URL '{erc1155_url}': Unsupported database type"
-        )
-    })?;
-
-    if let Some(url) = storage_database_url {
-        let backend: DbBackend = DbBackend::from_str(url).map_err(|_| {
-            anyhow::anyhow!("Error parsing storage database URL '{url}': Unsupported database type")
-        })?;
-        if backend == DbBackend::Postgres
-            && (erc20_backend != DbBackend::Postgres
-                || erc721_backend != DbBackend::Postgres
-                || erc1155_backend != DbBackend::Postgres)
-        {
-            bail!("Engine is configured for Postgres but one or more token storages resolved to SQLite. Set --storage-database-url to the same Postgres URL.");
-        }
+    if engine_database_url
+        .map(backend_from_url_or_path)
+        .is_some_and(|backend| backend == DbBackend::Postgres)
+        && (erc20_backend != DbBackend::Postgres
+            || erc721_backend != DbBackend::Postgres
+            || erc1155_backend != DbBackend::Postgres)
+    {
+        bail!(
+            "Engine is configured for Postgres but one or more token storages resolved to SQLite. Set --storage-database-url to the same Postgres URL."
+        );
     }
 
     Ok(TokenDbSetup {
@@ -175,8 +169,9 @@ mod tests {
             db_dir,
             Some("postgres://localhost/torii"),
             Some("./torii-data"),
-        )
-        .expect_err("expected mixed backend validation error");
+        );
+        println!("{err:?}");
+        let err = err.expect_err("expected mixed backend validation error");
         assert!(err
             .to_string()
             .contains("Engine is configured for Postgres"));
@@ -218,8 +213,8 @@ mod tests {
             "mixed backends",
         )
         .expect_err("expected mixed backend error");
-        assert!(err.contains("mixed backends"));
-        assert!(err.contains("engine=Postgres"));
-        assert!(err.contains("storage=Sqlite"));
+        assert!(err.to_string().contains("mixed backends"));
+        assert!(err.to_string().contains("engine=Postgres"));
+        assert!(err.to_string().contains("storage=Sqlite"));
     }
 }

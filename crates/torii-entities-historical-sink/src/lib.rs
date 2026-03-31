@@ -18,7 +18,8 @@ use torii_sql::connection::DbOption;
 use torii_sql::DbBackend;
 
 const INTROSPECT_TYPE: TypeId = TypeId::new("introspect");
-const SQLITE_SCHEMA_STATE_TABLE: &str = "introspect_sink_schema_state";
+const SQLITE_FETCH_SCHEMA_STATE_QUERY: &str =
+    "SELECT table_schema_json FROM introspect_sink_schema_state WHERE alive != 0";
 
 #[derive(Clone, Debug, Default)]
 pub enum HistoricalNamespace {
@@ -140,11 +141,9 @@ impl EntitiesHistoricalSink {
 
         match self.backend {
             DbBackend::Sqlite => {
-                let rows = sqlx::query(&format!(
-                    "SELECT table_schema_json FROM {SQLITE_SCHEMA_STATE_TABLE} WHERE alive != 0"
-                ))
-                .fetch_all(&self.pool)
-                .await?;
+                let rows = sqlx::query(SQLITE_FETCH_SCHEMA_STATE_QUERY)
+                    .fetch_all(&self.pool)
+                    .await?;
                 for row in rows {
                     let schema_json: String = row.try_get("table_schema_json")?;
                     let schema: TableSchema = serde_json::from_str(&schema_json)?;
@@ -275,6 +274,7 @@ impl EntitiesHistoricalSink {
     async fn load_source_columns(&self, base_name: &str) -> Result<Vec<HistoryColumn>> {
         match self.backend {
             DbBackend::Sqlite => {
+                // sqlite-dynamic-ok
                 let rows = sqlx::query(&format!(
                     "PRAGMA table_info({})",
                     quote_sqlite_identifier(base_name)
