@@ -95,6 +95,15 @@ EOF
 
 export NPM_CONFIG_USERCONFIG="$NPMRC_PATH"
 
+echo "==> Installing dependencies"
+bun install
+
+echo "==> Building dist"
+bun run build
+
+echo "==> Typechecking"
+bun run typecheck
+
 if [[ -n "$PACKAGE_OVERRIDE" ]]; then
     cp "$PACKAGE_JSON_PATH" "$PACKAGE_JSON_BACKUP"
     PACKAGE_JSON_PATH="$PACKAGE_JSON_PATH" PACKAGE_NAME="$PACKAGE_OVERRIDE" node <<'EOF'
@@ -105,15 +114,6 @@ pkg.name = process.env.PACKAGE_NAME;
 fs.writeFileSync(path, `${JSON.stringify(pkg, null, 2)}\n`);
 EOF
 fi
-
-echo "==> Installing dependencies"
-bun install
-
-echo "==> Building dist"
-bun run build
-
-echo "==> Typechecking"
-bun run typecheck
 
 echo "==> Validating npm package"
 npm pack --dry-run
