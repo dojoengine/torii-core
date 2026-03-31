@@ -1,0 +1,98 @@
+name: Release SDK
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release-sdk-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare SDK Release
+    if: github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'prepare-release-sdk')
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release-info.outputs.VERSION }}
+      tag_name: ${{ steps.release-info.outputs.TAG_NAME }}
+      package_name: ${{ steps.release-info.outputs.PACKAGE_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract release info
+        id: release-info
+        run: |
+          VERSION=$(node -p "require('./torii.js/package.json').version")
+          TAG_NAME="sdk-v${VERSION}"
+          PACKAGE_NAME=$(node -p "require('./torii.js/package.json').name")
+
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "TAG_NAME=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          echo "PACKAGE_NAME=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish ${{ needs.prepare.outputs.package_name }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Ensure version is not already published
+        env:
+          PACKAGE_NAME: ${{ needs.prepare.outputs.package_name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if npm view "${PACKAGE_NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "${PACKAGE_NAME}@${VERSION} is already published"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        working-directory: torii.js
+        run: bun install
+
+      - name: Build SDK distribution
+        working-directory: torii.js
+        run: bun run build
+
+      - name: Typecheck SDK
+        working-directory: torii.js
+        run: bun run typecheck
+
+      - name: Validate package contents
+        working-directory: torii.js
+        run: npm pack --dry-run
+
+      - name: Publish package to npm
+        working-directory: torii.js
+        run: npm publish
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_NAME: ${{ needs.prepare.outputs.package_name }}
+          TAG_NAME: ${{ needs.prepare.outputs.tag_name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          gh release create "$TAG_NAME" \
+            --title "${PACKAGE_NAME} v${VERSION}" \
+            --generate-notes \
+            --notes "Published ${PACKAGE_NAME} v${VERSION} to npm."

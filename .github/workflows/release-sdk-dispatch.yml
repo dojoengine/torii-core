@@ -1,0 +1,68 @@
+name: Release SDK Dispatch
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g., "1.0.0" or "v1.0.0")'
+        required: true
+        type: string
+
+jobs:
+  propose-release:
+    name: Propose SDK Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.CREATE_PR_TOKEN }}
+
+      - name: Normalize version
+        id: version
+        run: |
+          VERSION="${{ inputs.version }}"
+          VERSION="${VERSION#v}"
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Error: invalid semver version: $VERSION"
+            exit 1
+          fi
+
+          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Update SDK version
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          node <<'EOF'
+          const fs = require('fs');
+          const path = 'torii.js/package.json';
+          const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
+          pkg.version = process.env.VERSION;
+          fs.writeFileSync(path, `${JSON.stringify(pkg, null, 2)}\n`);
+          EOF
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.CREATE_PR_TOKEN }}
+          commit-message: "release(prepare): @toriijs/sdk v${{ steps.version.outputs.VERSION }}"
+          title: "release(prepare): @toriijs/sdk v${{ steps.version.outputs.VERSION }}"
+          body: |
+            ## Release Preparation
+
+            This PR prepares **@toriijs/sdk** for version **v${{ steps.version.outputs.VERSION }}**.
+
+            ### Changes
+            - Updated `torii.js/package.json` to `${{ steps.version.outputs.VERSION }}`
+
+            ### Next Steps
+            Once this PR is merged, the SDK release workflow will automatically:
+            1. Install dependencies for `torii.js`
+            2. Build the publishable `dist/` artifacts
+            3. Validate the npm package contents with `npm pack --dry-run`
+            4. Publish `@toriijs/sdk` to npm
+            5. Create a GitHub release for `sdk-v${{ steps.version.outputs.VERSION }}`
+          branch: prepare-release-sdk
+          delete-branch: true
+          base: main
