@@ -1,10 +1,10 @@
-use crate::etl::engine_db::EngineDbConfig;
 use crate::etl::extractor::Extractor;
 use crate::etl::sink::{EventBus, Sink};
-use crate::etl::{self, DecoderContext, EngineDb, MultiSink, SampleExtractor};
-use crate::{create_grpc_service, GrpcState, SubscriptionManager};
-use crate::{create_http_router, ToriiConfig};
-use crate::{metrics, FILE_DESCRIPTOR_SET};
+use crate::etl::{self, DecoderContext, MultiSink, SampleExtractor};
+use crate::{
+    create_grpc_service, create_http_router, metrics, GrpcState, SubscriptionManager, ToriiConfig,
+    FILE_DESCRIPTOR_SET,
+};
 use axum::Router as AxumRouter;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -39,10 +39,15 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
 
     let subscription_manager = Arc::new(SubscriptionManager::new());
     let event_bus = Arc::new(EventBus::new(subscription_manager.clone()));
+    for handler in &config.command_handlers {
+        handler.attach_event_bus(event_bus.clone());
+    }
+    let command_bus = CommandBus::new(config.command_handlers, config.command_bus_queue_size)?;
 
     // Create SinkContext for initialization
     let sink_context = etl::sink::SinkContext {
         database_root: config.database_root.clone(),
+        command_bus: command_bus.sender(),
     };
 
     let mut initialized_sinks: Vec<Arc<dyn Sink>> = Vec::new();
@@ -64,10 +69,10 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
             .to_string_lossy()
             .to_string()
     });
-    let engine_db_config = EngineDbConfig {
+    let engine_db_config = etl::engine_db::EngineDbConfig {
         path: engine_db_path,
     };
-    let engine_db = EngineDb::new(engine_db_config).await?;
+    let engine_db = etl::EngineDb::new(engine_db_config).await?;
     let engine_db = Arc::new(engine_db);
 
     // Create extractor early so we can get the provider for contract identification
@@ -132,11 +137,13 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
     } else {
         let reflection_v1 = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
-            .build_v1()?;
+            .build_v1()?
+            .accept_compressed(CompressionEncoding::Gzip);
 
         let reflection_v1alpha = tonic_reflection::server::Builder::configure()
             .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
-            .build_v1alpha()?;
+            .build_v1alpha()?
+            .accept_compressed(CompressionEncoding::Gzip);
 
         grpc_router = grpc_router
             .add_service(tonic_web::enable(reflection_v1))
@@ -169,7 +176,17 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
         .layer(cors);
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;
+    let tls_acceptor = config.tls.as_ref().map(build_tls_acceptor).transpose()?;
     tracing::info!(target: "torii::main", "Server listening on {}", addr);
+    if let Some(tls) = &config.tls {
+        tracing::info!(
+            target: "torii::main",
+            cert = %tls.cert_path.display(),
+            key = %tls.key_path.display(),
+            alpn = ?tls.alpn_names(),
+            "TLS enabled for listener"
+        );
+    }
 
     tracing::info!(target: "torii::main", "gRPC Services:");
     tracing::info!(target: "torii::main", "   torii.Torii - Core service");
@@ -582,7 +599,62 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
     };
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal);
+    let mut make_svc = app.into_make_service();
+    let http = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+
+    let server = async move {
+        tokio::pin!(shutdown_signal);
+        loop {
+            let (tcp, _remote_addr) = tokio::select! {
+                result = listener.accept() => match result {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        tracing::error!(target: "torii::main", "Accept error: {}", e);
+                        continue;
+                    }
+                },
+                () = &mut shutdown_signal => break,
+            };
+            let tower_service = make_svc.call(()).await.expect("infallible");
+            let hyper_service = hyper_util::service::TowerToHyperService::new(tower_service);
+            let builder = http.clone();
+            let tls_acceptor = tls_acceptor.clone();
+            tokio::spawn(async move {
+                if let Some(tls_acceptor) = tls_acceptor {
+                    let tls_stream = match tls_acceptor.accept(tcp).await {
+                        Ok(stream) => stream,
+                        Err(err) => {
+                            tracing::debug!(
+                                target: "torii::main",
+                                error = %err,
+                                "TLS handshake failed"
+                            );
+                            return;
+                        }
+                    };
+
+                    if let Err(err) = builder
+                        .serve_connection_with_upgrades(
+                            hyper_util::rt::TokioIo::new(tls_stream),
+                            hyper_service,
+                        )
+                        .await
+                    {
+                        tracing::debug!(target: "torii::main", error = %err, "Connection ended");
+                    }
+                } else if let Err(err) = builder
+                    .serve_connection_with_upgrades(
+                        hyper_util::rt::TokioIo::new(tcp),
+                        hyper_service,
+                    )
+                    .await
+                {
+                    tracing::debug!(target: "torii::main", error = %err, "Connection ended");
+                }
+            });
+        }
+        Ok::<_, std::io::Error>(())
+    };
 
     // Give active connections 15 seconds to close gracefully, then force shutdown.
     // This prevents hanging on long-lived gRPC streaming connections.
@@ -626,6 +698,64 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     tracing::info!(target: "torii::main", "Torii shutdown complete");
+    command_bus.shutdown().await;
 
     Ok(())
+}
+
+fn build_tls_acceptor(
+    config: &ToriiTlsConfig,
+) -> Result<tokio_rustls::TlsAcceptor, Box<dyn std::error::Error>> {
+    ensure_rustls_crypto_provider();
+    let cert_chain = load_cert_chain(&config.cert_path)?;
+    let private_key = load_private_key(&config.key_path)?;
+
+    let mut server_config = tokio_rustls::rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(cert_chain, private_key)?;
+    server_config
+        .alpn_protocols
+        .clone_from(&config.alpn_protocols);
+
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(server_config)))
+}
+
+fn ensure_rustls_crypto_provider() {
+    if tokio_rustls::rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+    }
+}
+
+fn load_cert_chain(
+    path: &Path,
+) -> Result<Vec<tokio_rustls::rustls::pki_types::CertificateDer<'static>>, Box<dyn std::error::Error>>
+{
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let certs = rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, io::Error>>()?;
+
+    if certs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("no certificates found in {}", path.display()),
+        )
+        .into());
+    }
+
+    Ok(certs)
+}
+
+fn load_private_key(
+    path: &Path,
+) -> Result<tokio_rustls::rustls::pki_types::PrivateKeyDer<'static>, Box<dyn std::error::Error>> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let private_key = rustls_pemfile::private_key(&mut reader)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("no private key found in {}", path.display()),
+        )
+    })?;
+
+    Ok(private_key)
 }

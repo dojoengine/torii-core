@@ -1,10 +1,10 @@
-use std::{path::PathBuf, sync::Arc};
-
+use crate::etl::decoder::{ContractFilter, DecoderId};
+use crate::etl::identification::ContractIdentifier;
 use crate::etl::{
-    decoder::{ContractFilter, DecoderId},
-    identification::ContractIdentifier,
     Decoder, Extractor, IdentificationRule, Sink, SyntheticExtractor, SyntheticExtractorAdapter,
 };
+use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Configuration for Torii server with pluggable sinks and decoders.
 #[derive(Debug, Clone)]
@@ -91,6 +91,20 @@ pub struct ToriiConfig {
     /// a registry cache via `with_registry_cache()` for identification to work.
     pub identification_rules: Vec<Box<dyn IdentificationRule>>,
 
+    /// Optional shared registry cache from ContractRegistry.
+    ///
+    /// If provided, the DecoderContext will use this cache to look up
+    /// contract→decoder mappings for contracts not in explicit mappings.
+    /// The cache is typically populated by a ContractRegistry running batch
+    /// identification before decoding.
+    pub registry_cache: Option<
+        Arc<
+            tokio::sync::RwLock<
+                std::collections::HashMap<starknet::core::types::Felt, Vec<DecoderId>>,
+            >,
+        >,
+    >,
+
     /// Optional contract identifier for runtime identification.
     ///
     /// If provided (via `with_contract_identifier()`), unknown contracts
@@ -106,11 +120,49 @@ pub struct ToriiConfig {
 
     /// ETL concurrency controls.
     pub etl_concurrency: EtlConcurrencyConfig,
+
+    /// Background command handlers registered for the command bus.
+    pub command_handlers: Vec<Box<dyn CommandHandler>>,
+
+    /// Command bus queue size.
+    pub command_bus_queue_size: usize,
+
+    /// Optional TLS listener configuration.
+    pub tls: Option<ToriiTlsConfig>,
 }
 
 impl ToriiConfig {
     pub fn builder() -> ToriiConfigBuilder {
         ToriiConfigBuilder::default()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ToriiTlsConfig {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    pub alpn_protocols: Vec<Vec<u8>>,
+}
+
+impl ToriiTlsConfig {
+    pub fn new(cert_path: impl Into<PathBuf>, key_path: impl Into<PathBuf>) -> Self {
+        Self {
+            cert_path: cert_path.into(),
+            key_path: key_path.into(),
+            alpn_protocols: vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+        }
+    }
+
+    pub fn with_alpn_protocols(mut self, alpn_protocols: Vec<Vec<u8>>) -> Self {
+        self.alpn_protocols = alpn_protocols;
+        self
+    }
+
+    fn alpn_names(&self) -> Vec<String> {
+        self.alpn_protocols
+            .iter()
+            .map(|protocol| String::from_utf8_lossy(protocol).into_owned())
+            .collect()
     }
 }
 
@@ -141,6 +193,9 @@ pub struct ToriiConfigBuilder {
     contract_identifier: Option<Arc<dyn ContractIdentifier>>,
     shutdown_timeout: Option<u64>,
     etl_concurrency: Option<EtlConcurrencyConfig>,
+    command_handlers: Vec<Box<dyn CommandHandler>>,
+    command_bus_queue_size: Option<usize>,
+    tls: Option<ToriiTlsConfig>,
 }
 
 impl ToriiConfigBuilder {
@@ -440,6 +495,26 @@ impl ToriiConfigBuilder {
         self
     }
 
+    pub fn with_command_handler(mut self, handler: Box<dyn CommandHandler>) -> Self {
+        self.command_handlers.push(handler);
+        self
+    }
+
+    pub fn with_command_handlers(mut self, handlers: Vec<Box<dyn CommandHandler>>) -> Self {
+        self.command_handlers.extend(handlers);
+        self
+    }
+
+    pub fn command_bus_queue_size(mut self, size: usize) -> Self {
+        self.command_bus_queue_size = Some(size.max(1));
+        self
+    }
+
+    pub fn with_tls(mut self, tls: ToriiTlsConfig) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
     /// Builds the Torii configuration.
     ///
     /// # Panics
@@ -469,9 +544,13 @@ impl ToriiConfigBuilder {
             engine_database_url: self.engine_database_url,
             contract_filter,
             identification_rules: self.identification_rules,
+            registry_cache: self.registry_cache,
             contract_identifier: self.contract_identifier,
             shutdown_timeout: self.shutdown_timeout.unwrap_or(30),
             etl_concurrency: self.etl_concurrency.unwrap_or_default(),
+            command_handlers: self.command_handlers,
+            command_bus_queue_size: self.command_bus_queue_size.unwrap_or(4096),
+            tls: self.tls,
         }
     }
 }
