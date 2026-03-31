@@ -18,13 +18,11 @@
 //! - Raw JSON fallback for inline metadata
 
 use starknet::core::types::{Felt, U256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::OwnedSemaphorePermit;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::MetadataFetcher;
@@ -34,7 +32,9 @@ const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_RETRIES: u32 = 5;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const IMAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(20);
-const DROP_WARN_INTERVAL_MS: u64 = 5_000;
+const RPC_BATCH_SIZE_CAP: usize = 128;
+const WRITE_BATCH_SIZE: usize = 128;
+const WRITE_BATCH_DELAY: Duration = Duration::from_millis(25);
 
 /// Token standard hint for URI fetching
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,76 +77,100 @@ pub struct TokenUriResult {
 /// Callback trait for storing fetched token URI results.
 #[async_trait::async_trait]
 pub trait TokenUriStore: Send + Sync + 'static {
-    async fn store_token_uri(&self, result: &TokenUriResult) -> anyhow::Result<()>;
+    async fn store_token_uris_batch(&self, results: &[TokenUriResult]) -> anyhow::Result<()>;
+
+    async fn store_token_uri(&self, result: &TokenUriResult) -> anyhow::Result<()> {
+        self.store_token_uris_batch(std::slice::from_ref(result))
+            .await
+    }
 }
 
 /// Handle to send requests to the token URI service.
 #[derive(Clone)]
 pub struct TokenUriSender {
-    tx: mpsc::Sender<TokenUriRequest>,
-    dropped_count: Arc<AtomicU64>,
-    last_drop_warn_ms: Arc<AtomicU64>,
+    tx: mpsc::UnboundedSender<TokenUriRequest>,
 }
 
 impl TokenUriSender {
-    fn now_ms() -> u64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-    }
-
-    fn maybe_flush_drop_warning(&self) {
-        let now_ms = Self::now_ms();
-        let last = self.last_drop_warn_ms.load(Ordering::Relaxed);
-        if now_ms.saturating_sub(last) < DROP_WARN_INTERVAL_MS {
-            return;
-        }
-        if self
-            .last_drop_warn_ms
-            .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
-            return;
-        }
-        let dropped = self.dropped_count.swap(0, Ordering::Relaxed);
-        if dropped > 0 {
+    /// Queue a token URI fetch request.
+    pub fn request_update(&self, request: TokenUriRequest) -> bool {
+        if let Err(_error) = self.tx.send(request) {
             tracing::warn!(
                 target: "torii_common::token_uri",
-                dropped,
-                interval_ms = DROP_WARN_INTERVAL_MS,
-                "Dropping token URI requests: queue is full"
+                "Failed to send token URI request (channel closed)"
             );
-        }
-    }
-
-    /// Queue a token URI fetch request.
-    pub fn request_update(&self, request: TokenUriRequest) {
-        match self.tx.try_send(request) {
-            Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                self.dropped_count.fetch_add(1, Ordering::Relaxed);
-                self.maybe_flush_drop_warning();
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                tracing::warn!(
-                    target: "torii_common::token_uri",
-                    "Failed to send token URI request (channel closed)"
-                );
-            }
+            false
+        } else {
+            true
         }
     }
 
     /// Queue updates for a batch of token IDs on the same contract.
-    pub fn request_batch(&self, contract: Felt, token_ids: &[U256], standard: TokenStandard) {
+    pub fn request_batch(
+        &self,
+        contract: Felt,
+        token_ids: &[U256],
+        standard: TokenStandard,
+    ) -> usize {
+        let mut accepted = 0;
         for &token_id in token_ids {
-            self.request_update(TokenUriRequest {
+            accepted += usize::from(self.request_update(TokenUriRequest {
                 contract,
                 token_id,
                 standard,
-            });
+            }));
         }
+        accepted
+    }
+}
+
+struct RequestBacklog {
+    queued: HashMap<TaskKey, TokenUriRequest>,
+    ready: VecDeque<TaskKey>,
+}
+
+impl RequestBacklog {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            queued: HashMap::with_capacity(capacity),
+            ready: VecDeque::with_capacity(capacity),
+        }
+    }
+
+    fn enqueue(&mut self, request: TokenUriRequest) {
+        let key = TaskKey {
+            contract: request.contract,
+            token_id: request.token_id,
+        };
+
+        if let Some(existing) = self.queued.get_mut(&key) {
+            *existing = request;
+            return;
+        }
+
+        self.ready.push_back(key.clone());
+        self.queued.insert(key, request);
+    }
+
+    fn pop_batch(&mut self, batch_size: usize) -> Vec<TokenUriRequest> {
+        let mut batch = Vec::with_capacity(batch_size.min(self.ready.len()));
+        while batch.len() < batch_size {
+            let Some(key) = self.ready.pop_front() else {
+                break;
+            };
+            if let Some(request) = self.queued.remove(&key) {
+                batch.push(request);
+            }
+        }
+        batch
+    }
+
+    fn is_empty(&self) -> bool {
+        self.queued.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.queued.len()
     }
 }
 
@@ -159,6 +183,12 @@ pub struct TokenUriService {
 struct ImageCacheConfig {
     dir: PathBuf,
     max_concurrent: usize,
+}
+
+#[derive(Debug)]
+struct BufferedTokenUriResult {
+    result: TokenUriResult,
+    image_uri: Option<String>,
 }
 
 impl TokenUriService {
@@ -187,163 +217,222 @@ impl TokenUriService {
         image_cache_dir: Option<PathBuf>,
         image_max_concurrent: usize,
     ) -> (TokenUriSender, Self) {
-        let (tx, rx) = mpsc::channel(buffer_size);
+        let (tx, rx) = mpsc::unbounded_channel();
         let image_cache = image_cache_dir.map(|dir| ImageCacheConfig {
             dir,
             max_concurrent: image_max_concurrent.max(1),
         });
-        let handle = tokio::spawn(Self::run(rx, fetcher, store, max_concurrent, image_cache));
-        let sender = TokenUriSender {
-            tx,
-            dropped_count: Arc::new(AtomicU64::new(0)),
-            last_drop_warn_ms: Arc::new(AtomicU64::new(0)),
-        };
+        let handle = tokio::spawn(Self::run(
+            rx,
+            fetcher,
+            store,
+            buffer_size.max(1),
+            max_concurrent.max(1),
+            image_cache,
+        ));
+        let sender = TokenUriSender { tx };
         (sender, Self { handle })
     }
 
     /// Main processing loop.
     async fn run<S: TokenUriStore>(
-        mut rx: mpsc::Receiver<TokenUriRequest>,
+        mut rx: mpsc::UnboundedReceiver<TokenUriRequest>,
         fetcher: Arc<MetadataFetcher>,
         store: Arc<S>,
+        backlog_capacity: usize,
         max_concurrent: usize,
         image_cache: Option<ImageCacheConfig>,
     ) {
-        let in_flight: Arc<Mutex<HashMap<TaskKey, JoinHandle<()>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
-        let image_semaphore = image_cache
-            .as_ref()
-            .map(|cfg| Arc::new(tokio::sync::Semaphore::new(cfg.max_concurrent)));
+        let (result_tx, result_rx) = mpsc::channel::<BufferedTokenUriResult>(WRITE_BATCH_SIZE * 2);
+        let writer = tokio::spawn(Self::run_writer(result_rx, store, image_cache.clone()));
+        let mut backlog = RequestBacklog::with_capacity(backlog_capacity);
+        let rpc_batch_size = backlog_capacity.clamp(1, RPC_BATCH_SIZE_CAP);
 
-        while let Some(request) = rx.recv().await {
-            let key = TaskKey {
-                contract: request.contract,
-                token_id: request.token_id,
-            };
-
-            let mut tasks = in_flight.lock().await;
-
-            // Cancel previous task for same key
-            if let Some(old_handle) = tasks.remove(&key) {
-                old_handle.abort();
-                tracing::debug!(
-                    target: "torii_common::token_uri",
-                    contract = %format!("{:#x}", key.contract),
-                    token_id = %key.token_id,
-                    "Cancelled previous fetch (superseded)"
-                );
+        loop {
+            if backlog.is_empty() {
+                match rx.recv().await {
+                    Some(request) => backlog.enqueue(request),
+                    None => break,
+                }
             }
 
-            let fetcher = fetcher.clone();
-            let store = store.clone();
-            let in_flight = in_flight.clone();
-            let sem = semaphore.clone();
-            let task_key = key.clone();
-            let image_cache = image_cache.clone();
-            let image_semaphore = image_semaphore.clone();
+            Self::drain_pending_requests(&mut rx, &mut backlog);
 
-            // Apply backpressure before spawning to keep task count bounded.
-            let permit: OwnedSemaphorePermit = match sem.acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => break,
-            };
+            while !backlog.is_empty() {
+                let batch = backlog.pop_batch(rpc_batch_size);
+                let resolved =
+                    Self::resolve_token_uri_requests_batch(&fetcher, batch, max_concurrent).await;
 
-            let handle = tokio::spawn(async move {
-                let _permit = permit;
-
-                // Fetch the URI from chain
-                let uri = fetch_token_uri_with_retry(
-                    &fetcher,
-                    request.contract,
-                    request.token_id,
-                    request.standard,
-                )
-                .await;
-
-                // Apply ERC1155 {id} substitution
-                let uri = uri.map(|u| {
-                    if request.standard == TokenStandard::Erc1155 {
-                        let token_id_hex = format!("{:064x}", request.token_id);
-                        u.replace("{id}", &token_id_hex)
-                    } else {
-                        u
-                    }
-                });
-
-                // Resolve URI to JSON metadata
-                let metadata_json = if let Some(ref uri_str) = uri {
-                    if uri_str.is_empty() {
-                        None
-                    } else {
-                        resolve_metadata(uri_str).await
-                    }
-                } else {
-                    None
-                };
-
-                let result = TokenUriResult {
-                    contract: request.contract,
-                    token_id: request.token_id,
-                    uri,
-                    metadata_json,
-                };
-
-                if let Err(e) = store.store_token_uri(&result).await {
-                    tracing::warn!(
-                        target: "torii_common::token_uri",
-                        contract = %format!("{:#x}", request.contract),
-                        token_id = %request.token_id,
-                        error = %e,
-                        "Failed to store token URI result"
-                    );
-                } else {
-                    tracing::debug!(
-                        target: "torii_common::token_uri",
-                        contract = %format!("{:#x}", request.contract),
-                        token_id = %request.token_id,
-                        uri = ?result.uri,
-                        has_json = result.metadata_json.is_some(),
-                        "Stored token URI"
-                    );
-                }
-
-                if let (Some(cfg), Some(meta)) =
-                    (image_cache.clone(), result.metadata_json.as_ref())
-                {
-                    if let Some(image_uri) = extract_image_uri(meta) {
-                        let contract = request.contract;
-                        let token_id = request.token_id;
-                        let _image_permit = match image_semaphore {
-                            Some(sema) => sema.acquire_owned().await.ok(),
-                            None => None,
-                        };
-
-                        if let Err(e) =
-                            cache_image_locally(&cfg.dir, contract, token_id, &image_uri).await
-                        {
-                            tracing::debug!(
-                                target: "torii_common::token_uri",
-                                contract = %format!("{:#x}", contract),
-                                token_id = %token_id,
-                                image_uri = %image_uri,
-                                error = %e,
-                                "Failed to cache image locally"
-                            );
-                        }
+                for buffered in resolved {
+                    if let Err(error) = result_tx.send(buffered).await {
+                        tracing::warn!(
+                            target: "torii_common::token_uri",
+                            error = %error,
+                            "Failed to enqueue resolved token URI result"
+                        );
+                        break;
                     }
                 }
 
-                in_flight.lock().await.remove(&task_key);
-            });
+                tracing::debug!(
+                    target: "torii_common::token_uri",
+                    queued = backlog.len(),
+                    rpc_batch_size,
+                    "Processed token URI queue batch"
+                );
 
-            tasks.insert(key, handle);
+                Self::drain_pending_requests(&mut rx, &mut backlog);
+            }
         }
+
+        drop(result_tx);
+        let _ = writer.await;
 
         tracing::info!(
             target: "torii_common::token_uri",
             "Token URI service shutting down"
         );
+    }
+
+    async fn run_writer<S: TokenUriStore>(
+        mut rx: mpsc::Receiver<BufferedTokenUriResult>,
+        store: Arc<S>,
+        image_cache: Option<ImageCacheConfig>,
+    ) {
+        let image_semaphore = image_cache
+            .as_ref()
+            .map(|cfg| Arc::new(tokio::sync::Semaphore::new(cfg.max_concurrent)));
+        let mut pending: HashMap<TaskKey, BufferedTokenUriResult> = HashMap::new();
+        let mut closed = false;
+
+        loop {
+            if closed {
+                if pending.is_empty() {
+                    break;
+                }
+                Self::flush_results(
+                    &store,
+                    &mut pending,
+                    image_cache.clone(),
+                    image_semaphore.clone(),
+                )
+                .await;
+                break;
+            }
+
+            if pending.is_empty() {
+                if let Some(result) = rx.recv().await {
+                    pending.insert(
+                        TaskKey {
+                            contract: result.result.contract,
+                            token_id: result.result.token_id,
+                        },
+                        result,
+                    );
+                } else {
+                    closed = true;
+                    continue;
+                }
+            } else {
+                let delay = tokio::time::sleep(WRITE_BATCH_DELAY);
+                tokio::pin!(delay);
+                tokio::select! {
+                    maybe_result = rx.recv() => {
+                        match maybe_result {
+                            Some(result) => {
+                                pending.insert(
+                                    TaskKey {
+                                        contract: result.result.contract,
+                                        token_id: result.result.token_id,
+                                    },
+                                    result,
+                                );
+                            }
+                            None => closed = true,
+                        }
+                    }
+                    () = &mut delay => {
+                        Self::flush_results(&store, &mut pending, image_cache.clone(), image_semaphore.clone()).await;
+                    }
+                }
+            }
+
+            if pending.len() >= WRITE_BATCH_SIZE {
+                Self::flush_results(
+                    &store,
+                    &mut pending,
+                    image_cache.clone(),
+                    image_semaphore.clone(),
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn flush_results<S: TokenUriStore>(
+        store: &Arc<S>,
+        pending: &mut HashMap<TaskKey, BufferedTokenUriResult>,
+        image_cache: Option<ImageCacheConfig>,
+        image_semaphore: Option<Arc<tokio::sync::Semaphore>>,
+    ) {
+        if pending.is_empty() {
+            return;
+        }
+
+        let drained = pending
+            .drain()
+            .map(|(_, result)| result)
+            .collect::<Vec<_>>();
+        let results = drained
+            .iter()
+            .map(|buffered| buffered.result.clone())
+            .collect::<Vec<_>>();
+
+        if let Err(error) = store.store_token_uris_batch(&results).await {
+            tracing::warn!(
+                target: "torii_common::token_uri",
+                batch_size = results.len(),
+                error = %error,
+                "Failed to store token URI batch"
+            );
+            return;
+        }
+
+        for buffered in drained {
+            tracing::debug!(
+                target: "torii_common::token_uri",
+                contract = %format!("{:#x}", buffered.result.contract),
+                token_id = %buffered.result.token_id,
+                uri = ?buffered.result.uri,
+                has_json = buffered.result.metadata_json.is_some(),
+                "Stored token URI"
+            );
+
+            if let (Some(cfg), Some(image_uri)) = (image_cache.clone(), buffered.image_uri) {
+                let contract = buffered.result.contract;
+                let token_id = buffered.result.token_id;
+                let semaphore = image_semaphore.clone();
+                tokio::spawn(async move {
+                    let _image_permit = match semaphore {
+                        Some(sema) => sema.acquire_owned().await.ok(),
+                        None => None,
+                    };
+
+                    if let Err(error) =
+                        cache_image_locally(&cfg.dir, contract, token_id, &image_uri).await
+                    {
+                        tracing::debug!(
+                            target: "torii_common::token_uri",
+                            contract = %format!("{:#x}", contract),
+                            token_id = %token_id,
+                            image_uri = %image_uri,
+                            error = %error,
+                            "Failed to cache image locally"
+                        );
+                    }
+                });
+            }
+        }
     }
 
     /// Wait for the service to finish.
@@ -354,6 +443,189 @@ impl TokenUriService {
     /// Abort the background task.
     pub fn abort(self) {
         self.handle.abort();
+    }
+
+    fn drain_pending_requests(
+        rx: &mut mpsc::UnboundedReceiver<TokenUriRequest>,
+        backlog: &mut RequestBacklog,
+    ) {
+        while let Ok(request) = rx.try_recv() {
+            backlog.enqueue(request);
+        }
+    }
+
+    async fn resolve_token_uri_requests_batch(
+        fetcher: &MetadataFetcher,
+        requests: Vec<TokenUriRequest>,
+        max_concurrent: usize,
+    ) -> Vec<BufferedTokenUriResult> {
+        if requests.is_empty() {
+            return Vec::new();
+        }
+
+        let mut raw_uris = vec![None; requests.len()];
+        let mut erc721_positions = Vec::new();
+        let mut erc1155_positions = Vec::new();
+        let mut erc721_requests = Vec::new();
+        let mut erc1155_requests = Vec::new();
+
+        for (idx, request) in requests.iter().enumerate() {
+            let token_id = Felt::from(request.token_id.low());
+            match request.standard {
+                TokenStandard::Erc721 => {
+                    erc721_positions.push(idx);
+                    erc721_requests.push((request.contract, token_id));
+                }
+                TokenStandard::Erc1155 => {
+                    erc1155_positions.push(idx);
+                    erc1155_requests.push((request.contract, token_id));
+                }
+            }
+        }
+
+        let erc721_results = fetcher.fetch_token_uri_batch(&erc721_requests).await;
+        for (position, uri) in erc721_positions.into_iter().zip(erc721_results) {
+            raw_uris[position] = uri;
+        }
+
+        let erc1155_results = fetcher.fetch_uri_batch(&erc1155_requests).await;
+        for (position, uri) in erc1155_positions.into_iter().zip(erc1155_results) {
+            raw_uris[position] = uri;
+        }
+
+        let metadata_parallelism = max_concurrent.max(1);
+        let mut next_idx = 0usize;
+        let mut join_set = tokio::task::JoinSet::new();
+        let mut resolved = (0..requests.len()).map(|_| None).collect::<Vec<_>>();
+
+        while next_idx < requests.len() || !join_set.is_empty() {
+            while next_idx < requests.len() && join_set.len() < metadata_parallelism {
+                let request = requests[next_idx].clone();
+                let raw_uri = raw_uris[next_idx].clone();
+                join_set.spawn(async move {
+                    let result = resolve_token_uri_from_uri(request, raw_uri).await;
+                    let image_uri = result.metadata_json.as_deref().and_then(extract_image_uri);
+                    (next_idx, BufferedTokenUriResult { result, image_uri })
+                });
+                next_idx += 1;
+            }
+
+            let Some(joined) = join_set.join_next().await else {
+                break;
+            };
+            match joined {
+                Ok((idx, buffered)) => resolved[idx] = Some(buffered),
+                Err(error) => {
+                    tracing::warn!(
+                        target: "torii_common::token_uri",
+                        error = %error,
+                        "Token URI metadata task failed"
+                    );
+                }
+            }
+        }
+
+        resolved.into_iter().flatten().collect()
+    }
+}
+
+pub async fn process_token_uri_request<S: TokenUriStore>(
+    fetcher: &MetadataFetcher,
+    store: &S,
+    request: &TokenUriRequest,
+    image_cache_dir: Option<&Path>,
+) -> anyhow::Result<()> {
+    let result = resolve_token_uri_request(fetcher, request).await;
+
+    store.store_token_uri(&result).await?;
+
+    if let (Some(root_dir), Some(meta)) = (image_cache_dir, result.metadata_json.as_ref()) {
+        if let Some(image_uri) = extract_image_uri(meta) {
+            if let Err(error) =
+                cache_image_locally(root_dir, request.contract, request.token_id, &image_uri).await
+            {
+                tracing::debug!(
+                    target: "torii_common::token_uri",
+                    contract = %format!("{:#x}", request.contract),
+                    token_id = %request.token_id,
+                    image_uri = %image_uri,
+                    error = %error,
+                    "Failed to cache image locally"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn resolve_token_uri_request(
+    fetcher: &MetadataFetcher,
+    request: &TokenUriRequest,
+) -> TokenUriResult {
+    let uri = fetch_token_uri_with_retry(
+        fetcher,
+        request.contract,
+        request.token_id,
+        request.standard,
+    )
+    .await;
+
+    let uri = uri.map(|u| {
+        if request.standard == TokenStandard::Erc1155 {
+            let token_id_hex = format!("{:064x}", request.token_id);
+            u.replace("{id}", &token_id_hex)
+        } else {
+            u
+        }
+    });
+
+    let metadata_json = if let Some(ref uri_str) = uri {
+        if uri_str.is_empty() {
+            None
+        } else {
+            resolve_metadata(uri_str).await
+        }
+    } else {
+        None
+    };
+
+    TokenUriResult {
+        contract: request.contract,
+        token_id: request.token_id,
+        uri,
+        metadata_json,
+    }
+}
+
+async fn resolve_token_uri_from_uri(
+    request: TokenUriRequest,
+    raw_uri: Option<String>,
+) -> TokenUriResult {
+    let uri = raw_uri.map(|value| {
+        if request.standard == TokenStandard::Erc1155 {
+            let token_id_hex = format!("{:064x}", request.token_id);
+            value.replace("{id}", &token_id_hex)
+        } else {
+            value
+        }
+    });
+
+    let metadata_json = if let Some(ref uri_str) = uri {
+        if uri_str.is_empty() {
+            None
+        } else {
+            resolve_metadata(uri_str).await
+        }
+    } else {
+        None
+    };
+
+    TokenUriResult {
+        contract: request.contract,
+        token_id: request.token_id,
+        uri,
+        metadata_json,
     }
 }
 
@@ -722,6 +994,24 @@ fn sanitize_json_string(s: &str) -> String {
         }
 
         // Inside a string
+        if c == '\n' {
+            result.push_str("\\n");
+            backslash_count = 0;
+            continue;
+        }
+
+        if c == '\r' {
+            result.push_str("\\r");
+            backslash_count = 0;
+            continue;
+        }
+
+        if c == '\t' {
+            result.push_str("\\t");
+            backslash_count = 0;
+            continue;
+        }
+
         if c == '\\' {
             backslash_count += 1;
             result.push('\\');
@@ -804,6 +1094,15 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_json_string_escapes_raw_newlines_inside_strings() {
+        let input = "{\"description\":\"line one\nline two\"}";
+        let sanitized = sanitize_json_string(input);
+        assert_eq!(sanitized, "{\"description\":\"line one\\nline two\"}");
+        let parsed: serde_json::Value = serde_json::from_str(&sanitized).unwrap();
+        assert_eq!(parsed["description"], "line one\nline two");
+    }
+
+    #[test]
     fn test_resolve_data_uri_base64() {
         let uri = "data:application/json;base64,eyJuYW1lIjoidGVzdCJ9";
         let result = resolve_data_uri(uri);
@@ -832,5 +1131,50 @@ mod tests {
         let token_id_hex = format!("{token_id:064x}");
         let result = uri.replace("{id}", &token_id_hex);
         assert!(result.contains("000000000000000000000000000000000000000000000000000000000000002a"));
+    }
+
+    #[test]
+    fn request_backlog_deduplicates_same_token() {
+        let contract = Felt::from_hex_unchecked("0x123");
+        let mut backlog = RequestBacklog::with_capacity(8);
+        backlog.enqueue(TokenUriRequest {
+            contract,
+            token_id: U256::from(1u64),
+            standard: TokenStandard::Erc721,
+        });
+        backlog.enqueue(TokenUriRequest {
+            contract,
+            token_id: U256::from(1u64),
+            standard: TokenStandard::Erc1155,
+        });
+
+        assert_eq!(backlog.len(), 1);
+        let batch = backlog.pop_batch(8);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].standard, TokenStandard::Erc1155);
+    }
+
+    #[test]
+    fn request_backlog_removes_items_when_popped() {
+        let contract = Felt::from_hex_unchecked("0x456");
+        let mut backlog = RequestBacklog::with_capacity(8);
+        backlog.enqueue(TokenUriRequest {
+            contract,
+            token_id: U256::from(1u64),
+            standard: TokenStandard::Erc721,
+        });
+        backlog.enqueue(TokenUriRequest {
+            contract,
+            token_id: U256::from(2u64),
+            standard: TokenStandard::Erc721,
+        });
+
+        let first = backlog.pop_batch(1);
+        assert_eq!(first.len(), 1);
+        assert_eq!(backlog.len(), 1);
+
+        let second = backlog.pop_batch(8);
+        assert_eq!(second.len(), 1);
+        assert!(backlog.is_empty());
     }
 }

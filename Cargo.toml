@@ -6,26 +6,29 @@ members = [
   "crates/torii-runtime-common",
   "crates/torii-sql-sink",
   "crates/torii-log-sink",
+  "crates/torii-controllers-sink",
+  "crates/arcade-sink",
   "crates/torii-ecs-sink",
+  "crates/torii-entities-historical-sink",
   "crates/torii-erc20",
   "crates/torii-erc721",
   "crates/torii-erc1155",
+  "crates/sql",
   "crates/introspect",
   "crates/dojo",
-  "crates/introspect-postgres-sink",
-  "crates/introspect-sqlite-sink",
+  "crates/introspect-sql-sink",
   "crates/testing",
-  "crates/postgres",
-  "crates/sqlite",
   "bins/torii-erc20",
   "bins/torii-erc20-synth",
   "bins/torii-introspect-bin",
   "bins/torii-introspect-synth",
+  "bins/torii-arcade",
   "bins/torii-tokens",
   "bins/torii-tokens-synth",
 ]
 default-members = [
   "bins/torii-erc20",
+  "bins/torii-arcade",
   "bins/torii-tokens",
   "bins/torii-introspect-bin",
 ]
@@ -44,7 +47,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 
 # gRPC and protobuf
 # Keep older version for now due to some compatibility issues with newer axum: https://github.com/hyperium/tonic/issues/1964.
-tonic = "0.12"
+tonic = { version = "0.12", features = ["gzip"] }
 tonic-reflection = "0.12"
 tonic-web = "0.12"
 prost = "0.13"
@@ -53,7 +56,7 @@ prost-types = "0.13"
 # HTTP server and routing
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.5", features = ["cors", "fs"] }
 hyper = "1.0"
 
 # Serialization
@@ -65,6 +68,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 metrics = "0.24"
 metrics-exporter-prometheus = "0.17"
+log = "0.4.29"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
@@ -73,12 +77,9 @@ clap = { version = "4.5", features = ["derive"] }
 starknet = "0.17"
 
 # Database
-sqlx = { version = "0.8.6", features = [
+sqlx = { git = "https://github.com/bengineer42/sqlx", version = "0.8.6", features = [
   "runtime-tokio",
-  "sqlite",
-  "postgres",
-  "any",
-] }
+], rev = "22a01d3" } # Used patched version of sqlx with SqliteConnectOptions support (PR in progress: https://github.com/launchbadge/sqlx/pull/4209)
 crc = "3.4.0"
 
 # Hashing
@@ -109,10 +110,10 @@ bigdecimal = "0.4.10"
 tonic-build = "0.12"
 
 # Introspect
-introspect-events = { git = "https://github.com/cartridge-gg/introspect", rev = "34e93c1" }
-introspect-types = { git = "https://github.com/cartridge-gg/introspect", rev = "34e93c1" }
-introspect-rust-macros = { git = "https://github.com/cartridge-gg/introspect", rev = "34e93c1" }
-dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev = "aadc3c9" }
+introspect-events = { git = "https://github.com/cartridge-gg/introspect", rev = "b89ee9e" }
+introspect-types = { git = "https://github.com/cartridge-gg/introspect", rev = "b89ee9e" }
+introspect-rust-macros = { git = "https://github.com/cartridge-gg/introspect", rev = "b89ee9e" }
+dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev = "fd99a0a" }
 
 
 # Utils
@@ -126,20 +127,20 @@ torii-config-common = { path = "crates/torii-config-common" }
 torii-runtime-common = { path = "crates/torii-runtime-common" }
 
 # Internal crates
+torii-sql = { path = "crates/sql" }
 torii-sql-sink.path = "crates/torii-sql-sink"
 torii-log-sink.path = "crates/torii-log-sink"
+torii-controllers-sink.path = "crates/torii-controllers-sink"
+torii-arcade-sink.path = "crates/arcade-sink"
 torii-ecs-sink.path = "crates/torii-ecs-sink"
+torii-entities-historical-sink.path = "crates/torii-entities-historical-sink"
 torii-erc20.path = "crates/torii-erc20"
 torii-erc721.path = "crates/torii-erc721"
 torii-erc1155.path = "crates/torii-erc1155"
 torii-dojo.path = "./crates/dojo"
 torii-introspect.path = "crates/introspect"
-torii-introspect-postgres-sink.path = "./crates/introspect-postgres-sink"
-torii-introspect-sqlite-sink.path = "./crates/introspect-sqlite-sink"
+torii-introspect-sql-sink.path = "./crates/introspect-sql-sink"
 torii-test-utils.path = "crates/testing"
-torii-postgres.path = "crates/postgres"
-torii-sqlite.path = "crates/sqlite"
-
 
 [lib]
 name = "torii"
@@ -166,10 +167,6 @@ name = "test_block_extractor"
 path = "examples/test_block_extractor/main.rs"
 
 [[example]]
-name = "introspect_simple"
-path = "examples/introspect/simple.rs"
-
-[[example]]
 name = "introspect_restart"
 path = "examples/introspect/restart.rs"
 
@@ -180,19 +177,29 @@ axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 futures.workspace = true
+hyper.workspace = true
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
 prost-types.workspace = true
+rustls-pemfile = "2.0"
 serde_json.workspace = true
 serde.workspace = true
 sqlx.workspace = true
 starknet.workspace = true
 tokio-stream.workspace = true
+tokio-rustls = { version = "0.26", default-features = false, features = [
+  "logging",
+  "tls12",
+  "ring",
+] }
 tokio-util.workspace = true
 tokio.workspace = true
 tonic-reflection.workspace = true
 tonic-web.workspace = true
 tonic.workspace = true
+torii-common.workspace = true
+tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 prost.workspace = true
@@ -221,11 +228,15 @@ torii-log-sink.workspace = true
 torii-erc20.workspace = true
 torii-erc721.workspace = true
 torii-erc1155.workspace = true
-torii-dojo.workspace = true
+torii-dojo = { workspace = true, features = ["postgres", "sqlite"] }
 torii-introspect.workspace = true
 torii-common.workspace = true
-torii-introspect-postgres-sink.workspace = true
 torii-test-utils.workspace = true
+torii-sql = { workspace = true, features = ["postgres", "sqlite"] }
+torii-introspect-sql-sink = { workspace = true, features = [
+  "postgres",
+  "sqlite",
+] }
 
 
 # Example dependencies

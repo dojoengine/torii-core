@@ -54,6 +54,10 @@ pub struct Config {
     /// Port for the HTTP API
     #[arg(long, default_value = "3000")]
     pub port: u16,
+
+    /// Delay between ETL idle/retry cycles in seconds.
+    #[arg(long, default_value = "3")]
+    pub cycle_interval: u64,
 }
 
 impl Config {

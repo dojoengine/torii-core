@@ -28,6 +28,7 @@ async-trait.workspace = true
 bigdecimal.workspace = true
 
 torii-common.workspace = true
+torii-sql = { workspace = true, features = ["postgres", "sqlite"] }
 
 [build-dependencies]
 tonic-build = "0.12"

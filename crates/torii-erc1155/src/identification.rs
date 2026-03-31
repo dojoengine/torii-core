@@ -64,7 +64,7 @@ impl IdentificationRule for Erc1155Rule {
         // ERC1155 must have balance_of_batch (which ERC20/ERC721 don't have)
         // and at least one of the transfer events
         if has_balance_of_batch && (has_transfer_single || has_transfer_batch) {
-            tracing::trace!(
+            tracing::debug!(
                 target: "torii_erc1155::identification",
                 "Contract matches ERC1155 pattern"
             );

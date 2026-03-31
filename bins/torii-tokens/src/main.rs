@@ -49,6 +49,7 @@ use std::path::Path;
 use std::sync::Arc;
 #[cfg(feature = "profiling")]
 use std::time::{SystemTime, UNIX_EPOCH};
+use tonic::codec::CompressionEncoding;
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{
     BlockRangeConfig, BlockRangeExtractor, ContractEventConfig, EventExtractor,
@@ -56,32 +57,30 @@ use torii::etl::extractor::{
 };
 use torii::etl::identification::ContractRegistry;
 use torii::EtlConcurrencyConfig;
+use torii_common::{MetadataFetcher, TokenUriService};
 use torii_config_common::apply_observability_env;
 use torii_runtime_common::database::resolve_token_db_setup;
 #[cfg(feature = "profiling")]
-use torii_runtime_common::database::DatabaseBackend;
+use torii_sql::DbBackend;
 
 // Import from ERC20 library crate
 use torii_erc20::proto::erc20_server::Erc20Server;
 use torii_erc20::{
-    Erc20Decoder, Erc20Rule, Erc20Service, Erc20Sink, Erc20Storage,
+    Erc20Decoder, Erc20MetadataCommandHandler, Erc20Rule, Erc20Service, Erc20Sink, Erc20Storage,
     FILE_DESCRIPTOR_SET as ERC20_DESCRIPTOR_SET,
 };
 
-// Import from ERC721 library crate
 use torii_erc721::proto::erc721_server::Erc721Server;
 use torii_erc721::{
-    Erc721Decoder, Erc721Rule, Erc721Service, Erc721Sink, Erc721Storage,
-    FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
+    Erc721Decoder, Erc721MetadataCommandHandler, Erc721Rule, Erc721Service, Erc721Sink,
+    Erc721Storage, FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
 };
-
-use torii_common::{MetadataFetcher, TokenUriService};
 
 // Import from ERC1155 library crate
 use torii_erc1155::proto::erc1155_server::Erc1155Server;
 use torii_erc1155::{
-    Erc1155Decoder, Erc1155Rule, Erc1155Service, Erc1155Sink, Erc1155Storage,
-    FILE_DESCRIPTOR_SET as ERC1155_DESCRIPTOR_SET,
+    Erc1155Decoder, Erc1155MetadataCommandHandler, Erc1155Rule, Erc1155Service, Erc1155Sink,
+    Erc1155Storage, FILE_DESCRIPTOR_SET as ERC1155_DESCRIPTOR_SET,
 };
 
 async fn contracts_from_registry(
@@ -515,9 +514,11 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
         .database_root(&config.db_dir)
+        .cycle_interval(config.cycle_interval)
         .etl_concurrency(EtlConcurrencyConfig {
             max_prefetch_batches: config.max_prefetch_batches,
         })
+        .command_bus_queue_size(config.metadata_queue_capacity)
         .engine_database_url(db_setup.engine_url.clone())
         .with_extractor(extractor)
         .with_contract_identifier(registry);
@@ -526,6 +527,7 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut erc20_grpc_service: Option<Erc20Service> = None;
     let mut erc721_grpc_service: Option<Erc721Service> = None;
     let mut erc1155_grpc_service: Option<Erc1155Service> = None;
+    let mut token_uri_services = Vec::new();
 
     // Global extraction modes create all token infra for runtime auto-discovery.
     let is_global_mode =
@@ -544,6 +546,12 @@ async fn run_indexer(config: Config) -> Result<()> {
         torii_config = torii_config.add_decoder(decoder);
 
         let grpc_service = Erc20Service::new(storage.clone());
+        torii_config =
+            torii_config.with_command_handler(Box::new(Erc20MetadataCommandHandler::new(
+                provider.clone(),
+                storage.clone(),
+                config.metadata_max_retries,
+            )));
         let sink = Box::new(
             Erc20Sink::new(storage)
                 .with_grpc_service(grpc_service.clone())
@@ -585,19 +593,25 @@ async fn run_indexer(config: Config) -> Result<()> {
         torii_config = torii_config.add_decoder(decoder);
 
         let grpc_service = Erc721Service::new(storage.clone());
+        torii_config =
+            torii_config.with_command_handler(Box::new(Erc721MetadataCommandHandler::new(
+                provider.clone(),
+                storage.clone(),
+                config.metadata_max_retries,
+            )));
         let mut sink = Erc721Sink::new(storage).with_grpc_service(grpc_service.clone());
         if effective_metadata_mode == MetadataMode::Inline {
-            let image_cache_dir = Path::new("./data").join("image-cache");
-            let (token_uri_sender, _token_uri_service) = TokenUriService::spawn_with_image_cache(
+            let (token_uri_sender, token_uri_service) = TokenUriService::spawn_with_image_cache(
                 Arc::new(MetadataFetcher::new(provider.clone())),
                 sink.storage().clone(),
                 config.metadata_queue_capacity,
-                8, // max concurrent metadata fetches
-                Some(image_cache_dir),
-                8, // max concurrent image downloads
+                config.metadata_parallelism.max(1),
+                Some(Path::new("./data").join("image-cache")),
+                4,
             );
+            token_uri_services.push(token_uri_service);
             sink = sink
-                .with_metadata_fetching(provider.clone())
+                .with_metadata_commands()
                 .with_token_uri_sender(token_uri_sender);
         } else {
             tracing::info!("ERC721 metadata fetching disabled for throughput (deferred mode)");
@@ -634,22 +648,25 @@ async fn run_indexer(config: Config) -> Result<()> {
         torii_config = torii_config.add_decoder(decoder);
 
         let grpc_service = Erc1155Service::new(storage.clone());
+        torii_config = torii_config.with_command_handler(Box::new(
+            Erc1155MetadataCommandHandler::new(provider.clone(), storage.clone()),
+        ));
         let mut sink = Erc1155Sink::new(storage)
             .with_grpc_service(grpc_service.clone())
             .with_balance_tracking(provider.clone());
         if effective_metadata_mode == MetadataMode::Inline {
-            let erc1155_fetcher = Arc::new(MetadataFetcher::new(provider.clone()));
-            let image_cache_dir = Path::new("./data").join("image-cache");
-            let (erc1155_uri_sender, _erc1155_uri_service) =
-                TokenUriService::spawn_with_image_cache(
-                    erc1155_fetcher,
-                    sink.storage().clone(),
-                    config.metadata_queue_capacity,
-                    8,
-                    Some(image_cache_dir),
-                    8,
-                );
-            sink = sink.with_token_uri_sender(erc1155_uri_sender);
+            let (token_uri_sender, token_uri_service) = TokenUriService::spawn_with_image_cache(
+                Arc::new(MetadataFetcher::new(provider.clone())),
+                sink.storage().clone(),
+                config.metadata_queue_capacity,
+                config.metadata_parallelism.max(1),
+                Some(Path::new("./data").join("image-cache")),
+                4,
+            );
+            token_uri_services.push(token_uri_service);
+            sink = sink
+                .with_metadata_commands()
+                .with_token_uri_sender(token_uri_sender);
         } else {
             tracing::info!("ERC1155 metadata fetching disabled for throughput (deferred mode)");
         }
@@ -677,40 +694,44 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     let reflection = reflection_builder
         .build_v1()
-        .expect("Failed to build gRPC reflection service");
+        .expect("Failed to build gRPC reflection service")
+        .accept_compressed(CompressionEncoding::Gzip);
+
+    let erc20_server = erc20_grpc_service
+        .map(|service| Erc20Server::new(service).accept_compressed(CompressionEncoding::Gzip));
+    let erc721_server = erc721_grpc_service
+        .map(|service| Erc721Server::new(service).accept_compressed(CompressionEncoding::Gzip));
+    let erc1155_server = erc1155_grpc_service
+        .map(|service| Erc1155Server::new(service).accept_compressed(CompressionEncoding::Gzip));
 
     let mut grpc_builder = tonic::transport::Server::builder();
-    let grpc_router = match (
-        erc20_grpc_service,
-        erc721_grpc_service,
-        erc1155_grpc_service,
-    ) {
+    let grpc_router = match (erc20_server, erc721_server, erc1155_server) {
         (Some(erc20), Some(erc721), Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(reflection),
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(reflection.clone()),
         (Some(erc20), Some(erc721), None) => grpc_builder
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(reflection),
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(reflection.clone()),
         (Some(erc20), None, Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(reflection),
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(reflection.clone()),
         (None, Some(erc721), Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(reflection),
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(reflection.clone()),
         (Some(erc20), None, None) => grpc_builder
-            .add_service(tonic_web::enable(Erc20Server::new(erc20)))
-            .add_service(reflection),
+            .add_service(tonic_web::enable(erc20))
+            .add_service(reflection.clone()),
         (None, Some(erc721), None) => grpc_builder
-            .add_service(tonic_web::enable(Erc721Server::new(erc721)))
-            .add_service(reflection),
+            .add_service(tonic_web::enable(erc721))
+            .add_service(reflection.clone()),
         (None, None, Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(Erc1155Server::new(erc1155)))
-            .add_service(reflection),
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(reflection.clone()),
         (None, None, None) => {
             // No token services, just reflection
             grpc_builder.add_service(reflection)
@@ -725,8 +746,9 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("Torii configured, starting ETL pipeline...");
     tracing::info!("Enabled token types: {}", enabled_types.join(", "));
     tracing::info!(
-        "ETL concurrency: prefetch_batches={} rpc_parallelism={} metadata_parallelism={} metadata_queue_capacity={} metadata_max_retries={}",
+        "ETL concurrency: prefetch_batches={} cycle_interval={}s rpc_parallelism={} metadata_parallelism={} metadata_queue_capacity={} metadata_max_retries={}",
         config.max_prefetch_batches,
+        config.cycle_interval,
         config.rpc_parallelism,
         config.metadata_parallelism,
         config.metadata_queue_capacity,
@@ -749,6 +771,8 @@ async fn run_indexer(config: Config) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Torii error: {e}"))?;
 
+    drop(token_uri_services);
+
     tracing::info!("Torii shutdown complete");
 
     #[cfg(feature = "profiling")]
@@ -758,7 +782,7 @@ async fn run_indexer(config: Config) -> Result<()> {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let db_backend = if db_setup.erc20_backend == DatabaseBackend::Postgres {
+            let db_backend = if db_setup.erc20_backend == DbBackend::Postgres {
                 "postgres"
             } else {
                 "sqlite"

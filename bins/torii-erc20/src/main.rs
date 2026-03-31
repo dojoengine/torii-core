@@ -33,15 +33,23 @@ use starknet::core::types::Felt;
 use std::sync::Arc;
 #[cfg(feature = "profiling")]
 use std::time::{SystemTime, UNIX_EPOCH};
+use tonic::codec::CompressionEncoding;
 use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{BlockRangeConfig, BlockRangeExtractor};
 use torii_runtime_common::database::resolve_single_db_setup;
 #[cfg(feature = "profiling")]
-use torii_runtime_common::database::{backend_from_url_or_path, DatabaseBackend};
+use torii_sql::DbBackend;
 
 // Import from the library crate
 use torii_erc20::proto::erc20_server::Erc20Server;
-use torii_erc20::{Erc20Decoder, Erc20Service, Erc20Sink, Erc20Storage, FILE_DESCRIPTOR_SET};
+use torii_erc20::{
+    Erc20Decoder, Erc20MetadataCommandHandler, Erc20Service, Erc20Sink, Erc20Storage,
+    FILE_DESCRIPTOR_SET,
+};
+
+const ERC20_METADATA_COMMAND_PARALLELISM: usize = 1;
+const ERC20_METADATA_COMMAND_QUEUE_SIZE: usize = 4096;
+const ERC20_METADATA_MAX_RETRIES: u8 = 3;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -66,6 +74,7 @@ async fn main() -> Result<()> {
     tracing::info!("RPC URL: {}", config.rpc_url);
     tracing::info!("From block: {}", config.from_block);
     tracing::info!("Database: {}", config.db_path);
+    tracing::info!("ETL cycle interval: {}s", config.cycle_interval);
     if let Some(url) = &config.database_url {
         tracing::info!("Engine database URL: {}", url);
     }
@@ -110,26 +119,44 @@ async fn main() -> Result<()> {
     let grpc_service = Erc20Service::new(storage.clone());
 
     // Create sink with gRPC service for dual publishing
-    let sink = Box::new(Erc20Sink::new(storage.clone()).with_grpc_service(grpc_service.clone()));
+    let sink = Box::new(
+        Erc20Sink::new(storage.clone())
+            .with_grpc_service(grpc_service.clone())
+            .with_metadata_pipeline(
+                ERC20_METADATA_COMMAND_PARALLELISM,
+                ERC20_METADATA_COMMAND_QUEUE_SIZE,
+                ERC20_METADATA_MAX_RETRIES,
+            ),
+    );
 
     // Build gRPC router with Erc20 service and reflection
     let reflection = tonic_reflection::server::Builder::configure()
         .register_encoded_file_descriptor_set(torii::TORII_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(FILE_DESCRIPTOR_SET)
         .build_v1()
-        .expect("Failed to build gRPC reflection service");
+        .expect("Failed to build gRPC reflection service")
+        .accept_compressed(CompressionEncoding::Gzip);
+
+    let grpc_service = Erc20Server::new(grpc_service).accept_compressed(CompressionEncoding::Gzip);
 
     let grpc_router = tonic::transport::Server::builder()
-        .add_service(Erc20Server::new(grpc_service))
+        .add_service(grpc_service)
         .add_service(reflection);
 
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)
         .database_root(&db_setup.database_root)
+        .command_bus_queue_size(ERC20_METADATA_COMMAND_QUEUE_SIZE)
+        .cycle_interval(config.cycle_interval)
         .engine_database_url(db_setup.engine_url.clone())
         .with_extractor(extractor)
         .add_decoder(decoder)
         .add_sink_boxed(sink)
+        .with_command_handler(Box::new(Erc20MetadataCommandHandler::new(
+            provider.clone(),
+            storage.clone(),
+            ERC20_METADATA_MAX_RETRIES,
+        )))
         .with_grpc_router(grpc_router)
         .with_custom_reflection(true); // We've added our own reflection
 
@@ -192,10 +219,10 @@ async fn main() -> Result<()> {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let db_backend = match backend_from_url_or_path(&db_setup.storage_url) {
-                DatabaseBackend::Postgres => "postgres",
-                DatabaseBackend::Sqlite => "sqlite",
-            };
+            let db_backend = db_setup
+                .storage_url
+                .parse::<DbBackend>()
+                .map_err(anyhow::Error::new)?;
             let filename = format!("flamegraph-torii-erc20-block-range-{db_backend}-{ts}.svg");
             let file = std::fs::File::create(&filename).unwrap();
             report.flamegraph(file).unwrap();

@@ -1,0 +1,46 @@
+[package]
+name = "torii-arcade"
+version = "0.1.0"
+edition = "2021"
+description = "Arcade-dedicated Torii backend combining Dojo introspect and token indexing"
+
+[[bin]]
+name = "torii-arcade"
+path = "src/main.rs"
+
+[dependencies]
+torii.workspace = true
+torii-common.workspace = true
+torii-config-common.workspace = true
+torii-arcade-sink.workspace = true
+torii-dojo.workspace = true
+torii-ecs-sink.workspace = true
+torii-entities-historical-sink.workspace = true
+torii-erc20.workspace = true
+torii-erc721.workspace = true
+torii-erc1155.workspace = true
+torii-introspect-sql-sink = { workspace = true, features = [
+    "postgres",
+    "sqlite",
+] }
+torii-runtime-common.workspace = true
+torii-sql = { workspace = true, features = ["postgres", "sqlite"] }
+
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+starknet = "0.17"
+url = "2.5"
+clap = { version = "4.5", features = ["derive", "env"] }
+anyhow = "1.0"
+sqlx = { workspace = true, features = [
+    "postgres",
+    "sqlite",
+    "runtime-tokio-rustls",
+] }
+tonic.workspace = true
+tonic-reflection.workspace = true
+tonic-web.workspace = true
+
+[lints]
+workspace = true

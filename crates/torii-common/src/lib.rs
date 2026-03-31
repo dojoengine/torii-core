@@ -5,7 +5,6 @@
 
 pub mod json;
 pub mod metadata;
-pub mod sql;
 pub mod token_uri;
 pub mod utils;
 
@@ -13,7 +12,8 @@ use starknet::core::types::{Felt, U256};
 
 pub use metadata::{MetadataFetcher, TokenMetadata};
 pub use token_uri::{
-    TokenStandard, TokenUriRequest, TokenUriResult, TokenUriSender, TokenUriService, TokenUriStore,
+    process_token_uri_request, TokenStandard, TokenUriRequest, TokenUriResult, TokenUriSender,
+    TokenUriService, TokenUriStore,
 };
 
 // ===== Felt conversions =====

@@ -44,7 +44,7 @@ require_cmd rg
 require_cmd mktemp
 
 list_out="$(mktemp)"
-trap 'rm -f "$list_out" "$entities_out" "$entities_err" "$messages_out" "$messages_err" "$events_out" "$events_err" "$contracts_out" "$contracts_err"' EXIT
+trap 'rm -f "$list_out" "$entities_out" "$entities_err" "$messages_out" "$messages_err" "$events_out" "$events_err" "$contracts_out" "$contracts_err" "$token_balances_query_out" "$token_balances_query_err" "$token_balances_out" "$token_balances_err"' EXIT
 
 grpcurl -plaintext "$GRPC_ADDR" list >"$list_out"
 rg -F -q 'world.World' "$list_out" || fail 'world.World service not exposed'
@@ -53,6 +53,8 @@ entities_out="$(mktemp)"; entities_err="$(mktemp)"
 messages_out="$(mktemp)"; messages_err="$(mktemp)"
 events_out="$(mktemp)"; events_err="$(mktemp)"
 contracts_out="$(mktemp)"; contracts_err="$(mktemp)"
+token_balances_query_out="$(mktemp)"; token_balances_query_err="$(mktemp)"
+token_balances_out="$(mktemp)"; token_balances_err="$(mktemp)"
 
 log "gRPC target: $GRPC_ADDR"
 log "world filter: $WORLD_ADDRESS_B64"
@@ -87,6 +89,46 @@ elif [[ "$REQUIRE_LIVE_UPDATES" == "1" ]]; then
   fail 'SubscribeContracts did not receive contract frame'
 else
   log 'SubscribeContracts: no contract frame during window (inconclusive)'
+fi
+
+set +e
+grpcurl -plaintext -d '{"query":{"pagination":{"limit":1,"direction":"FORWARD"}}}' \
+  "$GRPC_ADDR" world.World/RetrieveTokenBalances >"$token_balances_query_out" 2>"$token_balances_query_err"
+token_balances_status=$?
+set -e
+
+if [[ $token_balances_status -ne 0 ]]; then
+  fail "RetrieveTokenBalances failed: $(<"$token_balances_query_err")"
+fi
+
+if rg -q '"balances": \[\]' "$token_balances_query_out"; then
+  log 'SubscribeTokenBalances: no balances available during window (inconclusive)'
+else
+  token_balance_account="$(
+    sed -nE 's/.*"accountAddress": "([^"]+)".*/\1/p' "$token_balances_query_out" | head -n 1
+  )"
+  token_balance_contract="$(
+    sed -nE 's/.*"contractAddress": "([^"]+)".*/\1/p' "$token_balances_query_out" | head -n 1
+  )"
+  token_balance_id="$(
+    sed -nE 's/.*"tokenId": "([^"]+)".*/\1/p' "$token_balances_query_out" | head -n 1
+  )"
+
+  [[ -n "$token_balance_account" ]] || fail 'RetrieveTokenBalances returned a row without accountAddress'
+  [[ -n "$token_balance_contract" ]] || fail 'RetrieveTokenBalances returned a row without contractAddress'
+
+  token_balances_payload="{\"account_addresses\":[\"$token_balance_account\"],\"contract_addresses\":[\"$token_balance_contract\"]"
+  if [[ -n "$token_balance_id" ]]; then
+    token_balances_payload="${token_balances_payload},\"token_ids\":[\"$token_balance_id\"]"
+  fi
+  token_balances_payload="${token_balances_payload}}"
+
+  stream_call "world.World/SubscribeTokenBalances" "$token_balances_payload" "$token_balances_out" "$token_balances_err"
+  rg -q '"subscriptionId":' "$token_balances_out" || fail 'SubscribeTokenBalances missing subscriptionId frame'
+  if [[ "$REQUIRE_LIVE_UPDATES" == "1" ]]; then
+    rg -q '"balance": \{' "$token_balances_out" || fail 'SubscribeTokenBalances did not receive live update'
+  fi
+  log 'SubscribeTokenBalances setup frame: OK'
 fi
 
 log 'subscription smoke checks passed'

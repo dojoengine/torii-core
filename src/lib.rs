@@ -3,6 +3,7 @@
 //! This library aims at providing a modular and high-performance blockchain indexer.
 //! The current implementation is still WIP, but gives a good idea of the architecture and the capabilities.
 
+pub mod command;
 pub mod config;
 pub mod etl;
 pub mod grpc;
@@ -18,11 +19,9 @@ pub mod proto {
 
 // Re-export commonly used types for external sink authors
 pub use async_trait::async_trait;
-pub use axum;
 pub use config::{EtlConcurrencyConfig, ToriiConfig, ToriiConfigBuilder};
 pub use runner::run;
-pub use tokio;
-pub use tonic;
+pub use {axum, tokio, tonic};
 // Re-export UpdateType for sink implementations
 pub use grpc::UpdateType;
 

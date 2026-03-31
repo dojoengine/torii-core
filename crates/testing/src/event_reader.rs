@@ -45,6 +45,10 @@ pub struct EventIterator {
     pub event: usize,
 }
 
+pub struct MultiContractEventIterator {
+    iterators: VecDeque<EventIterator>,
+}
+
 impl EventIterator {
     pub fn new<P: Into<PathBuf>>(path: P) -> Self {
         let path = resolve_path_like(path);
@@ -60,6 +64,16 @@ impl EventIterator {
             batch: 0,
             event: 0,
         }
+    }
+}
+
+impl MultiContractEventIterator {
+    pub fn new<P: Into<PathBuf>>(paths: Vec<P>) -> Self {
+        let iterators = paths
+            .into_iter()
+            .map(|p| EventIterator::new(p))
+            .collect::<VecDeque<_>>();
+        Self { iterators }
     }
 }
 
@@ -79,5 +93,20 @@ impl Iterator for EventIterator {
                 Some(self.events.pop_front()?.into())
             }
         }
+    }
+}
+
+impl Iterator for MultiContractEventIterator {
+    type Item = EmittedEvent;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(iterator) = self.iterators.front_mut() {
+            if let Some(event) = iterator.next() {
+                self.iterators.rotate_left(1);
+                return Some(event);
+            }
+            self.iterators.pop_front();
+        }
+        None
     }
 }

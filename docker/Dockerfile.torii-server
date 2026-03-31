@@ -1,0 +1,24 @@
+FROM debian:trixie-slim
+
+# Install runtime dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tini && \
+    rm -rf /var/lib/apt/lists/*
+
+ARG TARGETPLATFORM
+WORKDIR /app
+
+# Copy binary from build artifacts
+# Docker build context will have: linux/amd64/torii-server, linux/arm64/torii-server
+COPY ${TARGETPLATFORM}/torii-server /usr/local/bin/torii-server
+RUN chmod +x /usr/local/bin/torii-server
+
+# Labels
+LABEL org.opencontainers.image.title="torii-server" \
+    org.opencontainers.image.description="Dojo introspect and token indexer" \
+    org.opencontainers.image.source="https://github.com/dojoengine/torii-core" \
+    org.opencontainers.image.licenses="MIT"
+
+ENTRYPOINT ["/usr/bin/tini", "--"]

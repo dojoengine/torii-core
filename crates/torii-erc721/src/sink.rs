@@ -5,6 +5,7 @@ use crate::decoder::{
     NftTransfer as DecodedNftTransfer, OperatorApproval as DecodedOperatorApproval,
 };
 use crate::grpc_service::Erc721Service;
+use crate::handlers::{FetchErc721MetadataCommand, RefreshErc721TokenUriCommand};
 use crate::proto;
 use crate::storage::{Erc721Storage, NftTransferData, OperatorApprovalData};
 use anyhow::Result;
@@ -12,17 +13,16 @@ use async_trait::async_trait;
 use axum::Router;
 use prost::Message;
 use prost_types::Any;
-use starknet::core::types::Felt;
+use starknet::core::types::{Felt, U256};
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use torii::command::CommandBusSender;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
-use torii_common::{
-    u256_to_bytes, MetadataFetcher, TokenStandard, TokenUriRequest, TokenUriSender,
-};
+use torii_common::{u256_to_bytes, TokenStandard, TokenUriRequest, TokenUriSender};
 
 /// Default threshold for "live" detection: 100 blocks from chain head.
 /// Events from blocks older than this won't be broadcast to real-time subscribers.
@@ -41,12 +41,16 @@ pub struct Erc721Sink {
     storage: Arc<Erc721Storage>,
     event_bus: Option<Arc<EventBus>>,
     grpc_service: Option<Erc721Service>,
-    /// Metadata fetcher for token name/symbol
-    metadata_fetcher: Option<Arc<MetadataFetcher>>,
-    /// Token URI service sender for async URI fetching
+    /// Whether contract metadata commands should be dispatched.
+    metadata_commands_enabled: bool,
+    /// Whether token URI commands should be dispatched.
+    token_uri_commands_enabled: bool,
+    /// Command bus sender for background metadata and token URI work.
+    command_bus: Option<CommandBusSender>,
     token_uri_sender: Option<TokenUriSender>,
-    /// In-flight contract metadata fetches to avoid duplicate background jobs.
-    metadata_fetch_inflight: Arc<Mutex<HashSet<Felt>>>,
+    /// Commands already queued but not yet observed in storage.
+    pending_metadata_commands: tokio::sync::Mutex<HashSet<Felt>>,
+    pending_token_uri_commands: tokio::sync::Mutex<HashSet<(Felt, U256)>>,
     /// In-memory counters to avoid full-table COUNT(*) in the ingest hot path.
     total_transfers: AtomicU64,
     total_operator_approvals: AtomicU64,
@@ -58,25 +62,16 @@ impl Erc721Sink {
             storage,
             event_bus: None,
             grpc_service: None,
-            metadata_fetcher: None,
+            metadata_commands_enabled: false,
+            token_uri_commands_enabled: false,
+            command_bus: None,
             token_uri_sender: None,
-            metadata_fetch_inflight: Arc::new(Mutex::new(HashSet::new())),
+            pending_metadata_commands: tokio::sync::Mutex::new(HashSet::new()),
+            pending_token_uri_commands: tokio::sync::Mutex::new(HashSet::new()),
             // Avoid startup full-table COUNT(*) scans on large datasets.
             total_transfers: AtomicU64::new(0),
             total_operator_approvals: AtomicU64::new(0),
         }
-    }
-
-    /// Enable metadata fetching with a provider
-    pub fn with_metadata_fetching(mut self, provider: Arc<JsonRpcClient<HttpTransport>>) -> Self {
-        self.metadata_fetcher = Some(Arc::new(MetadataFetcher::new(provider)));
-        self
-    }
-
-    /// Enable async token URI fetching
-    pub fn with_token_uri_sender(mut self, sender: TokenUriSender) -> Self {
-        self.token_uri_sender = Some(sender);
-        self
     }
 
     /// Set the gRPC service for dual publishing
@@ -137,26 +132,64 @@ impl Erc721Sink {
         true
     }
 
-    /// Filter function for ERC721 token metadata updates.
-    ///
-    /// Supports filters:
-    /// - "token": Filter by token contract address (hex string)
-    fn matches_metadata_filters(
-        metadata: &proto::TokenMetadataEntry,
-        filters: &HashMap<String, String>,
-    ) -> bool {
-        if filters.is_empty() {
+    fn enqueue_token_uri_request(&self, contract: Felt, token_id: U256) -> bool {
+        if let Some(sender) = &self.token_uri_sender {
+            return sender.request_update(TokenUriRequest {
+                contract,
+                token_id,
+                standard: TokenStandard::Erc721,
+            });
+        }
+
+        if let Some(command_bus) = &self.command_bus {
+            if let Err(error) =
+                command_bus.dispatch(RefreshErc721TokenUriCommand { contract, token_id })
+            {
+                tracing::warn!(
+                    target: "torii_erc721::sink",
+                    error = %error,
+                    "Failed to dispatch ERC721 token URI refresh"
+                );
+                return false;
+            }
             return true;
         }
 
-        if let Some(token_filter) = filters.get("token") {
-            let token_hex = format!("0x{}", hex::encode(&metadata.token));
-            if !token_hex.eq_ignore_ascii_case(token_filter) {
-                return false;
+        false
+    }
+
+    async fn enqueue_token_uri_range_refresh(
+        &self,
+        contract: Felt,
+        from_token_id: U256,
+        to_token_id: U256,
+    ) {
+        let Ok(uris) = self.storage.get_token_uris_by_contract(contract).await else {
+            return;
+        };
+        let token_ids = uris
+            .into_iter()
+            .map(|(token_id, _, _)| token_id)
+            .filter(|token_id| *token_id >= from_token_id && *token_id <= to_token_id)
+            .collect::<Vec<_>>();
+
+        if let Some(sender) = &self.token_uri_sender {
+            let accepted = sender.request_batch(contract, &token_ids, TokenStandard::Erc721);
+            if accepted != token_ids.len() {
+                tracing::warn!(
+                    target: "torii_erc721::sink",
+                    contract = %format!("{:#x}", contract),
+                    requested = token_ids.len(),
+                    accepted,
+                    "Failed to enqueue some ERC721 batch token URI refreshes"
+                );
             }
+            return;
         }
 
-        true
+        for token_id in token_ids {
+            self.enqueue_token_uri_request(contract, token_id);
+        }
     }
 }
 
@@ -179,9 +212,10 @@ impl Sink for Erc721Sink {
     async fn initialize(
         &mut self,
         event_bus: Arc<EventBus>,
-        _context: &torii::etl::sink::SinkContext,
+        context: &torii::etl::sink::SinkContext,
     ) -> Result<()> {
         self.event_bus = Some(event_bus);
+        self.command_bus = Some(context.command_bus.clone());
         tracing::info!(target: "torii_erc721::sink", "ERC721 sink initialized");
         Ok(())
     }
@@ -244,12 +278,8 @@ impl Sink for Erc721Sink {
                     .as_any()
                     .downcast_ref::<DecodedMetadataUpdate>()
                 {
-                    if let Some(ref sender) = self.token_uri_sender {
-                        sender.request_update(TokenUriRequest {
-                            contract: update.token,
-                            token_id: update.token_id,
-                            standard: TokenStandard::Erc721,
-                        });
+                    if self.token_uri_commands_enabled {
+                        self.enqueue_token_uri_request(update.token, update.token_id);
                     }
                 }
             }
@@ -260,24 +290,13 @@ impl Sink for Erc721Sink {
                     .as_any()
                     .downcast_ref::<DecodedBatchMetadataUpdate>()
                 {
-                    if let Some(ref sender) = self.token_uri_sender {
-                        // For batch updates, we need to know which token IDs exist in the range.
-                        // Fetch them from storage and request URI updates for each.
-                        if let Ok(uris) =
-                            self.storage.get_token_uris_by_contract(update.token).await
-                        {
-                            for (token_id, _, _) in &uris {
-                                if *token_id >= update.from_token_id
-                                    && *token_id <= update.to_token_id
-                                {
-                                    sender.request_update(TokenUriRequest {
-                                        contract: update.token,
-                                        token_id: *token_id,
-                                        standard: TokenStandard::Erc721,
-                                    });
-                                }
-                            }
-                        }
+                    if self.token_uri_commands_enabled {
+                        self.enqueue_token_uri_range_refresh(
+                            update.token,
+                            update.from_token_id,
+                            update.to_token_id,
+                        )
+                        .await;
                     }
                 }
             }
@@ -285,121 +304,105 @@ impl Sink for Erc721Sink {
             // but is less commonly needed for indexing purposes
         }
 
-        // Fetch metadata for any new token contracts
-        if let Some(ref fetcher) = self.metadata_fetcher {
-            let new_tokens: HashSet<Felt> = transfers.iter().map(|t| t.token).collect();
-            for token in new_tokens {
-                match self.storage.has_token_metadata(token).await {
-                    Ok(exists) => {
-                        if exists {
-                            continue;
+        // Fetch metadata for any new token contracts.
+        if self.metadata_commands_enabled {
+            if let Some(ref command_bus) = self.command_bus {
+                let candidate_tokens = transfers
+                    .iter()
+                    .map(|transfer| transfer.token)
+                    .collect::<HashSet<_>>()
+                    .into_iter();
+                let unchecked_tokens = {
+                    let pending = self.pending_metadata_commands.lock().await;
+                    candidate_tokens
+                        .into_iter()
+                        .filter(|token| !pending.contains(token))
+                        .collect::<Vec<_>>()
+                };
+
+                match self
+                    .storage
+                    .has_token_metadata_batch(&unchecked_tokens)
+                    .await
+                {
+                    Ok(existing_tokens) => {
+                        let mut pending = self.pending_metadata_commands.lock().await;
+                        for token in &existing_tokens {
+                            pending.remove(token);
                         }
 
-                        let scheduled = {
-                            let mut inflight = self.metadata_fetch_inflight.lock().unwrap();
-                            inflight.insert(token)
-                        };
-                        if !scheduled {
-                            continue;
-                        }
-
-                        let fetcher = fetcher.clone();
-                        let storage = self.storage.clone();
-                        let event_bus = self.event_bus.clone();
-                        let inflight = self.metadata_fetch_inflight.clone();
-                        tokio::spawn(async move {
-                            let result = async {
-                                let meta = fetcher.fetch_erc721_metadata(token).await;
-                                tracing::info!(
-                                    target: "torii_erc721::sink",
-                                    token = %format!("{:#x}", token),
-                                    name = ?meta.name,
-                                    symbol = ?meta.symbol,
-                                    "Fetched token metadata"
-                                );
-                                storage
-                                    .upsert_token_metadata(
-                                        token,
-                                        meta.name.as_deref(),
-                                        meta.symbol.as_deref(),
-                                        meta.total_supply,
-                                    )
-                                    .await?;
-
-                                if let Some(event_bus) = &event_bus {
-                                    let meta_entry = proto::TokenMetadataEntry {
-                                        token: token.to_bytes_be().to_vec(),
-                                        name: meta.name,
-                                        symbol: meta.symbol,
-                                        total_supply: meta.total_supply.map(u256_to_bytes),
-                                    };
-
-                                    let mut buf = Vec::new();
-                                    meta_entry.encode(&mut buf)?;
-                                    let any = Any {
-                                        type_url:
-                                            "type.googleapis.com/torii.sinks.erc721.TokenMetadataEntry"
-                                                .to_string(),
-                                        value: buf,
-                                    };
-
-                                    event_bus.publish_protobuf(
-                                        "erc721.metadata",
-                                        "erc721.metadata",
-                                        &any,
-                                        &meta_entry,
-                                        UpdateType::Created,
-                                        Self::matches_metadata_filters,
-                                    );
-                                }
-
-                                Ok::<(), anyhow::Error>(())
+                        for token in unchecked_tokens
+                            .into_iter()
+                            .filter(|token| !existing_tokens.contains(token))
+                        {
+                            if !pending.insert(token) {
+                                continue;
                             }
-                            .await;
-
-                            if let Err(e) = result {
+                            if let Err(error) =
+                                command_bus.dispatch(FetchErc721MetadataCommand { token })
+                            {
+                                pending.remove(&token);
                                 tracing::warn!(
                                     target: "torii_erc721::sink",
                                     token = %format!("{:#x}", token),
-                                    error = %e,
-                                    "Failed to fetch/store token metadata in background task"
+                                    error = %error,
+                                    "Failed to dispatch ERC721 metadata command"
                                 );
                             }
-
-                            let mut inflight = inflight.lock().unwrap();
-                            inflight.remove(&token);
-                        });
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(target: "torii_erc721::sink", error = %e, "Failed to check token metadata");
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "torii_erc721::sink",
+                            error = %error,
+                            "Failed to batch-check token metadata"
+                        );
                     }
                 }
             }
         }
 
-        // Request token URI fetches for new token IDs
-        if let Some(ref sender) = self.token_uri_sender {
-            for transfer in &transfers {
-                match self
-                    .storage
-                    .has_token_uri(transfer.token, transfer.token_id)
-                    .await
-                {
-                    Ok(false) => {
-                        sender.request_update(TokenUriRequest {
-                            contract: transfer.token,
-                            token_id: transfer.token_id,
-                            standard: TokenStandard::Erc721,
-                        });
+        // Request token URI fetches for new token IDs.
+        if self.token_uri_commands_enabled
+            && (self.token_uri_sender.is_some() || self.command_bus.is_some())
+        {
+            let candidate_tokens = transfers
+                .iter()
+                .map(|transfer| (transfer.token, transfer.token_id))
+                .collect::<HashSet<_>>()
+                .into_iter();
+            let unchecked_tokens = {
+                let pending = self.pending_token_uri_commands.lock().await;
+                candidate_tokens
+                    .filter(|token| !pending.contains(token))
+                    .collect::<Vec<_>>()
+            };
+
+            match self.storage.has_token_uri_batch(&unchecked_tokens).await {
+                Ok(existing_tokens) => {
+                    let mut pending = self.pending_token_uri_commands.lock().await;
+                    for token in &existing_tokens {
+                        pending.remove(token);
                     }
-                    Ok(true) => {}
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "torii_erc721::sink",
-                            error = %e,
-                            "Failed to check token URI existence"
-                        );
+
+                    for (contract, token_id) in unchecked_tokens
+                        .into_iter()
+                        .filter(|token| !existing_tokens.contains(token))
+                    {
+                        if !pending.insert((contract, token_id)) {
+                            continue;
+                        }
+                        if !self.enqueue_token_uri_request(contract, token_id) {
+                            pending.remove(&(contract, token_id));
+                        }
                     }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "torii_erc721::sink",
+                        error = %error,
+                        "Failed to batch-check token URI existence"
+                    );
                 }
             }
         }
@@ -542,5 +545,27 @@ impl Sink for Erc721Sink {
 
     fn build_routes(&self) -> Router {
         Router::new()
+    }
+}
+
+impl Erc721Sink {
+    pub fn with_metadata_commands(mut self) -> Self {
+        self.metadata_commands_enabled = true;
+        self
+    }
+
+    pub fn with_metadata_fetching(self, _provider: Arc<JsonRpcClient<HttpTransport>>) -> Self {
+        self.with_metadata_commands()
+    }
+
+    pub fn with_token_uri_commands(mut self) -> Self {
+        self.token_uri_commands_enabled = true;
+        self
+    }
+
+    pub fn with_token_uri_sender(mut self, sender: TokenUriSender) -> Self {
+        self.token_uri_commands_enabled = true;
+        self.token_uri_sender = Some(sender);
+        self
     }
 }

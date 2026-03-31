@@ -458,11 +458,12 @@ impl Erc20Trait for Erc20Service {
                 .ok_or_else(|| Status::invalid_argument("Invalid token address"))?;
 
             let entries = match self.storage.get_token_metadata(token).await {
-                Ok(Some((name, symbol, decimals))) => vec![TokenMetadataEntry {
+                Ok(Some((name, symbol, decimals, total_supply))) => vec![TokenMetadataEntry {
                     token: token.to_bytes_be().to_vec(),
                     name,
                     symbol,
                     decimals: decimals.map(|d| d as u32),
+                    total_supply: total_supply.map(u256_to_bytes),
                 }],
                 Ok(None) => vec![],
                 Err(e) => return Err(Status::internal(format!("Query failed: {e}"))),
@@ -489,12 +490,15 @@ impl Erc20Trait for Erc20Service {
 
         let entries = all
             .into_iter()
-            .map(|(token, name, symbol, decimals)| TokenMetadataEntry {
-                token: token.to_bytes_be().to_vec(),
-                name,
-                symbol,
-                decimals: decimals.map(|d| d as u32),
-            })
+            .map(
+                |(token, name, symbol, decimals, total_supply)| TokenMetadataEntry {
+                    token: token.to_bytes_be().to_vec(),
+                    name,
+                    symbol,
+                    decimals: decimals.map(|d| d as u32),
+                    total_supply: total_supply.map(u256_to_bytes),
+                },
+            )
             .collect();
 
         Ok(Response::new(GetTokenMetadataResponse {
