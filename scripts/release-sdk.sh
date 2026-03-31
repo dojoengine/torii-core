@@ -3,48 +3,54 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SDK_DIR="${ROOT_DIR}/torii.js"
-SKIP_GH_RELEASE=false
+PACKAGE_JSON_PATH="${SDK_DIR}/package.json"
+NPMRC_PATH="${SDK_DIR}/.npmrc.release"
+PACKAGE_JSON_BACKUP="${SDK_DIR}/package.json.release-backup"
 
-for arg in "$@"; do
-    case "$arg" in
+SKIP_GH_RELEASE=false
+PACKAGE_OVERRIDE=""
+
+usage() {
+    echo "Usage: $0 [--skip-gh-release] [-p <package-name>|--package <package-name>]" >&2
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --skip-gh-release)
             SKIP_GH_RELEASE=true
+            shift
+            ;;
+        -p|--package)
+            if [[ $# -lt 2 ]]; then
+                usage
+                exit 1
+            fi
+            PACKAGE_OVERRIDE="$2"
+            shift 2
             ;;
         *)
-            echo "Unknown argument: $arg" >&2
-            echo "Usage: $0 [--skip-gh-release]" >&2
+            echo "Unknown argument: $1" >&2
+            usage
             exit 1
             ;;
     esac
 done
 
-if ! command -v bun >/dev/null 2>&1; then
-    echo "bun is required" >&2
-    exit 1
-fi
-
-if ! command -v npm >/dev/null 2>&1; then
-    echo "npm is required" >&2
-    exit 1
-fi
-
-if ! command -v git >/dev/null 2>&1; then
-    echo "git is required" >&2
-    exit 1
-fi
-
-if ! command -v node >/dev/null 2>&1; then
-    echo "node is required" >&2
-    exit 1
-fi
-
-if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
-    echo "NODE_AUTH_TOKEN is required" >&2
-    exit 1
-fi
+for tool in bun npm git node; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "$tool is required" >&2
+        exit 1
+    fi
+done
 
 if [[ "$SKIP_GH_RELEASE" != true ]] && ! command -v gh >/dev/null 2>&1; then
     echo "gh is required unless --skip-gh-release is used" >&2
+    exit 1
+fi
+
+AUTH_TOKEN="${NODE_AUTH_TOKEN:-${NPM_TOKEN:-}}"
+if [[ -z "$AUTH_TOKEN" ]]; then
+    echo "NODE_AUTH_TOKEN or NPM_TOKEN is required" >&2
     exit 1
 fi
 
@@ -53,9 +59,19 @@ if ! git -C "$ROOT_DIR" diff --quiet || ! git -C "$ROOT_DIR" diff --cached --qui
     exit 1
 fi
 
-PACKAGE_NAME="$(node -p "require('${SDK_DIR}/package.json').name")"
-VERSION="$(node -p "require('${SDK_DIR}/package.json').version")"
+ORIGINAL_PACKAGE_NAME="$(node -p "require('${PACKAGE_JSON_PATH}').name")"
+PACKAGE_NAME="${PACKAGE_OVERRIDE:-$ORIGINAL_PACKAGE_NAME}"
+VERSION="$(node -p "require('${PACKAGE_JSON_PATH}').version")"
 TAG_NAME="sdk-v${VERSION}"
+
+cleanup() {
+    rm -f "$NPMRC_PATH"
+    if [[ -f "$PACKAGE_JSON_BACKUP" ]]; then
+        mv "$PACKAGE_JSON_BACKUP" "$PACKAGE_JSON_PATH"
+    fi
+}
+
+trap cleanup EXIT
 
 if git -C "$ROOT_DIR" rev-parse --verify "$TAG_NAME" >/dev/null 2>&1; then
     echo "Tag ${TAG_NAME} already exists" >&2
@@ -70,6 +86,25 @@ fi
 echo "Releasing ${PACKAGE_NAME} ${VERSION}"
 
 pushd "$SDK_DIR" >/dev/null
+
+cat > "$NPMRC_PATH" <<EOF
+//registry.npmjs.org/:_authToken=${AUTH_TOKEN}
+registry=https://registry.npmjs.org/
+always-auth=true
+EOF
+
+export NPM_CONFIG_USERCONFIG="$NPMRC_PATH"
+
+if [[ -n "$PACKAGE_OVERRIDE" ]]; then
+    cp "$PACKAGE_JSON_PATH" "$PACKAGE_JSON_BACKUP"
+    PACKAGE_JSON_PATH="$PACKAGE_JSON_PATH" PACKAGE_NAME="$PACKAGE_OVERRIDE" node <<'EOF'
+const fs = require('fs');
+const path = process.env.PACKAGE_JSON_PATH;
+const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
+pkg.name = process.env.PACKAGE_NAME;
+fs.writeFileSync(path, `${JSON.stringify(pkg, null, 2)}\n`);
+EOF
+fi
 
 echo "==> Installing dependencies"
 bun install
