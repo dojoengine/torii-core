@@ -1,10 +1,12 @@
 pub mod connection;
 pub mod migrate;
+pub mod pool;
 pub mod query;
 pub mod types;
 
-pub use connection::{DbPoolOptions, DbType, DbUrl, PoolConfig, PoolExt};
+pub use connection::DbBackend;
 pub use migrate::{AcquiredSchema, SchemaMigrator};
+pub use pool::{DbPoolOptions, PoolConfig, PoolExt};
 pub use query::{Executable, FlexQuery, Queries};
 
 pub use sqlx::Error as SqlxError;
@@ -26,4 +28,4 @@ pub mod runtime;
 
 #[cfg(feature = "postgres")]
 #[cfg(feature = "sqlite")]
-pub use runtime::DbPool;
+pub use runtime::{DbConnectionOptions, DbPool};

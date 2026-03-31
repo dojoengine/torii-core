@@ -11,6 +11,7 @@ use starknet::core::types::{Felt, U256};
 use tonic::{Request, Response, Status};
 use torii_common::{blob_to_u256, u256_to_blob};
 use torii_erc721::{storage::OwnershipCursor, Erc721Storage};
+use torii_runtime_common::database::DEFAULT_SQLITE_MAX_CONNECTIONS;
 
 use crate::proto::arcade::{
     arcade_server::Arcade, Collection, Edition, Game, GetPlayerInventoryRequest,
@@ -111,7 +112,7 @@ impl ArcadeService {
 
         let pool = AnyPoolOptions::new()
             .max_connections(max_connections.unwrap_or(if backend == DbBackend::Sqlite {
-                1
+                DEFAULT_SQLITE_MAX_CONNECTIONS
             } else {
                 5
             }))

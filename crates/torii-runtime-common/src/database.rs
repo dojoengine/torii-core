@@ -1,17 +1,24 @@
 use anyhow::{bail, Result as AnyhowResult};
 use std::path::{Path, PathBuf};
-use torii_sql::connection::DbType;
+use std::str::FromStr;
+use torii_sql::connection::DbBackend;
+
+pub const DEFAULT_SQLITE_MAX_CONNECTIONS: u32 = 500;
 
 pub fn validate_uniform_backends(
     named_urls: &[(&str, &str)],
     _mixed_backend_message: &str,
-) -> Result<DbType, String> {
+) -> Result<DbBackend, String> {
     let ((_, first_url), rest) = named_urls
         .split_first()
         .ok_or_else(|| "at least one database URL must be provided".to_string())?;
-    let expected_backend: DbType = (*first_url).try_into()?;
+    let expected_backend = DbBackend::from_str(first_url).map_err(|_| {
+        format!("Error parsing database URL '{first_url}': Unsupported database type")
+    })?;
     for (name, url) in rest {
-        let backend: DbType = (*url).try_into()?;
+        let backend = DbBackend::from_str(url).map_err(|_| {
+            format!("Error validating database {name} URL '{url}': Unsupported database type")
+        })?;
         if backend != expected_backend {
             return Err(format!("{name}={backend}({url})"));
         }
@@ -56,10 +63,10 @@ pub struct TokenDbSetup {
     pub erc20_url: String,
     pub erc721_url: String,
     pub erc1155_url: String,
-    pub engine_backend: DbType,
-    pub erc20_backend: DbType,
-    pub erc721_backend: DbType,
-    pub erc1155_backend: DbType,
+    pub engine_backend: DbBackend,
+    pub erc20_backend: DbBackend,
+    pub erc721_backend: DbBackend,
+    pub erc1155_backend: DbBackend,
 }
 
 pub fn resolve_token_db_setup(
@@ -90,34 +97,34 @@ pub fn resolve_token_db_setup(
         "erc1155.db",
     );
 
-    let engine_backend = DbType::from_url(&engine_url).ok_or_else(|| {
+    let engine_backend = DbBackend::from_str(&engine_url).map_err(|_| {
         anyhow::anyhow!(
             "Error parsing engine database URL '{engine_url}': Unsupported database type"
         )
     })?;
-    let erc20_backend = DbType::from_url(&erc20_url).ok_or_else(|| {
+    let erc20_backend = DbBackend::from_str(&erc20_url).map_err(|_| {
         anyhow::anyhow!("Error parsing ERC20 database URL '{erc20_url}': Unsupported database type")
     })?;
 
-    let erc721_backend = DbType::from_url(&erc721_url).ok_or_else(|| {
+    let erc721_backend = DbBackend::from_str(&erc721_url).map_err(|_| {
         anyhow::anyhow!(
             "Error parsing ERC721 database URL '{erc721_url}': Unsupported database type"
         )
     })?;
-    let erc1155_backend = DbType::from_url(&erc1155_url).ok_or_else(|| {
+    let erc1155_backend = DbBackend::from_str(&erc1155_url).map_err(|_| {
         anyhow::anyhow!(
             "Error parsing ERC1155 database URL '{erc1155_url}': Unsupported database type"
         )
     })?;
 
     if let Some(url) = storage_database_url {
-        let backend: DbType = DbType::from_url(url).ok_or_else(|| {
+        let backend: DbBackend = DbBackend::from_str(url).map_err(|_| {
             anyhow::anyhow!("Error parsing storage database URL '{url}': Unsupported database type")
         })?;
-        if backend == DbType::Postgres
-            && (erc20_backend != DbType::Postgres
-                || erc721_backend != DbType::Postgres
-                || erc1155_backend != DbType::Postgres)
+        if backend == DbBackend::Postgres
+            && (erc20_backend != DbBackend::Postgres
+                || erc721_backend != DbBackend::Postgres
+                || erc1155_backend != DbBackend::Postgres)
         {
             bail!("Engine is configured for Postgres but one or more token storages resolved to SQLite. Set --storage-database-url to the same Postgres URL.");
         }
@@ -155,8 +162,8 @@ mod tests {
     fn resolves_sqlite_defaults() {
         let db_dir = Path::new("./torii-data");
         let setup = resolve_token_db_setup(db_dir, None, None).unwrap();
-        assert_eq!(setup.engine_backend, DbType::Sqlite);
-        assert_eq!(setup.erc20_backend, DbType::Sqlite);
+        assert_eq!(setup.engine_backend, DbBackend::Sqlite);
+        assert_eq!(setup.erc20_backend, DbBackend::Sqlite);
         assert!(setup.engine_url.ends_with("engine.db"));
         assert!(setup.erc20_url.ends_with("erc20.db"));
     }
@@ -184,8 +191,8 @@ mod tests {
             Some("postgres://localhost/torii"),
         )
         .unwrap();
-        assert_eq!(setup.engine_backend, DbType::Postgres);
-        assert_eq!(setup.erc721_backend, DbType::Postgres);
+        assert_eq!(setup.engine_backend, DbBackend::Postgres);
+        assert_eq!(setup.erc721_backend, DbBackend::Postgres);
     }
 
     #[test]
@@ -198,7 +205,7 @@ mod tests {
             "mixed backends",
         )
         .unwrap();
-        assert_eq!(backend, DbType::Postgres);
+        assert_eq!(backend, DbBackend::Postgres);
     }
 
     #[test]

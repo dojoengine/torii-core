@@ -19,12 +19,15 @@ sqlx = { workspace = true, features = [
 ] }
 starknet.workspace = true
 tokio.workspace = true
-torii.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 introspect-types.workspace = true
+itertools.workspace = true
+primitive-types.workspace = true
 
+torii.workspace = true
 torii-sql.workspace = true
+torii-runtime-common.workspace = true
 torii-introspect.workspace = true
 
 [lints]

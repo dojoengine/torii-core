@@ -38,7 +38,7 @@ use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{BlockRangeConfig, BlockRangeExtractor};
 use torii_runtime_common::database::resolve_single_db_setup;
 #[cfg(feature = "profiling")]
-use torii_sql::DbType;
+use torii_sql::DbBackend;
 
 // Import from the library crate
 use torii_erc20::proto::erc20_server::Erc20Server;
@@ -74,6 +74,7 @@ async fn main() -> Result<()> {
     tracing::info!("RPC URL: {}", config.rpc_url);
     tracing::info!("From block: {}", config.from_block);
     tracing::info!("Database: {}", config.db_path);
+    tracing::info!("ETL cycle interval: {}s", config.cycle_interval);
     if let Some(url) = &config.database_url {
         tracing::info!("Engine database URL: {}", url);
     }
@@ -146,6 +147,7 @@ async fn main() -> Result<()> {
         .port(config.port)
         .database_root(&db_setup.database_root)
         .command_bus_queue_size(ERC20_METADATA_COMMAND_QUEUE_SIZE)
+        .cycle_interval(config.cycle_interval)
         .engine_database_url(db_setup.engine_url.clone())
         .with_extractor(extractor)
         .add_decoder(decoder)
@@ -217,10 +219,10 @@ async fn main() -> Result<()> {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let db_backend: DbType = db_setup
+            let db_backend = db_setup
                 .storage_url
-                .try_into()
-                .map_err(|e: String| anyhow::anyhow!(e))?;
+                .parse::<DbBackend>()
+                .map_err(anyhow::Error::new)?;
             let filename = format!("flamegraph-torii-erc20-block-range-{db_backend}-{ts}.svg");
             let file = std::fs::File::create(&filename).unwrap();
             report.flamegraph(file).unwrap();

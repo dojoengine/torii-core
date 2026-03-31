@@ -15,12 +15,10 @@ use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
 use torii_introspect::events::{CreateTable, IntrospectBody, IntrospectMsg, UpdateTable};
 use torii_introspect::schema::TableSchema;
 use torii_sql::connection::DbOption;
-use torii_sql::{DbType, DbUrl};
+use torii_sql::DbBackend;
 
 const INTROSPECT_TYPE: TypeId = TypeId::new("introspect");
 const SQLITE_SCHEMA_STATE_TABLE: &str = "introspect_sink_schema_state";
-const PG_METADATA_SCHEMA: &str = "introspect";
-const PG_METADATA_TABLES: &str = "db_tables";
 
 #[derive(Clone, Debug, Default)]
 pub enum HistoricalNamespace {
@@ -83,12 +81,20 @@ struct TrackedTable {
     base_name: String,
     history_name: String,
     columns: Vec<HistoryColumn>,
+    sqlite_queries: Option<TrackedTableSqliteQueries>,
+}
+
+#[derive(Clone, Debug)]
+struct TrackedTableSqliteQueries {
+    next_revision: String,
+    copy_current_row: String,
+    insert_tombstone: String,
 }
 
 #[derive(Clone)]
 pub struct EntitiesHistoricalSink {
     pool: Pool<Any>,
-    backend: DbType,
+    backend: DbBackend,
     namespace: HistoricalNamespace,
     tracked_names: HashSet<String>,
     tracked_tables: Arc<RwLock<HashMap<Felt, TrackedTable>>>,
@@ -102,11 +108,10 @@ impl EntitiesHistoricalSink {
         tracked_models: Vec<String>,
     ) -> Result<Self> {
         sqlx::any::install_default_drivers();
-        let db_url_type = DbUrl::from_str(database_url).map_err(|err| anyhow!(err))?;
-        let (backend, url) = db_url_type.into();
+        let backend = DbBackend::from_str(database_url).map_err(anyhow::Error::new)?;
         let pool = AnyPoolOptions::new()
             .max_connections(max_connections.unwrap_or(DbOption::new(5, 1).value(&backend)))
-            .connect(&url)
+            .connect(database_url)
             .await?;
 
         Ok(Self {
@@ -126,7 +131,7 @@ impl EntitiesHistoricalSink {
             return Ok(());
         }
 
-        if self.backend == DbType::Sqlite {
+        if self.backend == DbBackend::Sqlite {
             sqlx::query("PRAGMA journal_mode=WAL")
                 .execute(&self.pool)
                 .await
@@ -134,7 +139,7 @@ impl EntitiesHistoricalSink {
         }
 
         match self.backend {
-            DbType::Sqlite => {
+            DbBackend::Sqlite => {
                 let rows = sqlx::query(&format!(
                     "SELECT table_schema_json FROM {SQLITE_SCHEMA_STATE_TABLE} WHERE alive != 0"
                 ))
@@ -148,10 +153,12 @@ impl EntitiesHistoricalSink {
                     }
                 }
             }
-            DbType::Postgres => {
-                let rows = sqlx::query(&format!(
-                    "SELECT id, name FROM {PG_METADATA_SCHEMA}.{PG_METADATA_TABLES} WHERE \"schema\" = $1"
-                ))
+            DbBackend::Postgres => {
+                let rows = sqlx::query(
+                    "SELECT id, name
+                     FROM introspect.db_tables
+                     WHERE \"schema\" = $1",
+                )
                 .bind(self.namespace.postgres_schema())
                 .fetch_all(&self.pool)
                 .await?;
@@ -170,11 +177,15 @@ impl EntitiesHistoricalSink {
     }
 
     async fn resolve_tracked_table(&self, table_id: Felt) -> Result<Option<TrackedTable>> {
-        {
-            if let Some(table) = self.tracked_tables.read().await.get(&table_id) {
-                return Ok(Some(table.clone()));
-            }
+        let tracked = {
+            let tracked_tables = self.tracked_tables.read().await;
+            tracked_tables.get(&table_id).cloned()
+        };
+
+        if let Some(table) = tracked {
+            return Ok(Some(table));
         }
+
         let resolved = self.lookup_table_name(table_id).await?;
         let Some(table_name) = resolved else {
             return Ok(None);
@@ -190,11 +201,13 @@ impl EntitiesHistoricalSink {
     async fn lookup_table_name(&self, table_id: Felt) -> Result<Option<String>> {
         let (canonical_table_id, compact_table_id) = felt_hex_variants(table_id);
         match self.backend {
-            DbType::Sqlite => {
-                let row = sqlx::query(&format!(
-                    "SELECT table_schema_json FROM {SQLITE_SCHEMA_STATE_TABLE} \
-                     WHERE table_id = ?1 OR table_id = ?2 LIMIT 1"
-                ))
+            DbBackend::Sqlite => {
+                let row = sqlx::query(
+                    "SELECT table_schema_json
+                     FROM introspect_sink_schema_state
+                     WHERE table_id = ?1 OR table_id = ?2
+                     LIMIT 1",
+                )
                 .bind(canonical_table_id)
                 .bind(compact_table_id)
                 .fetch_optional(&self.pool)
@@ -206,11 +219,13 @@ impl EntitiesHistoricalSink {
                 })
                 .transpose()
             }
-            DbType::Postgres => {
-                let row = sqlx::query(&format!(
-                    "SELECT name FROM {PG_METADATA_SCHEMA}.{PG_METADATA_TABLES} \
-                     WHERE \"schema\" = $1 AND (id::text = $2 OR id::text = $3) LIMIT 1"
-                ))
+            DbBackend::Postgres => {
+                let row = sqlx::query(
+                    "SELECT name
+                     FROM introspect.db_tables
+                     WHERE \"schema\" = $1 AND (id::text = $2 OR id::text = $3)
+                     LIMIT 1",
+                )
                 .bind(self.namespace.postgres_schema())
                 .bind(canonical_table_id)
                 .bind(compact_table_id)
@@ -224,15 +239,15 @@ impl EntitiesHistoricalSink {
 
     async fn sync_tracked_table(&self, table_id: Felt, logical_name: &str) -> Result<TrackedTable> {
         let base_name = match self.backend {
-            DbType::Sqlite => sqlite_storage_name(self.namespace.sqlite_prefix(), logical_name),
-            DbType::Postgres => logical_name.to_string(),
+            DbBackend::Sqlite => sqlite_storage_name(self.namespace.sqlite_prefix(), logical_name),
+            DbBackend::Postgres => logical_name.to_string(),
         };
         let history_name = match self.backend {
-            DbType::Sqlite => sqlite_storage_name(
+            DbBackend::Sqlite => sqlite_storage_name(
                 self.namespace.sqlite_prefix(),
                 &format!("{logical_name}_historical"),
             ),
-            DbType::Postgres => format!("{logical_name}_historical"),
+            DbBackend::Postgres => format!("{logical_name}_historical"),
         };
         let columns = self.load_source_columns(&base_name).await?;
         if !columns.iter().any(|column| column.name == "entity_id") {
@@ -240,10 +255,13 @@ impl EntitiesHistoricalSink {
                 "tracked table '{logical_name}' does not expose entity_id column"
             ));
         }
+        let sqlite_queries = (self.backend == DbBackend::Sqlite)
+            .then(|| build_tracked_table_sqlite_queries(&base_name, &history_name, &columns));
         let tracked = TrackedTable {
             logical_name: logical_name.to_string(),
             base_name,
             history_name,
+            sqlite_queries,
             columns,
         };
         self.ensure_history_table(&tracked).await?;
@@ -256,7 +274,7 @@ impl EntitiesHistoricalSink {
 
     async fn load_source_columns(&self, base_name: &str) -> Result<Vec<HistoryColumn>> {
         match self.backend {
-            DbType::Sqlite => {
+            DbBackend::Sqlite => {
                 let rows = sqlx::query(&format!(
                     "PRAGMA table_info({})",
                     quote_sqlite_identifier(base_name)
@@ -271,7 +289,7 @@ impl EntitiesHistoricalSink {
                 }
                 Ok(columns)
             }
-            DbType::Postgres => {
+            DbBackend::Postgres => {
                 let rows = sqlx::query(
                     "SELECT a.attname AS column_name,
                             pg_catalog.format_type(a.atttypid, a.atttypmod) AS column_type
@@ -305,8 +323,8 @@ impl EntitiesHistoricalSink {
 
     async fn ensure_history_table(&self, tracked: &TrackedTable) -> Result<()> {
         let create_sql = match self.backend {
-            DbType::Sqlite => self.create_history_table_sqlite(tracked),
-            DbType::Postgres => self.create_history_table_postgres(tracked),
+            DbBackend::Sqlite => self.create_history_table_sqlite(tracked),
+            DbBackend::Postgres => self.create_history_table_postgres(tracked),
         };
         sqlx::query(&create_sql).execute(&self.pool).await?;
 
@@ -316,13 +334,13 @@ impl EntitiesHistoricalSink {
                 continue;
             }
             let add_sql = match self.backend {
-                DbType::Sqlite => format!(
+                DbBackend::Sqlite => format!(
                     "ALTER TABLE {} ADD COLUMN {} {}",
                     quote_sqlite_identifier(&tracked.history_name),
                     quote_ident(&column.name),
                     column.type_sql
                 ),
-                DbType::Postgres => format!(
+                DbBackend::Postgres => format!(
                     "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {}",
                     quote_pg_qualified(self.namespace.postgres_schema(), &tracked.history_name),
                     quote_ident(&column.name),
@@ -348,7 +366,8 @@ impl EntitiesHistoricalSink {
         tracked: &TrackedTable,
     ) -> Result<HashSet<String>> {
         let rows = match self.backend {
-            DbType::Sqlite => {
+            DbBackend::Sqlite => {
+                // sqlite-dynamic-ok: PRAGMA table_info requires the table identifier in SQL text.
                 sqlx::query(&format!(
                     "PRAGMA table_info({})",
                     quote_sqlite_identifier(&tracked.history_name)
@@ -356,7 +375,7 @@ impl EntitiesHistoricalSink {
                 .fetch_all(&self.pool)
                 .await?
             }
-            DbType::Postgres => {
+            DbBackend::Postgres => {
                 sqlx::query(
                     "SELECT a.attname AS column_name
                      FROM pg_catalog.pg_attribute a
@@ -375,7 +394,7 @@ impl EntitiesHistoricalSink {
         };
         let mut columns = HashSet::with_capacity(rows.len());
         for row in rows {
-            let name = if self.backend == DbType::Sqlite {
+            let name = if self.backend == DbBackend::Sqlite {
                 row.try_get("name")?
             } else {
                 row.try_get("column_name")?
@@ -439,7 +458,7 @@ impl EntitiesHistoricalSink {
         existing_columns: &HashSet<String>,
     ) -> Vec<String> {
         match self.backend {
-            DbType::Sqlite => {
+            DbBackend::Sqlite => {
                 let mut sql = Vec::new();
                 let target = quote_sqlite_identifier(&tracked.history_name);
                 if !existing_columns.contains("revision") {
@@ -469,7 +488,7 @@ impl EntitiesHistoricalSink {
                 }
                 sql
             }
-            DbType::Postgres => vec![
+            DbBackend::Postgres => vec![
                 format!(
                     "ALTER TABLE {} ADD COLUMN IF NOT EXISTS \"revision\" BIGINT NOT NULL DEFAULT 0",
                     quote_pg_qualified(self.namespace.postgres_schema(), &tracked.history_name)
@@ -498,7 +517,7 @@ impl EntitiesHistoricalSink {
         let unique_index = format!("{}_entity_revision_idx", tracked.history_name);
         let entity_index = format!("{}_entity_idx", tracked.history_name);
         match self.backend {
-            DbType::Sqlite => vec![
+            DbBackend::Sqlite => vec![
                 format!(
                     "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {} (\"entity_id\", \"revision\")",
                     quote_ident(&unique_index),
@@ -510,7 +529,7 @@ impl EntitiesHistoricalSink {
                     quote_sqlite_identifier(&tracked.history_name)
                 ),
             ],
-            DbType::Postgres => vec![
+            DbBackend::Postgres => vec![
                 format!(
                     "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {} (\"entity_id\", \"revision\")",
                     quote_ident(&unique_index),
@@ -532,12 +551,13 @@ impl EntitiesHistoricalSink {
         compact_entity_id_hex: &str,
     ) -> Result<i64> {
         let sql = match self.backend {
-            DbType::Sqlite => format!(
-                "SELECT COALESCE(MAX(\"revision\"), 0) + 1 AS next_revision \
-                 FROM {} WHERE \"entity_id\" = ?1 OR \"entity_id\" = ?2",
-                quote_sqlite_identifier(&tracked.history_name)
-            ),
-            DbType::Postgres => format!(
+            DbBackend::Sqlite => tracked
+                .sqlite_queries
+                .as_ref()
+                .expect("sqlite queries available for sqlite backend")
+                .next_revision
+                .clone(),
+            DbBackend::Postgres => format!(
                 "SELECT COALESCE(MAX(\"revision\"), 0) + 1 AS next_revision \
                  FROM {} WHERE \"entity_id\"::text = $1 OR \"entity_id\"::text = $2",
                 quote_pg_qualified(self.namespace.postgres_schema(), &tracked.history_name)
@@ -609,50 +629,39 @@ impl EntitiesHistoricalSink {
         executed_at: u64,
         deleted: bool,
     ) -> Result<u64> {
-        let source_columns = tracked
-            .columns
-            .iter()
-            .map(|column| quote_ident(&column.name))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let insert_columns = format!(
-            "{source_columns}, \"revision\", \"historical_deleted\", \
-             \"historical_block_number\", \"historical_tx_hash\", \"historical_executed_at\""
-        );
-        let history_target = match self.backend {
-            DbType::Sqlite => quote_sqlite_identifier(&tracked.history_name),
-            DbType::Postgres => {
-                quote_pg_qualified(self.namespace.postgres_schema(), &tracked.history_name)
+        let sql = match self.backend {
+            DbBackend::Sqlite => tracked
+                .sqlite_queries
+                .as_ref()
+                .expect("sqlite queries available for sqlite backend")
+                .copy_current_row
+                .clone(),
+            DbBackend::Postgres => {
+                let source_columns = tracked
+                    .columns
+                    .iter()
+                    .map(|column| quote_ident(&column.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let insert_columns = format!(
+                    "{source_columns}, \"revision\", \"historical_deleted\", \
+                     \"historical_block_number\", \"historical_tx_hash\", \"historical_executed_at\""
+                );
+                let history_target =
+                    quote_pg_qualified(self.namespace.postgres_schema(), &tracked.history_name);
+                let source_target =
+                    quote_pg_qualified(self.namespace.postgres_schema(), &tracked.base_name);
+                format!(
+                    "INSERT INTO {history_target} ({insert_columns}) \
+                     SELECT {source_columns}, $1, $2, $3, $4, $5 \
+                     FROM {source_target} WHERE (\"entity_id\"::text = $6 OR \"entity_id\"::text = $7) LIMIT 1"
+                )
             }
         };
-        let source_target = match self.backend {
-            DbType::Sqlite => quote_sqlite_identifier(&tracked.base_name),
-            DbType::Postgres => {
-                quote_pg_qualified(self.namespace.postgres_schema(), &tracked.base_name)
-            }
-        };
-        let where_entity = match self.backend {
-            DbType::Sqlite => "(\"entity_id\" = ?6 OR \"entity_id\" = ?7)",
-            DbType::Postgres => "(\"entity_id\"::text = $6 OR \"entity_id\"::text = $7)",
-        };
-        let placeholder = match self.backend {
-            DbType::Sqlite => "?",
-            DbType::Postgres => "$",
-        };
-        let revision_ph = format!("{placeholder}1");
-        let deleted_ph = format!("{placeholder}2");
-        let block_ph = format!("{placeholder}3");
-        let tx_ph = format!("{placeholder}4");
-        let executed_ph = format!("{placeholder}5");
-        let sql = format!(
-            "INSERT INTO {history_target} ({insert_columns}) \
-             SELECT {source_columns}, {revision_ph}, {deleted_ph}, {block_ph}, {tx_ph}, {executed_ph} \
-             FROM {source_target} WHERE {where_entity} LIMIT 1"
-        );
         let mut query = sqlx::query(&sql).bind(revision);
         query = match self.backend {
-            DbType::Sqlite => query.bind(i64::from(deleted)),
-            DbType::Postgres => query.bind(deleted),
+            DbBackend::Sqlite => query.bind(i64::from(deleted)),
+            DbBackend::Postgres => query.bind(deleted),
         };
         let result = query
             .bind(block_number.map(|value| value as i64))
@@ -674,53 +683,59 @@ impl EntitiesHistoricalSink {
         tx_hash: Felt,
         executed_at: u64,
     ) -> Result<()> {
-        let mut columns = Vec::with_capacity(tracked.columns.len() + 5);
-        let mut values_sql = Vec::with_capacity(tracked.columns.len() + 5);
+        let sql = match self.backend {
+            DbBackend::Sqlite => tracked
+                .sqlite_queries
+                .as_ref()
+                .expect("sqlite queries available for sqlite backend")
+                .insert_tombstone
+                .clone(),
+            DbBackend::Postgres => {
+                let mut columns = Vec::with_capacity(tracked.columns.len() + 5);
+                let mut values_sql = Vec::with_capacity(tracked.columns.len() + 5);
 
-        let mut bind_index = 1_usize;
-        for column in &tracked.columns {
-            columns.push(quote_ident(&column.name));
-            if column.name == "entity_id" {
-                values_sql.push(self.entity_cast_placeholder(bind_index, &column.type_sql));
+                let mut bind_index = 1_usize;
+                for column in &tracked.columns {
+                    columns.push(quote_ident(&column.name));
+                    if column.name == "entity_id" {
+                        values_sql.push(self.entity_cast_placeholder(bind_index, &column.type_sql));
+                        bind_index += 1;
+                    } else {
+                        values_sql.push("NULL".to_string());
+                    }
+                }
+
+                columns.extend([
+                    "\"revision\"".to_string(),
+                    "\"historical_deleted\"".to_string(),
+                    "\"historical_block_number\"".to_string(),
+                    "\"historical_tx_hash\"".to_string(),
+                    "\"historical_executed_at\"".to_string(),
+                ]);
+                values_sql.push(self.value_placeholder(bind_index));
                 bind_index += 1;
-            } else {
-                values_sql.push("NULL".to_string());
-            }
-        }
+                values_sql.push(self.value_placeholder(bind_index));
+                bind_index += 1;
+                values_sql.push(self.value_placeholder(bind_index));
+                bind_index += 1;
+                values_sql.push(self.value_placeholder(bind_index));
+                bind_index += 1;
+                values_sql.push(self.value_placeholder(bind_index));
 
-        columns.extend([
-            "\"revision\"".to_string(),
-            "\"historical_deleted\"".to_string(),
-            "\"historical_block_number\"".to_string(),
-            "\"historical_tx_hash\"".to_string(),
-            "\"historical_executed_at\"".to_string(),
-        ]);
-        values_sql.push(self.value_placeholder(bind_index));
-        bind_index += 1;
-        values_sql.push(self.value_placeholder(bind_index));
-        bind_index += 1;
-        values_sql.push(self.value_placeholder(bind_index));
-        bind_index += 1;
-        values_sql.push(self.value_placeholder(bind_index));
-        bind_index += 1;
-        values_sql.push(self.value_placeholder(bind_index));
-
-        let target = match self.backend {
-            DbType::Sqlite => quote_sqlite_identifier(&tracked.history_name),
-            DbType::Postgres => {
-                quote_pg_qualified(self.namespace.postgres_schema(), &tracked.history_name)
+                let target =
+                    quote_pg_qualified(self.namespace.postgres_schema(), &tracked.history_name);
+                format!(
+                    "INSERT INTO {target} ({}) VALUES ({})",
+                    columns.join(", "),
+                    values_sql.join(", ")
+                )
             }
         };
-        let sql = format!(
-            "INSERT INTO {target} ({}) VALUES ({})",
-            columns.join(", "),
-            values_sql.join(", ")
-        );
 
         let mut query = sqlx::query(&sql).bind(entity_id_hex).bind(revision);
         query = match self.backend {
-            DbType::Sqlite => query.bind(1_i64),
-            DbType::Postgres => query.bind(true),
+            DbBackend::Sqlite => query.bind(1_i64),
+            DbBackend::Postgres => query.bind(true),
         };
         query
             .bind(block_number.map(|value| value as i64))
@@ -734,15 +749,15 @@ impl EntitiesHistoricalSink {
 
     fn value_placeholder(&self, index: usize) -> String {
         match self.backend {
-            DbType::Sqlite => "?".to_string(),
-            DbType::Postgres => format!("${index}"),
+            DbBackend::Sqlite => "?".to_string(),
+            DbBackend::Postgres => format!("${index}"),
         }
     }
 
     fn entity_cast_placeholder(&self, index: usize, type_sql: &str) -> String {
         match self.backend {
-            DbType::Sqlite => "?".to_string(),
-            DbType::Postgres => format!("CAST(${index} AS {type_sql})"),
+            DbBackend::Sqlite => "?".to_string(),
+            DbBackend::Postgres => format!("CAST(${index} AS {type_sql})"),
         }
     }
 
@@ -882,6 +897,68 @@ fn quote_sqlite_identifier(table: &str) -> String {
 
 fn quote_pg_qualified(schema: &str, table: &str) -> String {
     format!("{}.{}", quote_ident(schema), quote_ident(table))
+}
+
+fn build_tracked_table_sqlite_queries(
+    base_name: &str,
+    history_name: &str,
+    columns: &[HistoryColumn],
+) -> TrackedTableSqliteQueries {
+    let history_target = quote_sqlite_identifier(history_name);
+    let source_target = quote_sqlite_identifier(base_name);
+    let source_columns = columns
+        .iter()
+        .map(|column| quote_ident(&column.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let insert_columns = format!(
+        "{source_columns}, \"revision\", \"historical_deleted\", \
+         \"historical_block_number\", \"historical_tx_hash\", \"historical_executed_at\""
+    );
+
+    let mut tombstone_columns = Vec::with_capacity(columns.len() + 5);
+    let mut tombstone_values = Vec::with_capacity(columns.len() + 5);
+    for column in columns {
+        tombstone_columns.push(quote_ident(&column.name));
+        if column.name == "entity_id" {
+            tombstone_values.push("?".to_string());
+        } else {
+            tombstone_values.push("NULL".to_string());
+        }
+    }
+    tombstone_columns.extend([
+        "\"revision\"".to_string(),
+        "\"historical_deleted\"".to_string(),
+        "\"historical_block_number\"".to_string(),
+        "\"historical_tx_hash\"".to_string(),
+        "\"historical_executed_at\"".to_string(),
+    ]);
+    tombstone_values.extend([
+        "?".to_string(),
+        "?".to_string(),
+        "?".to_string(),
+        "?".to_string(),
+        "?".to_string(),
+    ]);
+
+    TrackedTableSqliteQueries {
+        next_revision: format!(
+            "SELECT COALESCE(MAX(\"revision\"), 0) + 1 AS next_revision \
+             FROM {history_target} WHERE \"entity_id\" = ?1 OR \"entity_id\" = ?2"
+        ),
+        copy_current_row: format!(
+            "INSERT INTO {history_target} ({insert_columns}) \
+             SELECT {source_columns}, ?1, ?2, ?3, ?4, ?5 \
+             FROM {source_target} \
+             WHERE (\"entity_id\" = ?6 OR \"entity_id\" = ?7) \
+             LIMIT 1"
+        ),
+        insert_tombstone: format!(
+            "INSERT INTO {history_target} ({}) VALUES ({})",
+            tombstone_columns.join(", "),
+            tombstone_values.join(", ")
+        ),
+    }
 }
 
 fn felt_hex(value: Felt) -> String {

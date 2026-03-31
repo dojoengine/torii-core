@@ -25,3 +25,4 @@ pg-data/
 /torii-data/image-cache/
 HANDOFF.md
 .cargo/
+certs/*.pem

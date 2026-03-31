@@ -6,6 +6,7 @@ use config::{Config, MetadataMode};
 use starknet::core::types::Felt;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::codec::CompressionEncoding;
@@ -47,8 +48,9 @@ use torii_erc721::{
     FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
 };
 use torii_introspect_sql_sink::{IntrospectDb, NamespaceMode};
-use torii_runtime_common::database::validate_uniform_backends;
-use torii_sql::{DbPool, DbPoolOptions, PoolExt};
+use torii_runtime_common::database::{validate_uniform_backends, DEFAULT_SQLITE_MAX_CONNECTIONS};
+use torii_runtime_common::token_support::{resolve_installed_token_support, InstalledTokenSupport};
+use torii_sql::{DbConnectionOptions, DbPool, DbPoolOptions, PoolExt};
 
 type StarknetProvider =
     starknet::providers::jsonrpc::JsonRpcClient<starknet::providers::jsonrpc::HttpTransport>;
@@ -202,6 +204,20 @@ impl Sink for ArcadeProjectionPipeline {
     }
 }
 
+fn advertised_token_services(installed_token_support: InstalledTokenSupport) -> Vec<&'static str> {
+    let mut services = Vec::new();
+    if installed_token_support.erc20 {
+        services.push("torii.sinks.erc20.Erc20");
+    }
+    if installed_token_support.erc721 {
+        services.push("torii.sinks.erc721.Erc721");
+    }
+    if installed_token_support.erc1155 {
+        services.push("torii.sinks.erc1155.Erc1155");
+    }
+    services
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -288,8 +304,9 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("Database backend: {:?}", backend);
     tracing::info!("Metadata mode: {:?}", config.metadata_mode);
     tracing::info!(
-        "ETL concurrency: prefetch_batches={} rpc_parallelism={}",
+        "ETL concurrency: prefetch_batches={} cycle_interval={}s rpc_parallelism={}",
         config.max_prefetch_batches,
+        config.cycle_interval,
         config.rpc_parallelism,
     );
     tracing::info!(
@@ -344,9 +361,17 @@ async fn run_indexer(config: Config) -> Result<()> {
     )
     .await?;
 
-    let install_erc20 = config.index_external_contracts || !erc20_addresses.is_empty();
-    let install_erc721 = config.index_external_contracts || !erc721_addresses.is_empty();
-    let install_erc1155 = config.index_external_contracts || !erc1155_addresses.is_empty();
+    let installed_token_support = resolve_installed_token_support(
+        config.index_external_contracts,
+        InstalledTokenSupport {
+            erc20: !erc20_addresses.is_empty(),
+            erc721: !erc721_addresses.is_empty(),
+            erc1155: !erc1155_addresses.is_empty(),
+        },
+    );
+    let install_erc20 = installed_token_support.erc20;
+    let install_erc721 = installed_token_support.erc721;
+    let install_erc1155 = installed_token_support.erc1155;
     let installed_external_decoders = installed_external_decoder_ids(
         config.index_external_contracts,
         install_erc20,
@@ -362,8 +387,18 @@ async fn run_indexer(config: Config) -> Result<()> {
         &erc1155_addresses,
         &config,
     );
-    let pool_options = DbPoolOptions::new().max_connections(config.max_db_connections.unwrap_or(5));
-    let pool = pool_options.connect_any(&engine_database_url).await?;
+    let conn_options =
+        DbConnectionOptions::from_str(&engine_database_url).map_err(anyhow::Error::msg)?;
+    let max_connections = match config.max_db_connections {
+        Some(n) => n,
+        None => match &conn_options {
+            DbConnectionOptions::Postgres(_) => 10,
+            DbConnectionOptions::Sqlite(ops) if ops.is_in_memory() => 1,
+            DbConnectionOptions::Sqlite(_) => DEFAULT_SQLITE_MAX_CONNECTIONS,
+        },
+    };
+    let pool_options = DbPoolOptions::new().max_connections(max_connections);
+    let pool = pool_options.connect_any_with(conn_options).await?;
     if let DbPool::Sqlite(pool) = &pool {
         pool.execute_queries([
             "PRAGMA journal_mode=WAL",
@@ -424,6 +459,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         .port(config.port)
         .database_root(&config.db_dir)
         .command_bus_queue_size(TOKEN_COMMAND_QUEUE_SIZE)
+        .cycle_interval(config.cycle_interval)
         .etl_concurrency(EtlConcurrencyConfig {
             max_prefetch_batches: config.max_prefetch_batches,
         })
@@ -432,6 +468,10 @@ async fn run_indexer(config: Config) -> Result<()> {
         .add_decoder(Arc::new(dojo_decoder))
         .add_sink_boxed(Box::new(ecs_sink))
         .add_sink_boxed(Box::new(arcade_projection_pipeline));
+
+    if let Some(tls) = config.tls_config()? {
+        torii_config = torii_config.with_tls(tls);
+    }
 
     if config.index_external_contracts {
         torii_config = torii_config
@@ -640,14 +680,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     tracing::info!("  - torii.Torii");
     tracing::info!("  - world.World");
     tracing::info!("  - arcade.v1.Arcade");
-    if !erc20_addresses.is_empty() {
-        tracing::info!("  - torii.sinks.erc20.Erc20");
-    }
-    if !erc721_addresses.is_empty() {
-        tracing::info!("  - torii.sinks.erc721.Erc721");
-    }
-    if !erc1155_addresses.is_empty() {
-        tracing::info!("  - torii.sinks.erc1155.Erc1155");
+    for service in advertised_token_services(installed_token_support) {
+        tracing::info!("  - {}", service);
     }
 
     torii::run(torii_config)
@@ -728,5 +762,40 @@ fn append_unique_contract_configs(
                 to_block,
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::advertised_token_services;
+    use torii_runtime_common::token_support::InstalledTokenSupport;
+
+    #[test]
+    fn advertised_token_services_include_installed_services_without_explicit_targets() {
+        let services = advertised_token_services(InstalledTokenSupport {
+            erc20: true,
+            erc721: true,
+            erc1155: true,
+        });
+
+        assert_eq!(
+            services,
+            vec![
+                "torii.sinks.erc20.Erc20",
+                "torii.sinks.erc721.Erc721",
+                "torii.sinks.erc1155.Erc1155",
+            ]
+        );
+    }
+
+    #[test]
+    fn advertised_token_services_skip_uninstalled_services() {
+        let services = advertised_token_services(InstalledTokenSupport {
+            erc20: false,
+            erc721: true,
+            erc1155: false,
+        });
+
+        assert_eq!(services, vec!["torii.sinks.erc721.Erc721"]);
     }
 }

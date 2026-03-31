@@ -4,9 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-torii = { path = "../.." }
+torii.workspace = true
 torii-dojo = { workspace = true, features = ["postgres", "sqlite"] }
-torii-introspect = { path = "../introspect" }
+torii-introspect.workspace = true
+torii-runtime-common.workspace = true
+torii-sql.workspace = true
+
 dojo-introspect.workspace = true
 introspect-types.workspace = true
 

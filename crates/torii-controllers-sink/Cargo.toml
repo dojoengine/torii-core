@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-torii = { path = "../.." }
+torii.workspace = true
+torii-runtime-common.workspace = true
+torii-sql.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
@@ -13,7 +15,12 @@ metrics.workspace = true
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
-sqlx = { workspace = true, features = ["runtime-tokio", "sqlite", "postgres", "any"] }
+sqlx = { workspace = true, features = [
+    "runtime-tokio",
+    "sqlite",
+    "postgres",
+    "any",
+] }
 starknet.workspace = true
 tokio.workspace = true
 tracing.workspace = true

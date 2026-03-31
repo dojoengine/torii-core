@@ -170,6 +170,10 @@ pub struct Config {
     #[arg(long, default_value = "2")]
     pub max_prefetch_batches: usize,
 
+    /// Delay between ETL idle/retry cycles in seconds.
+    #[arg(long, default_value = "3")]
+    pub cycle_interval: u64,
+
     /// Maximum chunked RPC requests to run concurrently (`0` = auto).
     #[arg(long, default_value = "0")]
     pub rpc_parallelism: usize,
