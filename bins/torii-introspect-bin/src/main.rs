@@ -4,12 +4,13 @@ mod config;
 
 use anyhow::Result;
 use clap::Parser;
-use config::{Config, StorageBackend};
+use config::Config;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use starknet::core::types::Felt;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::codec::CompressionEncoding;
@@ -51,7 +52,7 @@ use torii_runtime_common::database::{
     resolve_token_db_setup, TokenDbSetup, DEFAULT_SQLITE_MAX_CONNECTIONS,
 };
 use torii_runtime_common::token_support::{resolve_installed_token_support, InstalledTokenSupport};
-use torii_sql::sqlite::{is_sqlite_memory_path, sqlite_connect_options};
+use torii_sql::DbBackend;
 
 type StarknetProvider =
     starknet::providers::jsonrpc::JsonRpcClient<starknet::providers::jsonrpc::HttpTransport>;
@@ -636,12 +637,12 @@ async fn run_indexer(config: Config) -> Result<()> {
         },
     ));
 
-    if matches!(backend, StorageBackend::Sqlite) {
+    if matches!(backend, DbBackend::Sqlite) {
         tokio::fs::create_dir_all(db_dir).await?;
     }
 
     match backend {
-        StorageBackend::Postgres => {
+        DbBackend::Postgres => {
             run_with_postgres(
                 &config,
                 &storage_database_url,
@@ -660,7 +661,7 @@ async fn run_indexer(config: Config) -> Result<()> {
             )
             .await?;
         }
-        StorageBackend::Sqlite => {
+        DbBackend::Sqlite => {
             run_with_sqlite(
                 &config,
                 &storage_database_url,
@@ -881,10 +882,10 @@ async fn run_with_sqlite(
     extractor: Box<dyn Extractor>,
 ) -> Result<()> {
     let token_provider = Arc::new(provider.clone());
-    let options = sqlite_connect_options(storage_database_url)?;
+    let options = SqliteConnectOptions::from_str(storage_database_url)?.create_if_missing(true);
     let max_db_connections = match config.max_db_connections {
         Some(limit) => limit.max(1),
-        None if is_sqlite_memory_path(storage_database_url) => 1,
+        None if options.is_in_memory() => 1,
         None => DEFAULT_SQLITE_MAX_CONNECTIONS,
     };
     let pool = SqlitePoolOptions::new()

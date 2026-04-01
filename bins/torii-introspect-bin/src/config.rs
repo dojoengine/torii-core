@@ -2,12 +2,7 @@ use anyhow::{bail, Result};
 use clap::{ArgGroup, Parser};
 use starknet::core::types::Felt;
 use std::path::{Path, PathBuf};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StorageBackend {
-    Postgres,
-    Sqlite,
-}
+use torii_sql::DbBackend;
 
 /// Dojo introspect indexer backed by PostgreSQL or SQLite.
 ///
@@ -187,11 +182,11 @@ impl Config {
         models
     }
 
-    pub fn storage_backend(&self) -> StorageBackend {
+    pub fn storage_backend(&self) -> DbBackend {
         if self.storage_database_url.is_some() {
-            StorageBackend::Postgres
+            DbBackend::Postgres
         } else {
-            StorageBackend::Sqlite
+            DbBackend::Sqlite
         }
     }
 
@@ -210,7 +205,10 @@ impl Config {
                 Ok(url.clone())
             }
             Some(_) => bail!("--storage-database-url must be a PostgreSQL URL"),
-            None => Ok(db_dir.join("introspect.db").to_string_lossy().to_string()),
+            None => Ok(format!(
+                "sqlite://{}",
+                db_dir.join("introspect.db").to_string_lossy()
+            )),
         }
     }
 
@@ -272,7 +270,7 @@ mod tests {
     fn sqlite_is_default_when_storage_database_url_is_omitted() {
         let cfg = Config::parse_from(["torii-server", "--contract", "0x1"]);
 
-        assert_eq!(cfg.storage_backend(), StorageBackend::Sqlite);
+        assert_eq!(cfg.storage_backend(), DbBackend::Sqlite);
         assert!(cfg
             .storage_database_url(Path::new("./torii-data"))
             .unwrap()

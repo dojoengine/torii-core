@@ -40,6 +40,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Any, AnyConnection, Column, ConnectOptions, Pool, QueryBuilder, Row};
 use starknet::core::types::Felt;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -887,15 +888,21 @@ impl EcsService {
             ("erc1155", &self.state.erc1155_url),
         ] {
             if let Some(url) = url {
-                let path = sqlite_db_path(url);
-                let file_exists = std::path::Path::new(&path).exists();
-                tracing::info!(
-                    schema,
-                    path = %path,
-                    file_exists,
-                    "Attaching ERC database"
-                );
-                attach_sqlite_database(&mut conn, schema, url).await?;
+                let options = SqliteConnectOptions::from_str(url)?;
+                match options.is_in_memory() {
+                    true => tracing::info!(schema, "Attaching in-memory ERC database"),
+                    false => {
+                        let path = options.get_filename();
+                        let file_exists = path.exists();
+                        tracing::info!(
+                            schema,
+                            path = %path.display(),
+                            file_exists,
+                            "Attaching ERC database"
+                        )
+                    }
+                };
+                attach_sqlite_database(&mut conn, schema, &options).await?;
                 match sqlx::query(sqlite_master_preview_sql(schema))
                     .fetch_all(&mut *conn)
                     .await
@@ -4896,7 +4903,8 @@ async fn attach_sqlite_databases(
         ("erc1155", erc1155_url),
     ] {
         if let Some(url) = url {
-            attach_sqlite_database(conn, schema, url).await?;
+            let options = SqliteConnectOptions::from_str(url)?;
+            attach_sqlite_database(conn, schema, &options).await?;
         }
     }
     Ok(())
@@ -4905,7 +4913,7 @@ async fn attach_sqlite_databases(
 async fn attach_sqlite_database(
     conn: &mut AnyConnection,
     schema: &str,
-    url: &str,
+    options: &SqliteConnectOptions,
 ) -> sqlx::Result<()> {
     let attached =
         sqlx::query_scalar::<Any, i64>("SELECT 1 FROM pragma_database_list WHERE name = ? LIMIT 1")
@@ -4916,9 +4924,14 @@ async fn attach_sqlite_database(
     if attached {
         return Ok(());
     }
+    let path = options.get_filename();
 
-    let path = sqlite_db_path(url).replace('\'', "''");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::OpenOptions::new().create(true).write(true).open(path)?;
     // sqlite-dynamic-ok: ATTACH requires the database path and schema identifier in SQL text.
+    let path = path.to_string_lossy().replace('\'', "''");
     sqlx::query(&format!("ATTACH DATABASE '{path}' AS {schema}"))
         .execute(&mut *conn)
         .await?;
@@ -4932,20 +4945,6 @@ fn sqlite_master_preview_sql(schema: &str) -> &'static str {
         "erc1155" => "SELECT name FROM erc1155.sqlite_master WHERE type='table' LIMIT 5",
         _ => "SELECT name FROM sqlite_master WHERE 1 = 0",
     }
-}
-
-fn sqlite_db_path(url: &str) -> String {
-    let path = url
-        .strip_prefix("sqlite://")
-        .or_else(|| url.strip_prefix("sqlite:"))
-        .unwrap_or(url);
-    let p = std::path::Path::new(path);
-    if let (Some(parent), Some(file_name)) = (p.parent(), p.file_name()) {
-        if let Ok(abs_parent) = parent.canonicalize() {
-            return abs_parent.join(file_name).to_string_lossy().into_owned();
-        }
-    }
-    path.to_string()
 }
 
 fn get_db_backend(url: &str) -> DbBackend {
