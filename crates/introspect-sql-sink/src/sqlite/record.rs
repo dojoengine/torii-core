@@ -1,13 +1,21 @@
 use crate::sqlite::json::SqliteJsonSerializer;
+use crate::sqlite::table::qualified_table_name;
 use crate::sqlite::types::{SqliteColumn, SqliteType};
-use crate::RecordResult;
+use crate::{RecordResult, Table, TypeResult};
+use introspect_types::bytes::IntoByteSource;
+use introspect_types::schema::{Names, TypeDefs};
 use introspect_types::serialize::CairoSeFrom;
 use introspect_types::{CairoDeserializer, DecodeError, EthAddress, ResultInto, TypeDef};
+use itertools::Itertools;
 use sqlx::encode::IsNull;
 use sqlx::error::BoxDynError;
 use sqlx::sqlite::SqliteArgumentValue;
-use sqlx::{Encode, Sqlite, Type};
+use sqlx::Error::Encode as EncodeError;
+use sqlx::{Arguments, Encode, Sqlite, Type};
 use starknet_types_core::felt::Felt;
+use std::sync::Arc;
+use torii_introspect::Record;
+use torii_sql::{Queries, SqliteArguments, SqliteQuery};
 
 pub fn coalesce_sql<'a>(table_name: &str, column: &SqliteColumn<'a>) -> String {
     let column_name = column.name;
@@ -163,4 +171,60 @@ impl<'q> Encode<'q, Sqlite> for SqliteValue {
             SqliteValue::Blob(b) => <Vec<u8> as Encode<Sqlite>>::encode_by_ref(b, buf),
         }
     }
+}
+
+pub fn insert_record_queries(
+    table: &Table,
+    columns: &[Felt],
+    records: &[Record],
+    _from_address: &Felt,
+    _block_number: u64,
+    _transaction_hash: &Felt,
+    queries: &mut Vec<SqliteQuery>,
+) -> RecordResult<()> {
+    let schema = table.get_record_schema(columns)?;
+    let table_name = qualified_table_name(&table.namespace, &table.name);
+    let all_columns = schema.all_columns();
+    let sql_columns = all_columns
+        .iter()
+        .map(|c| (*c).try_into())
+        .collect::<TypeResult<Vec<SqliteColumn>>>()?;
+    let column_names = all_columns.names();
+    let placeholders = sql_columns.iter().map(SqliteColumn::placeholder).join(", ");
+    let coalesce = sql_columns[1..]
+        .iter()
+        .map(|col| coalesce_sql(&table_name, col))
+        .join(", ");
+    let sql: Arc<str> = format!(
+        r#"INSERT INTO "{table_name}" ({}) VALUES ({}) ON CONFLICT("{}") DO UPDATE SET {}"#,
+        column_names
+            .iter()
+            .map(|name| format!(r#""{name}""#))
+            .collect::<Vec<_>>()
+            .join(", "),
+        placeholders,
+        schema.primary_name(),
+        coalesce
+    )
+    .into();
+
+    for record in records {
+        let mut arguments: SqliteArguments<'static> = SqliteArguments::default();
+        let mut primary_data = record.id.as_slice().into_source();
+        let mut data = record.values.as_slice().into_source();
+        arguments
+            .add(
+                schema
+                    .primary_type_def()
+                    .deserialize_column(&mut primary_data)?,
+            )
+            .map_err(EncodeError)?;
+        for type_def in schema.columns().type_defs() {
+            arguments
+                .add(type_def.deserialize_column(&mut data)?)
+                .map_err(EncodeError)?;
+        }
+        queries.add((sql.clone(), arguments));
+    }
+    Ok(())
 }

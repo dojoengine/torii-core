@@ -121,7 +121,7 @@ impl Display for PostgresType {
 
 impl Display for PrimaryKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, r#""{}" {} PRIMARY KEY"#, self.name, self.pg_type)
+        write!(f, r#""{}" {}"#, self.name, self.pg_type)
     }
 }
 

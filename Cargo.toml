@@ -9,7 +9,6 @@ members = [
   "crates/torii-controllers-sink",
   "crates/arcade-sink",
   "crates/torii-ecs-sink",
-  "crates/torii-entities-historical-sink",
   "crates/torii-erc20",
   "crates/torii-erc721",
   "crates/torii-erc1155",
@@ -112,7 +111,7 @@ tonic-build = "0.12"
 introspect-events = { git = "https://github.com/cartridge-gg/introspect", rev = "b89ee9e" }
 introspect-types = { git = "https://github.com/cartridge-gg/introspect", rev = "b89ee9e" }
 introspect-rust-macros = { git = "https://github.com/cartridge-gg/introspect", rev = "b89ee9e" }
-dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev = "fd99a0a" }
+dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev = "c45d711" }
 
 
 # Utils
@@ -132,7 +131,6 @@ torii-log-sink.path = "crates/torii-log-sink"
 torii-controllers-sink.path = "crates/torii-controllers-sink"
 torii-arcade-sink.path = "crates/arcade-sink"
 torii-ecs-sink.path = "crates/torii-ecs-sink"
-torii-entities-historical-sink.path = "crates/torii-entities-historical-sink"
 torii-erc20.path = "crates/torii-erc20"
 torii-erc721.path = "crates/torii-erc721"
 torii-erc1155.path = "crates/torii-erc1155"

@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS introspect_db_tables (
     name TEXT NOT NULL,
     "primary" TEXT NOT NULL,
     columns TEXT NOT NULL,
+    append_only INTEGER NOT NULL DEFAULT 0,
     alive INTEGER NOT NULL DEFAULT 1,
     updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
     PRIMARY KEY (namespace, id)

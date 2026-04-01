@@ -31,7 +31,6 @@ use torii_dojo::external_contract::{
 use torii_dojo::store::DojoStoreTrait;
 use torii_ecs_sink::proto::world::world_server::WorldServer;
 use torii_ecs_sink::{EcsSink, FILE_DESCRIPTOR_SET as ECS_DESCRIPTOR_SET};
-use torii_entities_historical_sink::EntitiesHistoricalSink;
 use torii_erc1155::proto::erc1155_server::Erc1155Server;
 use torii_erc1155::{
     Erc1155Decoder, Erc1155MetadataCommandHandler, Erc1155Service, Erc1155Sink, Erc1155Storage,
@@ -53,6 +52,8 @@ use torii_runtime_common::database::{
 };
 use torii_runtime_common::token_support::{resolve_installed_token_support, InstalledTokenSupport};
 use torii_sql::DbBackend;
+
+use crate::config::parse_historical_models;
 
 type StarknetProvider =
     starknet::providers::jsonrpc::JsonRpcClient<starknet::providers::jsonrpc::HttpTransport>;
@@ -491,7 +492,7 @@ async fn run_indexer(config: Config) -> Result<()> {
             erc1155: !token_targets.erc1155.is_empty(),
         },
     );
-    let historical_models = config.historical_models();
+    let historical_models = parse_historical_models(config.historical_models(), &contracts)?;
     let token_db_setup = if installed_token_support.any() {
         Some(resolve_token_db_setup(
             db_dir,
@@ -655,7 +656,7 @@ async fn run_indexer(config: Config) -> Result<()> {
                 decoder_registry.clone(),
                 contract_type_registry.clone(),
                 installed_external_decoders.clone(),
-                historical_models.clone(),
+                historical_models,
                 provider,
                 extractor,
             )
@@ -674,7 +675,7 @@ async fn run_indexer(config: Config) -> Result<()> {
                 decoder_registry.clone(),
                 contract_type_registry.clone(),
                 installed_external_decoders.clone(),
-                historical_models.clone(),
+                historical_models,
                 provider,
                 extractor,
             )
@@ -698,7 +699,7 @@ async fn run_with_postgres(
     decoder_registry: SharedDecoderRegistry,
     contract_type_registry: SharedContractTypeRegistry,
     installed_external_decoders: HashSet<DecoderId>,
-    historical_models: Vec<String>,
+    historical_models: HashSet<(Felt, String)>,
     provider: StarknetProvider,
     extractor: Box<dyn Extractor>,
 ) -> Result<()> {
@@ -709,8 +710,10 @@ async fn run_with_postgres(
         .connect(storage_database_url)
         .await?;
 
-    let decoder = DojoDecoder::new(pool.clone(), provider);
+    let mut decoder = DojoDecoder::new(pool.clone(), provider);
     let introspect_sink = IntrospectPgDb::new(pool.clone(), NamespaceMode::Address);
+
+    decoder.append_historical(historical_models);
     decoder.initialize().await?;
     introspect_sink.initialize_introspect_sql_sink().await?;
     decoder.load_tables(&[]).await?;
@@ -751,16 +754,7 @@ async fn run_with_postgres(
         .add_sink_boxed(Box::new(ecs_sink))
         .add_sink_boxed(Box::new(
             OrderedSinkPipeline::new("introspect-projection-pipeline")
-                .push(Box::new(introspect_sink))
-                .push(Box::new(
-                    EntitiesHistoricalSink::new(
-                        storage_database_url,
-                        config.max_db_connections,
-                        (),
-                        historical_models,
-                    )
-                    .await?,
-                )),
+                .push(Box::new(introspect_sink)),
         ));
     if let Some(tls) = config.tls_config()? {
         torii_config = torii_config.with_tls(tls);
@@ -877,7 +871,7 @@ async fn run_with_sqlite(
     decoder_registry: SharedDecoderRegistry,
     contract_type_registry: SharedContractTypeRegistry,
     installed_external_decoders: HashSet<DecoderId>,
-    historical_models: Vec<String>,
+    historical_models: HashSet<(Felt, String)>,
     provider: StarknetProvider,
     extractor: Box<dyn Extractor>,
 ) -> Result<()> {
@@ -901,7 +895,8 @@ async fn run_with_sqlite(
         .await?;
     sqlx::query("PRAGMA foreign_keys=ON").execute(&pool).await?;
 
-    let decoder = DojoDecoder::new(pool.clone(), provider);
+    let mut decoder = DojoDecoder::new(pool.clone(), provider);
+    decoder.append_historical(historical_models);
     decoder.initialize().await?;
     decoder.load_tables(&[]).await?;
 
@@ -940,20 +935,9 @@ async fn run_with_sqlite(
         .add_decoder(decoder)
         .add_sink_boxed(Box::new(ecs_sink))
         .add_sink_boxed(Box::new(
-            OrderedSinkPipeline::new("introspect-projection-pipeline")
-                .push(Box::new(IntrospectSqliteDb::new(
-                    pool.clone(),
-                    NamespaceMode::Address,
-                )))
-                .push(Box::new(
-                    EntitiesHistoricalSink::new(
-                        storage_database_url,
-                        config.max_db_connections,
-                        (),
-                        historical_models,
-                    )
-                    .await?,
-                )),
+            OrderedSinkPipeline::new("introspect-projection-pipeline").push(Box::new(
+                IntrospectSqliteDb::new(pool.clone(), NamespaceMode::Address),
+            )),
         ));
     if let Some(tls) = config.tls_config()? {
         torii_config = torii_config.with_tls(tls);

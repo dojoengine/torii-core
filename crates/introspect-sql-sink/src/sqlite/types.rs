@@ -121,11 +121,17 @@ impl SqliteType {
     pub fn placeholder(&self) -> &'static str {
         match self {
             SqliteType::Null => "NULL",
-            SqliteType::Text => "?",
-            SqliteType::Integer => "?",
-            SqliteType::Real => "?",
-            SqliteType::Blob => "?",
+            SqliteType::Text | SqliteType::Integer | SqliteType::Real | SqliteType::Blob => "?",
             SqliteType::Json => "jsonb(?)",
+        }
+    }
+    pub fn index_placeholder(&self, index: usize) -> String {
+        match self {
+            SqliteType::Null => "NULL".to_string(),
+            SqliteType::Text | SqliteType::Integer | SqliteType::Real | SqliteType::Blob => {
+                format!("?{index}")
+            }
+            SqliteType::Json => format!("jsonb(?{index})"),
         }
     }
 }
@@ -134,14 +140,22 @@ impl<'a> SqliteColumn<'a> {
     pub fn placeholder(&self) -> &'static str {
         self.sql_type.placeholder()
     }
+    pub fn index_placeholder(&self, index: usize) -> String {
+        self.sql_type.index_placeholder(index)
+    }
 }
 
 pub trait TypeDefSqliteExt {
     fn placeholder(&self) -> TypeResult<&'static str>;
+    fn index_placeholder(&self, index: usize) -> TypeResult<String>;
 }
 
 impl TypeDefSqliteExt for TypeDef {
     fn placeholder(&self) -> TypeResult<&'static str> {
         self.try_into().map(|t: SqliteType| t.placeholder())
+    }
+    fn index_placeholder(&self, index: usize) -> TypeResult<String> {
+        self.try_into()
+            .map(|t: SqliteType| t.index_placeholder(index))
     }
 }

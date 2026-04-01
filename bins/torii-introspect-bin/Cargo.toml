@@ -18,7 +18,6 @@ torii-erc20.workspace = true
 torii-erc721.workspace = true
 torii-erc1155.workspace = true
 torii-ecs-sink.workspace = true
-torii-entities-historical-sink.workspace = true
 torii-introspect-sql-sink = { workspace = true, features = [
     "postgres",
     "sqlite",

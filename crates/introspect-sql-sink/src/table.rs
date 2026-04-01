@@ -1,11 +1,10 @@
-use crate::{TableError, TableResult};
-use introspect_types::{ColumnInfo, MemberDef, TypeDef};
+use crate::error::{CollectColumnResults, ColumnNotFoundError, ColumnsNotFoundError};
+use introspect_types::{ColumnDef, ColumnInfo, MemberDef, PrimaryDef, TypeDef};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::rc::Rc;
-use torii_introspect::schema::TableInfo;
 use torii_introspect::tables::RecordSchema;
 
 #[derive(Debug)]
@@ -16,8 +15,9 @@ pub struct Table {
     pub owner: Felt,
     pub primary: ColumnInfo,
     pub columns: HashMap<Felt, ColumnInfo>,
-    pub alive: bool,
     pub dead: HashMap<u128, DeadField>,
+    pub append_only: bool,
+    pub alive: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -75,20 +75,16 @@ impl From<(u128, DeadField)> for DeadFieldDef {
 }
 
 impl Table {
-    pub fn column(&self, id: &Felt) -> TableResult<&ColumnInfo> {
-        self.columns
-            .get(id)
-            .ok_or_else(|| TableError::ColumnNotFound(*id, self.name.clone()))
+    pub fn column(&self, id: &Felt) -> Result<&ColumnInfo, ColumnNotFoundError> {
+        self.columns.get(id).ok_or_else(|| ColumnNotFoundError(*id))
     }
 
     pub fn namespace(&self) -> Rc<str> {
         self.namespace.as_str().into()
     }
 
-    pub fn columns(&self, ids: &[Felt]) -> TableResult<Vec<&ColumnInfo>> {
-        ids.iter()
-            .map(|id| self.column(id))
-            .collect::<TableResult<Vec<&ColumnInfo>>>()
+    pub fn columns(&self, ids: &[Felt]) -> Result<Vec<&ColumnInfo>, ColumnsNotFoundError> {
+        ids.iter().map(|id| self.column(id)).collect_columns()
     }
 
     pub fn all_columns(&self) -> Vec<&ColumnInfo> {
@@ -98,10 +94,10 @@ impl Table {
     pub fn columns_with_ids<'a>(
         &'a self,
         ids: &'a [Felt],
-    ) -> TableResult<Vec<(&'a Felt, &'a ColumnInfo)>> {
+    ) -> Result<Vec<(&'a Felt, &'a ColumnInfo)>, ColumnsNotFoundError> {
         ids.iter()
             .map(|id| self.column(id).map(|col| (id, col)))
-            .collect::<TableResult<Vec<(&Felt, &ColumnInfo)>>>()
+            .collect_columns()
     }
 
     pub fn all_columns_with_ids(&self) -> Vec<(&Felt, &ColumnInfo)> {
@@ -109,25 +105,32 @@ impl Table {
     }
 
     pub fn new(
-        id: Felt,
         namespace: String,
+        id: Felt,
         owner: Felt,
-        info: TableInfo,
+        name: String,
+        primary: PrimaryDef,
+        columns: &[ColumnDef],
         dead: Option<Vec<(u128, DeadField)>>,
+        append_only: bool,
     ) -> Self {
         Table {
             id,
             namespace,
             owner,
-            name: info.name,
-            primary: info.primary.into(),
-            columns: info.columns.into_iter().map_into().collect(),
-            alive: true,
+            name,
+            primary: primary.into(),
+            columns: columns.into_iter().cloned().map_into().collect(),
             dead: dead.unwrap_or_default().into_iter().collect(),
+            append_only,
+            alive: true,
         }
     }
 
-    pub fn get_record_schema(&self, columns: &[Felt]) -> TableResult<RecordSchema<'_>> {
+    pub fn get_record_schema(
+        &self,
+        columns: &[Felt],
+    ) -> Result<RecordSchema<'_>, ColumnsNotFoundError> {
         Ok(RecordSchema::new(&self.primary, self.columns(columns)?))
     }
 }

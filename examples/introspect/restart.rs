@@ -3,6 +3,7 @@ use starknet::core::types::Felt;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::store::DojoStoreTrait;
 use torii_dojo::DojoToriiError;
+use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_introspect_sql_sink::IntrospectDb;
 use torii_sql::{DbPool, PoolConfig};
 use torii_test_utils::{resolve_path_like, FakeProvider, MultiContractEventIterator};
@@ -11,7 +12,7 @@ use torii_test_utils::{resolve_path_like, FakeProvider, MultiContractEventIterat
 const DB_URL: &str = "sqlite://sqlite-data.db?mode=rwc";
 const EVENT_PATHS: [&str; 2] = ["~/tc-tests/blob-arena/events", "~/tc-tests/pistols/events"];
 const MODEL_CONTRACTS_PATH: &str = "~/tc-tests/model-contracts";
-const BATCH_SIZE: usize = 1000;
+const BATCH_SIZE: usize = 2000;
 const PISTOLS_ADDRESS: Felt =
     Felt::from_hex_unchecked("08b4838140a3cbd36ebe64d4b5aaf56a30cc3753c928a79338bf56c53f506c5");
 const BLOB_ARENA_ADDRESS: Felt =
@@ -37,9 +38,9 @@ async fn run_events(
     let db = IntrospectDb::new(pool, ADDRESSES);
     decoder.initialize().await.unwrap();
     decoder.load_tables(&[]).await.unwrap();
-    let results = db.initialize_introspect_sql_sink().await.unwrap();
-    if results.is_empty() {
-        for err in results {
+    let errors = db.initialize_introspect_sql_sink().await.unwrap();
+    if !errors.is_empty() {
+        for err in errors {
             println!("Error loading table: {err}");
         }
         panic!("");
@@ -56,6 +57,13 @@ async fn run_events(
             *event_n += 1;
             this_run += 1;
             match decoder.decode_raw_event(&event).await {
+                Ok(IntrospectBody {
+                    metadata,
+                    msg: IntrospectMsg::CreateTable(mut msg),
+                }) => {
+                    msg.append_only = true;
+                    msgs.push((IntrospectMsg::CreateTable(msg), metadata).into());
+                }
                 Ok(msg) => {
                     msgs.push(msg);
                 }
@@ -67,6 +75,7 @@ async fn run_events(
                 }
             };
         }
+
         let msgs_ref = msgs.iter().collect_vec();
         for res in db.process_messages(msgs_ref).await.unwrap() {
             match res {

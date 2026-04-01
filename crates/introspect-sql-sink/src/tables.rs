@@ -3,13 +3,11 @@ use crate::error::RecordResultExt;
 use crate::namespace::{NamespaceKey, TableKey};
 use crate::table::Table;
 use crate::{DbError, DbResult};
-use introspect_types::ResultInto;
+use introspect_types::{ColumnDef, PrimaryDef, ResultInto};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::RwLock;
-use torii_introspect::events::IntrospectMsg;
-use torii_introspect::schema::TableSchema;
 use torii_introspect::InsertsFields;
 use torii_sql::FlexQuery;
 
@@ -28,53 +26,71 @@ impl Tables {
     pub fn create_table<DB: IntrospectQueryMaker>(
         &self,
         namespace_key: NamespaceKey,
-        to_table: impl Into<TableSchema>,
+        id: &Felt,
+        name: &str,
+        primary: &PrimaryDef,
+        columns: &[ColumnDef],
+        append_only: bool,
         from_address: &Felt,
         block_number: u64,
         transaction_hash: &Felt,
         queries: &mut Vec<FlexQuery<DB>>,
     ) -> DbResult<()> {
-        let (id, info) = Into::<TableSchema>::into(to_table).into();
         let namespace = namespace_key.to_string();
 
-        let key = TableKey::new(namespace_key, id);
-        self.assert_table_not_exists(&key, &info.name)?;
+        let key = TableKey::new(namespace_key, *id);
+        self.assert_table_not_exists(&key, name)?;
         DB::create_table_queries(
             &namespace,
-            &id,
-            &info.name,
-            &info.primary,
-            &info.columns,
+            id,
+            name,
+            primary,
+            columns,
+            append_only,
             from_address,
             block_number,
             transaction_hash,
             queries,
         )?;
         let mut tables = self.write()?;
-        tables.insert(key, Table::new(id, namespace, *from_address, info, None));
+        tables.insert(
+            key,
+            Table::new(
+                namespace,
+                *id,
+                *from_address,
+                name.to_string(),
+                primary.clone(),
+                columns,
+                None,
+                append_only,
+            ),
+        );
         Ok(())
     }
 
     pub fn update_table<DB: IntrospectQueryMaker>(
         &self,
         namespace_key: NamespaceKey,
-        to_table: impl Into<TableSchema>,
+        id: &Felt,
+        name: &str,
+        primary: &PrimaryDef,
+        columns: &[ColumnDef],
         from_address: &Felt,
         block_number: u64,
         transaction_hash: &Felt,
         queries: &mut Vec<FlexQuery<DB>>,
     ) -> DbResult<()> {
-        let (id, new) = Into::<TableSchema>::into(to_table).into();
         let mut tables = self.write()?;
-        let key = TableKey::new(namespace_key, id);
+        let key = TableKey::new(namespace_key, *id);
         let table = tables
             .get_mut(&key)
             .ok_or_else(|| DbError::TableNotFound(key.clone()))?;
         DB::update_table_queries(
             table,
-            &new.name,
-            &new.primary,
-            &new.columns,
+            name,
+            primary,
+            columns,
             from_address,
             block_number,
             transaction_hash,
@@ -124,11 +140,9 @@ impl Tables {
         if !table.alive {
             return Ok(());
         }
-        let schema = table.get_record_schema(&event.columns)?;
         DB::insert_record_queries(
-            &table.namespace,
-            &table.name,
-            &schema,
+            &table,
+            &event.columns,
             &event.records,
             from_address,
             block_number,
@@ -136,51 +150,5 @@ impl Tables {
             queries,
         )
         .to_db_result(&table.name)
-    }
-
-    pub fn handle_message<DB: IntrospectQueryMaker>(
-        &self,
-        namespace: NamespaceKey,
-        msg: &IntrospectMsg,
-        from_address: &Felt,
-        block_number: u64,
-        transaction_hash: &Felt,
-        queries: &mut Vec<FlexQuery<DB>>,
-    ) -> DbResult<()> {
-        match msg {
-            IntrospectMsg::CreateTable(event) => self.create_table::<DB>(
-                namespace,
-                event.clone(),
-                from_address,
-                block_number,
-                transaction_hash,
-                queries,
-            ),
-            IntrospectMsg::UpdateTable(event) => self.update_table::<DB>(
-                namespace,
-                event.clone(),
-                from_address,
-                block_number,
-                transaction_hash,
-                queries,
-            ),
-            IntrospectMsg::AddColumns(event) => self.set_table_dead(namespace, event.table),
-            IntrospectMsg::DropColumns(event) => self.set_table_dead(namespace, event.table),
-            IntrospectMsg::RetypeColumns(event) => self.set_table_dead(namespace, event.table),
-            IntrospectMsg::RetypePrimary(event) => self.set_table_dead(namespace, event.table),
-            IntrospectMsg::RenameTable(_)
-            | IntrospectMsg::DropTable(_)
-            | IntrospectMsg::RenameColumns(_)
-            | IntrospectMsg::RenamePrimary(_) => Ok(()),
-            IntrospectMsg::InsertsFields(event) => self.insert_fields::<DB>(
-                namespace,
-                event,
-                from_address,
-                block_number,
-                transaction_hash,
-                queries,
-            ),
-            IntrospectMsg::DeleteRecords(_) | IntrospectMsg::DeletesFields(_) => Ok(()),
-        }
     }
 }

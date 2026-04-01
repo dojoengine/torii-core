@@ -1,29 +1,22 @@
-use crate::sqlite::record::{coalesce_sql, SqliteDeserializer};
+use crate::sqlite::append_only::append_only_record_queries;
+use crate::sqlite::record::insert_record_queries;
 use crate::sqlite::table::{
     create_table_query, persist_table_state_query, qualified_table_name, update_column,
     update_columns, FETCH_TABLES_QUERY,
 };
-use crate::sqlite::types::SqliteColumn;
 use crate::{
     DbColumn, DbDeadField, DbResult, DbTable, IntrospectDb, IntrospectInitialize,
-    IntrospectQueryMaker, IntrospectSqlSink, RecordResult, Table, TableResult, TypeResult,
-    UpgradeResultExt,
+    IntrospectQueryMaker, IntrospectSqlSink, RecordResult, Table, TableResult, UpgradeResultExt,
 };
 use async_trait::async_trait;
-use introspect_types::bytes::IntoByteSource;
-use introspect_types::schema::{Names, TypeDefs};
 use introspect_types::{ColumnDef, ColumnInfo, PrimaryDef, ResultInto};
 use itertools::Itertools;
 use sqlx::prelude::FromRow;
 use sqlx::types::Json;
-use sqlx::Arguments;
-use sqlx::Error::Encode as EncodeError;
 use starknet_types_core::felt::{Felt, FromStrError};
 use std::collections::HashMap;
-use std::sync::Arc;
-use torii_introspect::tables::RecordSchema;
 use torii_introspect::Record;
-use torii_sql::{PoolExt, Queries, Sqlite, SqliteArguments, SqlitePool, SqliteQuery};
+use torii_sql::{PoolExt, Queries, Sqlite, SqlitePool, SqliteQuery};
 
 pub const INTROSPECT_SQLITE_SINK_MIGRATIONS: sqlx::migrate::Migrator =
     sqlx::migrate!("./migrations/sqlite");
@@ -38,6 +31,7 @@ pub struct SqliteTableRow {
     name: String,
     primary: Json<PrimaryDef>,
     columns: Json<HashMap<Felt, ColumnInfo>>,
+    append_only: bool,
     alive: bool,
 }
 
@@ -52,6 +46,7 @@ impl TryFrom<SqliteTableRow> for DbTable {
             primary: value.primary.0,
             columns: value.columns.0.into_iter().map_into().collect(),
             dead: HashMap::new(),
+            append_only: value.append_only,
             alive: value.alive,
         })
     }
@@ -65,18 +60,26 @@ impl IntrospectQueryMaker for Sqlite {
         name: &str,
         primary: &PrimaryDef,
         columns: &[ColumnDef],
+        append_only: bool,
         from_address: &Felt,
         block_number: u64,
         transaction_hash: &Felt,
         queries: &mut Vec<SqliteQuery>,
     ) -> TableResult<()> {
-        queries.add(create_table_query(namespace, name, primary, columns)?);
+        queries.add(create_table_query(
+            namespace,
+            name,
+            primary,
+            columns,
+            append_only,
+        )?);
         persist_table_state_query(
             namespace,
             id,
             name,
             primary,
             columns,
+            append_only,
             from_address,
             block_number,
             transaction_hash,
@@ -116,6 +119,7 @@ impl IntrospectQueryMaker for Sqlite {
             &table.name,
             primary,
             &table.columns.iter().collect_vec(),
+            table.append_only,
             from_address,
             block_number,
             transaction_hash,
@@ -123,59 +127,35 @@ impl IntrospectQueryMaker for Sqlite {
         )
     }
     fn insert_record_queries(
-        namespace: &str,
-        table_name: &str,
-        schema: &RecordSchema<'_>,
+        table: &Table,
+        columns: &[Felt],
         records: &[Record],
         _from_address: &Felt,
         _block_number: u64,
         _transaction_hash: &Felt,
         queries: &mut Vec<SqliteQuery>,
     ) -> RecordResult<()> {
-        let table_name = qualified_table_name(namespace, table_name);
-        let all_columns = schema.all_columns();
-        let sql_columns = all_columns
-            .iter()
-            .map(|c| (*c).try_into())
-            .collect::<TypeResult<Vec<SqliteColumn>>>()?;
-        let column_names = all_columns.names();
-        let placeholders = sql_columns.iter().map(SqliteColumn::placeholder).join(", ");
-        let coalesce = sql_columns[1..]
-            .iter()
-            .map(|col| coalesce_sql(&table_name, col))
-            .join(", ");
-        let sql: Arc<str> = format!(
-            r#"INSERT INTO "{table_name}" ({}) VALUES ({}) ON CONFLICT("{}") DO UPDATE SET {}"#,
-            column_names
-                .iter()
-                .map(|name| format!(r#""{name}""#))
-                .collect::<Vec<_>>()
-                .join(", "),
-            placeholders,
-            schema.primary_name(),
-            coalesce
-        )
-        .into();
-
-        for record in records {
-            let mut arguments: SqliteArguments<'static> = SqliteArguments::default();
-            let mut primary_data = record.id.as_slice().into_source();
-            let mut data = record.values.as_slice().into_source();
-            arguments
-                .add(
-                    schema
-                        .primary_type_def()
-                        .deserialize_column(&mut primary_data)?,
-                )
-                .map_err(EncodeError)?;
-            for type_def in schema.columns().type_defs() {
-                arguments
-                    .add(type_def.deserialize_column(&mut data)?)
-                    .map_err(EncodeError)?;
-            }
-            queries.add((sql.clone(), arguments));
+        if table.append_only {
+            append_only_record_queries(
+                table,
+                columns,
+                records,
+                _from_address,
+                _block_number,
+                _transaction_hash,
+                queries,
+            )
+        } else {
+            insert_record_queries(
+                table,
+                columns,
+                records,
+                _from_address,
+                _block_number,
+                _transaction_hash,
+                queries,
+            )
         }
-        Ok(())
     }
 }
 

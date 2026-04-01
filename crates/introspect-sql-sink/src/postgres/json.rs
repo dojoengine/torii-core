@@ -1,8 +1,9 @@
 use introspect_types::serialize::ToCairoDeSeFrom;
 use introspect_types::serialize_def::CairoTypeSerialization;
-use introspect_types::{CairoDeserializer, ResultDef, TupleDef, TypeDef};
-use serde::ser::SerializeMap;
+use introspect_types::{CairoDeserializer, EnumDef, ResultDef, TupleDef, TypeDef, VariantDef};
+use serde::ser::{Error as SerError, SerializeMap};
 use serde::Serializer;
+use starknet_types_core::felt::Felt;
 
 pub struct PostgresJsonSerializer;
 
@@ -48,27 +49,40 @@ impl CairoTypeSerialization for PostgresJsonSerializer {
         seq.end()
     }
 
-    fn serialize_variant<'a, S: Serializer>(
+    fn serialize_enum<'a, S: Serializer>(
         &'a self,
         data: &mut impl CairoDeserializer,
         serializer: S,
-        name: &str,
-        type_def: &'a TypeDef,
+        enum_def: &'a EnumDef,
+        variant: Felt,
     ) -> Result<S::Ok, S::Error> {
-        match type_def {
-            TypeDef::None => {
-                let mut map = serializer.serialize_map(Some(1))?;
-                map.serialize_entry("_variant", name)?;
-                map
-            }
-            _ => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_variant", name)?;
-                map.serialize_entry(name, &type_def.to_de_se(data, self))?;
-                map
+        let VariantDef { name, type_def, .. } =
+            enum_def.get_variant(&variant).map_err(S::Error::custom)?;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("_variant", name)?;
+        if type_def != &TypeDef::None {
+            map.serialize_entry(name, &type_def.to_de_se(data, self))?;
+        }
+        for v in &enum_def.order {
+            if v != &variant {
+                let VariantDef { name, type_def, .. } =
+                    enum_def.get_variant(v).map_err(S::Error::custom)?;
+                if type_def != &TypeDef::None {
+                    map.serialize_entry(name, &())?;
+                }
             }
         }
-        .end()
+        map.end()
+    }
+
+    fn serialize_variant<'a, S: Serializer>(
+        &'a self,
+        _data: &mut impl CairoDeserializer,
+        _serializer: S,
+        _name: &str,
+        _type_def: &'a TypeDef,
+    ) -> Result<S::Ok, S::Error> {
+        unimplemented!("variant serialization is only supported within enums, and should not be called directly")
     }
 
     fn serialize_result<'a, S: Serializer>(

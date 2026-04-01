@@ -6604,6 +6604,7 @@ mod tests {
                 attributes: vec![],
                 type_def: TypeDef::Bool,
             }],
+            append_only: false,
         };
 
         service.cache_created_table(world_address, &table).await;
@@ -6699,6 +6700,7 @@ mod tests {
                 attributes: vec![],
                 type_def: TypeDef::Bool,
             }],
+            append_only: false,
         };
 
         service.cache_created_table(world_address, &table).await;
@@ -6808,6 +6810,7 @@ mod tests {
                 attributes: vec![Attribute::new_empty("key".to_string())],
                 type_def: TypeDef::Felt252,
             }],
+            append_only: false,
         };
 
         service.cache_created_table(world_address, &table).await;

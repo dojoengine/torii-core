@@ -9,6 +9,7 @@ use dojo_introspect::events::{
     ModelWithSchemaRegistered, StoreDelRecord, StoreSetRecord, StoreUpdateMember,
     StoreUpdateRecord,
 };
+use dojo_introspect::selector::compute_selector_from_dojo_tag;
 use dojo_introspect::serde::dojo_primary_def;
 use dojo_introspect::{DojoSchema, DojoSchemaFetcher};
 use introspect_types::{
@@ -18,14 +19,14 @@ use introspect_types::{
 use itertools::Itertools;
 use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::RwLock;
 use torii::etl::event::EmittedEventExt;
 use torii::etl::{Decoder, Envelope, EventMsg};
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_introspect::schema::{TableMetadata, TableSchema};
-use torii_introspect::EventId;
+use torii_introspect::{CreateTable, EventId};
 
 pub const DOJO_ID_FIELD_NAME: &str = "entity_id";
 
@@ -33,6 +34,7 @@ pub struct DojoDecoder<Store, F> {
     pub tables: RwLock<HashMap<Felt, DojoTableInfo>>,
     pub store: Store,
     pub fetcher: F,
+    pub append_only: HashSet<(Felt, Felt)>,
 }
 
 fn deserialize_data<'a, T>(keys: &[Felt], data: &'a [Felt]) -> DojoToriiResult<T>
@@ -120,9 +122,15 @@ where
             tables: Default::default(),
             store,
             fetcher,
+            append_only: HashSet::new(),
         }
     }
-
+    pub fn append_historical(&mut self, models: HashSet<(Felt, String)>) {
+        for (address, name) in models {
+            let table_id = compute_selector_from_dojo_tag(&name).unwrap();
+            self.append_only.insert((address, table_id));
+        }
+    }
     pub async fn load_tables(&self, owners: &[Felt]) -> DojoToriiResult<()> {
         let new = self.read_tables(owners).await?;
         let mut tables = self.tables.write()?;
@@ -150,6 +158,7 @@ where
             tables: RwLock::new(tables),
             store,
             fetcher,
+            append_only: HashSet::new(),
         }
     }
 
@@ -160,7 +169,7 @@ where
         name: &str,
         schema: DojoSchema,
         metadata: &impl TableMetadata,
-    ) -> DojoToriiResult<TableSchema> {
+    ) -> DojoToriiResult<CreateTable> {
         let full_table = DojoTable::from_schema(schema, namespace, name, dojo_primary_def());
         self.save_table(
             owner,
@@ -180,7 +189,10 @@ where
             }
         }
         self.tables.write()?.insert(id, table);
-        Ok(full_table.into())
+        Ok(CreateTable::from_schema(
+            full_table.into(),
+            self.append_only.contains(&(owner.clone(), id)),
+        ))
     }
 
     pub async fn update_table(

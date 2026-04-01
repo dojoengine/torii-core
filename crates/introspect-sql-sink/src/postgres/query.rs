@@ -20,24 +20,27 @@ use torii_sql::{Queries, SqlxResult};
 
 pub const COMMIT_CMD: &str = "--COMMIT";
 
-const CREATE_METADATA_COLUMNS: &str =  "__created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), __updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), __created_block public.uint64 NOT NULL, __updated_block public.uint64 NOT NULL, __created_tx public.felt252 NOT NULL, __updated_tx public.felt252 NOT NULL);";
+const CREATE_METADATA_COLUMNS: &str =  "__created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), __updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), __created_block public.uint64 NOT NULL, __updated_block public.uint64 NOT NULL, __created_tx public.felt252 NOT NULL, __updated_tx public.felt252 NOT NULL";
+const CREATE_APPEND_ONLY_METADATA_COLUMNS: &str =  "__created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), __created_block public.uint64 NOT NULL, __created_tx public.felt252 NOT NULL";
+const APPEND_ONLY_REVISION_COLUMN: &str = r#""__revision" bigint NOT NULL, "#;
+const INSERT_TABLE_QUERY: &str = r#"INSERT INTO introspect.db_tables
+    ("schema", id, owner, name, primary_def, append_only, updated_at, created_block, updated_block, created_tx, updated_tx)
+    VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7::uint64, $7::uint64, $8, $8)
+    ON CONFLICT ("schema", id) DO UPDATE SET
+    name = EXCLUDED.name, append_only = EXCLUDED.append_only, primary_def = EXCLUDED.primary_def, updated_at = NOW(), updated_block = EXCLUDED.updated_block, updated_tx = EXCLUDED.updated_tx"#;
 const INSERT_DEAD_MEMBER_QUERY: &str = r#"INSERT INTO introspect.db_dead_fields
     ("schema", "table", id, name, type_def, updated_at, created_block, updated_block, created_tx, updated_tx)
     SELECT $1, $2, unnest($3::bigint[]), unnest($4::text[]), unnest($5::jsonb[]), NOW(), $6::uint64, $6::uint64, $7, $7
     ON CONFLICT ("schema", "table", id) DO UPDATE SET
     name = EXCLUDED.name, type_def = EXCLUDED.type_def, updated_at = NOW(), updated_block = EXCLUDED.updated_block, updated_tx = EXCLUDED.updated_tx"#;
-const INSERT_TABLE_QUERY: &str = r#"INSERT INTO introspect.db_tables
-    ("schema", id, owner, name, primary_def, updated_at, created_block, updated_block, created_tx, updated_tx)
-    VALUES ($1, $2, $3, $4, $5, NOW(), $6::uint64, $6::uint64, $7, $7)
-    ON CONFLICT ("schema", id) DO UPDATE SET
-    name = EXCLUDED.name, primary_def = EXCLUDED.primary_def, updated_at = NOW(), updated_block = EXCLUDED.updated_block, updated_tx = EXCLUDED.updated_tx"#;
+
 const INSERT_COLUMN_QUERY: &str = r#"INSERT INTO introspect.db_columns
     ("schema", "table", id, name, type_def, updated_at, created_block, updated_block, created_tx, updated_tx)
     SELECT $1, $2, unnest($3::felt252[]), unnest($4::text[]), unnest($5::jsonb[]), NOW(), $6::uint64, $6::uint64, $7, $7
     ON CONFLICT ("schema", "table", id) DO UPDATE SET
     name = EXCLUDED.name, type_def = EXCLUDED.type_def, updated_at = NOW(), updated_block = EXCLUDED.updated_block, updated_tx = EXCLUDED.updated_tx"#;
 
-const FETCH_TABLES_QUERY: &str = r#"SELECT "schema", id, name, primary_def, owner FROM introspect.db_tables WHERE $1::text[] = '{}'::text[] OR "schema" = ANY($1::text[])"#;
+const FETCH_TABLES_QUERY: &str = r#"SELECT "schema", id, name, primary_def, owner, append_only FROM introspect.db_tables WHERE $1::text[] = '{}'::text[] OR "schema" = ANY($1::text[])"#;
 const FETCH_COLUMNS_QUERY: &str = r#"SELECT "schema", "table", id, name, type_def FROM introspect.db_columns WHERE $1::text[] = '{}'::text[] OR "schema" = ANY($1::text[])"#;
 const FETCH_DEAD_FIELDS_QUERY: &str = r#"SELECT "schema", "table", id, name, type_def FROM introspect.db_dead_fields WHERE $1::text[] = '{}'::text[] OR "schema" = ANY($1::text[])"#;
 
@@ -48,6 +51,7 @@ pub struct TableRow {
     pub name: String,
     pub primary_def: PgPrimary,
     pub owner: PgFelt,
+    pub append_only: bool,
 }
 
 #[derive(FromRow)]
@@ -74,6 +78,7 @@ pub struct CreatePgTable {
     pub primary: PrimaryKey,
     pub columns: Vec<PostgresField>,
     pub pg_types: Vec<CreatesType>,
+    pub append_only: bool,
 }
 
 #[derive(Debug)]
@@ -164,10 +169,25 @@ impl Display for CreatePgTable {
             r#"CREATE TABLE IF NOT EXISTS {} ({}, "#,
             self.name, self.primary
         )?;
+        if self.append_only {
+            APPEND_ONLY_REVISION_COLUMN.fmt(f)?;
+        }
         for column in &self.columns {
             write!(f, "{column}, ")?;
         }
-        CREATE_METADATA_COLUMNS.fmt(f)
+        if self.append_only {
+            write!(
+                f,
+                r#"{CREATE_APPEND_ONLY_METADATA_COLUMNS}, PRIMARY KEY ("{}", "__revision"));"#,
+                self.primary.name
+            )
+        } else {
+            write!(
+                f,
+                r#"{CREATE_METADATA_COLUMNS}, PRIMARY KEY ("{}"));"#,
+                self.primary.name
+            )
+        }
     }
 }
 
@@ -574,6 +594,7 @@ impl From<TableRow> for DbTable {
             primary: value.primary_def.into(),
             columns: HashMap::new(),
             dead: HashMap::new(),
+            append_only: value.append_only,
             alive: true,
         }
     }
@@ -626,6 +647,7 @@ pub fn insert_table_query(
     name: &str,
     primary_def: &PrimaryDef,
     from_address: &Felt,
+    append_only: bool,
     block_number: u64,
     transaction_hash: &Felt,
 ) -> Result<PgQuery, BoxDynError> {
@@ -635,6 +657,7 @@ pub fn insert_table_query(
     args.add(PgFelt::from(*from_address))?;
     args.add(name.to_owned())?;
     args.add(PgPrimary::from(primary_def))?;
+    args.add(append_only)?;
     args.add(block_number.to_string())?;
     args.add(PgFelt::from(*transaction_hash))?;
 

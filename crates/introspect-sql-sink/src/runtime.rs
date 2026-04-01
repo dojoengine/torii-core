@@ -46,13 +46,13 @@ impl IntrospectInitialize for DbPool {
 impl IntrospectProcessor for DbPool {
     async fn process_msgs(
         &self,
-        tables: &Tables,
         namespaces: &NamespaceMode,
+        tables: &Tables,
         msgs: Vec<&IntrospectBody>,
     ) -> DbResult<Vec<DbResult<()>>> {
         match self {
-            DbPool::Postgres(pg) => pg.process_msgs(tables, namespaces, msgs).await,
-            DbPool::Sqlite(site) => site.process_msgs(tables, namespaces, msgs).await,
+            DbPool::Postgres(pg) => pg.process_msgs(namespaces, tables, msgs).await,
+            DbPool::Sqlite(site) => site.process_msgs(namespaces, tables, msgs).await,
         }
     }
 }

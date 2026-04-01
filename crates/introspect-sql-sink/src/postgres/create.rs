@@ -293,6 +293,7 @@ impl CreatePgTable {
         name: &str,
         primary: &PrimaryDef,
         columns: &[ColumnDef],
+        append_only: bool,
     ) -> TypeResult<Self> {
         let mut creates: Vec<CreatesType> = Vec::new();
         let branch = Xxh3::new_based(id);
@@ -306,6 +307,7 @@ impl CreatePgTable {
             primary,
             columns,
             pg_types: creates,
+            append_only,
         })
     }
     pub fn make_queries(&self, queries: &mut Vec<PgQuery>) {
@@ -316,9 +318,11 @@ impl CreatePgTable {
             queries.add(pg_type.to_string());
         }
         queries.add(self.to_string());
-        queries.add(format!(
-            r#"CREATE TRIGGER set_timestamps BEFORE INSERT ON {} FOR EACH ROW EXECUTE FUNCTION introspect.set_default_timestamps();"#,
-            self.name
-        ));
+        if !self.append_only {
+            queries.add(format!(
+                r#"CREATE TRIGGER set_timestamps BEFORE INSERT ON {} FOR EACH ROW EXECUTE FUNCTION introspect.set_default_timestamps();"#,
+                self.name
+            ));
+        }
     }
 }

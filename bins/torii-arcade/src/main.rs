@@ -31,7 +31,6 @@ use torii_dojo::external_contract::{
 use torii_dojo::store::DojoStoreTrait;
 use torii_ecs_sink::proto::world::world_server::WorldServer;
 use torii_ecs_sink::{EcsSink, FILE_DESCRIPTOR_SET as ECS_DESCRIPTOR_SET};
-use torii_entities_historical_sink::EntitiesHistoricalSink;
 use torii_erc1155::proto::erc1155_server::Erc1155Server;
 use torii_erc1155::{
     Erc1155Decoder, Erc1155MetadataCommandHandler, Erc1155Service, Erc1155Sink, Erc1155Storage,
@@ -440,20 +439,8 @@ async fn run_indexer(config: Config) -> Result<()> {
         .register_encoded_file_descriptor_set(ECS_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(ARCADE_DESCRIPTOR_SET);
 
-    let historical_sink = Box::new(
-        EntitiesHistoricalSink::new(
-            &storage_database_url,
-            config.max_db_connections,
-            (),
-            historical_models,
-        )
-        .await?,
-    );
-    let arcade_projection_pipeline = ArcadeProjectionPipeline::new(vec![
-        Box::new(introspect_sink),
-        historical_sink,
-        Box::new(arcade_sink),
-    ]);
+    let arcade_projection_pipeline =
+        ArcadeProjectionPipeline::new(vec![Box::new(introspect_sink), Box::new(arcade_sink)]);
 
     let mut torii_config = torii::ToriiConfig::builder()
         .port(config.port)

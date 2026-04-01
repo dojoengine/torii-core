@@ -987,7 +987,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect"
 version = "0.1.0"
-source = "git+https://github.com/dojoengine/dojo-introspect?rev=fd99a0a#fd99a0a3fe5698e1d26bbf06d8ff7d5fcc541a77"
+source = "git+https://github.com/dojoengine/dojo-introspect?rev=c45d711#c45d711236c856bc60d567e43965b2043d5cb2b0"
 dependencies = [
  "async-trait",
  "introspect-rust-macros",
@@ -4803,7 +4803,6 @@ dependencies = [
  "torii-config-common",
  "torii-dojo",
  "torii-ecs-sink",
- "torii-entities-historical-sink",
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",
@@ -4933,28 +4932,6 @@ dependencies = [
  "tonic-build",
  "torii",
  "torii-dojo",
- "torii-introspect",
- "torii-runtime-common",
- "torii-sql",
- "tracing",
-]
-
-[[package]]
-name = "torii-entities-historical-sink"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "introspect-types",
- "itertools 0.14.0",
- "primitive-types 0.14.0",
- "serde",
- "serde_json",
- "sqlx",
- "starknet",
- "thiserror 2.0.18",
- "tokio",
- "torii",
  "torii-introspect",
  "torii-runtime-common",
  "torii-sql",
@@ -5121,7 +5098,6 @@ dependencies = [
  "torii-controllers-sink",
  "torii-dojo",
  "torii-ecs-sink",
- "torii-entities-historical-sink",
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",

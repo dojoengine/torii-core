@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS introspect.db_tables (
     name TEXT NOT NULL,
     "owner" felt252 NOT NULL,
     primary_def introspect.primary_def NOT NULL,
+    append_only BOOLEAN NOT NULL DEFAULT FALSE,
     alive BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

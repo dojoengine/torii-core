@@ -13,16 +13,16 @@ use torii_sql::types::SqlFelt;
 use torii_sql::{Queries, SqliteArguments, SqliteQuery};
 
 pub const FETCH_TABLES_QUERY: &str = r#"
-    SELECT namespace, id, owner, name, "primary", columns, alive
+    SELECT namespace, id, owner, name, "primary", columns, append_only, alive
     FROM introspect_db_tables
     ORDER BY updated_at ASC
 "#;
 
 const INSERT_TABLE_QUERY: &str = r#" INSERT INTO introspect_db_tables
-    (namespace, id, owner, name, "primary", columns, updated_at)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch())
+    (namespace, id, owner, name, "primary", columns, append_only, updated_at)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, unixepoch())
     ON CONFLICT (namespace, id) DO UPDATE SET 
-    owner = excluded.owner, name = excluded.name, "primary" = excluded."primary", columns = excluded.columns, updated_at = unixepoch()
+    owner = excluded.owner, name = excluded.name, "primary" = excluded."primary", columns = excluded.columns, append_only = excluded.append_only, updated_at = unixepoch()
 "#;
 
 struct TableName<'a>(&'a str, &'a str);
@@ -63,6 +63,7 @@ pub fn persist_table_state_query<'a>(
     name: &str,
     primary: &PrimaryDef,
     columns: &'a [impl AsColumnRef<'a>],
+    append_only: bool,
     from_address: &Felt,
     _block_number: u64,
     _transaction_hash: &Felt,
@@ -75,6 +76,7 @@ pub fn persist_table_state_query<'a>(
     args.add(name.to_string())?;
     args.add(serde_json::to_string(primary)?)?;
     args.add(serialize_columns(columns)?)?;
+    args.add(append_only)?;
     queries.add((INSERT_TABLE_QUERY, args));
     Ok(())
 }
@@ -84,18 +86,31 @@ pub fn create_table_query(
     name: &str,
     primary: &PrimaryDef,
     columns: &[ColumnDef],
+    append_only: bool,
 ) -> TableResult<String> {
     let table_name = TableName(namespace, name);
     let mut query = format!(
-        r#"CREATE TABLE IF NOT EXISTS "{table_name}" ("{}" {} PRIMARY KEY "#,
+        r#"CREATE TABLE IF NOT EXISTS "{table_name}" ("{}" {}"#,
         primary.name,
         TryInto::<SqliteType>::try_into(primary)?
     );
+    if append_only {
+        query.push_str(r#", "__revision" INTEGER NOT NULL"#);
+    }
     for column in columns {
         let sql_type: SqliteType = column.try_into()?;
         write!(query, r#", "{}" {sql_type}"#, column.name).unwrap();
     }
-    query.push_str(");");
+    if append_only {
+        write!(
+            query,
+            r#", PRIMARY KEY ("{}", "__revision"));"#,
+            primary.name
+        )
+        .unwrap();
+    } else {
+        write!(query, r#", PRIMARY KEY ("{}"));"#, primary.name).unwrap();
+    }
     Ok(query)
 }
 

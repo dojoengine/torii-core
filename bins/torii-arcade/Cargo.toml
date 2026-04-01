@@ -15,7 +15,6 @@ torii-config-common.workspace = true
 torii-arcade-sink.workspace = true
 torii-dojo.workspace = true
 torii-ecs-sink.workspace = true
-torii-entities-historical-sink.workspace = true
 torii-erc20.workspace = true
 torii-erc721.workspace = true
 torii-erc1155.workspace = true

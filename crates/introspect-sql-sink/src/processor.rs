@@ -2,14 +2,15 @@ use crate::backend::{IntrospectInitialize, IntrospectPool, IntrospectProcessor};
 use crate::error::TableLoadError;
 use crate::table::{DeadField, Table};
 use crate::tables::Tables;
-use crate::{DbResult, IntrospectQueryMaker, NamespaceMode};
+use crate::{DbResult, IntrospectQueryMaker, NamespaceKey, NamespaceMode};
 use async_trait::async_trait;
 use introspect_types::{ColumnInfo, PrimaryDef, TypeDef};
 use itertools::Itertools;
 use sqlx::{Database, Pool};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
-use torii_introspect::events::IntrospectBody;
+use std::fmt::Debug;
+use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_sql::{Executable, FlexQuery, PoolExt};
 
 pub const COMMIT_CMD: &str = "--COMMIT";
@@ -28,6 +29,7 @@ pub struct DbTable {
     pub primary: PrimaryDef,
     pub columns: HashMap<Felt, ColumnInfo>,
     pub dead: HashMap<u128, DeadField>,
+    pub append_only: bool,
     pub alive: bool,
 }
 
@@ -71,14 +73,15 @@ where
 impl<DB: Database + Send + Sync + IntrospectQueryMaker> IntrospectProcessor for Pool<DB>
 where
     Vec<FlexQuery<DB>>: Executable<DB>,
+    FlexQuery<DB>: Debug + Clone,
 {
     async fn process_msgs(
         &self,
-        tables: &Tables,
         namespaces: &NamespaceMode,
+        tables: &Tables,
         msgs: Vec<&IntrospectBody>,
     ) -> DbResult<Vec<DbResult<()>>> {
-        self.execute_msgs(tables, namespaces, msgs).await
+        self.execute_msgs(namespaces, tables, msgs).await
     }
 }
 
@@ -102,7 +105,7 @@ impl<Backend: IntrospectProcessor + IntrospectInitialize> IntrospectDb<Backend> 
         msgs: Vec<&IntrospectBody>,
     ) -> DbResult<Vec<DbResult<()>>> {
         self.db
-            .process_msgs(&self.tables, &self.namespaces, msgs)
+            .process_msgs(&self.namespaces, &self.tables, msgs)
             .await
     }
 
@@ -159,6 +162,7 @@ impl From<DbTable> for ((String, Felt), Table) {
                 primary: value.primary.into(),
                 columns: value.columns,
                 dead: value.dead,
+                append_only: value.append_only,
                 alive: value.alive,
             },
         )
@@ -191,5 +195,81 @@ impl From<DbDeadField> for (String, Felt, u128, DeadField) {
                 type_def: value.type_def,
             },
         )
+    }
+}
+
+pub fn messages_to_queries<DB: IntrospectQueryMaker>(
+    namespaces: &NamespaceMode,
+    tables: &Tables,
+    msgs: Vec<&IntrospectBody>,
+    queries: &mut Vec<FlexQuery<DB>>,
+) -> DbResult<Vec<DbResult<()>>> {
+    let mut results = Vec::with_capacity(msgs.len());
+    for body in msgs {
+        let (msg, metadata) = body.into();
+        let namespace = namespaces.to_namespace(&metadata.from_address)?;
+        results.push(handle_message::<DB>(
+            namespace,
+            tables,
+            msg,
+            &metadata.from_address,
+            metadata.block_number.unwrap_or(u64::MAX),
+            &metadata.transaction_hash,
+            queries,
+        ));
+    }
+    Ok(results)
+}
+
+pub fn handle_message<DB: IntrospectQueryMaker>(
+    namespace: NamespaceKey,
+    tables: &Tables,
+    msg: &IntrospectMsg,
+    from_address: &Felt,
+    block_number: u64,
+    transaction_hash: &Felt,
+    queries: &mut Vec<FlexQuery<DB>>,
+) -> DbResult<()> {
+    match msg {
+        IntrospectMsg::CreateTable(event) => tables.create_table::<DB>(
+            namespace,
+            &event.id,
+            &event.name,
+            &event.primary,
+            &event.columns,
+            event.append_only,
+            from_address,
+            block_number,
+            transaction_hash,
+            queries,
+        ),
+        IntrospectMsg::UpdateTable(event) => tables.update_table::<DB>(
+            namespace,
+            &event.id,
+            &event.name,
+            &event.primary,
+            &event.columns,
+            from_address,
+            block_number,
+            transaction_hash,
+            queries,
+        ),
+        IntrospectMsg::AddColumns(event) => tables.set_table_dead(namespace, event.table),
+        IntrospectMsg::DropColumns(event) => tables.set_table_dead(namespace, event.table),
+        IntrospectMsg::RetypeColumns(event) => tables.set_table_dead(namespace, event.table),
+        IntrospectMsg::RetypePrimary(event) => tables.set_table_dead(namespace, event.table),
+        IntrospectMsg::RenameTable(_)
+        | IntrospectMsg::DropTable(_)
+        | IntrospectMsg::RenameColumns(_)
+        | IntrospectMsg::RenamePrimary(_) => Ok(()),
+        IntrospectMsg::InsertsFields(event) => tables.insert_fields::<DB>(
+            namespace,
+            event,
+            from_address,
+            block_number,
+            transaction_hash,
+            queries,
+        ),
+        IntrospectMsg::DeleteRecords(_) | IntrospectMsg::DeletesFields(_) => Ok(()),
     }
 }

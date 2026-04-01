@@ -3,6 +3,7 @@ use introspect_types::{DecodeError, PrimaryTypeDef, TypeDef};
 use sqlx::error::BoxDynError;
 use sqlx::Error as SqlxError;
 use starknet_types_core::felt::{Felt, FromStrError};
+use std::fmt::Display;
 use std::sync::PoisonError;
 use thiserror::Error;
 
@@ -18,8 +19,8 @@ pub type TypeResult<T> = std::result::Result<T, TypeError>;
 
 #[derive(Debug, Error)]
 pub enum TableError {
-    #[error("Column with id: {0} not found in table {1}")]
-    ColumnNotFound(Felt, String),
+    #[error("Table {0} has not got columns: {1:?}")]
+    ColumnsNotFound(String, ColumnsNotFoundError),
     #[error(transparent)]
     TypeError(#[from] TypeError),
     #[error("Current type mismatch error")]
@@ -34,6 +35,55 @@ pub enum TableError {
     JsonError(#[from] serde_json::Error),
     #[error("error occurred while encoding a value: {0}")]
     Encode(#[from] BoxDynError),
+}
+
+#[derive(Debug)]
+pub struct ColumnNotFoundError(pub Felt);
+
+#[derive(Debug, Default, Error)]
+pub struct ColumnsNotFoundError(pub Vec<Felt>);
+
+impl ColumnsNotFoundError {
+    pub fn to_table_error(self, table: &str) -> TableError {
+        TableError::ColumnsNotFound(table.to_string(), self)
+    }
+}
+
+impl Display for ColumnsNotFoundError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some((first, rest)) = self.0.split_first() {
+            write!(f, "0x{first:#063x}")?;
+            for col in rest {
+                write!(f, ", 0x{col:#063x}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub trait CollectColumnResults<T> {
+    fn collect_columns(self) -> Result<Vec<T>, ColumnsNotFoundError>;
+}
+
+impl<T, I> CollectColumnResults<T> for I
+where
+    I: Iterator<Item = Result<T, ColumnNotFoundError>>,
+{
+    fn collect_columns(self) -> Result<Vec<T>, ColumnsNotFoundError> {
+        let mut columns = Vec::new();
+        let mut not_found = Vec::new();
+        for result in self {
+            match result {
+                Ok(col) => columns.push(col),
+                Err(e) => not_found.push(e.0),
+            }
+        }
+        if not_found.is_empty() {
+            Ok(columns)
+        } else {
+            Err(ColumnsNotFoundError(not_found))
+        }
+    }
 }
 
 pub type TableResult<T = ()> = std::result::Result<T, TableError>;
@@ -116,6 +166,8 @@ pub enum RecordError {
     DecodeError(#[from] DecodeError),
     #[error(transparent)]
     SqlxError(#[from] SqlxError),
+    #[error("Columns with ids: {0} not found")]
+    ColumnsNotFound(#[from] ColumnsNotFoundError),
 }
 
 pub type RecordResult<T> = std::result::Result<T, RecordError>;
