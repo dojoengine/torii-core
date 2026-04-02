@@ -204,6 +204,9 @@ pub struct Config {
 
     #[arg(long, value_delimiter = ',')]
     pub historical: Vec<String>,
+
+    #[arg(long)]
+    pub pathfinder_path: Option<String>,
 }
 
 impl Config {
@@ -357,6 +360,10 @@ impl Config {
             (None, None) => Ok(None),
             _ => bail!("--tls-cert and --tls-key must be provided together"),
         }
+    }
+
+    pub fn pathfinder_path(&self) -> Option<PathBuf> {
+        self.pathfinder_path.as_ref().map(PathBuf::from)
     }
 }
 

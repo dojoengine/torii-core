@@ -40,6 +40,7 @@ impl<T> Extractor for SyntheticExtractorAdapter<T>
 where
     T: SyntheticExtractor + Send + Sync + 'static,
 {
+    fn set_start_block(&mut self, _start_block: u64) {}
     async fn extract(
         &mut self,
         cursor: Option<String>,

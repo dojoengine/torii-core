@@ -14,6 +14,14 @@ pub struct PathfinderExtractor {
     pub batch: u64,
     pub current: u64,
     pub end: u64,
+    pub finished: bool,
+}
+
+#[derive(Debug)]
+pub struct PathfinderCombinedExtractor<T: Extractor + Send + Sync + 'static> {
+    pub pathfinder: PathfinderExtractor,
+    pub head: T,
+    pub on_head: bool,
 }
 
 impl PathfinderExtractor {
@@ -23,22 +31,50 @@ impl PathfinderExtractor {
             batch,
             current: start,
             end,
+            finished: false,
         })
     }
 
     pub fn next_batch(&mut self) -> PFResult<(Vec<BlockContext>, Vec<EmittedEvent>)> {
-        let next = (self.current + self.batch).min(self.end);
+        let mut last = self.current + self.batch;
+        if last >= self.end {
+            last = self.end;
+            self.finished = true;
+        }
         let (blocks, events) = self
             .conn
             .lock()?
-            .get_emitted_events_with_context(self.current, next - 1)?;
-        self.current = next;
+            .get_emitted_events_with_context(self.current, last)?;
+        let last_block = blocks.last().map(|b| b.number).unwrap_or(self.current);
+        if last_block < last {
+            self.finished = true;
+        }
+        self.current = last_block + 1;
         Ok((blocks, events.into_iter().map(Into::into).collect()))
+    }
+}
+
+impl<T: Extractor> PathfinderCombinedExtractor<T> {
+    pub fn new<P: AsRef<Path>>(
+        path: P,
+        batch: u64,
+        start: u64,
+        end: u64,
+        head: T,
+    ) -> PFResult<Self> {
+        Ok(Self {
+            pathfinder: PathfinderExtractor::new(path, batch, start, end)?,
+            head,
+            on_head: false,
+        })
     }
 }
 
 #[async_trait]
 impl Extractor for PathfinderExtractor {
+    fn set_start_block(&mut self, start_block: u64) {
+        self.current = start_block.max(self.current);
+    }
     async fn extract(
         &mut self,
         _cursor: Option<String>,
@@ -61,6 +97,35 @@ impl Extractor for PathfinderExtractor {
     }
     fn is_finished(&self) -> bool {
         self.current >= self.end
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+#[async_trait]
+impl<T: Extractor + Send + Sync + 'static> Extractor for PathfinderCombinedExtractor<T> {
+    fn set_start_block(&mut self, start_block: u64) {
+        self.pathfinder.set_start_block(start_block);
+        self.head.set_start_block(start_block);
+    }
+    async fn extract(
+        &mut self,
+        cursor: Option<String>,
+        engine_db: &EngineDb,
+    ) -> AnyResult<ExtractionBatch> {
+        if self.on_head {
+            self.head.extract(cursor, engine_db).await
+        } else if self.pathfinder.is_finished() {
+            self.on_head = true;
+            self.head.set_start_block(self.pathfinder.current);
+            self.head.extract(cursor, engine_db).await
+        } else {
+            self.pathfinder.extract(cursor, engine_db).await
+        }
+    }
+    fn is_finished(&self) -> bool {
+        self.pathfinder.is_finished() && self.head.is_finished()
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
