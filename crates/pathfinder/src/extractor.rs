@@ -17,7 +17,7 @@ pub struct PathfinderExtractor {
 }
 
 impl PathfinderExtractor {
-    pub fn new(path: &Path, batch: u64, start: u64, end: u64) -> PFResult<Self> {
+    pub fn new<P: AsRef<Path>>(path: P, batch: u64, start: u64, end: u64) -> PFResult<Self> {
         Ok(Self {
             conn: connect(path)?.into(),
             batch,

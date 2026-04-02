@@ -23,4 +23,5 @@ anyhow = { workspace = true, optional = true }
 workspace = true
 
 [features]
+default = ["etl"]
 etl = ["torii", "async-trait", "anyhow"]
