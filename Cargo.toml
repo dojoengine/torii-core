@@ -21,6 +21,7 @@ members = [
   "crates/postgres",
   "crates/sqlite",
   "crates/pathfinder",
+  "crates/starknet",
   "bins/torii-erc20",
   "bins/torii-erc20-synth",
   "bins/torii-introspect-bin",
@@ -123,6 +124,7 @@ dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev =
 # Utils
 resolve-path = "0.1.0"
 itertools = "0.14.0"
+bincode = { version = "2.0.0" }
 
 # Torii core
 torii.path = "."
@@ -148,6 +150,7 @@ torii-test-utils.path = "crates/testing"
 torii-postgres.path = "crates/postgres"
 torii-sqlite.path = "crates/sqlite"
 torii-pathfinder.path = "crates/pathfinder"
+torii-starknet.path = "crates/starknet"
 
 
 [lib]

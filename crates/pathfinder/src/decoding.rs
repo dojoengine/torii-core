@@ -1,14 +1,31 @@
-use itertools::Itertools;
-use serde::{Deserialize, Serialize};
-use starknet::core::types::Event;
-use std::fmt::{Formatter, Result as FmtResult};
-
 use crate::sqlite::BlockEventsRow;
 use crate::{PFError, PFResult};
+use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
+use std::fmt::{Formatter, Result as FmtResult};
+use std::io::Result as IoResult;
+use std::sync::LazyLock;
+use torii_starknet::event::Event;
+use torii_starknet::Felt;
+use zstd::bulk::Decompressor;
 
 /// Mostly taken from pathfinder-common but with some optimizations
 
+const MAX_EVENTS_UNCOMPRESSED_SIZE: usize = 128usize * 1024 * 1024;
+
+static ZSTD_EVENTS_DECODER_DICTIONARY: LazyLock<zstd::dict::DecoderDictionary<'static>> =
+    LazyLock::new(|| zstd::dict::DecoderDictionary::new(include_bytes!("assets/events.zdict")));
+
+thread_local! {
+    static EVENT_DECOMPRESSOR: RefCell<Decompressor<'static>> = RefCell::new(
+        Decompressor::with_prepared_dictionary(
+            &ZSTD_EVENTS_DECODER_DICTIONARY
+        ).expect("failed to create decompressor")
+    );
+}
+
 /// Minimally encoded Felt value.
+#[repr(transparent)]
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct MinimalFelt([u8; 32]);
 
@@ -57,9 +74,20 @@ impl<'de> serde::Deserialize<'de> for MinimalFelt {
     }
 }
 
-impl From<MinimalFelt> for starknet::core::types::Felt {
+impl MinimalFelt {
+    #[allow(unsafe_code)]
+    fn into_felt_vec(v: Vec<Self>) -> Vec<Felt> {
+        // Safe: both repr(transparent) over [u8; 32]
+        unsafe {
+            let mut v = std::mem::ManuallyDrop::new(v);
+            Vec::from_raw_parts(v.as_mut_ptr() as *mut Felt, v.len(), v.capacity())
+        }
+    }
+}
+
+impl From<MinimalFelt> for Felt {
     fn from(value: MinimalFelt) -> Self {
-        starknet::core::types::Felt::from_bytes_be(&value.0)
+        value.0.into()
     }
 }
 
@@ -70,18 +98,21 @@ pub enum EventsForBlock {
 }
 
 impl EventsForBlock {
-    pub fn encoded_events(self) -> Vec<Vec<EncodedEvent>> {
+    pub fn events(self) -> Vec<Vec<Event>> {
         match self {
-            EventsForBlock::V0 { events } => events,
+            EventsForBlock::V0 { events } => events
+                .into_iter()
+                .map(|evs| evs.into_iter().map(Event::from).collect())
+                .collect(),
         }
     }
+}
 
-    pub fn events(self) -> Vec<Vec<Event>> {
-        self.encoded_events()
-            .into_iter()
-            .map(|evs| evs.into_iter().map_into().collect())
-            .collect()
-    }
+pub(crate) fn decompress_events(input: &[u8]) -> IoResult<Vec<u8>> {
+    EVENT_DECOMPRESSOR.with(|d| {
+        d.borrow_mut()
+            .decompress(input, MAX_EVENTS_UNCOMPRESSED_SIZE)
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -95,36 +126,19 @@ pub struct EncodedEvent {
 impl From<EncodedEvent> for Event {
     fn from(value: EncodedEvent) -> Self {
         Self {
-            data: value.data.into_iter().map_into().collect(),
+            data: MinimalFelt::into_felt_vec(value.data),
             from_address: value.from_address.into(),
-            keys: value.keys.into_iter().map_into().collect(),
+            keys: MinimalFelt::into_felt_vec(value.keys),
         }
-    }
-}
-
-pub(crate) mod compression {
-    use std::sync::LazyLock;
-
-    const MAX_EVENTS_UNCOMPRESSED_SIZE: usize = 128usize * 1024 * 1024;
-
-    static ZSTD_EVENTS_DECODER_DICTIONARY: LazyLock<zstd::dict::DecoderDictionary<'static>> =
-        LazyLock::new(|| zstd::dict::DecoderDictionary::new(include_bytes!("assets/events.zdict")));
-
-    fn new_events_decompressor() -> std::io::Result<zstd::bulk::Decompressor<'static>> {
-        zstd::bulk::Decompressor::with_prepared_dictionary(&ZSTD_EVENTS_DECODER_DICTIONARY)
-    }
-    pub(crate) fn decompress_events(input: &[u8]) -> std::io::Result<Vec<u8>> {
-        let mut decompressor = new_events_decompressor()?;
-        decompressor.decompress(input, MAX_EVENTS_UNCOMPRESSED_SIZE)
     }
 }
 
 impl BlockEventsRow {
     pub fn decompress_events(&self) -> PFResult<Vec<Vec<Event>>> {
         match self.events {
-            None => Ok(vec![]),
+            None => Ok(Vec::new()),
             Some(ref events) => {
-                let events = compression::decompress_events(events)?;
+                let events = decompress_events(events)?;
                 let events: EventsForBlock =
                     bincode::serde::decode_from_slice(&events, bincode::config::standard())?.0;
                 Ok(events.events())

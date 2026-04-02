@@ -28,12 +28,12 @@ impl PathfinderExtractor {
 
     pub fn next_batch(&mut self) -> PFResult<(Vec<BlockContext>, Vec<EmittedEvent>)> {
         let next = (self.current + self.batch).min(self.end);
-        let result = self
+        let (blocks, events) = self
             .conn
             .lock()?
-            .get_emitted_events_with_context(self.current, next - 1);
+            .get_emitted_events_with_context(self.current, next - 1)?;
         self.current = next;
-        result
+        Ok((blocks, events.into_iter().map(Into::into).collect()))
     }
 }
 

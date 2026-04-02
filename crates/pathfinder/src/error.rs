@@ -14,6 +14,8 @@ pub enum PFError {
     DataMismatch(String),
     #[error("Block Hash missing for block {0}")]
     BlockHashMissing(u64),
+    #[error("Block context missing for block {0}")]
+    BlockContextMissing(u64),
     #[error("Lock poisoned: {0}")]
     LockPoison(String),
 }
@@ -34,5 +36,8 @@ impl PFError {
     }
     pub fn block_hash_missing(block_number: u64) -> Self {
         Self::BlockHashMissing(block_number)
+    }
+    pub fn block_context_missing(block_number: u64) -> Self {
+        Self::BlockContextMissing(block_number)
     }
 }

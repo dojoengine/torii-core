@@ -9,10 +9,10 @@ starknet.workspace = true
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 zstd = { version = "0.13.2", features = ["experimental"] }
 serde.workspace = true
-itertools.workspace = true
-bincode = { version = "2.0.0", features = ["serde"] }
+bincode = { workspace = true, features = ["serde"] }
 thiserror.workspace = true
 rand = "0.8.5"
+torii-starknet.workspace = true
 
 # Etl dependencies
 torii = { workspace = true, optional = true }
@@ -24,4 +24,4 @@ workspace = true
 
 [features]
 default = ["etl"]
-etl = ["torii", "async-trait", "anyhow"]
+etl = ["torii", "async-trait", "anyhow", "torii-starknet/starknet"]
