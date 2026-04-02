@@ -1,0 +1,27 @@
+[package]
+name = "torii-pathfinder"
+version = "0.1.0"
+edition = "2021"
+description = "Pathfinding utilities for Torii"
+
+[dependencies]
+starknet.workspace = true
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+zstd = { version = "0.13.2", features = ["experimental"] }
+serde.workspace = true
+itertools.workspace = true
+bincode = { version = "2.0.0-rc.3", features = ["serde"] }
+thiserror.workspace = true
+rand = "0.8.5"
+
+# Etl dependencies
+torii = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+
+[lints]
+workspace = true
+
+[features]
+default = ["etl"]
+etl = ["torii", "async-trait", "anyhow"]
