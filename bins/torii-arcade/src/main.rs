@@ -773,7 +773,7 @@ fn build_extractor(
         to_block,
     );
     let event_extractor = EventExtractor::new(
-        provider.clone(),
+        provider,
         EventExtractorConfig {
             contracts: contracts.clone(),
             chunk_size: config.event_chunk_size,
@@ -783,6 +783,7 @@ fn build_extractor(
             rpc_parallelism: config.rpc_parallelism,
         },
     );
+    #[allow(clippy::single_match_else)]
     match config.pathfinder_path() {
         Some(path) => {
             tracing::info!(

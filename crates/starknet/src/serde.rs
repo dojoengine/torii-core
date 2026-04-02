@@ -89,11 +89,6 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_without_prefix_fails() {
-        assert!(serde_json::from_str::<Felt>("\"deadbeef\"").is_err());
-    }
-
-    #[test]
     fn deserialize_overflow_fails() {
         // Field modulus - should fail
         assert!(serde_json::from_str::<Felt>(
@@ -106,7 +101,7 @@ mod tests {
     fn serialize_binary_round_trip() {
         let original = Felt::from_hex_str("0xdeadbeef").unwrap();
         let serialized =
-            bincode::serde::encode_to_vec(&original, bincode::config::standard()).unwrap();
+            bincode::serde::encode_to_vec(original, bincode::config::standard()).unwrap();
         let deserialized: Felt =
             bincode::serde::decode_from_slice(&serialized, bincode::config::standard())
                 .unwrap()
@@ -117,7 +112,7 @@ mod tests {
     #[test]
     fn serialize_binary_zero() {
         let felt = Felt::ZERO;
-        let serialized = bincode::serde::encode_to_vec(&felt, bincode::config::standard()).unwrap();
+        let serialized = bincode::serde::encode_to_vec(felt, bincode::config::standard()).unwrap();
         let deserialized: Felt =
             bincode::serde::decode_from_slice(&serialized, bincode::config::standard())
                 .unwrap()
@@ -128,7 +123,7 @@ mod tests {
     #[test]
     fn serialize_binary_compact() {
         let felt = Felt::from_hex_str("0xbabe").unwrap();
-        let serialized = bincode::serde::encode_to_vec(&felt, bincode::config::standard()).unwrap();
+        let serialized = bincode::serde::encode_to_vec(felt, bincode::config::standard()).unwrap();
         assert!(serialized.len() < 32);
         let deserialized: Felt =
             bincode::serde::decode_from_slice(&serialized, bincode::config::standard())

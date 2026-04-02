@@ -111,7 +111,7 @@ impl EventFetcher for Connection {
             for transaction in block.transactions {
                 let transaction_hash = tx_hashes
                     .next()
-                    .map(|r| r.1.into())
+                    .map(|r| r.1)
                     .ok_or_else(|| PFError::tx_hash_mismatch(block.block_number))?;
                 for event in transaction {
                     emitted_events.push(EmittedEvent {
@@ -153,7 +153,7 @@ impl EventFetcher for Connection {
             for transaction in block.transactions {
                 let transaction_hash = tx_hashes
                     .next()
-                    .map(|r| r.1.into())
+                    .map(|r| r.1)
                     .ok_or_else(|| PFError::tx_hash_mismatch(block.block_number))?;
                 for event in transaction {
                     emitted_events.push(EmittedEvent {

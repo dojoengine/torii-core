@@ -45,7 +45,7 @@ impl PathfinderExtractor {
             .conn
             .lock()?
             .get_emitted_events_with_context(self.current, last)?;
-        let last_block = blocks.last().map(|b| b.number).unwrap_or(self.current);
+        let last_block = blocks.last().map_or(self.current, |b| b.number);
         if last_block < last {
             self.finished = true;
         }

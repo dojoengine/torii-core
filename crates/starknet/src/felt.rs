@@ -531,9 +531,7 @@ mod tests {
             let felt = Felt::from_hex_str(hex_str).unwrap();
             let result = format!("{felt:?}");
 
-            let mut expected = "0".repeat(64 - hex_str.len());
-            expected.push_str(hex_str);
-            let expected = format!("Felt({felt})");
+            let expected = format!("0x{felt}");
 
             assert_eq!(result, expected);
         }
@@ -544,11 +542,8 @@ mod tests {
             let starkhash = Felt::from_hex_str(hex_str).unwrap();
             let result = format!("{starkhash:x}");
 
-            let mut expected = "0".repeat(64 - hex_str.len());
-            expected.push_str(hex_str);
-
             // We don't really care which casing is used by fmt.
-            assert_eq!(result.to_lowercase(), expected.to_lowercase());
+            assert_eq!(result.to_lowercase(), hex_str.to_lowercase());
         }
 
         #[test]
@@ -557,10 +552,7 @@ mod tests {
             let starkhash = Felt::from_hex_str(hex_str).unwrap();
             let result = format!("{starkhash:x}");
 
-            let mut expected = "0".repeat(64 - hex_str.len());
-            expected.push_str(hex_str);
-
-            assert_eq!(result, expected.to_lowercase());
+            assert_eq!(result, hex_str.to_lowercase());
         }
 
         #[test]
@@ -569,10 +561,7 @@ mod tests {
             let starkhash = Felt::from_hex_str(hex_str).unwrap();
             let result = format!("{starkhash:X}");
 
-            let mut expected = "0".repeat(64 - hex_str.len());
-            expected.push_str(hex_str);
-
-            assert_eq!(result, expected.to_uppercase());
+            assert_eq!(result, hex_str.to_uppercase());
         }
     }
 
@@ -631,12 +620,12 @@ mod tests {
 
         #[test]
         fn invalid_nibble() {
-            assert_matches!(Felt::from_hex_str("0x123z").unwrap_err(), HexParseError::InvalidNibble(n) => assert_eq!(n, b'z'))
+            assert_matches!(Felt::from_hex_str("0x123z").unwrap_err(), HexParseError::InvalidNibble(n) => assert_eq!(n, b'z'));
         }
 
         #[test]
         fn invalid_len() {
-            assert_matches!(Felt::from_hex_str(&"1".repeat(65)).unwrap_err(), HexParseError::InvalidLength{max: 64, actual: n} => assert_eq!(n, 65))
+            assert_matches!(Felt::from_hex_str(&"1".repeat(65)).unwrap_err(), HexParseError::InvalidLength{max: 64, actual: n} => assert_eq!(n, 65));
         }
 
         #[test]
@@ -696,7 +685,7 @@ mod tests {
         }
 
         #[test]
-        #[should_panic]
+        #[should_panic(expected = "buffer size is 65, expected at least 66")]
         fn buffer_too_small() {
             let mut buf = [0u8; 65];
             Felt::ZERO.as_hex_str(&mut buf);

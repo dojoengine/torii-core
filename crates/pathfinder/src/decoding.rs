@@ -9,7 +9,7 @@ use torii_starknet::event::Event;
 use torii_starknet::Felt;
 use zstd::bulk::Decompressor;
 
-/// Mostly taken from pathfinder-common but with some optimizations
+// Taken from pathfinder-common but with some optimizations
 
 const MAX_EVENTS_UNCOMPRESSED_SIZE: usize = 128usize * 1024 * 1024;
 
@@ -80,7 +80,7 @@ impl MinimalFelt {
         // Safe: both repr(transparent) over [u8; 32]
         unsafe {
             let mut v = std::mem::ManuallyDrop::new(v);
-            Vec::from_raw_parts(v.as_mut_ptr() as *mut Felt, v.len(), v.capacity())
+            Vec::from_raw_parts(v.as_mut_ptr().cast::<Felt>(), v.len(), v.capacity())
         }
     }
 }
