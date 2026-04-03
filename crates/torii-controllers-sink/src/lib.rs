@@ -8,7 +8,9 @@ use chrono::{DateTime, TimeZone, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::{any::AnyPoolOptions, sqlite::SqliteConnectOptions, Any, ConnectOptions, Pool, Row};
+use sqlx::{
+    any::AnyPoolOptions, sqlite::SqliteConnectOptions, Any, ConnectOptions, Pool, QueryBuilder, Row,
+};
 use starknet::core::types::Felt;
 use torii::axum::Router;
 use torii::etl::extractor::ExtractionBatch;
@@ -23,6 +25,9 @@ pub const CONTROLLERS_STATE_TABLE: &str = "torii_controller_sync_state";
 const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 const CONTROLLERS_TYPE: TypeId = TypeId::new("controllers.sync");
+const CONTROLLER_PROCESSING_BATCH_SIZE: usize = 10_000;
+const SQLITE_CONTROLLER_UPSERT_BATCH_SIZE: usize = 199;
+const POSTGRES_CONTROLLER_UPSERT_BATCH_SIZE: usize = 10_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DbBackend {
@@ -205,8 +210,39 @@ impl ControllersStore {
         Ok(row == 0)
     }
 
-    async fn store_synced_until(&self, synced_until: i64) -> Result<()> {
-        let sql = match self.backend {
+    async fn upsert_controllers_and_store_synced_until(
+        &self,
+        controllers: &[StoredController],
+        synced_until: i64,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+
+        if !controllers.is_empty() {
+            let upsert_prefix = format!(
+                "INSERT INTO {CONTROLLERS_TABLE} (id, address, username, deployed_at, updated_at) "
+            );
+            let upsert_suffix = " ON CONFLICT(address) DO UPDATE SET \
+                id = excluded.id, \
+                username = excluded.username, \
+                deployed_at = excluded.deployed_at, \
+                updated_at = excluded.updated_at";
+
+            for chunk in controllers.chunks(self.controller_upsert_batch_size()) {
+                let mut builder = QueryBuilder::<Any>::new(&upsert_prefix);
+                builder.push_values(chunk, |mut builder, controller| {
+                    builder
+                        .push_bind(&controller.id)
+                        .push_bind(&controller.address)
+                        .push_bind(&controller.username)
+                        .push_bind(&controller.deployed_at)
+                        .push_bind(controller.updated_at);
+                });
+                builder.push(upsert_suffix);
+                builder.build().execute(&mut *tx).await?;
+            }
+        }
+
+        let progress_sql = match self.backend {
             DbBackend::Sqlite => format!(
                 "INSERT INTO {CONTROLLERS_STATE_TABLE} (id, synced_until) VALUES (?1, ?2)
                  ON CONFLICT(id) DO UPDATE SET synced_until = excluded.synced_until"
@@ -217,47 +253,21 @@ impl ControllersStore {
             ),
         };
 
-        sqlx::query(&sql)
+        sqlx::query(&progress_sql)
             .bind(1_i32)
             .bind(synced_until)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
 
+        tx.commit().await?;
         Ok(())
     }
 
-    async fn upsert_controller(&self, controller: &StoredController) -> Result<()> {
-        let sql = match self.backend {
-            DbBackend::Sqlite => format!(
-                "INSERT INTO {CONTROLLERS_TABLE} (id, address, username, deployed_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT(address) DO UPDATE SET
-                    id = excluded.id,
-                    username = excluded.username,
-                    deployed_at = excluded.deployed_at,
-                    updated_at = excluded.updated_at"
-            ),
-            DbBackend::Postgres => format!(
-                "INSERT INTO {CONTROLLERS_TABLE} (id, address, username, deployed_at, updated_at)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT(address) DO UPDATE SET
-                    id = excluded.id,
-                    username = excluded.username,
-                    deployed_at = excluded.deployed_at,
-                    updated_at = excluded.updated_at"
-            ),
-        };
-
-        sqlx::query(&sql)
-            .bind(&controller.id)
-            .bind(&controller.address)
-            .bind(&controller.username)
-            .bind(&controller.deployed_at)
-            .bind(controller.updated_at)
-            .execute(&self.pool)
-            .await?;
-
-        Ok(())
+    fn controller_upsert_batch_size(&self) -> usize {
+        match self.backend {
+            DbBackend::Sqlite => SQLITE_CONTROLLER_UPSERT_BATCH_SIZE,
+            DbBackend::Postgres => POSTGRES_CONTROLLER_UPSERT_BATCH_SIZE,
+        }
     }
 }
 
@@ -401,15 +411,23 @@ query {{
         let lower_bound = utc_timestamp(effective_start)?;
         let upper_bound = utc_timestamp(batch_to_ts)?;
         let controllers = self.fetch_controllers(lower_bound, upper_bound).await?;
+        let stored_controllers = controllers
+            .into_iter()
+            .map(StoredController::try_from)
+            .collect::<Result<Vec<_>>>()?;
+        let stored = stored_controllers.len() as u64;
 
-        let mut stored = 0_u64;
-        for controller in controllers {
-            let controller = StoredController::try_from(controller)?;
-            self.store.upsert_controller(&controller).await?;
-            stored += 1;
+        for chunk in stored_controllers.chunks(CONTROLLER_PROCESSING_BATCH_SIZE) {
+            self.store
+                .upsert_controllers_and_store_synced_until(chunk, batch_to_ts)
+                .await?;
         }
 
-        self.store.store_synced_until(batch_to_ts).await?;
+        if stored_controllers.is_empty() {
+            self.store
+                .upsert_controllers_and_store_synced_until(&[], batch_to_ts)
+                .await?;
+        }
 
         tracing::info!(
             target: "torii::sinks::controllers",
@@ -429,17 +447,23 @@ query {{
         let lower_bound = utc_timestamp(0)?;
         let upper_bound = Utc::now();
         let controllers = self.fetch_controllers(lower_bound, upper_bound).await?;
+        let stored_controllers = controllers
+            .into_iter()
+            .map(StoredController::try_from)
+            .collect::<Result<Vec<_>>>()?;
+        let stored = stored_controllers.len() as u64;
 
-        let mut stored = 0_u64;
-        for controller in controllers {
-            let controller = StoredController::try_from(controller)?;
-            self.store.upsert_controller(&controller).await?;
-            stored += 1;
+        for chunk in stored_controllers.chunks(CONTROLLER_PROCESSING_BATCH_SIZE) {
+            self.store
+                .upsert_controllers_and_store_synced_until(chunk, upper_bound.timestamp())
+                .await?;
         }
 
-        self.store
-            .store_synced_until(upper_bound.timestamp())
-            .await?;
+        if stored_controllers.is_empty() {
+            self.store
+                .upsert_controllers_and_store_synced_until(&[], upper_bound.timestamp())
+                .await?;
+        }
 
         tracing::info!(
             target: "torii::sinks::controllers",
@@ -659,7 +683,10 @@ mod tests {
             },
         })
         .unwrap();
-        sink.store.upsert_controller(&controller).await.unwrap();
+        sink.store
+            .upsert_controllers_and_store_synced_until(&[controller], 0)
+            .await
+            .unwrap();
 
         sink.process(&[], &make_batch(1_710_936_000, 1_710_936_100))
             .await
@@ -716,5 +743,45 @@ mod tests {
         .await
         .unwrap();
         assert!(synced_until > 0);
+    }
+
+    #[tokio::test]
+    async fn store_batches_large_controller_upserts() {
+        let sink = ControllersSink::new(":memory:", Some(1), None)
+            .await
+            .unwrap();
+        sink.store.initialize().await.unwrap();
+
+        let controllers = (0..250)
+            .map(|i| {
+                StoredController::try_from(ControllerNode {
+                    address: format!("{:#x}", i + 1),
+                    created_at: "2024-03-20T12:00:00Z".to_string(),
+                    account: ControllerAccount {
+                        username: format!("user_{i}"),
+                    },
+                })
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        sink.store
+            .upsert_controllers_and_store_synced_until(&controllers, 123)
+            .await
+            .unwrap();
+
+        let count: i64 = query_scalar(&format!("SELECT COUNT(*) FROM {CONTROLLERS_TABLE}"))
+            .fetch_one(&sink.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 250);
+
+        let synced_until: i64 = query_scalar(&format!(
+            "SELECT synced_until FROM {CONTROLLERS_STATE_TABLE} WHERE id = 1"
+        ))
+        .fetch_one(&sink.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(synced_until, 123);
     }
 }
