@@ -1,6 +1,6 @@
 mod config;
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 use clap::Parser;
 use config::{Config, MetadataMode};
 use sqlx::postgres::PgPoolOptions;
@@ -52,6 +52,7 @@ use torii_erc721::{
 };
 use torii_introspect_postgres_sink::processor::IntrospectPgDb;
 use torii_introspect_sqlite_sink::processor::IntrospectSqliteDb;
+use torii_pathfinder::extractor::PathfinderCombinedExtractor;
 use torii_runtime_common::database::{
     validate_uniform_backends, DatabaseBackend, DEFAULT_SQLITE_MAX_CONNECTIONS,
 };
@@ -392,7 +393,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         &erc721_addresses,
         &erc1155_addresses,
         &config,
-    );
+    )?;
 
     let (dojo_decoder, introspect_sink): (
         Arc<dyn torii::etl::Decoder>,
@@ -738,7 +739,7 @@ fn build_extractor(
     erc721_addresses: &[Felt],
     erc1155_addresses: &[Felt],
     config: &Config,
-) -> Box<dyn Extractor> {
+) -> Result<Box<dyn Extractor>> {
     let to_block = config.to_block.unwrap_or(u64::MAX);
     let mut contracts = Vec::new();
     let mut seen = HashSet::new();
@@ -771,18 +772,39 @@ fn build_extractor(
         config.from_block,
         to_block,
     );
-
-    Box::new(EventExtractor::new(
+    let event_extractor = EventExtractor::new(
         provider,
         EventExtractorConfig {
-            contracts,
+            contracts: contracts.clone(),
             chunk_size: config.event_chunk_size,
             block_batch_size: config.event_block_batch_size,
             retry_policy: RetryPolicy::default(),
             ignore_saved_state: config.ignore_saved_state,
             rpc_parallelism: config.rpc_parallelism,
         },
-    ))
+    );
+    #[allow(clippy::single_match_else)]
+    match config.pathfinder_path() {
+        Some(path) => {
+            tracing::info!(
+                "Using Pathfinder for event extraction with endpoint: {}",
+                path.display()
+            );
+            PathfinderCombinedExtractor::new(
+                path,
+                config.event_block_batch_size,
+                config.from_block,
+                config.to_block.unwrap_or(u64::MAX),
+                event_extractor,
+            )
+            .map(|e| Box::new(e) as Box<dyn Extractor>)
+            .map_err(Error::new)
+        }
+        None => {
+            tracing::info!("Using direct RPC for event extraction");
+            Ok(Box::new(event_extractor))
+        }
+    }
 }
 
 fn append_unique_contract_configs(

@@ -96,6 +96,11 @@ impl CompositeExtractor {
 
 #[async_trait]
 impl Extractor for CompositeExtractor {
+    fn set_start_block(&mut self, start_block: u64) {
+        for extractor in &mut self.extractors {
+            extractor.set_start_block(start_block);
+        }
+    }
     async fn extract(
         &mut self,
         _cursor: Option<String>,
