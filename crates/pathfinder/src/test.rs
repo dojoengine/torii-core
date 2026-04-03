@@ -3,6 +3,7 @@ use crate::{connect, extractor::PathfinderExtractor, fetcher::EventFetcher};
 const DB_PATH: &str = "/mnt/store/mainnet.sqlite";
 
 #[test]
+#[ignore = "requires /mnt/store/mainnet.sqlite snapshot"]
 fn test_emitted_events() {
     let mut extractor =
         PathfinderExtractor::new(DB_PATH, 2000, 0, 4000000).expect("failed to create extractor");
@@ -20,6 +21,7 @@ fn test_emitted_events() {
 }
 
 #[test]
+#[ignore = "requires /mnt/store/mainnet.sqlite snapshot"]
 fn test_get_emitted_events_with_context() {
     let conn = connect(DB_PATH).unwrap();
     let (blocks, events) = conn
