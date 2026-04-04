@@ -154,15 +154,13 @@ impl EventFetcher for Connection {
             let block = BlockEvents::try_from(row)?;
             let ctx = loop {
                 match ctx_iter.next() {
-                    Some(ctx) => {
-                        if ctx.number == block.block_number {
-                            break ctx;
-                        } else if ctx.number > block.block_number {
-                            return Err(PFError::block_context_missing(block.block_number));
-                        } else {
-                            contexts.push(ctx.into());
+                    Some(ctx) => match ctx.number.cmp(&block.block_number) {
+                        std::cmp::Ordering::Equal => break ctx,
+                        std::cmp::Ordering::Less => contexts.push(ctx.into()),
+                        std::cmp::Ordering::Greater => {
+                            return Err(PFError::block_context_missing(block.block_number))
                         }
-                    }
+                    },
                     None => return Err(PFError::block_context_missing(block.block_number)),
                 }
             };
