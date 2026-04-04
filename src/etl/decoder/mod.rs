@@ -4,7 +4,7 @@ use crate::etl::envelope::TransactionMsgs;
 use crate::etl::{EventData, TypedBody};
 use async_trait::async_trait;
 pub use context::DecoderContext;
-use starknet::core::types::Felt;
+use starknet::core::types::{EmittedEvent, Felt};
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use xxhash_rust::const_xxh3::xxh3_64;
@@ -150,6 +150,22 @@ pub trait Decoder: Send + Sync {
         keys: &[Felt],
         data: &[Felt],
     ) -> anyhow::Result<Vec<Box<dyn TypedBody>>>;
+
+    async fn decode_emitted_event(
+        &self,
+        event: &EmittedEvent,
+    ) -> anyhow::Result<Vec<Box<dyn TypedBody>>> {
+        self.decode_event(
+            &event.from_address,
+            event
+                .block_number
+                .ok_or_else(|| anyhow::anyhow!("Missing block_number in event"))?,
+            &event.transaction_hash,
+            &event.keys,
+            &event.data,
+        )
+        .await
+    }
 }
 
 #[async_trait]

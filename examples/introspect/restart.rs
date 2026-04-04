@@ -68,7 +68,7 @@ async fn run_events(
             };
         }
         let msgs_ref = msgs.iter().collect_vec();
-        for res in db.process_messages(msgs_ref).await.unwrap() {
+        for res in db.process_batch(msgs_ref).await.unwrap() {
             match res {
                 Err(err) => println!("Failed to process message: {err:?}"),
                 Ok(()) => *success += 1,

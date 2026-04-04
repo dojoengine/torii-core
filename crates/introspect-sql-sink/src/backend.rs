@@ -1,4 +1,4 @@
-use crate::processor::{DbColumn, DbDeadField, DbTable, COMMIT_CMD};
+use crate::processor::{DbColumn, DbDeadField, DbTable, IntrospectTxEvents, COMMIT_CMD};
 use crate::table::Table;
 use crate::tables::Tables;
 use crate::{DbResult, NamespaceMode, RecordResult, TableResult};
@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use introspect_types::{ColumnDef, PrimaryDef};
 use sqlx::{Database, Pool};
 use starknet_types_core::felt::Felt;
+use torii::etl::envelope::TypedTransactionsMsgs;
 use torii_introspect::events::IntrospectBody;
 use torii_introspect::tables::RecordSchema;
 use torii_introspect::Record;
@@ -13,11 +14,11 @@ use torii_sql::{Executable, FlexQuery, PoolExt};
 
 #[async_trait]
 pub trait IntrospectProcessor {
-    async fn process_msgs(
+    async fn process_batch(
         &self,
         tables: &Tables,
         namespaces: &NamespaceMode,
-        msgs: Vec<&IntrospectBody>,
+        batch: &[IntrospectTxEvents],
     ) -> DbResult<Vec<DbResult<()>>>;
 }
 
@@ -65,23 +66,35 @@ pub trait IntrospectQueryMaker: Database {
         transaction_hash: &Felt,
         queries: &mut Vec<FlexQuery<Self>>,
     ) -> RecordResult<()>;
+
+    fn transaction_to_queries(
+        tables: &Tables,
+        namespaces: &NamespaceMode,
+        transaction: &IntrospectTxEvents,
+        queries: &mut Vec<FlexQuery<Self>>,
+        results: &mut Vec<DbResult>,
+    ) -> DbResult {
+        for msg in &transaction.msgs {
+            results.push(tables.handle_message::<Self>(
+                namespaces.to_namespace(&transaction.from_address)?,
+                msg,
+                &transaction.from_address,
+                transaction.block_number,
+                &transaction.transaction_hash,
+                queries,
+            ));
+        }
+        Ok(())
+    }
     fn msgs_to_queries(
         tables: &Tables,
         namespaces: &NamespaceMode,
-        msgs: Vec<&IntrospectBody>,
+        transactions: &[IntrospectTxEvents],
         queries: &mut Vec<FlexQuery<Self>>,
-    ) -> DbResult<Vec<DbResult<()>>> {
-        let mut results = Vec::with_capacity(msgs.len());
-        for body in msgs {
-            let (msg, metadata) = body.into();
-            results.push(tables.handle_message::<Self>(
-                namespaces.to_namespace(&metadata.from_address)?,
-                msg,
-                &metadata.from_address,
-                metadata.block_number.unwrap_or(u64::MAX),
-                &metadata.transaction_hash,
-                queries,
-            ));
+    ) -> DbResult<Vec<DbResult>> {
+        let mut results: Vec<DbResult> = Vec::with_capacity(transactions.event_count());
+        for transaction in transactions {
+            Self::transaction_to_queries(tables, namespaces, transaction, queries, &mut results)?;
         }
         Ok(results)
     }
@@ -94,7 +107,7 @@ pub trait IntrospectPool<DB: IntrospectQueryMaker> {
         &self,
         tables: &Tables,
         namespaces: &NamespaceMode,
-        msgs: Vec<&IntrospectBody>,
+        batch: &[IntrospectTxEvents],
     ) -> DbResult<Vec<DbResult<()>>> {
         let mut queries = Vec::new();
         let results = DB::msgs_to_queries(tables, namespaces, msgs, &mut queries)?;

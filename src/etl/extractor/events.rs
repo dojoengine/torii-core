@@ -4,7 +4,7 @@ use starknet::core::types::{
     DeployTransactionReceipt, EmittedEvent, Event, Felt, InvokeTransactionReceipt,
     L1HandlerTransactionReceipt, TransactionReceipt, TransactionWithReceipt,
 };
-use std::mem;
+use std::{collections::VecDeque, mem};
 
 #[derive(Debug, Clone, Default)]
 pub enum ExtractedEvents {
@@ -109,10 +109,22 @@ pub trait ExtractEventData<'a> {
         self.extract_event_data(&mut events);
         events
     }
+    fn rebuild_events(&mut self, events: &mut FeltMap<VecDeque<EventData>>);
 }
 
 impl<'a> ExtractEventData<'a> for Vec<Event> {
     fn extract_event_data(&'a mut self, events: &mut FeltMap<Vec<EventData>>) {
+        for event in self.iter_mut() {
+            events
+                .entry(event.from_address)
+                .or_default()
+                .push(EventData {
+                    keys: mem::take(&mut event.keys),
+                    data: mem::take(&mut event.data),
+                });
+        }
+    }
+    fn rebuild_events(&mut self, events: &mut FeltMap<Vec<EventData>>){
         for event in self.iter_mut() {
             events
                 .entry(event.from_address)
@@ -175,5 +187,23 @@ impl ContractEvents {
             contract_address,
             transactions,
         }
+    }
+}
+
+
+impl From<BlockEvents> for BlockWithReceipts {
+    fn from(value: BlockEvents) -> Self {
+        let mut block = value.block;
+        let counts = FeltMap::default();
+        for tx in block.transactions.iter_mut() {
+            match tx.receipt{
+                TransactionReceipt::Invoke(invoke) => ,
+                TransactionReceipt::L1Handler(l1_handler) => counts.insert(l1_handler.transaction_hash, l1_handler.events.len()),
+                TransactionReceipt::Declare(declare) => counts.insert(declare.transaction_hash, declare.events.len()),
+                TransactionReceipt::Deploy(deploy) => counts.insert(deploy.transaction_hash, deploy.events.len()),
+                TransactionReceipt::DeployAccount(deploy_account) => counts.insert(deploy_account.transaction_hash, deploy_account.events.len()),
+            }
+        }
+        block 
     }
 }

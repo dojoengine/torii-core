@@ -52,7 +52,9 @@ pub trait DojoTableEvent<Store, F>: Sized + CairoEventInfo + Debug {
     type Msg: EventId;
     async fn event_to_msg(
         self,
-        raw: &EmittedEvent,
+        from_address: &Felt,
+        block_number: u64,
+        transaction_hash: &Felt,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg>;
 }
@@ -211,7 +213,9 @@ where
 
     async fn process_table_event<'a, E>(
         &self,
-        raw: &EmittedEvent,
+        from_address: &Felt,
+        block_number: u64,
+        transaction_hash: &Felt,
         keys: &'a [Felt],
         values: &'a [Felt],
     ) -> DojoToriiResult<IntrospectMsg>
@@ -220,7 +224,7 @@ where
         E::Msg: Into<IntrospectMsg>,
     {
         deserialize_data::<E>(keys, values)?
-            .event_to_msg(raw, self)
+            .event_to_msg(from_address, block_number, transaction_hash, self)
             .await
             .ok_into()
     }
@@ -258,24 +262,54 @@ where
         let selector_raw = selector.to_raw();
         match selector_raw {
             ModelRegistered::SELECTOR_RAW => {
-                self.process_table_event::<ModelRegistered>(raw, keys, values)
-                    .await
+                self.process_table_event::<ModelRegistered>(
+                    from_address,
+                    block_number,
+                    transaction_hash,
+                    keys,
+                    values,
+                )
+                .await
             }
             ModelWithSchemaRegistered::SELECTOR_RAW => {
-                self.process_table_event::<ModelWithSchemaRegistered>(raw, keys, values)
-                    .await
+                self.process_table_event::<ModelWithSchemaRegistered>(
+                    from_address,
+                    block_number,
+                    transaction_hash,
+                    keys,
+                    values,
+                )
+                .await
             }
             ModelUpgraded::SELECTOR_RAW => {
-                self.process_table_event::<ModelUpgraded>(raw, keys, values)
-                    .await
+                self.process_table_event::<ModelUpgraded>(
+                    from_address,
+                    block_number,
+                    transaction_hash,
+                    keys,
+                    values,
+                )
+                .await
             }
             EventRegistered::SELECTOR_RAW => {
-                self.process_table_event::<EventRegistered>(raw, keys, values)
-                    .await
+                self.process_table_event::<EventRegistered>(
+                    from_address,
+                    block_number,
+                    transaction_hash,
+                    keys,
+                    values,
+                )
+                .await
             }
             EventUpgraded::SELECTOR_RAW => {
-                self.process_table_event::<EventUpgraded>(raw, keys, values)
-                    .await
+                self.process_table_event::<EventUpgraded>(
+                    from_address,
+                    block_number,
+                    transaction_hash,
+                    keys,
+                    values,
+                )
+                .await
             }
             StoreSetRecord::SELECTOR_RAW => {
                 self.process_record_event::<StoreSetRecord>(keys, values)
@@ -442,7 +476,7 @@ mod tests {
             transaction_hash: Felt::from_hex("0xbeef").unwrap(),
         };
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
+        let envelopes = decoder.decode_emitted_event(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
         let body = envelopes[0]
             .downcast_ref::<ExternalContractRegisteredBody>()

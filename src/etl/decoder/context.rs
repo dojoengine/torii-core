@@ -29,6 +29,10 @@ fn event_preview(from_address: &Felt, block_number: u64, transaction_hash: &Felt
     )
 }
 
+fn felt_to_hex(felt: &Felt) -> String {
+    format!("0x{felt:063x}")
+}
+
 /// DecoderContext manages multiple decoders with contract filtering.
 ///
 /// Routes events to decoders based on:
@@ -206,22 +210,22 @@ impl TransactionDecoder for DecoderContext {
                         all_msgs.extend(msgs);
                     }
                     Err(e) => {
-                        let selector = event
+                        let selector = data
                             .keys
                             .first()
                             .map_or_else(|| "<missing>".to_string(), |felt| format!("{felt:#x}"));
-                        let preview = event_preview(event);
+                        let preview = event_preview(&from_address, block_number, &transaction_hash);
                         tracing::warn!(
                             target: "torii::etl::decoder_context",
-                            contract = %format!("{:#x}", event.from_address),
+                            contract = %felt_to_hex(&from_address),
                             selector = %selector,
-                            tx_hash = %format!("{:#x}", event.transaction_hash),
-                            block_number = event.block_number,
+                            tx_hash = %felt_to_hex(&transaction_hash),
+                            block_number = block_number,
                             event = %preview,
                             "Decoder '{}' failed: {}",
                             decoder.decoder_name(),
                             e,
-                            event_preview(&from_address, block_number, &transaction_hash)
+
                         );
                     }
                 }

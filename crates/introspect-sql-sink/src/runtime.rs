@@ -44,15 +44,15 @@ impl IntrospectInitialize for DbPool {
 
 #[async_trait]
 impl IntrospectProcessor for DbPool {
-    async fn process_msgs(
+    async fn process_batch(
         &self,
         tables: &Tables,
         namespaces: &NamespaceMode,
         msgs: Vec<&IntrospectBody>,
     ) -> DbResult<Vec<DbResult<()>>> {
         match self {
-            DbPool::Postgres(pg) => pg.process_msgs(tables, namespaces, msgs).await,
-            DbPool::Sqlite(site) => site.process_msgs(tables, namespaces, msgs).await,
+            DbPool::Postgres(pg) => pg.process_batch(tables, namespaces, msgs).await,
+            DbPool::Sqlite(site) => site.process_batch(tables, namespaces, msgs).await,
         }
     }
 }

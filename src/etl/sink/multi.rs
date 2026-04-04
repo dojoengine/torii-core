@@ -9,8 +9,6 @@ use futures::future::join_all;
 use std::sync::Arc;
 
 use super::{EventBus, Sink, SinkContext};
-use crate::etl::envelope::Envelope;
-use crate::etl::extractor::ExtractionBatch;
 
 /// MultiSink runs multiple sinks and merges their routes
 pub struct MultiSink {
@@ -40,7 +38,7 @@ impl Sink for MultiSink {
         vec![]
     }
 
-    async fn process(&self, envelopes: &[Envelope], batch: &ExtractionBatch) -> anyhow::Result<()> {
+    async fn process(&self, batch: &[TransactionMsgs]) -> anyhow::Result<()> {
         let sink_results = join_all(self.sinks.iter().map(|sink| async move {
             let sink_start = std::time::Instant::now();
             let result = sink.process(envelopes, batch).await;

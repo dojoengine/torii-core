@@ -9,7 +9,8 @@ use itertools::Itertools;
 use sqlx::{Database, Pool};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
-use torii_introspect::events::IntrospectBody;
+use torii::etl::envelope::TypedTransactionMsgs;
+use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_sql::{Executable, FlexQuery, PoolExt};
 
 pub const COMMIT_CMD: &str = "--COMMIT";
@@ -47,6 +48,8 @@ pub struct DbDeadField {
     pub type_def: TypeDef,
 }
 
+pub type IntrospectTxEvents = TypedTransactionMsgs<&IntrospectMsg>;
+
 impl<DB: Database> PoolExt<DB> for IntrospectDb<Pool<DB>> {
     fn pool(&self) -> &Pool<DB> {
         &self.db
@@ -72,11 +75,11 @@ impl<DB: Database + Send + Sync + IntrospectQueryMaker> IntrospectProcessor for 
 where
     Vec<FlexQuery<DB>>: Executable<DB>,
 {
-    async fn process_msgs(
+    async fn process_batch(
         &self,
         tables: &Tables,
         namespaces: &NamespaceMode,
-        msgs: Vec<&IntrospectBody>,
+        msgs: &[IntrospectTxEvents],
     ) -> DbResult<Vec<DbResult<()>>> {
         self.execute_msgs(tables, namespaces, msgs).await
     }
@@ -97,12 +100,9 @@ impl<Backend: IntrospectProcessor + IntrospectInitialize> IntrospectDb<Backend> 
         self.load_store_data().await
     }
 
-    pub async fn process_messages(
-        &self,
-        msgs: Vec<&IntrospectBody>,
-    ) -> DbResult<Vec<DbResult<()>>> {
+    pub async fn process_batch(&self, batch: &[IntrospectTxEvents]) -> DbResult<Vec<DbResult<()>>> {
         self.db
-            .process_msgs(&self.tables, &self.namespaces, msgs)
+            .process_batch(&self.tables, &self.namespaces, batch)
             .await
     }
 

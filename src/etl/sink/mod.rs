@@ -6,8 +6,9 @@ use prost_types::Any;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::envelope::{Envelope, TypeId};
+use super::envelope::TypeId;
 use crate::command::CommandBusSender;
+use crate::etl::envelope::TransactionMsgs;
 use crate::grpc::SubscriptionManager;
 
 pub use multi::MultiSink;
@@ -137,11 +138,7 @@ pub trait Sink: Send + Sync {
     ///     Ok(())
     /// }
     /// ```
-    async fn process(
-        &self,
-        envelopes: &[Envelope],
-        batch: &crate::etl::extractor::ExtractionBatch,
-    ) -> anyhow::Result<()>;
+    async fn process(&self, batch: &[TransactionMsgs]) -> anyhow::Result<()>;
 
     /// Get topic information provided by this sink
     ///

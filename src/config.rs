@@ -1,3 +1,4 @@
+use crate::command::CommandHandler;
 use crate::etl::decoder::{ContractFilter, DecoderId};
 use crate::etl::identification::ContractIdentifier;
 use crate::etl::{
@@ -158,7 +159,7 @@ impl ToriiTlsConfig {
         self
     }
 
-    fn alpn_names(&self) -> Vec<String> {
+    pub fn alpn_names(&self) -> Vec<String> {
         self.alpn_protocols
             .iter()
             .map(|protocol| String::from_utf8_lossy(protocol).into_owned())

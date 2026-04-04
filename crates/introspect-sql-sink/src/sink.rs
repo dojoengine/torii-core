@@ -1,8 +1,11 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use itertools::Itertools;
 use std::sync::Arc;
 use torii::axum::Router;
-use torii::etl::envelope::{Envelope, TypeId};
+use torii::etl::envelope::{
+    Envelope, TransactionMsgs, TransactionsMsgs, TypeId, TypedTransactionsMsgs,
+};
 use torii::etl::extractor::ExtractionBatch;
 use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
@@ -28,35 +31,30 @@ impl<Backend: Send + Sync + IntrospectProcessor + IntrospectSqlSink + Introspect
         vec![INTROSPECT_TYPE]
     }
 
-    async fn process(&self, envelopes: &[Envelope], _batch: &ExtractionBatch) -> Result<()> {
+    async fn process(&self, batch: &[TransactionMsgs]) -> Result<()> {
         let mut processed = 0usize;
         let mut create_tables: usize = 0usize;
         let mut update_tables = 0usize;
         let mut inserts_fields = 0usize;
         let mut inserted_records = 0usize;
         let mut delete_records = 0usize;
-        let mut msgs = Vec::with_capacity(envelopes.len());
-        for envelope in envelopes {
-            if envelope.type_id == INTROSPECT_TYPE {
-                if let Some(body) = envelope.downcast_ref::<IntrospectBody>() {
-                    match &body.msg {
-                        IntrospectMsg::CreateTable(_) => create_tables += 1,
-                        IntrospectMsg::UpdateTable(_) => update_tables += 1,
-                        IntrospectMsg::InsertsFields(event) => {
-                            inserts_fields += 1;
-                            inserted_records += event.records.len();
-                        }
-                        IntrospectMsg::DeleteRecords(event) => {
-                            delete_records += event.rows.len();
-                        }
-                        _ => {}
-                    }
-                    processed += 1;
-                    msgs.push(body);
+        let mut transactions = batch.to_typed::<IntrospectMsg>(INTROSPECT_TYPE);
+        for msg in transactions.msgs() {
+            match msg {
+                IntrospectMsg::CreateTable(_) => create_tables += 1,
+                IntrospectMsg::UpdateTable(_) => update_tables += 1,
+                IntrospectMsg::InsertsFields(event) => {
+                    inserts_fields += 1;
+                    inserted_records += event.records.len();
                 }
+                IntrospectMsg::DeleteRecords(event) => {
+                    delete_records += event.rows.len();
+                }
+                _ => {}
             }
+            processed += 1;
         }
-        let results = self.process_messages(msgs).await?;
+        let results = self.process_batch(&transactions).await?;
         let failed = results.iter().filter(|r| r.is_err()).count();
         if failed > 0 {
             tracing::error!(
