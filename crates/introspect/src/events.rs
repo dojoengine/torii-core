@@ -72,6 +72,7 @@ pub struct CreateTable {
     pub attributes: Vec<Attribute>,
     pub primary: PrimaryDef,
     pub columns: Vec<ColumnDef>,
+    pub append_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -288,6 +289,7 @@ impl From<TableSchema> for CreateTable {
             attributes: schema.attributes,
             primary: schema.primary,
             columns: schema.columns,
+            append_only: false,
         }
     }
 }
@@ -347,6 +349,19 @@ impl InsertsFields {
             table,
             columns,
             records,
+        }
+    }
+}
+
+impl CreateTable {
+    pub fn from_schema(schema: TableSchema, append_only: bool) -> Self {
+        Self {
+            id: schema.id,
+            name: schema.name,
+            attributes: schema.attributes,
+            primary: schema.primary,
+            columns: schema.columns,
+            append_only,
         }
     }
 }

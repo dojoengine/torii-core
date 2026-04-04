@@ -9,6 +9,7 @@ use dojo_introspect::events::{
     ModelWithSchemaRegistered, StoreDelRecord, StoreSetRecord, StoreUpdateMember,
     StoreUpdateRecord,
 };
+use dojo_introspect::selector::compute_selector_from_dojo_tag;
 use dojo_introspect::serde::dojo_primary_def;
 use dojo_introspect::{DojoSchema, DojoSchemaFetcher};
 use introspect_types::{
@@ -18,14 +19,14 @@ use introspect_types::{
 use itertools::Itertools;
 use starknet::core::types::EmittedEvent;
 use starknet_types_core::felt::Felt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::RwLock;
 use torii::etl::event::EmittedEventExt;
 use torii::etl::{Decoder, Envelope, EventMsg};
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_introspect::schema::{TableMetadata, TableSchema};
-use torii_introspect::EventId;
+use torii_introspect::{CreateTable, EventId};
 
 pub const DOJO_ID_FIELD_NAME: &str = "entity_id";
 
@@ -33,6 +34,7 @@ pub struct DojoDecoder<Store, F> {
     pub tables: RwLock<HashMap<Felt, DojoTableInfo>>,
     pub store: Store,
     pub fetcher: F,
+    pub append_only: HashSet<(Felt, Felt)>,
 }
 
 fn deserialize_data<'a, T>(keys: &[Felt], data: &'a [Felt]) -> DojoToriiResult<T>
@@ -65,12 +67,12 @@ pub trait DojoRecordEvent<Store, F>: Sized + CairoEventInfo + Debug {
 #[async_trait]
 impl<Store, F> DojoStoreTrait for DojoDecoder<Store, F>
 where
-    Store: DojoStoreTrait + Send + Sync,
-    Store::Error: ToString,
-    F: Send + Sync + 'static,
+    Store: DojoStoreTrait + Sync,
+    F: Sync,
 {
-    type Error = DojoToriiError;
-
+    async fn initialize(&self) -> DojoToriiResult<()> {
+        self.store.initialize().await
+    }
     async fn save_table(
         &self,
         owner: &Felt,
@@ -81,14 +83,10 @@ where
         self.store
             .save_table(owner, table, tx_hash, block_number)
             .await
-            .map_err(DojoToriiError::store_error)
     }
 
     async fn read_tables(&self, owners: &[Felt]) -> DojoToriiResult<Vec<DojoTable>> {
-        self.store
-            .read_tables(owners)
-            .await
-            .map_err(DojoToriiError::store_error)
+        self.store.read_tables(owners).await
     }
 }
 
@@ -116,18 +114,23 @@ impl<Store, F> DojoDecoder<Store, F> {
 
 impl<Store, F> DojoDecoder<Store, F>
 where
-    Store: DojoStoreTrait + Sync,
+    Store: DojoStoreTrait + Sync + Send,
     F: DojoSchemaFetcher + Send + Sync + 'static,
 {
-    pub fn new<S: Into<Store>>(store: S, fetcher: F) -> Self {
-        let store = store.into();
+    pub fn new(store: Store, fetcher: F) -> Self {
         Self {
             tables: Default::default(),
             store,
             fetcher,
+            append_only: HashSet::new(),
         }
     }
-
+    pub fn append_historical(&mut self, models: HashSet<(Felt, String)>) {
+        for (address, name) in models {
+            let table_id = compute_selector_from_dojo_tag(&name).unwrap();
+            self.append_only.insert((address, table_id));
+        }
+    }
     pub async fn load_tables(&self, owners: &[Felt]) -> DojoToriiResult<()> {
         let new = self.read_tables(owners).await?;
         let mut tables = self.tables.write()?;
@@ -155,6 +158,7 @@ where
             tables: RwLock::new(tables),
             store,
             fetcher,
+            append_only: HashSet::new(),
         }
     }
 
@@ -165,7 +169,7 @@ where
         name: &str,
         schema: DojoSchema,
         metadata: &impl TableMetadata,
-    ) -> DojoToriiResult<TableSchema> {
+    ) -> DojoToriiResult<CreateTable> {
         let full_table = DojoTable::from_schema(schema, namespace, name, dojo_primary_def());
         self.save_table(
             owner,
@@ -185,7 +189,10 @@ where
             }
         }
         self.tables.write()?.insert(id, table);
-        Ok(full_table.into())
+        Ok(CreateTable::from_schema(
+            full_table.into(),
+            self.append_only.contains(&(*owner, id)),
+        ))
     }
 
     pub async fn update_table(
@@ -347,14 +354,9 @@ mod tests {
     use crate::ExternalContractRegisteredBody;
     use async_trait::async_trait;
     use dojo_introspect::DojoIntrospectError;
-    use introspect_types::{
-        utils::string_to_cairo_serialize_byte_array, Attribute, ColumnDef, TypeDef,
-    };
+    use introspect_types::utils::string_to_cairo_serialize_byte_array;
+    use introspect_types::{Attribute, ColumnDef, TypeDef};
     use std::sync::Mutex;
-
-    #[derive(Debug, thiserror::Error)]
-    #[error("{0}")]
-    struct FakeStoreError(String);
 
     #[derive(Default)]
     struct FakeStore {
@@ -363,20 +365,21 @@ mod tests {
 
     #[async_trait]
     impl DojoStoreTrait for FakeStore {
-        type Error = FakeStoreError;
-
+        async fn initialize(&self) -> DojoToriiResult {
+            Ok(())
+        }
         async fn save_table(
             &self,
             _owner: &Felt,
             _table: &DojoTable,
             _tx_hash: &Felt,
             block_number: u64,
-        ) -> Result<(), Self::Error> {
+        ) -> DojoToriiResult {
             self.saved_blocks.lock().unwrap().push(block_number);
             Ok(())
         }
 
-        async fn read_tables(&self, _owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
+        async fn read_tables(&self, _owners: &[Felt]) -> DojoToriiResult<Vec<DojoTable>> {
             Ok(Vec::new())
         }
     }

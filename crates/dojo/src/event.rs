@@ -35,7 +35,6 @@ where
                 raw,
             )
             .await
-            .map(Into::into)
     }
 }
 
@@ -55,7 +54,6 @@ where
         decoder
             .register_table(&raw.from_address, &self.namespace, &self.name, schema, raw)
             .await
-            .map(Into::into)
     }
 }
 
@@ -75,7 +73,6 @@ where
         decoder
             .register_table(&raw.from_address, &self.namespace, &self.name, schema, raw)
             .await
-            .map(Into::into)
     }
 }
 

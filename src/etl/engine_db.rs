@@ -4,7 +4,9 @@
 //! This will be enhanced with actual Torii features in the future.
 
 use anyhow::{Context, Result};
-use sqlx::{any::AnyPoolOptions, sqlite::SqliteConnectOptions, Any, ConnectOptions, Pool, Row};
+use sqlx::any::AnyPoolOptions;
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::{Any, ConnectOptions, Pool, Row};
 use starknet::core::types::Felt;
 use std::collections::HashMap;
 use std::str::FromStr;

@@ -178,7 +178,7 @@ impl DojoTable {
     pub fn get_column(&self, selector: &Felt) -> DojoToriiResult<&ColumnInfo> {
         self.columns
             .get(selector)
-            .ok_or_else(|| DojoToriiError::ColumnNotFound(*selector, self.name.clone()))
+            .ok_or_else(|| DojoToriiError::ColumnNotFound(self.name.clone(), *selector))
     }
 
     pub fn selectors(&self) -> impl Iterator<Item = &Felt> + '_ {
@@ -270,7 +270,7 @@ impl DojoTableInfo {
     pub fn get_column(&self, selector: &Felt) -> DojoToriiResult<&ColumnInfo> {
         self.columns
             .get(selector)
-            .ok_or_else(|| DojoToriiError::ColumnNotFound(*selector, self.name.clone()))
+            .ok_or_else(|| DojoToriiError::ColumnNotFound(self.name.clone(), *selector))
     }
 
     pub fn selectors(&self) -> impl Iterator<Item = &Felt> + '_ {

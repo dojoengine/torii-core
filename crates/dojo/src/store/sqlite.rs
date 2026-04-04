@@ -1,21 +1,20 @@
 use super::DojoStoreTrait;
 use crate::decoder::primary_field_def;
-use crate::DojoTable;
+use crate::{DojoTable, DojoToriiError, DojoToriiResult};
 use async_trait::async_trait;
 use introspect_types::ColumnInfo;
 use serde::{Deserialize, Serialize};
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::SqliteArguments;
-use sqlx::Arguments;
-use sqlx::{FromRow, Sqlite};
+use sqlx::{Arguments, FromRow, Sqlite, SqlitePool};
 use starknet_types_core::felt::Felt;
 use std::collections::HashMap;
 use std::io;
 use std::ops::Deref;
-use torii_common::sql::SqlxResult;
 use torii_common::{blob_to_felt, felt_to_blob};
 use torii_introspect::schema::ColumnKeyTrait;
-use torii_sqlite::SqliteConnection;
+use torii_sql::sqlite::SqliteDbConnection;
+use torii_sql::{PoolExt, SqlxResult};
 
 pub const DOJO_SQLITE_STORE_MIGRATIONS: Migrator = sqlx::migrate!("./migrations/sqlite");
 
@@ -162,31 +161,34 @@ impl<T> Deref for SqliteStore<T> {
     }
 }
 
-impl<T: SqliteConnection + Send + Sync> SqliteStore<T> {
+impl<T: SqliteDbConnection + Send + Sync> SqliteStore<T> {
     pub async fn initialize(&self) -> SqlxResult<()> {
         self.migrate(Some("dojo"), DOJO_SQLITE_STORE_MIGRATIONS)
             .await
     }
 }
 
-impl<T: SqliteConnection> From<T> for SqliteStore<T> {
+impl<T: SqliteDbConnection> From<T> for SqliteStore<T> {
     fn from(pool: T) -> Self {
         Self(pool)
     }
 }
 
 #[async_trait]
-impl<T: SqliteConnection + Send + Sync + 'static> DojoStoreTrait for SqliteStore<T> {
-    type Error = DojoSqliteStoreError;
-
+impl DojoStoreTrait for SqlitePool {
+    async fn initialize(&self) -> DojoToriiResult {
+        self.migrate(Some("dojo"), DOJO_SQLITE_STORE_MIGRATIONS)
+            .await
+            .map_err(DojoToriiError::store_error)
+    }
     async fn save_table(
         &self,
         owner: &Felt,
         table: &DojoTable,
         tx_hash: &Felt,
         block_number: u64,
-    ) -> Result<(), Self::Error> {
-        let mut transaction = self.begin().await?;
+    ) -> DojoToriiResult {
+        let mut transaction = self.begin().await.map_err(DojoToriiError::store_error)?;
 
         sqlx::query(
             r"
@@ -227,7 +229,8 @@ impl<T: SqliteConnection + Send + Sync + 'static> DojoStoreTrait for SqliteStore
         .bind(felt_to_blob(*tx_hash))
         .bind(felt_to_blob(*tx_hash))
         .execute(&mut *transaction)
-        .await?;
+        .await
+        .map_err(DojoToriiError::store_error)?;
 
         for (id, info) in &table.columns {
             let payload = StoredColumnInfo {
@@ -248,37 +251,45 @@ impl<T: SqliteConnection + Send + Sync + 'static> DojoStoreTrait for SqliteStore
             .bind(felt_to_blob(*id))
             .bind(serde_json::to_string(&payload)?)
             .execute(&mut *transaction)
-            .await?;
+            .await
+            .map_err(DojoToriiError::store_error)?;
         }
 
-        transaction.commit().await?;
+        transaction
+            .commit()
+            .await
+            .map_err(DojoToriiError::store_error)?;
         Ok(())
     }
 
-    async fn read_tables(&self, owners: &[Felt]) -> Result<Vec<DojoTable>, Self::Error> {
+    async fn read_tables(&self, owners: &[Felt]) -> DojoToriiResult<Vec<DojoTable>> {
         let (table_query, table_args) = select_table_query(owners);
         let rows = sqlx::query_as_with::<Sqlite, TableRow, _>(&table_query, table_args)
             .fetch_all(self.pool())
-            .await?;
+            .await
+            .map_err(DojoToriiError::store_error)?;
         let mut tables = rows
             .into_iter()
             .map(table_row_into_table)
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DojoToriiError::store_error)?;
 
         let (column_query, column_args) = select_column_query(owners);
         let mut columns: HashMap<(Felt, Felt), ColumnInfo> =
             sqlx::query_as_with::<Sqlite, ColumnRow, _>(&column_query, column_args)
                 .fetch_all(self.pool())
-                .await?
+                .await
+                .map_err(DojoToriiError::store_error)?
                 .into_iter()
                 .map(column_row_into_entry::<(Felt, Felt)>)
-                .collect::<Result<HashMap<_, _>, _>>()?;
+                .collect::<Result<HashMap<_, _>, _>>()
+                .map_err(DojoToriiError::store_error)?;
 
         for table in &mut tables {
             for key in table.key_fields.iter().chain(table.value_fields.iter()) {
-                let column = columns.remove(&(table.id, *key)).ok_or_else(|| {
-                    DojoSqliteStoreError::column_not_found(table.name.clone(), &(table.id, *key))
-                })?;
+                let column = columns
+                    .remove(&(table.id, *key))
+                    .ok_or_else(|| DojoToriiError::ColumnNotFound(table.name.clone(), *key))?;
                 table.columns.insert(*key, column);
             }
         }

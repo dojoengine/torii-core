@@ -1,10 +1,24 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::pin::Pin;
-use std::str::FromStr;
-use std::sync::Arc;
-use std::task::{Context, Poll};
-use std::time::Instant;
-
+use crate::proto::types::clause::ClauseType;
+use crate::proto::types::member_value::ValueType;
+use crate::proto::types::{
+    self, ComparisonOperator, ContractType, LogicalOperator, PaginationDirection, PatternMatching,
+};
+use crate::proto::world::world_server::World;
+use crate::proto::world::{
+    RetrieveContractsRequest, RetrieveContractsResponse, RetrieveControllersRequest,
+    RetrieveControllersResponse, RetrieveEntitiesRequest, RetrieveEntitiesResponse,
+    RetrieveEventsRequest, RetrieveEventsResponse, RetrieveTokenBalancesRequest,
+    RetrieveTokenBalancesResponse, RetrieveTokenContractsRequest, RetrieveTokenContractsResponse,
+    RetrieveTokenTransfersRequest, RetrieveTokenTransfersResponse, RetrieveTokensRequest,
+    RetrieveTokensResponse, RetrieveTransactionsRequest, RetrieveTransactionsResponse,
+    SubscribeContractsRequest, SubscribeContractsResponse, SubscribeEntitiesRequest,
+    SubscribeEntityResponse, SubscribeEventsRequest, SubscribeEventsResponse,
+    SubscribeTokenBalancesRequest, SubscribeTokenBalancesResponse, SubscribeTokenTransfersRequest,
+    SubscribeTokenTransfersResponse, SubscribeTokensRequest, SubscribeTokensResponse,
+    SubscribeTransactionsRequest, SubscribeTransactionsResponse, UpdateEntitiesSubscriptionRequest,
+    UpdateTokenBalancesSubscriptionRequest, UpdateTokenSubscriptionRequest,
+    UpdateTokenTransfersSubscriptionRequest, WorldsRequest, WorldsResponse,
+};
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use introspect_types::serialize::ToCairoDeSeFrom;
@@ -19,46 +33,32 @@ use prost::Message;
 use serde::ser::SerializeMap;
 use serde::Serializer;
 use serde_json::{Map, Serializer as JsonSerializer, Value};
-use sqlx::AnyConnection;
-use sqlx::{
-    any::AnyPoolOptions, pool::PoolConnection, postgres::PgPoolOptions,
-    sqlite::SqliteConnectOptions, sqlite::SqlitePoolOptions, Any, Column, ConnectOptions, Pool,
-    QueryBuilder, Row,
-};
+use sqlx::any::AnyPoolOptions;
+use sqlx::pool::PoolConnection;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Any, AnyConnection, Column, ConnectOptions, Pool, QueryBuilder, Row};
 use starknet::core::types::Felt;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::fs;
+use std::pin::Pin;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Instant;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{sleep, Duration};
-use tokio_stream::{wrappers::ReceiverStream, Stream};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
-use torii_dojo::store::postgres::PgStore;
 use torii_dojo::store::sqlite::SqliteStore;
 use torii_dojo::store::DojoStoreTrait;
 use torii_dojo::DojoTable;
 use torii_introspect::events::{CreateTable, Record, UpdateTable};
 use torii_introspect::schema::TableSchema;
 use torii_runtime_common::database::DEFAULT_SQLITE_MAX_CONNECTIONS;
-
-use crate::proto::types::{
-    self, clause::ClauseType, member_value::ValueType, ComparisonOperator, ContractType,
-    LogicalOperator, PaginationDirection, PatternMatching,
-};
-use crate::proto::world::{
-    world_server::World, RetrieveContractsRequest, RetrieveContractsResponse,
-    RetrieveControllersRequest, RetrieveControllersResponse, RetrieveEntitiesRequest,
-    RetrieveEntitiesResponse, RetrieveEventsRequest, RetrieveEventsResponse,
-    RetrieveTokenBalancesRequest, RetrieveTokenBalancesResponse, RetrieveTokenContractsRequest,
-    RetrieveTokenContractsResponse, RetrieveTokenTransfersRequest, RetrieveTokenTransfersResponse,
-    RetrieveTokensRequest, RetrieveTokensResponse, RetrieveTransactionsRequest,
-    RetrieveTransactionsResponse, SubscribeContractsRequest, SubscribeContractsResponse,
-    SubscribeEntitiesRequest, SubscribeEntityResponse, SubscribeEventsRequest,
-    SubscribeEventsResponse, SubscribeTokenBalancesRequest, SubscribeTokenBalancesResponse,
-    SubscribeTokenTransfersRequest, SubscribeTokenTransfersResponse, SubscribeTokensRequest,
-    SubscribeTokensResponse, SubscribeTransactionsRequest, SubscribeTransactionsResponse,
-    UpdateEntitiesSubscriptionRequest, UpdateTokenBalancesSubscriptionRequest,
-    UpdateTokenSubscriptionRequest, UpdateTokenTransfersSubscriptionRequest, WorldsRequest,
-    WorldsResponse,
-};
+use torii_sql::DbBackend;
 
 const SUBSCRIPTION_SEEN_CACHE_CAPACITY: usize = 4096;
 
@@ -81,29 +81,6 @@ impl TableKind {
             "entity" => Some(Self::Entity),
             "event_message" => Some(Self::EventMessage),
             _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DbBackend {
-    Sqlite,
-    Postgres,
-}
-
-impl DbBackend {
-    fn detect(database_url: &str) -> Self {
-        if database_url.starts_with("postgres://") || database_url.starts_with("postgresql://") {
-            Self::Postgres
-        } else {
-            Self::Sqlite
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Sqlite => "sqlite",
-            Self::Postgres => "postgres",
         }
     }
 }
@@ -646,12 +623,11 @@ impl EcsService {
     ) -> Result<Self> {
         sqlx::any::install_default_drivers();
 
-        let backend = DbBackend::detect(database_url);
+        let backend = get_db_backend(database_url);
         let database_url = match backend {
             DbBackend::Postgres => database_url.to_string(),
             DbBackend::Sqlite => sqlite_url(database_url)?,
         };
-
         let has_erc20 = erc20_url.is_some();
         let has_erc721 = erc721_url.is_some();
         let has_erc1155 = erc1155_url.is_some();
@@ -912,15 +888,23 @@ impl EcsService {
             ("erc1155", &self.state.erc1155_url),
         ] {
             if let Some(url) = url {
-                let path = sqlite_db_path(url);
-                let file_exists = std::path::Path::new(&path).exists();
-                tracing::info!(
-                    schema,
-                    path = %path,
-                    file_exists,
-                    "Attaching ERC database"
-                );
-                attach_sqlite_database(&mut conn, schema, url).await?;
+                let options = SqliteConnectOptions::from_str(url)?;
+                #[allow(clippy::match_bool)]
+                #[allow(clippy::single_match_else)]
+                match options.is_in_memory() {
+                    true => tracing::info!(schema, "Attaching in-memory ERC database"),
+                    false => {
+                        let path = options.get_filename();
+                        let file_exists = path.exists();
+                        tracing::info!(
+                            schema,
+                            path = %path.display(),
+                            file_exists,
+                            "Attaching ERC database"
+                        );
+                    }
+                }
+                attach_sqlite_database(&mut conn, schema, &options).await?;
                 match sqlx::query(sqlite_master_preview_sql(schema))
                     .fetch_all(&mut *conn)
                     .await
@@ -3369,7 +3353,7 @@ impl EcsService {
                     .max_connections(1)
                     .connect_with(SqliteConnectOptions::from_str(&self.state.database_url)?)
                     .await?;
-                let store = SqliteStore(Arc::new(pool));
+                let store = SqliteStore(pool);
                 Ok(store.read_tables(&[]).await?)
             }
             DbBackend::Postgres => {
@@ -3377,8 +3361,7 @@ impl EcsService {
                     .max_connections(1)
                     .connect(&self.state.database_url)
                     .await?;
-                let store = PgStore(Arc::new(pool));
-                Ok(store.read_tables(&[]).await?)
+                Ok(pool.read_tables(&[]).await?)
             }
         }
     }
@@ -4922,7 +4905,8 @@ async fn attach_sqlite_databases(
         ("erc1155", erc1155_url),
     ] {
         if let Some(url) = url {
-            attach_sqlite_database(conn, schema, url).await?;
+            let options = SqliteConnectOptions::from_str(url)?;
+            attach_sqlite_database(conn, schema, &options).await?;
         }
     }
     Ok(())
@@ -4931,7 +4915,7 @@ async fn attach_sqlite_databases(
 async fn attach_sqlite_database(
     conn: &mut AnyConnection,
     schema: &str,
-    url: &str,
+    options: &SqliteConnectOptions,
 ) -> sqlx::Result<()> {
     let attached =
         sqlx::query_scalar::<Any, i64>("SELECT 1 FROM pragma_database_list WHERE name = ? LIMIT 1")
@@ -4942,33 +4926,20 @@ async fn attach_sqlite_database(
     if attached {
         return Ok(());
     }
+    let path = options.get_filename();
 
-    let db_path = sqlite_db_path(url);
-    if !is_sqlite_memory_url(url) {
-        let path = std::path::Path::new(&db_path);
-        if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)?;
-        }
-        if !path.exists() {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(false)
-                .open(path)?;
-        }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
-
-    let path = db_path.replace('\'', "''");
+    if !path.exists() {
+        fs::File::create(path)?;
+    }
     // sqlite-dynamic-ok: ATTACH requires the database path and schema identifier in SQL text.
+    let path = path.to_string_lossy().replace('\'', "''");
     sqlx::query(&format!("ATTACH DATABASE '{path}' AS {schema}"))
         .execute(&mut *conn)
         .await?;
     Ok(())
-}
-
-fn is_sqlite_memory_url(url: &str) -> bool {
-    matches!(url, ":memory:" | "sqlite::memory:")
-        || (url.starts_with("sqlite:file:") && url.contains("mode=memory"))
 }
 
 fn sqlite_master_preview_sql(schema: &str) -> &'static str {
@@ -4980,18 +4951,12 @@ fn sqlite_master_preview_sql(schema: &str) -> &'static str {
     }
 }
 
-fn sqlite_db_path(url: &str) -> String {
-    let path = url
-        .strip_prefix("sqlite://")
-        .or_else(|| url.strip_prefix("sqlite:"))
-        .unwrap_or(url);
-    let p = std::path::Path::new(path);
-    if let (Some(parent), Some(file_name)) = (p.parent(), p.file_name()) {
-        if let Ok(abs_parent) = parent.canonicalize() {
-            return abs_parent.join(file_name).to_string_lossy().into_owned();
-        }
+fn get_db_backend(url: &str) -> DbBackend {
+    if url.starts_with("postgres") {
+        DbBackend::Postgres
+    } else {
+        DbBackend::Sqlite
     }
-    path.to_string()
 }
 
 fn sqlite_url(path: &str) -> Result<String> {
@@ -5178,10 +5143,9 @@ fn record_to_json_map(
             info
         })
         .collect::<Vec<_>>();
-    let schema = torii_introspect::tables::RecordSchema::new(
-        &schema_table.primary,
-        schema_columns.iter().collect(),
-    );
+    let primary = schema_table.primary.into();
+    let schema =
+        torii_introspect::tables::RecordSchema::new(&primary, schema_columns.iter().collect());
 
     let mut bytes = Vec::new();
     let mut serializer = JsonSerializer::new(&mut bytes);
@@ -6644,6 +6608,7 @@ mod tests {
                 attributes: vec![],
                 type_def: TypeDef::Bool,
             }],
+            append_only: false,
         };
 
         service.cache_created_table(world_address, &table).await;
@@ -6739,6 +6704,7 @@ mod tests {
                 attributes: vec![],
                 type_def: TypeDef::Bool,
             }],
+            append_only: false,
         };
 
         service.cache_created_table(world_address, &table).await;
@@ -6848,6 +6814,7 @@ mod tests {
                 attributes: vec![Attribute::new_empty("key".to_string())],
                 type_def: TypeDef::Felt252,
             }],
+            append_only: false,
         };
 
         service.cache_created_table(world_address, &table).await;
