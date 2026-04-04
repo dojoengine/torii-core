@@ -104,10 +104,18 @@ impl EventFetcher for Connection {
 
         for row in self.get_block_events_rows(from_block, to_block)? {
             let block: BlockEvents = row.try_into()?;
-            let block_hash = hash_rows
-                .next()
-                .map(|r| r.hash)
-                .ok_or_else(|| PFError::block_hash_missing(block.block_number))?;
+            let block_hash = loop {
+                match hash_rows.next() {
+                    Some(hash_row) => {
+                        if hash_row.number == block.block_number {
+                            break hash_row.hash;
+                        } else if hash_row.number > block.block_number {
+                            return Err(PFError::block_hash_missing(block.block_number));
+                        }
+                    }
+                    None => return Err(PFError::block_hash_missing(block.block_number)),
+                }
+            };
             for transaction in block.transactions {
                 let transaction_hash = tx_hashes
                     .next()
@@ -144,12 +152,20 @@ impl EventFetcher for Connection {
 
         for row in self.get_block_events_rows(from_block, to_block)? {
             let block = BlockEvents::try_from(row)?;
-            let ctx = ctx_iter
-                .next()
-                .ok_or_else(|| PFError::block_context_missing(block.block_number))?;
-            if ctx.number != block.block_number {
-                return Err(PFError::block_context_missing(block.block_number));
-            }
+            let ctx = loop {
+                match ctx_iter.next() {
+                    Some(ctx) => {
+                        if ctx.number == block.block_number {
+                            break ctx;
+                        } else if ctx.number > block.block_number {
+                            return Err(PFError::block_context_missing(block.block_number));
+                        } else {
+                            contexts.push(ctx.into());
+                        }
+                    }
+                    None => return Err(PFError::block_context_missing(block.block_number)),
+                }
+            };
             for transaction in block.transactions {
                 let transaction_hash = tx_hashes
                     .next()
