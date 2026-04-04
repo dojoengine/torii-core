@@ -889,6 +889,8 @@ impl EcsService {
         ] {
             if let Some(url) = url {
                 let options = SqliteConnectOptions::from_str(url)?;
+                #[allow(clippy::match_bool)]
+                #[allow(clippy::single_match_else)]
                 match options.is_in_memory() {
                     true => tracing::info!(schema, "Attaching in-memory ERC database"),
                     false => {
@@ -899,9 +901,9 @@ impl EcsService {
                             path = %path.display(),
                             file_exists,
                             "Attaching ERC database"
-                        )
+                        );
                     }
-                };
+                }
                 attach_sqlite_database(&mut conn, schema, &options).await?;
                 match sqlx::query(sqlite_master_preview_sql(schema))
                     .fetch_all(&mut *conn)
@@ -4929,18 +4931,15 @@ async fn attach_sqlite_database(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::OpenOptions::new().create(true).write(true).open(path)?;
+    if !path.exists() {
+        fs::File::create(path)?;
+    }
     // sqlite-dynamic-ok: ATTACH requires the database path and schema identifier in SQL text.
     let path = path.to_string_lossy().replace('\'', "''");
     sqlx::query(&format!("ATTACH DATABASE '{path}' AS {schema}"))
         .execute(&mut *conn)
         .await?;
     Ok(())
-}
-
-fn is_sqlite_memory_url(url: &str) -> bool {
-    matches!(url, ":memory:" | "sqlite::memory:")
-        || (url.starts_with("sqlite:file:") && url.contains("mode=memory"))
 }
 
 fn sqlite_master_preview_sql(schema: &str) -> &'static str {

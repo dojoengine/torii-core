@@ -641,6 +641,7 @@ where
     Ok(PgQuery::new(INSERT_COLUMN_QUERY, args))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn insert_table_query(
     schema: &str,
     id: &Felt,

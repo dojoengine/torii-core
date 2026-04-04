@@ -25,6 +25,9 @@ pub const CONTROLLERS_STATE_TABLE: &str = "torii_controller_sync_state";
 const MAX_RETRIES: u32 = 3;
 const INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 const CONTROLLERS_TYPE: TypeId = TypeId::new("controllers.sync");
+const CONTROLLER_PROCESSING_BATCH_SIZE: usize = 10_000;
+const SQLITE_CONTROLLER_UPSERT_BATCH_SIZE: usize = 199;
+const POSTGRES_CONTROLLER_UPSERT_BATCH_SIZE: usize = 10_000;
 #[derive(Debug, Clone, Deserialize)]
 struct ControllerAccount {
     username: String,

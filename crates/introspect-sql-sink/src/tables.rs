@@ -22,6 +22,7 @@ impl Deref for Tables {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 impl Tables {
     pub fn create_table<DB: IntrospectQueryMaker>(
         &self,
@@ -141,7 +142,7 @@ impl Tables {
             return Ok(());
         }
         DB::insert_record_queries(
-            &table,
+            table,
             &event.columns,
             &event.records,
             from_address,

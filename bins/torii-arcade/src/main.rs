@@ -386,7 +386,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         &erc721_addresses,
         &erc1155_addresses,
         &config,
-    );
+    )?;
     let conn_options =
         DbConnectionOptions::from_str(&engine_database_url).map_err(anyhow::Error::msg)?;
     let max_connections = match config.max_db_connections {

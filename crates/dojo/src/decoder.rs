@@ -191,7 +191,7 @@ where
         self.tables.write()?.insert(id, table);
         Ok(CreateTable::from_schema(
             full_table.into(),
-            self.append_only.contains(&(owner.clone(), id)),
+            self.append_only.contains(&(*owner, id)),
         ))
     }
 

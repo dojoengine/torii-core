@@ -76,7 +76,7 @@ impl From<(u128, DeadField)> for DeadFieldDef {
 
 impl Table {
     pub fn column(&self, id: &Felt) -> Result<&ColumnInfo, ColumnNotFoundError> {
-        self.columns.get(id).ok_or_else(|| ColumnNotFoundError(*id))
+        self.columns.get(id).ok_or(ColumnNotFoundError(*id))
     }
 
     pub fn namespace(&self) -> Rc<str> {
@@ -104,6 +104,7 @@ impl Table {
         self.columns.iter().collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         namespace: String,
         id: Felt,
@@ -120,7 +121,7 @@ impl Table {
             owner,
             name,
             primary: primary.into(),
-            columns: columns.into_iter().cloned().map_into().collect(),
+            columns: columns.iter().cloned().map_into().collect(),
             dead: dead.unwrap_or_default().into_iter().collect(),
             append_only,
             alive: true,
