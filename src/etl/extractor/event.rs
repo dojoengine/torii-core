@@ -269,6 +269,8 @@ pub struct EventExtractor {
     /// Per-contract extraction state.
     contract_states: HashMap<Felt, ContractState>,
 
+    start_block: u64,
+
     /// Whether the extractor has been initialized.
     initialized: bool,
 
@@ -294,6 +296,7 @@ impl EventExtractor {
             initialized: false,
             chain_head: None,
             has_following_contracts,
+            start_block: 0,
         }
     }
 
@@ -448,7 +451,7 @@ impl EventExtractor {
                     tracing::trace!(
                         target: "torii::etl::event",
                         contract = %state.state_key(),
-                        from_block = state.current_block,
+                        from_block = state.current_block.max(self.start_block),
                         to_block = range_end,
                         following_head = state.is_following_head(),
                         "Queueing event range request"
@@ -457,7 +460,7 @@ impl EventExtractor {
                     tracing::debug!(
                         target: "torii::etl::event",
                         contract = %state.state_key(),
-                        from_block = state.current_block,
+                        from_block = state.current_block.max(self.start_block),
                         to_block = range_end,
                         continuation_token = %state.continuation_token.as_deref().unwrap_or_default(),
                         "Queueing paginated event request"
@@ -466,7 +469,7 @@ impl EventExtractor {
                 let request = ProviderRequestData::GetEvents(GetEventsRequest {
                     filter: EventFilterWithPage {
                         event_filter: EventFilter {
-                            from_block: Some(BlockId::Number(state.current_block)),
+                            from_block: Some(BlockId::Number(state.current_block.max(self.start_block))),
                             to_block: Some(BlockId::Number(range_end)),
                             address: Some(state.address),
                             keys: None,
@@ -533,6 +536,9 @@ impl EventExtractor {
 
 #[async_trait]
 impl Extractor for EventExtractor {
+    fn set_start_block(&mut self, start_block: u64) {
+        self.start_block = start_block;
+    }
     async fn extract(
         &mut self,
         _cursor: Option<String>,

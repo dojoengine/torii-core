@@ -24,6 +24,7 @@ torii-introspect-sql-sink = { workspace = true, features = [
 ] }
 torii-runtime-common.workspace = true
 torii-sql = { workspace = true, features = ["postgres", "sqlite"] }
+torii-pathfinder = { workspace = true, features = ["etl"] }
 
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

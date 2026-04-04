@@ -75,6 +75,9 @@ impl SampleExtractor {
 
 #[async_trait]
 impl Extractor for SampleExtractor {
+    fn set_start_block(&mut self, start_block: u64) {
+        self.current_block = start_block.max(self.current_block);
+    }
     fn is_finished(&self) -> bool {
         false // Sample extractor cycles infinitely, never finishes
     }

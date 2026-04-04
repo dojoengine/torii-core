@@ -4938,6 +4938,11 @@ async fn attach_sqlite_database(
     Ok(())
 }
 
+fn is_sqlite_memory_url(url: &str) -> bool {
+    matches!(url, ":memory:" | "sqlite::memory:")
+        || (url.starts_with("sqlite:file:") && url.contains("mode=memory"))
+}
+
 fn sqlite_master_preview_sql(schema: &str) -> &'static str {
     match schema {
         "erc20" => "SELECT name FROM erc20.sqlite_master WHERE type='table' LIMIT 5",
@@ -8717,6 +8722,34 @@ mod tests {
             response.balances[0].token_id.as_ref(),
             Some(&u256_bytes_from_u64(4))
         );
+    }
+
+    #[tokio::test]
+    async fn init_skips_missing_sqlite_token_databases() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!("torii-ecs-main-{nonce}.db"));
+        std::fs::File::create(&db_path).expect("create main db file");
+        let db_path = db_path.display().to_string();
+        let missing_erc20 = temp_sqlite_url("missing-token-db-erc20");
+
+        let service = EcsService::new(&db_path, Some(1), Some(&missing_erc20), None, None)
+            .await
+            .expect("service init");
+
+        service
+            .attach_erc_databases()
+            .await
+            .expect("missing token db should be skipped");
+
+        sqlx::query("CREATE TABLE erc20.balances (id INTEGER PRIMARY KEY)")
+            .execute(&service.state.pool)
+            .await
+            .expect("missing token db should be attached and writable");
+
+        assert!(service.state.has_erc20);
     }
 
     #[tokio::test]

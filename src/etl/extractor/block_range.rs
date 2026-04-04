@@ -400,7 +400,9 @@ impl Extractor for BlockRangeExtractor {
     fn is_finished(&self) -> bool {
         self.reached_end
     }
-
+    fn set_start_block(&mut self, start_block: u64) {
+        self.current_block = start_block.max(self.current_block);
+    }
     async fn commit_cursor(&mut self, cursor: &str, engine_db: &EngineDb) -> Result<()> {
         if let Some(block_str) = cursor.strip_prefix("block:") {
             let block_num: u64 = block_str.parse().context("Invalid cursor format")?;

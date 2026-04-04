@@ -354,6 +354,10 @@ impl SyntheticIntrospectExtractor {
 
 #[async_trait]
 impl Extractor for SyntheticIntrospectExtractor {
+    fn set_start_block(&mut self, start_block: u64) {
+        self.current_block = start_block.max(self.current_block);
+    }
+
     async fn extract(
         &mut self,
         cursor: Option<String>,

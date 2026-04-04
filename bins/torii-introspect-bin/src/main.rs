@@ -720,22 +720,6 @@ async fn run_with_postgres(
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
 
-    let (erc20_url, erc721_url, erc1155_url) =
-        ecs_token_storage_urls(token_db_setup.as_ref(), installed_token_support);
-    let ecs_sink = EcsSink::new(
-        storage_database_url,
-        config.max_db_connections,
-        erc20_url,
-        erc721_url,
-        erc1155_url,
-        contract_type_registry.clone(),
-        config.from_block,
-        config.index_external_contracts,
-        installed_external_decoders.clone(),
-    )
-    .await?;
-    let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
-
     let reflection_builder = ReflectionBuilder::configure()
         .register_encoded_file_descriptor_set(torii::TORII_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(ECS_DESCRIPTOR_SET);
@@ -751,7 +735,6 @@ async fn run_with_postgres(
         .engine_database_url(engine_database_url)
         .with_extractor(extractor)
         .add_decoder(decoder)
-        .add_sink_boxed(Box::new(ecs_sink))
         .add_sink_boxed(Box::new(
             OrderedSinkPipeline::new("introspect-projection-pipeline")
                 .push(Box::new(introspect_sink)),
@@ -790,6 +773,23 @@ async fn run_with_postgres(
             reflection_builder,
         )
         .await?;
+
+    let (erc20_url, erc721_url, erc1155_url) =
+        ecs_token_storage_urls(token_db_setup.as_ref(), installed_token_support);
+    let ecs_sink = EcsSink::new(
+        storage_database_url,
+        config.max_db_connections,
+        erc20_url,
+        erc721_url,
+        erc1155_url,
+        contract_type_registry.clone(),
+        config.from_block,
+        config.index_external_contracts,
+        installed_external_decoders.clone(),
+    )
+    .await?;
+    let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
+    let torii_config = torii_config.add_sink_boxed(Box::new(ecs_sink));
 
     let reflection = reflection_builder
         .build_v1()
@@ -902,22 +902,6 @@ async fn run_with_sqlite(
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
 
-    let (erc20_url, erc721_url, erc1155_url) =
-        ecs_token_storage_urls(token_db_setup.as_ref(), installed_token_support);
-    let ecs_sink = EcsSink::new(
-        storage_database_url,
-        config.max_db_connections,
-        erc20_url,
-        erc721_url,
-        erc1155_url,
-        contract_type_registry.clone(),
-        config.from_block,
-        config.index_external_contracts,
-        installed_external_decoders.clone(),
-    )
-    .await?;
-    let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
-
     let reflection_builder = ReflectionBuilder::configure()
         .register_encoded_file_descriptor_set(torii::TORII_DESCRIPTOR_SET)
         .register_encoded_file_descriptor_set(ECS_DESCRIPTOR_SET);
@@ -933,7 +917,6 @@ async fn run_with_sqlite(
         .engine_database_url(engine_database_url)
         .with_extractor(extractor)
         .add_decoder(decoder)
-        .add_sink_boxed(Box::new(ecs_sink))
         .add_sink_boxed(Box::new(
             OrderedSinkPipeline::new("introspect-projection-pipeline").push(Box::new(
                 IntrospectSqliteDb::new(pool.clone(), NamespaceMode::Address),
@@ -973,6 +956,23 @@ async fn run_with_sqlite(
             reflection_builder,
         )
         .await?;
+
+    let (erc20_url, erc721_url, erc1155_url) =
+        ecs_token_storage_urls(token_db_setup.as_ref(), installed_token_support);
+    let ecs_sink = EcsSink::new(
+        storage_database_url,
+        config.max_db_connections,
+        erc20_url,
+        erc721_url,
+        erc1155_url,
+        contract_type_registry.clone(),
+        config.from_block,
+        config.index_external_contracts,
+        installed_external_decoders.clone(),
+    )
+    .await?;
+    let ecs_grpc_service = ecs_sink.get_grpc_service_impl();
+    let torii_config = torii_config.add_sink_boxed(Box::new(ecs_sink));
 
     let reflection = reflection_builder
         .build_v1()

@@ -17,6 +17,8 @@ members = [
   "crates/dojo",
   "crates/introspect-sql-sink",
   "crates/testing",
+  "crates/pathfinder",
+  "crates/starknet",
   "bins/torii-erc20",
   "bins/torii-erc20-synth",
   "bins/torii-introspect-bin",
@@ -117,6 +119,7 @@ dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev =
 # Utils
 resolve-path = "0.1.0"
 itertools = "0.14.0"
+bincode = { version = "2.0.0" }
 
 # Torii core
 torii.path = "."
@@ -138,6 +141,8 @@ torii-dojo.path = "./crates/dojo"
 torii-introspect.path = "crates/introspect"
 torii-introspect-sql-sink.path = "./crates/introspect-sql-sink"
 torii-test-utils.path = "crates/testing"
+torii-pathfinder.path = "crates/pathfinder"
+torii-starknet.path = "crates/starknet"
 
 [lib]
 name = "torii"
@@ -166,6 +171,10 @@ path = "examples/test_block_extractor/main.rs"
 [[example]]
 name = "introspect_restart"
 path = "examples/introspect/restart.rs"
+
+[[example]]
+name = "pathfinder"
+path = "examples/pathfinder/main.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -217,6 +226,8 @@ resolve-path.workspace = true
 itertools.workspace = true
 dojo-introspect.workspace = true
 
+
+torii-sql = { workspace = true, features = ["postgres", "sqlite"] }
 torii-sql-sink.workspace = true
 torii-log-sink.workspace = true
 torii-erc20.workspace = true
@@ -226,13 +237,11 @@ torii-dojo = { workspace = true, features = ["postgres", "sqlite"] }
 torii-introspect.workspace = true
 torii-common.workspace = true
 torii-test-utils.workspace = true
-torii-sql = { workspace = true, features = ["postgres", "sqlite"] }
 torii-introspect-sql-sink = { workspace = true, features = [
   "postgres",
   "sqlite",
 ] }
-
-
+torii-pathfinder.workspace = true
 # Example dependencies
 
 

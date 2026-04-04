@@ -261,6 +261,10 @@ impl GlobalEventExtractor {
 
 #[async_trait]
 impl Extractor for GlobalEventExtractor {
+    fn set_start_block(&mut self, start_block: u64) {
+        self.state.current_block = start_block.max(self.state.current_block);
+        self.config.from_block = start_block.max(self.config.from_block);
+    }
     async fn extract(
         &mut self,
         _cursor: Option<String>,

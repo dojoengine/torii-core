@@ -324,6 +324,10 @@ impl ExtractionBatch {
 /// Extractor trait for fetching enriched event batches
 #[async_trait]
 pub trait Extractor: Send + Sync {
+    /// Set the starting block for extraction
+    /// Must be called before the first call to `extract()`. Extractors that support block-based extraction
+    fn set_start_block(&mut self, start_block: u64);
+
     /// Extract events with enriched context (blocks, transactions)
     ///
     /// The cursor parameter is an opaque string that allows resuming from a previous extraction.
