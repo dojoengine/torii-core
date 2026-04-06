@@ -185,6 +185,10 @@ path = "examples/introspect/simple.rs"
 name = "introspect_restart"
 path = "examples/introspect/restart.rs"
 
+[[example]]
+name = "pathfinder"
+path = "examples/pathfinder/main.rs"
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -245,6 +249,7 @@ torii-introspect.workspace = true
 torii-common.workspace = true
 torii-introspect-postgres-sink.workspace = true
 torii-test-utils.workspace = true
+torii-pathfinder.workspace = true
 
 
 # Example dependencies
