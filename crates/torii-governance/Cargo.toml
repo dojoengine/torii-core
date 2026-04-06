@@ -1,0 +1,33 @@
+[package]
+name = "torii-governance"
+version = "0.1.0"
+edition = "2021"
+description = "Governance indexer library for Torii"
+
+[dependencies]
+torii = { path = "../.." }
+torii-common = { path = "../torii-common" }
+torii-erc20 = { path = "../torii-erc20" }
+
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+starknet = "0.17"
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "postgres", "any"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+prost = "0.13"
+prost-types = "0.13"
+tonic = "0.12"
+chrono = "0.4"
+async-stream = "0.3"
+futures = "0.3"
+axum = "0.7"
+anyhow = "1.0"
+tracing = "0.1"
+metrics = "0.24"
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[lints]
+workspace = true

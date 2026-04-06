@@ -1031,6 +1031,7 @@ dependencies = [
 [[package]]
 name = "dojo-introspect"
 version = "0.1.0"
+source = "git+https://github.com/dojoengine/dojo-introspect?rev=aadc3c9#aadc3c980706596a4a083413813a0a3ab01fded7"
 dependencies = [
  "async-trait",
  "introspect-rust-macros",
@@ -2011,6 +2012,7 @@ dependencies = [
 [[package]]
 name = "introspect-events"
 version = "0.1.2"
+source = "git+https://github.com/cartridge-gg/introspect?rev=34e93c1#34e93c10c867c53c622cce03abb6431c9dae0ef5"
 dependencies = [
  "cainome-cairo-serde",
  "introspect-types",
@@ -2022,6 +2024,7 @@ dependencies = [
 [[package]]
 name = "introspect-rust-macros"
 version = "0.1.0"
+source = "git+https://github.com/cartridge-gg/introspect?rev=34e93c1#34e93c10c867c53c622cce03abb6431c9dae0ef5"
 dependencies = [
  "paste",
  "proc-macro2",
@@ -2033,6 +2036,7 @@ dependencies = [
 [[package]]
 name = "introspect-types"
 version = "0.1.2"
+source = "git+https://github.com/cartridge-gg/introspect?rev=34e93c1#34e93c10c867c53c622cce03abb6431c9dae0ef5"
 dependencies = [
  "blake3",
  "convert_case",
@@ -5174,6 +5178,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "torii-governance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum",
+ "chrono",
+ "futures",
+ "metrics",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "starknet",
+ "tokio",
+ "tonic",
+ "tonic-build",
+ "torii",
+ "torii-common",
+ "torii-erc20",
+ "tracing",
+]
+
+[[package]]
 name = "torii-introspect"
 version = "0.1.0"
 dependencies = [
@@ -5448,6 +5478,7 @@ dependencies = [
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",
+ "torii-governance",
  "torii-runtime-common",
  "tracing",
  "tracing-subscriber",

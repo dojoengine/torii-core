@@ -69,6 +69,11 @@ use torii_erc20::{
     Erc20Decoder, Erc20MetadataCommandHandler, Erc20Rule, Erc20Service, Erc20Sink, Erc20Storage,
     FILE_DESCRIPTOR_SET as ERC20_DESCRIPTOR_SET,
 };
+use torii_governance::proto::governance_server::GovernanceServer;
+use torii_governance::{
+    bootstrap_governance_registry, GovernanceDecoder, GovernanceRule, GovernanceService,
+    GovernanceSink, GovernanceStorage, FILE_DESCRIPTOR_SET as GOVERNANCE_DESCRIPTOR_SET,
+};
 
 use torii_erc721::proto::erc721_server::Erc721Server;
 use torii_erc721::{
@@ -85,19 +90,24 @@ use torii_erc1155::{
 
 async fn contracts_from_registry(
     engine_db: &torii::etl::EngineDb,
-) -> Result<(Vec<Felt>, Vec<Felt>, Vec<Felt>)> {
+) -> Result<(Vec<Felt>, Vec<Felt>, Vec<Felt>, Vec<Felt>)> {
     let mappings = engine_db.get_all_contract_decoders().await?;
     let erc20_id = DecoderId::new("erc20");
+    let governance_id = DecoderId::new("governance");
     let erc721_id = DecoderId::new("erc721");
     let erc1155_id = DecoderId::new("erc1155");
 
     let mut erc20 = Vec::new();
+    let mut governance = Vec::new();
     let mut erc721 = Vec::new();
     let mut erc1155 = Vec::new();
 
     for (contract, decoder_ids, _) in mappings {
         if decoder_ids.contains(&erc20_id) {
             erc20.push(contract);
+        }
+        if decoder_ids.contains(&governance_id) {
+            governance.push(contract);
         }
         if decoder_ids.contains(&erc721_id) {
             erc721.push(contract);
@@ -107,7 +117,7 @@ async fn contracts_from_registry(
         }
     }
 
-    Ok((erc20, erc721, erc1155))
+    Ok((erc20, governance, erc721, erc1155))
 }
 
 fn extend_unique(target: &mut Vec<Felt>, additions: Vec<Felt>) {
@@ -278,6 +288,7 @@ async fn run_indexer(config: Config) -> Result<()> {
     ));
 
     let mut all_erc20_addresses: Vec<Felt> = Vec::new();
+    let mut all_governance_addresses: Vec<Felt> = Vec::new();
     let mut all_erc721_addresses: Vec<Felt> = Vec::new();
     let mut all_erc1155_addresses: Vec<Felt> = Vec::new();
 
@@ -336,6 +347,11 @@ async fn run_indexer(config: Config) -> Result<()> {
         db_setup.erc20_url
     );
     tracing::info!(
+        "Governance storage backend: {:?} ({})",
+        db_setup.governance_backend,
+        db_setup.governance_url
+    );
+    tracing::info!(
         "ERC721 storage backend: {:?} ({})",
         db_setup.erc721_backend,
         db_setup.erc721_url
@@ -355,6 +371,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         ContractRegistry::new(provider.clone(), engine_db.clone())
             .with_rpc_parallelism(config.rpc_parallelism)
             .with_rule(Box::new(Erc20Rule::new()))
+            .with_rule(Box::new(GovernanceRule::new()))
             .with_rule(Box::new(Erc721Rule::new()))
             .with_rule(Box::new(Erc1155Rule::new())),
     );
@@ -365,33 +382,60 @@ async fn run_indexer(config: Config) -> Result<()> {
         tracing::info!("Loaded {} contract mappings from database", loaded_count);
     }
 
+    let governance_bootstrap =
+        bootstrap_governance_registry(provider.clone(), engine_db.clone(), registry.shared_cache())
+            .await?;
+    extend_unique(
+        &mut all_governance_addresses,
+        governance_bootstrap
+            .governors
+            .iter()
+            .map(|entry| entry.governor)
+            .collect(),
+    );
+    extend_unique(
+        &mut all_erc20_addresses,
+        governance_bootstrap.added_votes_tokens.clone(),
+    );
+
     if config.mode == ExtractionMode::Event {
-        let (reg_erc20, reg_erc721, reg_erc1155) = contracts_from_registry(&engine_db).await?;
+        let (reg_erc20, reg_governance, reg_erc721, reg_erc1155) =
+            contracts_from_registry(&engine_db).await?;
         let before = (
             all_erc20_addresses.len(),
+            all_governance_addresses.len(),
             all_erc721_addresses.len(),
             all_erc1155_addresses.len(),
         );
         extend_unique(&mut all_erc20_addresses, reg_erc20);
+        extend_unique(&mut all_governance_addresses, reg_governance);
         extend_unique(&mut all_erc721_addresses, reg_erc721);
         extend_unique(&mut all_erc1155_addresses, reg_erc1155);
 
         let added_from_registry = (
             all_erc20_addresses.len().saturating_sub(before.0),
-            all_erc721_addresses.len().saturating_sub(before.1),
-            all_erc1155_addresses.len().saturating_sub(before.2),
+            all_governance_addresses.len().saturating_sub(before.1),
+            all_erc721_addresses.len().saturating_sub(before.2),
+            all_erc1155_addresses.len().saturating_sub(before.3),
         );
-        if added_from_registry.0 + added_from_registry.1 + added_from_registry.2 > 0 {
+        if added_from_registry.0
+            + added_from_registry.1
+            + added_from_registry.2
+            + added_from_registry.3
+            > 0
+        {
             tracing::info!(
                 target: "torii_tokens",
                 erc20 = added_from_registry.0,
-                erc721 = added_from_registry.1,
-                erc1155 = added_from_registry.2,
+                governance = added_from_registry.1,
+                erc721 = added_from_registry.2,
+                erc1155 = added_from_registry.3,
                 "Loaded event-mode contracts from registry"
             );
         }
 
         if all_erc20_addresses.is_empty()
+            && all_governance_addresses.is_empty()
             && all_erc721_addresses.is_empty()
             && all_erc1155_addresses.is_empty()
         {
@@ -399,20 +443,38 @@ async fn run_indexer(config: Config) -> Result<()> {
                 bootstrap_registry_for_event_mode(provider.clone(), &engine_db, &registry, &config)
                     .await?;
             if identified > 0 {
-                let (boot_erc20, boot_erc721, boot_erc1155) =
+                let bootstrap = bootstrap_governance_registry(
+                    provider.clone(),
+                    engine_db.clone(),
+                    registry.shared_cache(),
+                )
+                .await?;
+                extend_unique(
+                    &mut all_governance_addresses,
+                    bootstrap
+                        .governors
+                        .iter()
+                        .map(|entry| entry.governor)
+                        .collect(),
+                );
+                extend_unique(&mut all_erc20_addresses, bootstrap.added_votes_tokens);
+
+                let (boot_erc20, boot_governance, boot_erc721, boot_erc1155) =
                     contracts_from_registry(&engine_db).await?;
                 extend_unique(&mut all_erc20_addresses, boot_erc20);
+                extend_unique(&mut all_governance_addresses, boot_governance);
                 extend_unique(&mut all_erc721_addresses, boot_erc721);
                 extend_unique(&mut all_erc1155_addresses, boot_erc1155);
             }
         }
 
         if all_erc20_addresses.is_empty()
+            && all_governance_addresses.is_empty()
             && all_erc721_addresses.is_empty()
             && all_erc1155_addresses.is_empty()
         {
             anyhow::bail!(
-                "Event mode could not resolve any contracts after registry lookup/bootstrap. Provide explicit --erc20/--erc721/--erc1155 or widen bootstrap with --event-bootstrap-blocks."
+                "Event mode could not resolve any contracts after registry lookup/bootstrap. Provide explicit token targets or widen bootstrap with --event-bootstrap-blocks."
             );
         }
     }
@@ -444,6 +506,14 @@ async fn run_indexer(config: Config) -> Result<()> {
             let to_block = config.to_block.unwrap_or(u64::MAX);
 
             for addr in &all_erc20_addresses {
+                event_configs.push(ContractEventConfig {
+                    address: *addr,
+                    from_block: config.from_block,
+                    to_block,
+                });
+            }
+
+            for addr in &all_governance_addresses {
                 event_configs.push(ContractEventConfig {
                     address: *addr,
                     from_block: config.from_block,
@@ -521,18 +591,21 @@ async fn run_indexer(config: Config) -> Result<()> {
         .command_bus_queue_size(config.metadata_queue_capacity)
         .engine_database_url(db_setup.engine_url.clone())
         .with_extractor(extractor)
-        .with_contract_identifier(registry);
+        .with_contract_identifier(registry.clone());
 
     let mut enabled_types: Vec<&str> = Vec::new();
     let mut erc20_grpc_service: Option<Erc20Service> = None;
+    let mut governance_grpc_service: Option<GovernanceService> = None;
     let mut erc721_grpc_service: Option<Erc721Service> = None;
     let mut erc1155_grpc_service: Option<Erc1155Service> = None;
     let mut token_uri_services = Vec::new();
+    let mut erc20_storage_for_governance: Option<Arc<Erc20Storage>> = None;
 
     // Global extraction modes create all token infra for runtime auto-discovery.
     let is_global_mode =
         config.mode == ExtractionMode::BlockRange || config.mode == ExtractionMode::GlobalEvent;
     let create_erc20 = is_global_mode || !all_erc20_addresses.is_empty();
+    let create_governance = is_global_mode || !all_governance_addresses.is_empty();
     let create_erc721 = is_global_mode || !all_erc721_addresses.is_empty();
     let create_erc1155 = is_global_mode || !all_erc1155_addresses.is_empty();
 
@@ -546,6 +619,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         torii_config = torii_config.add_decoder(decoder);
 
         let grpc_service = Erc20Service::new(storage.clone());
+        erc20_storage_for_governance = Some(storage.clone());
         torii_config =
             torii_config.with_command_handler(Box::new(Erc20MetadataCommandHandler::new(
                 provider.clone(),
@@ -579,6 +653,50 @@ async fn run_indexer(config: Config) -> Result<()> {
             tracing::info!(
                 "ERC20 configured with {} explicit contracts (plus auto-discovery in block-range mode)",
                 all_erc20_addresses.len()
+            );
+        }
+    }
+
+    if create_governance {
+        enabled_types.push("Governance");
+
+        let storage = Arc::new(GovernanceStorage::new(&db_setup.governance_url).await?);
+        tracing::info!(
+            "Governance database initialized: {}",
+            db_setup.governance_url
+        );
+
+        let decoder = Arc::new(GovernanceDecoder::new());
+        torii_config = torii_config.add_decoder(decoder);
+
+        let grpc_service = GovernanceService::new(storage.clone());
+        let mut sink = GovernanceSink::new(
+            storage,
+            provider.clone(),
+            engine_db.clone(),
+            registry.shared_cache(),
+        )
+        .with_grpc_service(grpc_service.clone());
+        if let Some(erc20_storage) = &erc20_storage_for_governance {
+            sink = sink.with_erc20_storage(erc20_storage.clone());
+        }
+        torii_config = torii_config.add_sink_boxed(Box::new(sink));
+
+        governance_grpc_service = Some(grpc_service);
+        reflection_builder =
+            reflection_builder.register_encoded_file_descriptor_set(GOVERNANCE_DESCRIPTOR_SET);
+
+        let governance_decoder_id = DecoderId::new("governance");
+        for address in &all_governance_addresses {
+            torii_config = torii_config.map_contract(*address, vec![governance_decoder_id]);
+        }
+
+        if all_governance_addresses.is_empty() {
+            tracing::info!("Governance configured for auto-discovery");
+        } else {
+            tracing::info!(
+                "Governance configured with {} known governors",
+                all_governance_addresses.len()
             );
         }
     }
@@ -699,43 +817,83 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     let erc20_server = erc20_grpc_service
         .map(|service| Erc20Server::new(service).accept_compressed(CompressionEncoding::Gzip));
+    let governance_server = governance_grpc_service
+        .map(|service| GovernanceServer::new(service).accept_compressed(CompressionEncoding::Gzip));
     let erc721_server = erc721_grpc_service
         .map(|service| Erc721Server::new(service).accept_compressed(CompressionEncoding::Gzip));
     let erc1155_server = erc1155_grpc_service
         .map(|service| Erc1155Server::new(service).accept_compressed(CompressionEncoding::Gzip));
 
     let mut grpc_builder = tonic::transport::Server::builder();
-    let grpc_router = match (erc20_server, erc721_server, erc1155_server) {
-        (Some(erc20), Some(erc721), Some(erc1155)) => grpc_builder
+    let grpc_router = match (
+        erc20_server,
+        governance_server,
+        erc721_server,
+        erc1155_server,
+    ) {
+        (Some(erc20), Some(governance), Some(erc721), Some(erc1155)) => grpc_builder
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(governance))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(reflection.clone()),
+        (Some(erc20), Some(governance), Some(erc721), None) => grpc_builder
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(governance))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(reflection.clone()),
+        (Some(erc20), Some(governance), None, Some(erc1155)) => grpc_builder
+            .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(governance))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(reflection.clone()),
+        (Some(erc20), None, Some(erc721), Some(erc1155)) => grpc_builder
             .add_service(tonic_web::enable(erc20))
             .add_service(tonic_web::enable(erc721))
             .add_service(tonic_web::enable(erc1155))
             .add_service(reflection.clone()),
-        (Some(erc20), Some(erc721), None) => grpc_builder
-            .add_service(tonic_web::enable(erc20))
-            .add_service(tonic_web::enable(erc721))
-            .add_service(reflection.clone()),
-        (Some(erc20), None, Some(erc1155)) => grpc_builder
-            .add_service(tonic_web::enable(erc20))
-            .add_service(tonic_web::enable(erc1155))
-            .add_service(reflection.clone()),
-        (None, Some(erc721), Some(erc1155)) => grpc_builder
+        (None, Some(governance), Some(erc721), Some(erc1155)) => grpc_builder
+            .add_service(tonic_web::enable(governance))
             .add_service(tonic_web::enable(erc721))
             .add_service(tonic_web::enable(erc1155))
             .add_service(reflection.clone()),
-        (Some(erc20), None, None) => grpc_builder
+        (Some(erc20), Some(governance), None, None) => grpc_builder
             .add_service(tonic_web::enable(erc20))
+            .add_service(tonic_web::enable(governance))
             .add_service(reflection.clone()),
-        (None, Some(erc721), None) => grpc_builder
+        (Some(erc20), None, Some(erc721), None) => grpc_builder
+            .add_service(tonic_web::enable(erc20))
             .add_service(tonic_web::enable(erc721))
             .add_service(reflection.clone()),
-        (None, None, Some(erc1155)) => grpc_builder
+        (Some(erc20), None, None, Some(erc1155)) => grpc_builder
+            .add_service(tonic_web::enable(erc20))
             .add_service(tonic_web::enable(erc1155))
             .add_service(reflection.clone()),
-        (None, None, None) => {
-            // No token services, just reflection
-            grpc_builder.add_service(reflection)
-        }
+        (None, Some(governance), Some(erc721), None) => grpc_builder
+            .add_service(tonic_web::enable(governance))
+            .add_service(tonic_web::enable(erc721))
+            .add_service(reflection.clone()),
+        (None, Some(governance), None, Some(erc1155)) => grpc_builder
+            .add_service(tonic_web::enable(governance))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(reflection.clone()),
+        (None, None, Some(erc721), Some(erc1155)) => grpc_builder
+            .add_service(tonic_web::enable(erc721))
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(reflection.clone()),
+        (Some(erc20), None, None, None) => grpc_builder
+            .add_service(tonic_web::enable(erc20))
+            .add_service(reflection.clone()),
+        (None, Some(governance), None, None) => grpc_builder
+            .add_service(tonic_web::enable(governance))
+            .add_service(reflection.clone()),
+        (None, None, Some(erc721), None) => grpc_builder
+            .add_service(tonic_web::enable(erc721))
+            .add_service(reflection.clone()),
+        (None, None, None, Some(erc1155)) => grpc_builder
+            .add_service(tonic_web::enable(erc1155))
+            .add_service(reflection.clone()),
+        (None, None, None, None) => grpc_builder.add_service(reflection),
     };
 
     let torii_config = torii_config
@@ -759,6 +917,11 @@ async fn run_indexer(config: Config) -> Result<()> {
 
     if create_erc20 {
         tracing::info!("  - torii.sinks.erc20.Erc20 (ERC20 queries and subscriptions)");
+    }
+    if create_governance {
+        tracing::info!(
+            "  - torii.sinks.governance.Governance (governance queries and subscriptions)"
+        );
     }
     if create_erc721 {
         tracing::info!("  - torii.sinks.erc721.Erc721 (ERC721 queries and subscriptions)");
