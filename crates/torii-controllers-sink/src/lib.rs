@@ -60,7 +60,7 @@ struct ControllerNode {
 
 #[derive(Debug, Clone, Deserialize)]
 struct ControllerEdge {
-    node: ControllerNode,
+    node: Option<ControllerNode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -346,13 +346,22 @@ query {{
             match result {
                 Ok(response) if response.status().is_success() => {
                     let body: ControllersResponse = response.json().await?;
-                    if let Some(errors) = body.errors {
+                    if let Some(errors) = &body.errors {
                         let msg = errors
-                            .into_iter()
-                            .map(|error| error.message)
+                            .iter()
+                            .map(|error| error.message.clone())
                             .collect::<Vec<_>>()
                             .join("; ");
-                        return Err(anyhow!("controller GraphQL query failed: {msg}"));
+                        if body.data.is_none() {
+                            return Err(anyhow!("controller GraphQL query failed: {msg}"));
+                        }
+
+                        tracing::warn!(
+                            target: "torii::sinks::controllers",
+                            error_count = errors.len(),
+                            errors = %msg,
+                            "Controller GraphQL response returned partial errors; skipping bad edges"
+                        );
                     }
 
                     return Ok(body
@@ -363,7 +372,15 @@ query {{
                         .controllers
                         .edges
                         .into_iter()
-                        .map(|edge| edge.node)
+                        .filter_map(|edge| {
+                            if edge.node.is_none() {
+                                tracing::warn!(
+                                    target: "torii::sinks::controllers",
+                                    "Skipping controller edge with null node"
+                                );
+                            }
+                            edge.node
+                        })
                         .collect());
                 }
                 Ok(response) if attempts < MAX_RETRIES => {
@@ -700,6 +717,89 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(username, "user_one");
+    }
+
+    #[tokio::test]
+    async fn controllers_sink_skips_null_nodes() {
+        let api_url = spawn_graphql_server(json!({
+            "data": {
+                "controllers": {
+                    "edges": [
+                        { "node": null },
+                        {
+                            "node": {
+                                "address": "0x123",
+                                "createdAt": "2024-03-20T12:00:00Z",
+                                "account": { "username": "test_user" }
+                            }
+                        }
+                    ]
+                }
+            }
+        }))
+        .await
+        .unwrap();
+
+        let sink = ControllersSink::new(":memory:", Some(1), Some(api_url))
+            .await
+            .unwrap();
+        sink.store.initialize().await.unwrap();
+
+        sink.process(&[], &make_batch(1_710_936_000, 1_710_936_100))
+            .await
+            .unwrap();
+
+        let count: i64 = query_scalar(&format!("SELECT COUNT(*) FROM {CONTROLLERS_TABLE}"))
+            .fetch_one(&sink.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn controllers_sink_accepts_partial_graphql_errors_when_data_exists() {
+        let api_url = spawn_graphql_server(json!({
+            "errors": [
+                {
+                    "message": "ent: account not found",
+                    "path": ["controllers", "edges", 0, "node", "account"]
+                }
+            ],
+            "data": {
+                "controllers": {
+                    "edges": [
+                        { "node": null },
+                        {
+                            "node": {
+                                "address": "0x123",
+                                "createdAt": "2024-03-20T12:00:00Z",
+                                "account": { "username": "test_user" }
+                            }
+                        }
+                    ]
+                }
+            }
+        }))
+        .await
+        .unwrap();
+
+        let sink = ControllersSink::new(":memory:", Some(1), Some(api_url))
+            .await
+            .unwrap();
+        sink.store.initialize().await.unwrap();
+
+        sink.process(&[], &make_batch(1_710_936_000, 1_710_936_100))
+            .await
+            .unwrap();
+
+        let username: String = query_scalar(&format!(
+            "SELECT username FROM {CONTROLLERS_TABLE} WHERE address = ?1"
+        ))
+        .bind("0x0000000000000000000000000000000000000000000000000000000000000123")
+        .fetch_one(&sink.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(username, "test_user");
     }
 
     #[tokio::test]
