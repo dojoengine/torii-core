@@ -1,16 +1,15 @@
-use anyhow::{Context, Result};
-use futures::stream::{self, StreamExt};
-use starknet::core::types::{
-    requests::{GetBlockWithTxHashesRequest, GetTransactionReceiptRequest},
-    BlockId, EmittedEvent, ExecutionResult, Felt, MaybePreConfirmedBlockWithTxHashes,
-};
-use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
-use starknet::providers::{Provider, ProviderRequestData, ProviderResponseData};
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-
 use crate::etl::engine_db::EngineDb;
 use crate::etl::extractor::{BlockContext, ExtractionBatch, RetryPolicy, TransactionContext};
+use anyhow::{Context, Result};
+use futures::stream::{self, StreamExt};
+use starknet::core::types::requests::{GetBlockWithTxHashesRequest, GetTransactionReceiptRequest};
+use starknet::core::types::{BlockId, ExecutionResult, MaybePreConfirmedBlockWithTxHashes};
+use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
+use starknet::providers::{Provider, ProviderRequestData, ProviderResponseData};
+use starknet_types_raw::event::EmittedEvent;
+use starknet_types_raw::Felt;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 const RECEIPT_LOOKUP_BATCH_SIZE: usize = 200;
 
@@ -153,7 +152,7 @@ pub(crate) async fn fetch_successful_transaction_hashes(
                 .iter()
                 .map(|tx_hash| {
                     ProviderRequestData::GetTransactionReceipt(GetTransactionReceiptRequest {
-                        transaction_hash: *tx_hash,
+                        transaction_hash: tx_hash.into(),
                     })
                 })
                 .collect();

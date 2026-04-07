@@ -12,7 +12,8 @@
 //! - Deterministic ordering: decoders are always called in sorted DecoderId order
 
 use async_trait::async_trait;
-use starknet::core::types::{EmittedEvent, Felt};
+use starknet_types_raw::event::EmittedEvent;
+use starknet_types_raw::Felt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;

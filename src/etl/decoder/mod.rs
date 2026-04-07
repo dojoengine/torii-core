@@ -1,8 +1,10 @@
 pub mod context;
 
 use async_trait::async_trait;
-use starknet::core::types::{EmittedEvent, Felt};
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use starknet_types_raw::event::EmittedEvent;
+use starknet_types_raw::Felt;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use super::envelope::Envelope;

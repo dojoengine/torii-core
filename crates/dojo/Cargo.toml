@@ -24,6 +24,7 @@ sqlx = { workspace = true, features = [
     "migrate",
 ] }
 
+starknet-types-raw.workspace = true
 dojo-introspect.workspace = true
 introspect-types.workspace = true
 

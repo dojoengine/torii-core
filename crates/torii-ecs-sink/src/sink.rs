@@ -11,11 +11,9 @@ use starknet::core::types::Felt;
 use torii::axum::Router;
 use torii::command::CommandBusSender;
 use torii::etl::decoder::DecoderId;
-use torii::etl::{
-    envelope::{Envelope, TypeId},
-    extractor::ExtractionBatch,
-    sink::{EventBus, Sink, SinkContext, TopicInfo},
-};
+use torii::etl::envelope::{Envelope, TypeId};
+use torii::etl::extractor::ExtractionBatch;
+use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
 use torii_dojo::external_contract::{
     resolve_external_contract, ExternalContractRegisteredBody, RegisterExternalContractCommand,
     RegisteredContractType, SharedContractTypeRegistry,

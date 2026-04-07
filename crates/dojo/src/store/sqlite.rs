@@ -7,11 +7,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::SqliteArguments;
 use sqlx::{Arguments, FromRow, Sqlite, SqlitePool};
-use starknet_types_core::felt::Felt;
+use starknet_types_raw::error::OverflowError;
+use starknet_types_raw::Felt;
 use std::collections::HashMap;
 use std::io;
 use std::ops::Deref;
-use torii_common::{blob_to_felt, felt_to_blob};
 use torii_introspect::schema::ColumnKeyTrait;
 use torii_sql::sqlite::SqliteDbConnection;
 use torii_sql::{PoolExt, SqlxResult};
@@ -30,6 +30,8 @@ pub enum DojoSqliteStoreError {
         table_id: Felt,
         column_id: Felt,
     },
+    #[error("Felt overflow error: {0}")]
+    FeltOverflow(#[from] OverflowError),
 }
 
 impl DojoSqliteStoreError {
@@ -89,7 +91,7 @@ fn parse_felt_json_array(value: &str) -> Result<Vec<Felt>, DojoSqliteStoreError>
 
 fn table_row_into_table(value: TableRow) -> Result<DojoTable, DojoSqliteStoreError> {
     Ok(DojoTable {
-        id: blob_to_felt(&value.id),
+        id: Felt::from_be_bytes_slice(&value.id)?,
         name: value.name,
         attributes: serde_json::from_str(&value.attributes)?,
         primary: primary_field_def(),
@@ -106,7 +108,10 @@ where
 {
     let payload: StoredColumnInfo = serde_json::from_str(&value.payload)?;
     Ok((
-        K::from_parts(blob_to_felt(&value.table_id), blob_to_felt(&value.id)),
+        K::from_parts(
+            Felt::from_be_bytes_slice(&value.table_id)?,
+            Felt::from_be_bytes_slice(&value.id)?,
+        ),
         ColumnInfo {
             name: payload.name,
             attributes: payload.attributes,
@@ -115,7 +120,7 @@ where
     ))
 }
 
-fn select_table_query<'a>(owners: &[Felt]) -> (String, SqliteArguments<'a>) {
+fn select_table_query<'a>(owners: &'a [Felt]) -> (String, SqliteArguments<'a>) {
     let mut query = String::from(
         "SELECT id, name, attributes, keys_json, values_json, legacy FROM dojo_tables",
     );
@@ -127,14 +132,14 @@ fn select_table_query<'a>(owners: &[Felt]) -> (String, SqliteArguments<'a>) {
                 query.push_str(", ");
             }
             query.push('?');
-            let _ = args.add(felt_to_blob(*owner));
+            let _ = args.add(owner.as_be_bytes_slice());
         }
         query.push(')');
     }
     (query, args)
 }
 
-fn select_column_query<'a>(owners: &[Felt]) -> (String, SqliteArguments<'a>) {
+fn select_column_query<'a>(owners: &'a [Felt]) -> (String, SqliteArguments<'a>) {
     let mut query = String::from("SELECT table_id, id, payload FROM dojo_columns");
     let mut args = SqliteArguments::default();
     if !owners.is_empty() {
@@ -144,7 +149,7 @@ fn select_column_query<'a>(owners: &[Felt]) -> (String, SqliteArguments<'a>) {
                 query.push_str(", ");
             }
             query.push('?');
-            let _ = args.add(felt_to_blob(*owner));
+            let _ = args.add(owner.as_be_bytes_slice());
         }
         query.push(')');
     }
@@ -217,8 +222,8 @@ impl DojoStoreTrait for SqlitePool {
                 updated_tx = excluded.updated_tx
             ",
         )
-        .bind(felt_to_blob(*owner))
-        .bind(felt_to_blob(table.id))
+        .bind(owner.as_be_bytes_slice())
+        .bind(table.id.as_be_bytes_slice())
         .bind(&table.name)
         .bind(serde_json::to_string(&table.attributes)?)
         .bind(serialize_felt_json_array(&table.key_fields)?)
@@ -226,8 +231,8 @@ impl DojoStoreTrait for SqlitePool {
         .bind(table.legacy)
         .bind(block_number as i64)
         .bind(block_number as i64)
-        .bind(felt_to_blob(*tx_hash))
-        .bind(felt_to_blob(*tx_hash))
+        .bind(tx_hash.as_be_bytes_slice())
+        .bind(tx_hash.as_be_bytes_slice())
         .execute(&mut *transaction)
         .await
         .map_err(DojoToriiError::store_error)?;
@@ -246,9 +251,9 @@ impl DojoStoreTrait for SqlitePool {
                     payload = excluded.payload
                 ",
             )
-            .bind(felt_to_blob(*owner))
-            .bind(felt_to_blob(table.id))
-            .bind(felt_to_blob(*id))
+            .bind(owner.as_be_bytes_slice())
+            .bind(table.id.as_be_bytes_slice())
+            .bind(id.as_be_bytes_slice())
             .bind(serde_json::to_string(&payload)?)
             .execute(&mut *transaction)
             .await

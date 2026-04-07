@@ -1,8 +1,7 @@
-use std::collections::HashMap;
-
 use introspect_types::{Attribute, ColumnDef, PrimaryDef};
-use starknet::core::types::EmittedEvent;
-use starknet_types_core::felt::Felt;
+use starknet_types_raw::event::EmittedEvent;
+use starknet_types_raw::Felt;
+use std::collections::HashMap;
 use torii::etl::EventContext;
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy)]

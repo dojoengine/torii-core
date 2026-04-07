@@ -7,7 +7,7 @@ use serde_json::json;
 use sqlx::any::AnyPoolOptions;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Any, ConnectOptions, Pool, QueryBuilder, Row};
-use starknet::core::types::Felt;
+use starknet_types_raw::Felt;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;

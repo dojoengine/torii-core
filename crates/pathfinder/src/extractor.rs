@@ -2,7 +2,7 @@ use crate::{connect, EventFetcher, PFResult};
 use anyhow::Result as AnyResult;
 use async_trait::async_trait;
 use rusqlite::Connection;
-use starknet::core::types::EmittedEvent;
+use starknet_types_raw::event::EmittedEvent;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};

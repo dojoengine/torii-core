@@ -1,11 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use starknet::core::types::EmittedEvent;
+use starknet_types_raw::event::EmittedEvent;
 use std::any::Any;
-use torii::etl::{
-    envelope::{Envelope, TypeId, TypedBody},
-    Decoder,
-};
+use torii::etl::envelope::{Envelope, TypeId, TypedBody};
+use torii::etl::Decoder;
 
 /// Decoded log entry
 #[derive(Debug, Clone)]
@@ -101,7 +99,7 @@ impl Decoder for LogDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use starknet::core::types::Felt;
+    use starknet_types_raw::Felt;
 
     #[tokio::test]
     async fn test_decode_logs() {

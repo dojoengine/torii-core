@@ -5,8 +5,10 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use starknet::core::types::{EmittedEvent, Felt};
-use std::{collections::HashMap, sync::Arc};
+use starknet_types_raw::event::EmittedEvent;
+use starknet_types_raw::Felt;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::etl::engine_db::EngineDb;
 
@@ -133,7 +135,7 @@ impl Extractor for SampleExtractor {
                             .unwrap(),
                         ),
                         calldata: vec![
-                            Felt::from(1),                  // selector
+                            Felt::from(0),                  // selector
                             Felt::from(self.current_block), // param1
                             Felt::from(42),                 // param2
                         ],

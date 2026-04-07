@@ -17,12 +17,11 @@ use introspect_types::{
     SliceFeltSource,
 };
 use itertools::Itertools;
-use starknet::core::types::EmittedEvent;
-use starknet_types_core::felt::Felt;
+use starknet_types_raw::event::EmittedEvent;
+use starknet_types_raw::Felt;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::RwLock;
-use torii::etl::event::EmittedEventExt;
 use torii::etl::{Decoder, Envelope, EventMsg};
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_introspect::schema::{TableMetadata, TableSchema};
@@ -266,48 +265,44 @@ where
         keys: &[Felt],
         values: &[Felt],
     ) -> DojoToriiResult<IntrospectMsg> {
-        let selector_raw = selector.to_raw();
-        match selector_raw {
-            ModelRegistered::SELECTOR_RAW => {
+        match *selector {
+            ModelRegistered::SELECTOR => {
                 self.process_table_event::<ModelRegistered>(raw, keys, values)
                     .await
             }
-            ModelWithSchemaRegistered::SELECTOR_RAW => {
+            ModelWithSchemaRegistered::SELECTOR => {
                 self.process_table_event::<ModelWithSchemaRegistered>(raw, keys, values)
                     .await
             }
-            ModelUpgraded::SELECTOR_RAW => {
+            ModelUpgraded::SELECTOR => {
                 self.process_table_event::<ModelUpgraded>(raw, keys, values)
                     .await
             }
-            EventRegistered::SELECTOR_RAW => {
+            EventRegistered::SELECTOR => {
                 self.process_table_event::<EventRegistered>(raw, keys, values)
                     .await
             }
-            EventUpgraded::SELECTOR_RAW => {
+            EventUpgraded::SELECTOR => {
                 self.process_table_event::<EventUpgraded>(raw, keys, values)
                     .await
             }
-            StoreSetRecord::SELECTOR_RAW => {
-                self.process_record_event::<StoreSetRecord>(keys, values)
-            }
-            StoreUpdateRecord::SELECTOR_RAW => {
+            StoreSetRecord::SELECTOR => self.process_record_event::<StoreSetRecord>(keys, values),
+            StoreUpdateRecord::SELECTOR => {
                 self.process_record_event::<StoreUpdateRecord>(keys, values)
             }
-            StoreUpdateMember::SELECTOR_RAW => {
+            StoreUpdateMember::SELECTOR => {
                 self.process_record_event::<StoreUpdateMember>(keys, values)
             }
-            StoreDelRecord::SELECTOR_RAW => {
-                self.process_record_event::<StoreDelRecord>(keys, values)
-            }
-            EventEmitted::SELECTOR_RAW => self.process_record_event::<EventEmitted>(keys, values),
+            StoreDelRecord::SELECTOR => self.process_record_event::<StoreDelRecord>(keys, values),
+            EventEmitted::SELECTOR => self.process_record_event::<EventEmitted>(keys, values),
             _ => Err(DojoToriiError::UnknownDojoEventSelector(*selector)),
         }
     }
 
     pub async fn decode_raw_event_msg(&self, raw: &EmittedEvent) -> DojoToriiResult<IntrospectMsg> {
         let (selector, keys) = raw
-            .split_keys()
+            .keys
+            .split_first()
             .ok_or(DojoToriiError::MissingEventSelector)?;
         self.decode_event_data(raw, selector, keys, &raw.data).await
     }
@@ -331,10 +326,11 @@ where
 
     async fn decode_event(&self, event: &EmittedEvent) -> AnyResult<Vec<Envelope>> {
         let (selector, keys) = event
-            .split_keys()
+            .keys
+            .split_first()
             .ok_or(DojoToriiError::MissingEventSelector)?;
 
-        if selector.to_raw() == ExternalContractRegisteredEvent::SELECTOR_RAW {
+        if *selector == ExternalContractRegisteredEvent::SELECTOR {
             return self
                 .process_external_contract_event(keys, &event.data)
                 .map(|msg| vec![msg.to_envelope(event)])

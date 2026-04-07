@@ -1,7 +1,7 @@
 use crate::{read_json_file, resolve_path_like};
 use serde::Deserialize;
-use starknet::core::types::EmittedEvent;
-use starknet_types_core::felt::Felt;
+use starknet_types_raw::event::EmittedEvent;
+use starknet_types_raw::Felt;
 use std::collections::VecDeque;
 use std::fs::read_dir;
 use std::path::PathBuf;

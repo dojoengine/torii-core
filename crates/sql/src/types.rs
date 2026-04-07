@@ -1,22 +1,22 @@
-use starknet_types_core::felt::Felt;
+use starknet_types_raw::Felt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SqlFelt(pub [u8; 32]);
 
 impl From<SqlFelt> for Felt {
     fn from(value: SqlFelt) -> Self {
-        Felt::from_bytes_be(&value.0)
+        value.0.into()
     }
 }
 
 impl From<Felt> for SqlFelt {
     fn from(value: Felt) -> Self {
-        SqlFelt(value.to_bytes_be())
+        SqlFelt(value.to_be_bytes())
     }
 }
 
 impl From<&Felt> for SqlFelt {
     fn from(value: &Felt) -> Self {
-        SqlFelt(value.to_bytes_be())
+        SqlFelt(value.to_be_bytes())
     }
 }

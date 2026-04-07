@@ -10,8 +10,7 @@ use dojo_introspect::events::{
 };
 use dojo_introspect::DojoSchemaFetcher;
 use introspect_types::FeltIds;
-use starknet::core::types::EmittedEvent;
-use starknet_types_core::felt::Felt;
+use starknet_types_raw::event::EmittedEvent;
 use torii_introspect::events::{CreateTable, DeleteRecords, InsertsFields, UpdateTable};
 
 #[async_trait]
@@ -148,7 +147,7 @@ impl<Store, F> DojoRecordEvent<Store, F> for StoreUpdateRecord {
 impl<Store, F> DojoRecordEvent<Store, F> for EventEmitted {
     type Msg = InsertsFields;
     fn event_to_msg(self, decoder: &DojoDecoder<Store, F>) -> DojoToriiResult<Self::Msg> {
-        let primary = Felt::from_bytes_be(&self.keys.hash().into());
+        let primary: [u8; 32] = self.keys.hash().into();
         let (columns, data) = decoder.with_table(&self.selector, |table| {
             table.parse_record(self.keys, self.values)
         })?;

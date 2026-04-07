@@ -20,10 +20,11 @@ use crate::storage::{ApprovalData, Erc20Storage, TransferData};
 use anyhow::Result;
 use async_trait::async_trait;
 use axum::Router;
+use primitive_types::U256;
 use prost::Message;
 use prost_types::Any;
-use starknet::core::types::{Felt, U256};
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
+use starknet_types_raw::Felt;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -449,12 +450,12 @@ impl Sink for Erc20Sink {
                     // Publish transfer events
                     for transfer in &transfers {
                         let proto_transfer = proto::Transfer {
-                            token: transfer.token.to_bytes_be().to_vec(),
-                            from: transfer.from.to_bytes_be().to_vec(),
-                            to: transfer.to.to_bytes_be().to_vec(),
+                            token: transfer.token.to_be_bytes_vec(),
+                            from: transfer.from.to_be_bytes_vec(),
+                            to: transfer.to.to_be_bytes_vec(),
                             amount: u256_to_bytes(transfer.amount),
                             block_number: transfer.block_number,
-                            tx_hash: transfer.tx_hash.to_bytes_be().to_vec(),
+                            tx_hash: transfer.tx_hash.to_be_bytes_vec(),
                             timestamp: transfer.timestamp.unwrap_or(0),
                         };
 
@@ -522,12 +523,12 @@ impl Sink for Erc20Sink {
                     // Publish approval events
                     for approval in &approvals {
                         let proto_approval = proto::Approval {
-                            token: approval.token.to_bytes_be().to_vec(),
-                            owner: approval.owner.to_bytes_be().to_vec(),
-                            spender: approval.spender.to_bytes_be().to_vec(),
+                            token: approval.token.to_be_bytes_vec(),
+                            owner: approval.owner.to_be_bytes_vec(),
+                            spender: approval.spender.to_be_bytes_vec(),
                             amount: u256_to_bytes(approval.amount),
                             block_number: approval.block_number,
-                            tx_hash: approval.tx_hash.to_bytes_be().to_vec(),
+                            tx_hash: approval.tx_hash.to_be_bytes_vec(),
                             timestamp: approval.timestamp.unwrap_or(0),
                         };
 

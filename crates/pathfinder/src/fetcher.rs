@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
+use crate::decoding::BlockEvents;
 use crate::sqlite::{BlockContextRow, SqliteExt};
-use crate::PFError;
-use crate::{decoding::BlockEvents, PFResult};
+use crate::{PFError, PFResult};
 use rusqlite::Connection;
 
 #[cfg(not(feature = "etl"))]
@@ -15,10 +15,10 @@ pub struct BlockContext {
     pub timestamp: u64,
 }
 
+use starknet_types_raw::event::EmittedEvent;
+use starknet_types_raw::Felt;
 #[cfg(feature = "etl")]
 pub use torii::etl::extractor::BlockContext;
-use torii_starknet::event::EmittedEvent;
-use torii_starknet::Felt;
 
 impl From<BlockContextRow> for BlockContext {
     fn from(value: BlockContextRow) -> Self {

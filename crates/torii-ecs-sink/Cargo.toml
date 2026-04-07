@@ -12,6 +12,7 @@ torii-sql.workspace = true
 
 dojo-introspect.workspace = true
 introspect-types.workspace = true
+starknet-types-raw.workspace = true
 
 anyhow.workspace = true
 async-trait.workspace = true
@@ -28,7 +29,6 @@ sqlx = { workspace = true, features = [
     "postgres",
     "any",
 ] }
-starknet.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tonic.workspace = true

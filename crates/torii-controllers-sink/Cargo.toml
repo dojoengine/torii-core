@@ -21,7 +21,7 @@ sqlx = { workspace = true, features = [
     "postgres",
     "any",
 ] }
-starknet.workspace = true
+starknet-types-raw.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

@@ -1,6 +1,7 @@
 //! This module contains the envelope for the ETL pipeline.
 
-use starknet::core::types::{EmittedEvent, Felt};
+use starknet_types_raw::event::EmittedEvent;
+use starknet_types_raw::Felt;
 use std::any::Any;
 use std::collections::HashMap;
 use xxhash_rust::const_xxh3::xxh3_64;

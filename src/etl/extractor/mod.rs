@@ -15,7 +15,8 @@ pub mod synthetic_erc20;
 use crate::etl::engine_db::EngineDb;
 use anyhow::Result;
 use async_trait::async_trait;
-use starknet::core::types::{EmittedEvent, Felt};
+use starknet_types_raw::event::EmittedEvent;
+use starknet_types_raw::Felt;
 use std::collections::HashMap;
 use std::sync::Arc;
 

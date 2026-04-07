@@ -2,12 +2,18 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use starknet::core::types::{EmittedEvent, Felt, U256};
-use starknet::macros::selector;
+use primitive_types::U256;
+use starknet_types_raw::event::EmittedEvent;
+use starknet_types_raw::Felt;
 use std::any::Any;
 use std::collections::HashMap;
-use torii::etl::{Decoder, Envelope, TypedBody};
+use torii::etl::{Decoder, Envelope, TypeId, TypedBody};
+use torii_common::utils::{felt_pair_to_u256, felt_to_u256};
 
+const ERC20_TRANSFER_SELECTOR_TYPE_ID: TypeId = torii::etl::envelope::TypeId::new("erc20.transfer");
+const ERC20_APPROVAL_SELECTOR_TYPE_ID: TypeId = torii::etl::envelope::TypeId::new("erc20.approval");
+pub const TRANSFER_SELECTOR: Felt = Felt::selector("Transfer");
+pub const APPROVAL_SELECTOR: Felt = Felt::selector("Approval");
 /// Transfer event from ERC20 token
 #[derive(Debug, Clone)]
 pub struct Transfer {
@@ -22,7 +28,7 @@ pub struct Transfer {
 
 impl TypedBody for Transfer {
     fn envelope_type_id(&self) -> torii::etl::envelope::TypeId {
-        torii::etl::envelope::TypeId::new("erc20.transfer")
+        ERC20_TRANSFER_SELECTOR_TYPE_ID
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -48,7 +54,7 @@ pub struct Approval {
 
 impl TypedBody for Approval {
     fn envelope_type_id(&self) -> torii::etl::envelope::TypeId {
-        torii::etl::envelope::TypeId::new("erc20.approval")
+        ERC20_APPROVAL_SELECTOR_TYPE_ID
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -84,12 +90,12 @@ impl Erc20Decoder {
 
     /// Transfer event selector: sn_keccak("Transfer")
     fn transfer_selector() -> Felt {
-        selector!("Transfer")
+        TRANSFER_SELECTOR
     }
 
     /// Approval event selector: sn_keccak("Approval")
     fn approval_selector() -> Felt {
-        selector!("Approval")
+        APPROVAL_SELECTOR
     }
 
     /// Decode Transfer event into envelope
@@ -128,9 +134,9 @@ impl Erc20Decoder {
             // All-in-keys format: selector, from, to, amount_low, amount_high all in keys
             from = event.keys[1];
             to = event.keys[2];
-            let low: u128 = event.keys[3].try_into().unwrap_or(0);
-            let high: u128 = event.keys[4].try_into().unwrap_or(0);
-            amount = U256::from_words(low, high);
+            let low: Felt = event.keys[3];
+            let high: Felt = event.keys[4];
+            amount = felt_pair_to_u256(low, high);
             tracing::debug!(
                 target: "torii_erc20::decoder",
                 token = %format!("{:#x}", event.from_address),
@@ -143,8 +149,7 @@ impl Erc20Decoder {
             // All-in-keys format with felt amount: selector, from, to, amount in keys
             from = event.keys[1];
             to = event.keys[2];
-            let amount_felt: u128 = event.keys[3].try_into().unwrap_or(0);
-            amount = U256::from(amount_felt);
+            amount = felt_to_u256(event.keys[3]);
             tracing::debug!(
                 target: "torii_erc20::decoder",
                 token = %format!("{:#x}", event.from_address),
@@ -157,22 +162,17 @@ impl Erc20Decoder {
             // Legacy ERC20: from, to, amount_low, amount_high in data
             from = event.data[0];
             to = event.data[1];
-            let low: u128 = event.data[2].try_into().unwrap_or(0);
-            let high: u128 = event.data[3].try_into().unwrap_or(0);
-            amount = U256::from_words(low, high);
+            amount = felt_pair_to_u256(event.data[2], event.data[3]);
         } else if event.keys.len() == 3 && event.data.len() == 2 {
             // Modern ERC20: from, to in keys; amount_low, amount_high in data
             from = event.keys[1];
             to = event.keys[2];
-            let low: u128 = event.data[0].try_into().unwrap_or(0);
-            let high: u128 = event.data[1].try_into().unwrap_or(0);
-            amount = U256::from_words(low, high);
+            amount = felt_pair_to_u256(event.data[0], event.data[1]);
         } else if event.keys.len() == 3 && event.data.len() == 1 {
             // Felt-based modern format: from, to in keys; amount as single felt (fits in u128)
             from = event.keys[1];
             to = event.keys[2];
-            let amount_felt: u128 = event.data[0].try_into().unwrap_or(0);
-            amount = U256::from(amount_felt);
+            amount = felt_to_u256(event.data[0]);
             tracing::debug!(
                 target: "torii_erc20::decoder",
                 token = %format!("{:#x}", event.from_address),
@@ -185,8 +185,7 @@ impl Erc20Decoder {
             // Felt-based legacy format: from, to, amount in data
             from = event.data[0];
             to = event.data[1];
-            let amount_felt: u128 = event.data[2].try_into().unwrap_or(0);
-            amount = U256::from(amount_felt);
+            amount = felt_to_u256(event.data[2]);
             tracing::debug!(
                 target: "torii_erc20::decoder",
                 token = %format!("{:#x}", event.from_address),
@@ -199,7 +198,7 @@ impl Erc20Decoder {
             // All-in-keys format with zero amount (or amount omitted): from, to in keys, no data
             from = event.keys[1];
             to = event.keys[2];
-            amount = U256::from(0u64);
+            amount = U256::zero();
             tracing::debug!(
                 target: "torii_erc20::decoder",
                 token = %format!("{:#x}", event.from_address),
@@ -289,9 +288,7 @@ impl Erc20Decoder {
             // All-in-keys format: selector, owner, spender, amount_low, amount_high all in keys
             owner = event.keys[1];
             spender = event.keys[2];
-            let low: u128 = event.keys[3].try_into().unwrap_or(0);
-            let high: u128 = event.keys[4].try_into().unwrap_or(0);
-            amount = U256::from_words(low, high);
+            amount = felt_pair_to_u256(event.keys[3], event.keys[4]);
             tracing::debug!(
                 target: "torii_erc20::decoder",
                 token = %format!("{:#x}", event.from_address),
@@ -304,8 +301,7 @@ impl Erc20Decoder {
             // All-in-keys format with felt amount: selector, owner, spender, amount in keys
             owner = event.keys[1];
             spender = event.keys[2];
-            let amount_felt: u128 = event.keys[3].try_into().unwrap_or(0);
-            amount = U256::from(amount_felt);
+            amount = felt_to_u256(event.keys[3]);
             tracing::debug!(
                 target: "torii_erc20::decoder",
                 token = %format!("{:#x}", event.from_address),
@@ -318,22 +314,17 @@ impl Erc20Decoder {
             // Legacy ERC20: owner, spender, amount_low, amount_high in data
             owner = event.data[0];
             spender = event.data[1];
-            let low: u128 = event.data[2].try_into().unwrap_or(0);
-            let high: u128 = event.data[3].try_into().unwrap_or(0);
-            amount = U256::from_words(low, high);
+            amount = felt_pair_to_u256(event.data[2], event.data[3]);
         } else if event.keys.len() == 3 && event.data.len() == 2 {
             // Modern ERC20: owner, spender in keys; amount_low, amount_high in data
             owner = event.keys[1];
             spender = event.keys[2];
-            let low: u128 = event.data[0].try_into().unwrap_or(0);
-            let high: u128 = event.data[1].try_into().unwrap_or(0);
-            amount = U256::from_words(low, high);
+            amount = felt_pair_to_u256(event.data[0], event.data[1]);
         } else if event.keys.len() == 3 && event.data.len() == 1 {
             // Felt-based modern format: owner, spender in keys; amount as single felt
             owner = event.keys[1];
             spender = event.keys[2];
-            let amount_felt: u128 = event.data[0].try_into().unwrap_or(0);
-            amount = U256::from(amount_felt);
+            amount = felt_to_u256(event.data[0]);
             tracing::debug!(
                 target: "torii_erc20::decoder",
                 token = %format!("{:#x}", event.from_address),
@@ -346,8 +337,7 @@ impl Erc20Decoder {
             // Felt-based legacy format: owner, spender, amount in data
             owner = event.data[0];
             spender = event.data[1];
-            let amount_felt: u128 = event.data[2].try_into().unwrap_or(0);
-            amount = U256::from(amount_felt);
+            amount = felt_to_u256(event.data[2]);
             tracing::debug!(
                 target: "torii_erc20::decoder",
                 token = %format!("{:#x}", event.from_address),
@@ -360,7 +350,7 @@ impl Erc20Decoder {
             // All-in-keys format with zero amount (or amount omitted)
             owner = event.keys[1];
             spender = event.keys[2];
-            amount = U256::from(0u64);
+            amount = U256::zero();
             tracing::debug!(
                 target: "torii_erc20::decoder",
                 token = %format!("{:#x}", event.from_address),

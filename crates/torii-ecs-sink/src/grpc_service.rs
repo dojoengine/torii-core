@@ -38,7 +38,7 @@ use sqlx::pool::PoolConnection;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Any, AnyConnection, Column, ConnectOptions, Pool, QueryBuilder, Row};
-use starknet::core::types::Felt;
+use starknet_types_raw::Felt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::pin::Pin;
@@ -997,7 +997,7 @@ impl EcsService {
 
         let contract = self
             .load_contracts(&types::ContractQuery {
-                contract_addresses: vec![contract_address.to_bytes_be().to_vec()],
+                contract_addresses: vec![contract_address.into()],
                 contract_types: vec![],
             })
             .await?
@@ -1150,7 +1150,7 @@ impl EcsService {
             .bind(kind.as_str())
             .bind(felt_hex(world_address))
             .bind(felt_hex(table_id))
-            .bind(felt_hex(Felt::from_bytes_be(&record.id)))
+            .bind(felt_hex(record.id.into()))
             .bind(row_json)
             .bind(executed_at as i64)
             .execute(&self.state.pool)
@@ -1247,15 +1247,9 @@ impl EcsService {
             .await?;
 
         self.publish_event_update(types::Event {
-            keys: keys
-                .iter()
-                .map(|felt| felt.to_bytes_be().to_vec())
-                .collect(),
-            data: data
-                .iter()
-                .map(|felt| felt.to_bytes_be().to_vec())
-                .collect(),
-            transaction_hash: transaction_hash.to_bytes_be().to_vec(),
+            keys: keys.iter().map(|felt| felt.into()).collect(),
+            data: data.iter().map(|felt| felt.into()).collect(),
+            transaction_hash: transaction_hash.into(),
         })
         .await;
 
@@ -1450,7 +1444,7 @@ impl EcsService {
                 {
                     let mut separated = builder.separated(", ");
                     for address in &query.contract_addresses {
-                        separated.push_bind(felt_hex(felt_from_bytes(address)?));
+                        separated.push_bind(Felt::from_be_bytes_slice(&address)?.to_hex_string());
                     }
                 }
                 builder.push(")");
@@ -1476,7 +1470,7 @@ impl EcsService {
             let contract_address = row.try_get::<String, _>("contract_address")?;
             let contract_type = row.try_get::<i32, _>("contract_type")?;
             let contract = types::Contract {
-                contract_address: felt_from_hex(&contract_address)?.to_bytes_be().to_vec(),
+                contract_address: felt_from_hex(&contract_address)?.into(),
                 contract_type,
                 head: row
                     .try_get::<Option<i64>, _>("head")?
@@ -1491,7 +1485,7 @@ impl EcsService {
                     .try_get::<Option<String>, _>("last_pending_block_tx")?
                     .map(|value| felt_from_hex(&value))
                     .transpose()?
-                    .map(|felt| felt.to_bytes_be().to_vec()),
+                    .map(|felt| felt.into()),
                 updated_at: row.try_get::<i64, _>("updated_at")? as u64,
                 created_at: row.try_get::<i64, _>("created_at")? as u64,
             };
@@ -1528,7 +1522,7 @@ impl EcsService {
             {
                 let mut separated = builder.separated(", ");
                 for address in &query.contract_addresses {
-                    separated.push_bind(format!("{:#066x}", felt_from_bytes(address)?));
+                    separated.push_bind(format!("{:#066x}", Felt::from_be_bytes_slice(&address)?));
                 }
             }
             builder.push(")");
@@ -1585,7 +1579,7 @@ impl EcsService {
                     .map(|value| value.timestamp() as u64)
                     .unwrap_or_default();
                 Ok(types::Controller {
-                    address: felt_from_hex(&address)?.to_bytes_be().to_vec(),
+                    address: felt_from_hex(&address)?.into(),
                     username: row
                         .try_get::<Option<String>, _>("username")?
                         .unwrap_or_default(),
@@ -1976,7 +1970,8 @@ impl EcsService {
                 Ok(rows) => {
                     for row in rows {
                         let contract_address =
-                            canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("token")?)?;
+                            Felt::from_be_bytes_slice(&row.try_get::<Vec<u8>, _>("token")?)?
+                                .to_be_bytes_vec(); // Why not just get vec?
                         items.push(types::TokenContract {
                             contract_address,
                             contract_type: ContractType::Erc20 as i32,
@@ -2020,8 +2015,7 @@ impl EcsService {
             ));
             push_blob_in_filter(&mut builder, "tm.token", &query.contract_addresses);
             for row in builder.build().fetch_all(&mut *conn).await? {
-                let contract_address =
-                    canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("token")?)?;
+                let contract_address = row.try_get::<Vec<u8>, _>("token")?; // TODO: can it just be a vec?
                 let total_supply = canonical_optional_u256_bytes_from_db(
                     row.try_get::<Option<Vec<u8>>, _>("total_supply")?,
                 )?
@@ -2062,8 +2056,7 @@ impl EcsService {
             ));
             push_blob_in_filter(&mut builder, "tm.token", &query.contract_addresses);
             for row in builder.build().fetch_all(&mut *conn).await? {
-                let contract_address =
-                    canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("token")?)?;
+                let contract_address = row.try_get::<Vec<u8>, _>("token")?; //TODO: Can it just be a vec?
                 items.push(types::TokenContract {
                     contract_address,
                     contract_type: ContractType::Erc1155 as i32,
@@ -2104,8 +2097,7 @@ impl EcsService {
             ));
             push_blob_in_filter(&mut builder, "token", &query.contract_addresses);
             for row in builder.build().fetch_all(&mut *conn).await? {
-                let contract_address =
-                    canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("token")?)?;
+                let contract_address = row.try_get::<Vec<u8>, _>("token")?; //TODO: Can it just be a vec?
                 items.push(types::Token {
                     token_id: None,
                     contract_address,
@@ -2202,8 +2194,7 @@ impl EcsService {
             .map(|row| {
                 let token_id =
                     canonical_u256_bytes_from_db(&row.try_get::<Vec<u8>, _>("token_id")?)?;
-                let contract_address =
-                    canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("token")?)?;
+                let contract_address = row.try_get::<Vec<u8>, _>("token")?; // TODO: can it just be a vec?
                 Ok(types::Token {
                     token_id: Some(token_id),
                     contract_address,
@@ -2292,10 +2283,8 @@ impl EcsService {
                     for row in rows {
                         let balance =
                             canonical_u256_bytes_from_db(&row.try_get::<Vec<u8>, _>("balance")?)?;
-                        let account_address =
-                            canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("wallet")?)?;
-                        let contract_address =
-                            canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("token")?)?;
+                        let account_address = row.try_get::<Vec<u8>, _>("wallet")?; // TODO: can it just be a vec?
+                        let contract_address = row.try_get::<Vec<u8>, _>("token")?; // TODO: can it just be a vec?
                         items.push(types::TokenBalance {
                             balance,
                             account_address,
@@ -2360,10 +2349,8 @@ impl EcsService {
                         "RetrieveTokenBalances queried ERC721 ownership"
                     );
                     for row in rows {
-                        let account_address =
-                            canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("owner")?)?;
-                        let contract_address =
-                            canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("token")?)?;
+                        let account_address = row.try_get::<Vec<u8>, _>("owner")?; // TODO: can it just be a vec?
+                        let contract_address = row.try_get::<Vec<u8>, _>("token")?; // TODO: can it just be a vec?
                         let token_id =
                             canonical_u256_bytes_from_db(&row.try_get::<Vec<u8>, _>("token_id")?)?;
                         items.push(types::TokenBalance {
@@ -2433,10 +2420,8 @@ impl EcsService {
                     for row in rows {
                         let balance =
                             canonical_u256_bytes_from_db(&row.try_get::<Vec<u8>, _>("balance")?)?;
-                        let account_address =
-                            canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("wallet")?)?;
-                        let contract_address =
-                            canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("contract")?)?;
+                        let account_address = row.try_get::<Vec<u8>, _>("wallet")?; // TODO: can it just be a vec?
+                        let contract_address = row.try_get::<Vec<u8>, _>("contract")?; // TODO: can it just be a vec?
                         let token_id =
                             canonical_u256_bytes_from_db(&row.try_get::<Vec<u8>, _>("token_id")?)?;
                         items.push(types::TokenBalance {
@@ -2605,7 +2590,8 @@ impl EcsService {
             {
                 let mut separated = builder.separated(", ");
                 for contract in &filter.contract_addresses {
-                    separated.push_bind(felt_hex(felt_from_bytes(contract)?));
+                    separated.push_bind(hex::encode(contract)); // TODO: Is okay?
+                                                                // separated.push_bind(felt_hex(felt_from_bytes(contract)?));
                 }
             }
             builder.push(")");
@@ -2614,9 +2600,7 @@ impl EcsService {
         rows.into_iter()
             .map(|row| {
                 Ok((
-                    felt_from_hex(&row.try_get::<String, _>("transaction_hash")?)?
-                        .to_bytes_be()
-                        .to_vec(),
+                    felt_from_hex(&row.try_get::<String, _>("transaction_hash")?)?.into(),
                     row.try_get::<i64, _>("block_number")? as u64,
                     row.try_get::<i64, _>("executed_at")? as u64,
                 ))
@@ -2722,12 +2706,9 @@ impl EcsService {
         let rows = builder.build().fetch_all(&mut **conn).await?;
         rows.into_iter()
             .map(|row| {
-                let contract_address =
-                    canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("token")?)?;
-                let from_address =
-                    canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("from_addr")?)?;
-                let to_address =
-                    canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("to_addr")?)?;
+                let contract_address = row.try_get::<Vec<u8>, _>("token")?; // TODO: can it just be a vec?
+                let from_address = row.try_get::<Vec<u8>, _>("from_addr")?; // TODO: can it just be a vec?
+                let to_address = row.try_get::<Vec<u8>, _>("to_addr")?; // TODO: can it just be a vec?
                 let amount = canonical_u256_bytes_from_db(&row.try_get::<Vec<u8>, _>("amount")?)?;
                 Ok(types::TokenTransfer {
                     id: format!("erc20:{}", row.try_get::<i64, _>("id")?),
@@ -2766,12 +2747,9 @@ impl EcsService {
         let rows = builder.build().fetch_all(&mut **conn).await?;
         rows.into_iter()
             .map(|row| {
-                let contract_address =
-                    canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("token")?)?;
-                let from_address =
-                    canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("from_addr")?)?;
-                let to_address =
-                    canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("to_addr")?)?;
+                let contract_address = row.try_get::<Vec<u8>, _>("token")?; // TODO: can it just be a vec?
+                let from_address = row.try_get::<Vec<u8>, _>("from_addr")?; // TODO: can it just be a vec?
+                let to_address = row.try_get::<Vec<u8>, _>("to_addr")?; // TODO: can it just be a vec?
                 let token_id =
                     canonical_u256_bytes_from_db(&row.try_get::<Vec<u8>, _>("token_id")?)?;
                 Ok(types::TokenTransfer {
@@ -2811,12 +2789,9 @@ impl EcsService {
         let rows = builder.build().fetch_all(&mut **conn).await?;
         rows.into_iter()
             .map(|row| {
-                let contract_address =
-                    canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("token")?)?;
-                let from_address =
-                    canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("from_addr")?)?;
-                let to_address =
-                    canonical_felt_bytes_from_db(&row.try_get::<Vec<u8>, _>("to_addr")?)?;
+                let contract_address = row.try_get::<Vec<u8>, _>("token")?; // TODO: can it just be a vec?
+                let from_address = row.try_get::<Vec<u8>, _>("from_addr")?; // TODO: can it just be a vec?
+                let to_address = row.try_get::<Vec<u8>, _>("to_addr")?; // TODO: can it just be a vec?
                 let token_id =
                     canonical_u256_bytes_from_db(&row.try_get::<Vec<u8>, _>("token_id")?)?;
                 let amount = canonical_u256_bytes_from_db(&row.try_get::<Vec<u8>, _>("amount")?)?;
@@ -3228,7 +3203,7 @@ impl EcsService {
                 continue;
             }
             by_world
-                .entry(table.world_address.to_bytes_be().to_vec())
+                .entry(table.world_address.into())
                 .or_default()
                 .push(model_from_table(&table));
         }
@@ -3605,7 +3580,7 @@ impl EcsService {
                     .unwrap_or(Value::Null);
                 let entity_felt = value_to_primary_felt(&entity_id, &table.table.primary.type_def)
                     .unwrap_or(Felt::ZERO);
-                let entity_key = entity_felt.to_bytes_be().to_vec();
+                let entity_key: Vec<u8> = entity_felt.into();
                 if meta
                     .get(&felt_hex(entity_felt))
                     .is_some_and(|meta| meta.deleted)
@@ -3615,12 +3590,9 @@ impl EcsService {
 
                 let model = row_to_model_struct(&table.table, &row)?;
                 let aggregate = entities
-                    .entry((
-                        table.world_address.to_bytes_be().to_vec(),
-                        entity_key.clone(),
-                    ))
+                    .entry((table.world_address.into(), entity_key.clone()))
                     .or_insert_with(|| EntityAggregate {
-                        world_address: table.world_address.to_bytes_be().to_vec(),
+                        world_address: table.world_address.into(),
                         hashed_keys: entity_key.clone(),
                         ..EntityAggregate::default()
                     });
@@ -3707,14 +3679,14 @@ impl EcsService {
         let query = types::Query {
             clause: Some(types::Clause {
                 clause_type: Some(ClauseType::HashedKeys(types::HashedKeysClause {
-                    hashed_keys: vec![entity_id.to_bytes_be().to_vec()],
+                    hashed_keys: vec![entity_id.into()],
                 })),
             }),
             no_hashed_keys: false,
             models: vec![],
             pagination: None,
             historical: false,
-            world_addresses: vec![world_address.to_bytes_be().to_vec()],
+            world_addresses: vec![world_address.into()],
         };
         Ok(self
             .load_entity_page(kind, &query)
@@ -3932,8 +3904,8 @@ impl EcsService {
             .await?;
         let managed_tables = self.load_managed_table_map().await?;
         let mut aggregate = EntityAggregate {
-            world_address: world_address.to_bytes_be().to_vec(),
-            hashed_keys: entity_id.to_bytes_be().to_vec(),
+            world_address: world_address.into(),
+            hashed_keys: entity_id.into(),
             ..EntityAggregate::default()
         };
 
@@ -3987,7 +3959,7 @@ impl EcsService {
         };
         let rows = sqlx::query(&sql)
             .bind(kind.as_str())
-            .bind(felt_hex(world_address))
+            .bind(felt_hex(world_address)
             .bind(felt_hex(entity_id))
             .fetch_all(&self.state.pool)
             .await?;
@@ -4130,15 +4102,14 @@ impl EcsService {
             let event = types::Event {
                 keys: keys_hex
                     .into_iter()
-                    .map(|value| felt_from_hex(&value).map(|felt| felt.to_bytes_be().to_vec()))
-                    .collect::<Result<Vec<_>>>()?,
+                    .map(|value| Felt::from_hex(&value).map(|felt| felt.to_be_bytes_vec()))
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
                 data: data_hex
                     .into_iter()
-                    .map(|value| felt_from_hex(&value).map(|felt| felt.to_bytes_be().to_vec()))
-                    .collect::<Result<Vec<_>>>()?,
-                transaction_hash: felt_from_hex(&row.try_get::<String, _>("transaction_hash")?)?
-                    .to_bytes_be()
-                    .to_vec(),
+                    .map(|value| Felt::from_hex(&value).map(|felt| felt.to_be_bytes_vec()))
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+                transaction_hash: Felt::from_hex(&row.try_get::<String, _>("transaction_hash")?)?
+                    .to_be_bytes_vec(),
             };
             if query
                 .keys
@@ -5073,7 +5044,7 @@ impl CairoTypeSerialization for SnapshotJsonSerializer {
 fn model_from_table(table: &ManagedTable) -> types::Model {
     let (namespace, name) = split_table_name(&table.table.name);
     types::Model {
-        selector: table.table.id.to_bytes_be().to_vec(),
+        selector: table.table.id.into(),
         namespace,
         name,
         packed_size: table.table.columns.len() as u32,
@@ -5083,7 +5054,7 @@ fn model_from_table(table: &ManagedTable) -> types::Model {
         schema: serde_json::to_vec(&table.table).unwrap_or_default(),
         contract_address: Vec::new(),
         use_legacy_store: table.table.legacy,
-        world_address: table.world_address.to_bytes_be().to_vec(),
+        world_address: table.world_address.into(),
     }
 }
 
@@ -5505,13 +5476,13 @@ fn value_as_string(value: &Value) -> String {
 
 fn value_as_felt_bytes(value: &Value) -> Result<Vec<u8>> {
     if value.is_null() {
-        return Ok(Felt::ZERO.to_bytes_be().to_vec());
+        return Ok(Felt::ZERO.into());
     }
 
     let string = value_as_string(value);
     let trimmed = string.trim();
     if trimmed.is_empty() {
-        return Ok(Felt::ZERO.to_bytes_be().to_vec());
+        return Ok(Felt::ZERO.into());
     }
 
     felt_like_string_to_bytes(trimmed)
@@ -5658,7 +5629,7 @@ fn felt_like_string_to_bytes(raw: &str) -> Result<Vec<u8>> {
         return Ok(bytes);
     }
 
-    Ok(felt_from_hex(trimmed)?.to_bytes_be().to_vec())
+    Ok(felt_from_hex(trimmed)?.into())
 }
 
 fn decode_prefixed_hex_to_padded_bytes(raw: &str, width: usize) -> Result<Option<Vec<u8>>> {
@@ -5850,10 +5821,6 @@ fn token_balance_subscription_state(balances: &[types::TokenBalance]) -> HashMap
             )
         })
         .collect()
-}
-
-fn canonical_felt_bytes_from_db(bytes: &[u8]) -> Result<Vec<u8>> {
-    Ok(felt_from_bytes(bytes)?.to_bytes_be().to_vec())
 }
 
 fn canonical_optional_u256_bytes_from_db(bytes: Option<Vec<u8>>) -> Result<Option<Vec<u8>>> {
@@ -6300,16 +6267,12 @@ fn contract_matches_query(contract: &types::Contract, query: &types::ContractQue
             || query.contract_types.contains(&contract.contract_type))
 }
 
-fn felt_hex(value: Felt) -> String {
-    format!("{value:#x}")
+fn felt_vec_to_string(value: Vec<u8>) -> String {
+    format!("0x{}", hex::encode(value))
 }
 
 fn felt_from_hex(value: &str) -> Result<Felt> {
     Felt::from_str(value).map_err(|err| anyhow!("invalid felt {value}: {err}"))
-}
-
-fn felt_from_bytes(value: &[u8]) -> Result<Felt> {
-    Ok(Felt::from_bytes_be_slice(value))
 }
 
 #[cfg(test)]
@@ -6747,9 +6710,7 @@ mod tests {
             key: true,
             ty: Some(types::Ty {
                 ty_type: Some(types::ty::TyType::Primitive(types::Primitive {
-                    primitive_type: Some(types::primitive::PrimitiveType::Felt252(
-                        value.to_bytes_be().to_vec(),
-                    )),
+                    primitive_type: Some(types::primitive::PrimitiveType::Felt252(value.into())),
                 })),
             }),
         }
@@ -6874,7 +6835,7 @@ mod tests {
         let response = service
             .subscribe_entities(Request::new(SubscribeEntitiesRequest {
                 clause: Some(member_bool_clause("test-Lobby", "open", true)),
-                world_addresses: vec![world.to_bytes_be().to_vec()],
+                world_addresses: vec![world.into()],
             }))
             .await
             .expect("subscribe entities");
@@ -6899,13 +6860,13 @@ mod tests {
             .expect("entity ok");
         assert_eq!(matched.subscription_id, subscription_id);
         let matched_entity = matched.entity.expect("entity payload");
-        assert_eq!(matched_entity.world_address, world.to_bytes_be().to_vec());
+        assert_eq!(matched_entity.world_address, Vec::<u8>::from(world));
 
         service
             .update_entities_subscription(Request::new(UpdateEntitiesSubscriptionRequest {
                 subscription_id,
                 clause: Some(member_bool_clause("test-Lobby", "open", false)),
-                world_addresses: vec![world.to_bytes_be().to_vec()],
+                world_addresses: vec![world.into()],
             }))
             .await
             .expect("update entities subscription");
@@ -6929,7 +6890,7 @@ mod tests {
         let response = service
             .subscribe_entities(Request::new(SubscribeEntitiesRequest {
                 clause: None,
-                world_addresses: vec![world.to_bytes_be().to_vec()],
+                world_addresses: vec![world.into()],
             }))
             .await
             .expect("subscribe entities");
@@ -6959,7 +6920,7 @@ mod tests {
             let response = service
                 .subscribe_entities(Request::new(SubscribeEntitiesRequest {
                     clause: None,
-                    world_addresses: vec![world.to_bytes_be().to_vec()],
+                    world_addresses: vec![world.into()],
                 }))
                 .await
                 .expect("subscribe entities");
@@ -6990,14 +6951,14 @@ mod tests {
         let response_a = service
             .subscribe_entities(Request::new(SubscribeEntitiesRequest {
                 clause: Some(clause.clone()),
-                world_addresses: vec![world.to_bytes_be().to_vec()],
+                world_addresses: vec![world.into()],
             }))
             .await
             .expect("subscribe entities a");
         let response_b = service
             .subscribe_entities(Request::new(SubscribeEntitiesRequest {
                 clause: Some(clause),
-                world_addresses: vec![world.to_bytes_be().to_vec()],
+                world_addresses: vec![world.into()],
             }))
             .await
             .expect("subscribe entities b");
@@ -7039,14 +7000,14 @@ mod tests {
         let response_a = service
             .subscribe_entities(Request::new(SubscribeEntitiesRequest {
                 clause: Some(member_bool_clause("test-Lobby", "open", true)),
-                world_addresses: vec![world.to_bytes_be().to_vec()],
+                world_addresses: vec![world.into()],
             }))
             .await
             .expect("subscribe entities a");
         let response_b = service
             .subscribe_entities(Request::new(SubscribeEntitiesRequest {
                 clause: Some(member_bool_clause("test-Lobby", "open", true)),
-                world_addresses: vec![world.to_bytes_be().to_vec()],
+                world_addresses: vec![world.into()],
             }))
             .await
             .expect("subscribe entities b");
@@ -7070,7 +7031,7 @@ mod tests {
             .update_entities_subscription(Request::new(UpdateEntitiesSubscriptionRequest {
                 subscription_id: setup_a.subscription_id,
                 clause: Some(member_bool_clause("test-Lobby", "open", false)),
-                world_addresses: vec![world.to_bytes_be().to_vec()],
+                world_addresses: vec![world.into()],
             }))
             .await
             .expect("update entities subscription");
@@ -7107,7 +7068,7 @@ mod tests {
         let response = service
             .subscribe_event_messages(Request::new(SubscribeEntitiesRequest {
                 clause: Some(member_bool_clause("test-EventMessage", "open", true)),
-                world_addresses: vec![world.to_bytes_be().to_vec()],
+                world_addresses: vec![world.into()],
             }))
             .await
             .expect("subscribe event messages");
@@ -7137,7 +7098,7 @@ mod tests {
             .update_event_messages_subscription(Request::new(UpdateEntitiesSubscriptionRequest {
                 subscription_id,
                 clause: Some(member_bool_clause("test-EventMessage", "open", false)),
-                world_addresses: vec![world.to_bytes_be().to_vec()],
+                world_addresses: vec![world.into()],
             }))
             .await
             .expect("update event messages subscription");
@@ -7161,7 +7122,7 @@ mod tests {
         let response = service
             .subscribe_event_messages(Request::new(SubscribeEntitiesRequest {
                 clause: None,
-                world_addresses: vec![world.to_bytes_be().to_vec()],
+                world_addresses: vec![world.into()],
             }))
             .await
             .expect("subscribe event messages");
@@ -7193,7 +7154,7 @@ mod tests {
         let response = service
             .subscribe_events(Request::new(SubscribeEventsRequest {
                 keys: vec![types::KeysClause {
-                    keys: vec![key_match.to_bytes_be().to_vec()],
+                    keys: vec![key_match.into()],
                     pattern_matching: PatternMatching::VariableLen as i32,
                     models: vec![],
                 }],
@@ -7237,10 +7198,10 @@ mod tests {
             .expect("matched frame")
             .expect("matched ok");
         let event = matched.event.expect("event payload");
-        assert_eq!(event.transaction_hash, tx2.to_bytes_be().to_vec());
+        assert_eq!(event.transaction_hash, Vec::<u8>::from(tx2));
         assert_eq!(
             event.keys.first().cloned(),
-            Some(key_match.to_bytes_be().to_vec())
+            Some(Vec::<u8>::from(key_match))
         );
     }
 
@@ -7281,7 +7242,7 @@ mod tests {
         let response = service
             .subscribe_contracts(Request::new(SubscribeContractsRequest {
                 query: Some(types::ContractQuery {
-                    contract_addresses: vec![world_contract.to_bytes_be().to_vec()],
+                    contract_addresses: vec![world_contract.into()],
                     contract_types: vec![ContractType::World as i32],
                 }),
             }))
@@ -7309,10 +7270,7 @@ mod tests {
             .expect("matched frame")
             .expect("matched ok");
         let contract = matched.contract.expect("contract payload");
-        assert_eq!(
-            contract.contract_address,
-            world_contract.to_bytes_be().to_vec()
-        );
+        assert_eq!(contract.contract_address, world_contract.into());
         assert_eq!(contract.contract_type, ContractType::World as i32);
     }
 
@@ -7438,8 +7396,8 @@ mod tests {
         .await
         .expect("create erc20 balances");
 
-        let token = Felt::from(0x99_u64).to_bytes_be().to_vec();
-        let wallet = Felt::from(0x55_u64).to_bytes_be().to_vec();
+        let token: Vec<u8> = Felt::from(0x99_u64).into();
+        let wallet: Vec<u8> = Felt::from(0x55_u64).into();
         let original_balance = u256_bytes_from_u64(1);
         let updated_balance = u256_bytes_from_u64(5);
 
@@ -7647,7 +7605,7 @@ mod tests {
             clause_type: Some(ClauseType::Keys(types::KeysClause {
                 models: vec!["NUMS-Config".to_string()],
                 pattern_matching: PatternMatching::VariableLen as i32,
-                keys: vec![Felt::from(0x222_u64).to_bytes_be().to_vec()],
+                keys: vec![Felt::from(0x222_u64).into()],
             })),
         };
 
@@ -7748,7 +7706,7 @@ mod tests {
                         direction: PaginationDirection::Forward as i32,
                         order_by: vec![],
                     }),
-                    world_addresses: vec![world.to_bytes_be().to_vec()],
+                    world_addresses: vec![world.into()],
                     models: vec![],
                     clause: Some(member_bool_clause("NUMS-QuestDefinition", "enabled", true)),
                     no_hashed_keys: false,
@@ -7811,7 +7769,7 @@ mod tests {
                         direction: PaginationDirection::Forward as i32,
                         order_by: vec![],
                     }),
-                    world_addresses: vec![world.to_bytes_be().to_vec()],
+                    world_addresses: vec![world.into()],
                     models: vec![],
                     clause: Some(member_bool_clause("NUMS-QuestDefinition", "enabled", true)),
                     no_hashed_keys: false,
@@ -7879,13 +7837,13 @@ mod tests {
                         direction: PaginationDirection::Forward as i32,
                         order_by: vec![],
                     }),
-                    world_addresses: vec![world.to_bytes_be().to_vec()],
+                    world_addresses: vec![world.into()],
                     models: vec![],
                     clause: Some(types::Clause {
                         clause_type: Some(ClauseType::Keys(types::KeysClause {
                             models: vec!["NUMS-Config".to_string()],
                             pattern_matching: PatternMatching::VariableLen as i32,
-                            keys: vec![matching_key.to_bytes_be().to_vec()],
+                            keys: vec![matching_key.into()],
                         })),
                     }),
                     no_hashed_keys: false,
@@ -7899,7 +7857,7 @@ mod tests {
         assert_eq!(response.entities.len(), 1);
         assert_eq!(
             response.entities[0].hashed_keys,
-            matching_entity.to_bytes_be().to_vec()
+            Vec::<u8>::from(matching_entity)
         );
         assert!(response.next_cursor.is_empty());
     }
@@ -8052,8 +8010,8 @@ mod tests {
             "INSERT INTO erc20.balances (token, wallet, balance, last_block, last_tx_hash)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )
-        .bind(Felt::from(0x99_u64).to_bytes_be().to_vec())
-        .bind(Felt::from(0x55_u64).to_bytes_be().to_vec())
+        .bind(Felt::from(0x99_u64).into())
+        .bind(Felt::from(0x55_u64).into())
         .bind(vec![1_u8])
         .bind("1")
         .bind(vec![0_u8; 32])
@@ -8079,9 +8037,9 @@ mod tests {
             "INSERT INTO erc721.nft_ownership (token, token_id, owner, block_number, tx_hash, timestamp)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
-        .bind(Felt::from(0x1137_u64).to_bytes_be().to_vec())
+        .bind(Felt::from(0x1137_u64).into())
         .bind(vec![0x04_u8])
-        .bind(Felt::from(0x25145_u64).to_bytes_be().to_vec())
+        .bind(Felt::from(0x25145_u64).into())
         .bind("1")
         .bind(vec![1_u8; 32])
         .bind("1774350232")
@@ -8195,8 +8153,8 @@ mod tests {
             "INSERT INTO erc20.balances (token, wallet, balance, last_block, last_tx_hash)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )
-        .bind(Felt::from(0x99_u64).to_bytes_be().to_vec())
-        .bind(Felt::from(0x55_u64).to_bytes_be().to_vec())
+        .bind(Felt::from(0x99_u64).as_be_bytes_slice())
+        .bind(Felt::from(0x55_u64).as_be_bytes_slice())
         .bind(vec![1_u8])
         .bind("1")
         .bind(vec![0_u8; 32])
@@ -8231,11 +8189,11 @@ mod tests {
         assert_eq!(response.balances.len(), 1);
         assert_eq!(
             response.balances[0].contract_address,
-            Felt::from(0x99_u64).to_bytes_be().to_vec()
+            Felt::from(0x99_u64).to_be_bytes_vec()
         );
         assert_eq!(
             response.balances[0].account_address,
-            Felt::from(0x55_u64).to_bytes_be().to_vec()
+            Felt::from(0x55_u64).to_be_bytes_vec()
         );
         assert_eq!(response.balances[0].balance, u256_bytes_from_u64(1));
         assert_eq!(response.balances[0].token_id, None);
@@ -8395,7 +8353,7 @@ mod tests {
             "INSERT INTO erc20.token_metadata (token, name, symbol, decimals, total_supply)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )
-        .bind(Felt::from(0x99_u64).to_bytes_be().to_vec())
+        .bind(Felt::from(0x99_u64).to_be_bytes_vec())
         .bind("Nums")
         .bind("NUMS")
         .bind("18")
@@ -8428,7 +8386,7 @@ mod tests {
             canonical_u256_bytes_from_db(&[0x12, 0x34, 0x56]).expect("canonical");
         assert_eq!(
             contract.contract_address,
-            Felt::from(0x99_u64).to_bytes_be().to_vec()
+            Felt::from(0x99_u64).to_be_bytes_vec()
         );
         assert_eq!(contract.total_supply.as_ref(), Some(&expected_total_supply));
         assert_eq!(contract.metadata, Vec::<u8>::new());
@@ -8466,9 +8424,9 @@ mod tests {
             "INSERT INTO erc721.nft_ownership (token, token_id, owner)
              VALUES (?1, ?2, ?3)",
         )
-        .bind(Felt::from(0x1137_u64).to_bytes_be().to_vec())
+        .bind(Felt::from(0x1137_u64).to_be_bytes_vec())
         .bind(vec![0x04_u8])
-        .bind(Felt::from(0x25145_u64).to_bytes_be().to_vec())
+        .bind(Felt::from(0x25145_u64).to_be_bytes_vec())
         .execute(&mut *conn)
         .await
         .expect("insert ownership");
@@ -8497,11 +8455,11 @@ mod tests {
         let expected_token_id = u256_bytes_from_u64(4);
         assert_eq!(
             balance.contract_address,
-            Felt::from(0x1137_u64).to_bytes_be().to_vec()
+            Felt::from(0x1137_u64).to_be_bytes_vec()
         );
         assert_eq!(
             balance.account_address,
-            Felt::from(0x25145_u64).to_bytes_be().to_vec()
+            Felt::from(0x25145_u64).to_be_bytes_vec()
         );
         assert_eq!(balance.balance, u256_bytes_from_u64(1));
         assert_eq!(balance.token_id.as_ref(), Some(&expected_token_id));
@@ -8573,8 +8531,8 @@ mod tests {
             "INSERT INTO erc20.balances (token, wallet, balance, last_block, last_tx_hash)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )
-        .bind(Felt::from(0x30_u64).to_bytes_be().to_vec())
-        .bind(Felt::from(0x10_u64).to_bytes_be().to_vec())
+        .bind(Felt::from(0x30_u64).into())
+        .bind(Felt::from(0x10_u64).into())
         .bind(vec![9_u8])
         .bind("1")
         .bind(vec![0_u8; 32])
@@ -8585,9 +8543,9 @@ mod tests {
             "INSERT INTO erc721.nft_ownership (token, token_id, owner)
              VALUES (?1, ?2, ?3)",
         )
-        .bind(Felt::from(0x10_u64).to_bytes_be().to_vec())
+        .bind(Felt::from(0x10_u64).to_be_bytes_vec())
         .bind(vec![0x02_u8])
-        .bind(Felt::from(0x20_u64).to_bytes_be().to_vec())
+        .bind(Felt::from(0x20_u64).to_be_bytes_vec())
         .execute(&mut *conn)
         .await
         .expect("insert erc721 ownership");
@@ -8595,8 +8553,8 @@ mod tests {
             "INSERT INTO erc1155.erc1155_balances (contract, wallet, token_id, balance, last_block)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )
-        .bind(Felt::from(0x20_u64).to_bytes_be().to_vec())
-        .bind(Felt::from(0x05_u64).to_bytes_be().to_vec())
+        .bind(Felt::from(0x20_u64).to_be_bytes_vec())
+        .bind(Felt::from(0x05_u64).to_be_bytes_vec())
         .bind(vec![0x01_u8])
         .bind(vec![7_u8])
         .bind("1")
@@ -8626,11 +8584,11 @@ mod tests {
         assert_eq!(response.balances.len(), 2);
         assert_eq!(
             response.balances[0].contract_address,
-            Felt::from(0x10_u64).to_bytes_be().to_vec()
+            Felt::from(0x10_u64).to_be_bytes_vec()
         );
         assert_eq!(
             response.balances[0].account_address,
-            Felt::from(0x20_u64).to_bytes_be().to_vec()
+            Felt::from(0x20_u64).to_be_bytes_vec()
         );
         assert_eq!(
             response.balances[0].token_id.as_ref(),
@@ -8639,11 +8597,11 @@ mod tests {
 
         assert_eq!(
             response.balances[1].contract_address,
-            Felt::from(0x20_u64).to_bytes_be().to_vec()
+            Felt::from(0x20_u64).to_be_bytes_vec()
         );
         assert_eq!(
             response.balances[1].account_address,
-            Felt::from(0x05_u64).to_bytes_be().to_vec()
+            Felt::from(0x05_u64).to_be_bytes_vec()
         );
         assert_eq!(
             response.balances[1].token_id.as_ref(),
@@ -8682,9 +8640,9 @@ mod tests {
             "INSERT INTO erc721.nft_ownership (token, token_id, owner)
              VALUES (?1, ?2, ?3)",
         )
-        .bind(Felt::from(0x99_u64).to_bytes_be().to_vec())
+        .bind(Felt::from(0x99_u64).to_be_bytes_vec())
         .bind(vec![0x04_u8])
-        .bind(Felt::from(0x77_u64).to_bytes_be().to_vec())
+        .bind(Felt::from(0x77_u64).to_be_bytes_vec())
         .execute(&mut *conn)
         .await
         .expect("insert ownership");
@@ -8711,11 +8669,11 @@ mod tests {
         assert_eq!(response.balances.len(), 1);
         assert_eq!(
             response.balances[0].contract_address,
-            Felt::from(0x99_u64).to_bytes_be().to_vec()
+            Felt::from(0x99_u64).to_be_bytes_vec()
         );
         assert_eq!(
             response.balances[0].account_address,
-            Felt::from(0x77_u64).to_bytes_be().to_vec()
+            Felt::from(0x77_u64).to_be_bytes_vec()
         );
         assert_eq!(
             response.balances[0].token_id.as_ref(),
@@ -8787,7 +8745,7 @@ mod tests {
         let response = service
             .retrieve_controllers(Request::new(RetrieveControllersRequest {
                 query: Some(types::ControllerQuery {
-                    contract_addresses: vec![Felt::from(0x123_u64).to_bytes_be().to_vec()],
+                    contract_addresses: vec![Felt::from(0x123_u64).into()],
                     usernames: Vec::new(),
                     pagination: Some(types::Pagination {
                         cursor: String::new(),
@@ -8805,7 +8763,7 @@ mod tests {
         assert!(response.next_cursor.is_empty());
         assert_eq!(
             response.controllers[0].address,
-            Felt::from(0x123_u64).to_bytes_be().to_vec()
+            Felt::from(0x123_u64).into()
         );
         assert_eq!(response.controllers[0].username, "alice");
         assert_eq!(response.controllers[0].deployed_at_timestamp, 1_710_936_000);
@@ -8878,14 +8836,14 @@ mod tests {
                 .controllers
                 .first()
                 .map(|controller| controller.address.clone()),
-            Some(Felt::from(1_u64).to_bytes_be().to_vec())
+            Some(Felt::from(1_u64).into())
         );
         assert_eq!(
             response
                 .controllers
                 .last()
                 .map(|controller| controller.address.clone()),
-            Some(Felt::from(1_200_u64).to_bytes_be().to_vec())
+            Some(Felt::from(1_200_u64).into())
         );
     }
 }
