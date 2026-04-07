@@ -173,18 +173,8 @@ pub enum TransferDirection {
 }
 
 /// Storage for ERC20 transfers and approvals
-pub struct Erc20Storage {
-    backend: StorageBackend,
-    conn: Arc<Mutex<Connection>>,
-    balance_cache: Arc<Mutex<BalanceCacheState>>,
-    pg_conns: Option<Vec<Arc<tokio::sync::Mutex<Client>>>>,
-    pg_rr: AtomicUsize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StorageBackend {
-    Sqlite,
-    Postgres,
+pub struct Erc20Storage<Backend> {
+    backend: Backend,
 }
 
 /// Transfer data for batch insertion

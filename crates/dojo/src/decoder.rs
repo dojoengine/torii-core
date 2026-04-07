@@ -341,10 +341,14 @@ where
                 .err_into();
         }
 
-        self.decode_event_data(event, selector, keys, &event.data)
+        match self
+            .decode_event_data(event, selector, keys, &event.data)
             .await
-            .map(|msg| vec![msg.to_body(event).into()])
-            .err_into()
+        {
+            Ok(msg) => Ok(vec![msg.to_envelope(event)]),
+            Err(DojoToriiError::UnknownDojoEventSelector(_)) => Ok(Vec::new()),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 
