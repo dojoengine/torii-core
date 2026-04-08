@@ -37,6 +37,7 @@
 
 pub mod balance_fetcher;
 pub mod decoder;
+pub mod event;
 pub mod grpc_service;
 pub mod handlers;
 pub mod identification;

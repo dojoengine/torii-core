@@ -15,7 +15,7 @@ use starknet::providers::{Provider, ProviderRequestData, ProviderResponseData};
 use starknet_types_raw::Felt;
 use std::sync::Arc;
 
-use crate::utils::parse_u256_result;
+use crate::utils::felts_to_u256;
 
 /// Token metadata (common fields for all ERC standards)
 #[derive(Debug, Clone, Default)]
@@ -298,7 +298,7 @@ impl MetadataFetcher {
                     continue;
                 }
                 // U256 return: [low, high] or single felt
-                return Some(parse_u256_result(
+                return Some(felts_to_u256(
                     result.into_iter().map(Into::into).collect(),
                 ));
             }

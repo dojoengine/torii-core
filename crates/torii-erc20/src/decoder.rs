@@ -10,60 +10,23 @@ use std::collections::HashMap;
 use torii::etl::{Decoder, Envelope, TypeId, TypedBody};
 use torii_common::utils::{felt_pair_to_u256, felt_to_u256};
 
+use crate::event::Transfer;
+
 const ERC20_TRANSFER_SELECTOR_TYPE_ID: TypeId = torii::etl::envelope::TypeId::new("erc20.transfer");
 const ERC20_APPROVAL_SELECTOR_TYPE_ID: TypeId = torii::etl::envelope::TypeId::new("erc20.approval");
 pub const TRANSFER_SELECTOR: Felt = Felt::selector("Transfer");
 pub const APPROVAL_SELECTOR: Felt = Felt::selector("Approval");
-/// Transfer event from ERC20 token
+
 #[derive(Debug, Clone)]
-pub struct Transfer {
-    pub from: Felt,
-    pub to: Felt,
-    /// Amount as U256 (256-bit), properly representing ERC20 token amounts
-    pub amount: U256,
-    pub token: Felt,
-    pub block_number: u64,
-    pub transaction_hash: Felt,
+pub enum TransferFormat {
+    Standard,  // from, to in keys; amount_low, amount_high in data
+    AllInKeys, // from, to, amount_low, amount_high all in keys
+    Legacy,    // from, to, amount_low, amount_high all in data
 }
 
-impl TypedBody for Transfer {
-    fn envelope_type_id(&self) -> torii::etl::envelope::TypeId {
-        ERC20_TRANSFER_SELECTOR_TYPE_ID
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
-
-/// Approval event from ERC20 token
-#[derive(Debug, Clone)]
-pub struct Approval {
-    pub owner: Felt,
-    pub spender: Felt,
-    /// Amount as U256 (256-bit), properly representing ERC20 token amounts
-    pub amount: U256,
-    pub token: Felt,
-    pub block_number: u64,
-    pub transaction_hash: Felt,
-}
-
-impl TypedBody for Approval {
-    fn envelope_type_id(&self) -> torii::etl::envelope::TypeId {
-        ERC20_APPROVAL_SELECTOR_TYPE_ID
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
+pub enum Erc20DecoderError {
+    InvalidTransferFormat,
+    InvalidApprovalFormat,
 }
 
 /// ERC20 event decoder
@@ -82,6 +45,19 @@ impl TypedBody for Approval {
 ///
 /// This pattern scales cleanly to many event types without complex branching.
 pub struct Erc20Decoder;
+
+// Helper function to decode Transfer event based on format variants, keys DOES NOT include selector (already stripped)
+pub fn decode_transfer_event(keys: &[Felt], data: &[Felt]) -> Transfer {
+    match keys.len() {
+        0 => Transfer {
+            from: keys[0],
+            to: keys[1],
+            amount: felt_pair_to_u256(data[0], data[1]),
+        },
+        2 => {}
+        3 | 4 => {}
+    }
+}
 
 impl Erc20Decoder {
     pub fn new() -> Self {
@@ -125,7 +101,7 @@ impl Erc20Decoder {
     /// - data[3]: amount_high (u128)
     ///
     /// Felt-based variants use single felt for amount instead of U256.
-    async fn decode_transfer(&self, event: &EmittedEvent) -> Result<Option<Envelope>> {
+    async fn decode_transfer(&self, keys: &[Felt], data: &[Felt]) -> Result<Option<Envelope>> {
         let from;
         let to;
         let amount: U256;

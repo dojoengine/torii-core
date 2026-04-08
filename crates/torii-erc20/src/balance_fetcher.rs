@@ -15,7 +15,7 @@ use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use starknet::providers::{Provider, ProviderRequestData, ProviderResponseData};
 use starknet_types_raw::Felt;
 use std::sync::Arc;
-use torii_common::utils::parse_u256_result;
+use torii_common::utils::felts_to_u256;
 
 /// Request for fetching a balance at a specific block
 #[derive(Debug, Clone)]
@@ -63,9 +63,7 @@ impl BalanceFetcher {
         let block_id = BlockId::Number(block_number);
 
         match self.provider.call(call, block_id).await {
-            Ok(result) => Ok(parse_u256_result(
-                result.into_iter().map(Into::into).collect(),
-            )),
+            Ok(result) => Ok(felts_to_u256(result.into_iter().map(Into::into).collect())),
             Err(e) => {
                 tracing::warn!(
                     target: "torii_erc20::balance_fetcher",
@@ -127,7 +125,7 @@ impl BalanceFetcher {
             for (idx, response) in responses.into_iter().enumerate() {
                 let req = &chunk[idx];
                 let balance = if let ProviderResponseData::Call(felts) = response {
-                    parse_u256_result(felts.into_iter().map(Into::into).collect())
+                    felts_to_u256(felts.into_iter().map(Into::into).collect())
                 } else {
                     tracing::warn!(
                         target: "torii_erc20::balance_fetcher",
