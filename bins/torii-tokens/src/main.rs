@@ -97,13 +97,13 @@ async fn contracts_from_registry(
 
     for (contract, decoder_ids, _) in mappings {
         if decoder_ids.contains(&erc20_id) {
-            erc20.push(contract);
+            erc20.push(contract.into());
         }
         if decoder_ids.contains(&erc721_id) {
-            erc721.push(contract);
+            erc721.push(contract.into());
         }
         if decoder_ids.contains(&erc1155_id) {
-            erc1155.push(contract);
+            erc1155.push(contract.into());
         }
     }
 
@@ -188,7 +188,7 @@ async fn bootstrap_registry_for_event_mode(
             continue;
         }
 
-        let contract_addresses: Vec<Felt> = batch
+        let contract_addresses: Vec<_> = batch
             .events
             .iter()
             .map(|event| event.from_address)
@@ -445,7 +445,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
             for addr in &all_erc20_addresses {
                 event_configs.push(ContractEventConfig {
-                    address: *addr,
+                    address: (*addr).into(),
                     from_block: config.from_block,
                     to_block,
                 });
@@ -453,7 +453,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
             for addr in &all_erc721_addresses {
                 event_configs.push(ContractEventConfig {
-                    address: *addr,
+                    address: (*addr).into(),
                     from_block: config.from_block,
                     to_block,
                 });
@@ -461,7 +461,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
             for addr in &all_erc1155_addresses {
                 event_configs.push(ContractEventConfig {
-                    address: *addr,
+                    address: (*addr).into(),
                     from_block: config.from_block,
                     to_block,
                 });
@@ -570,7 +570,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
         let erc20_decoder_id = DecoderId::new("erc20");
         for address in &all_erc20_addresses {
-            torii_config = torii_config.map_contract(*address, vec![erc20_decoder_id]);
+            torii_config = torii_config.map_contract((*address).into(), vec![erc20_decoder_id]);
         }
 
         if all_erc20_addresses.is_empty() {
@@ -586,7 +586,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     if create_erc721 {
         enabled_types.push("ERC721");
 
-        let storage = Arc::new(Erc721Storage::new(&db_setup.erc721_url).await?);
+        let erc721_pool = Erc721Storage::connect_pool(&db_setup.erc721_url).await?;
+        let storage = Arc::new(Erc721Storage::from_pool(&db_setup.erc721_url, erc721_pool).await?);
         tracing::info!("ERC721 database initialized: {}", db_setup.erc721_url);
 
         let decoder = Arc::new(Erc721Decoder::new());
@@ -625,7 +626,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
         let erc721_decoder_id = DecoderId::new("erc721");
         for address in &all_erc721_addresses {
-            torii_config = torii_config.map_contract(*address, vec![erc721_decoder_id]);
+            torii_config = torii_config.map_contract((*address).into(), vec![erc721_decoder_id]);
         }
 
         if all_erc721_addresses.is_empty() {
@@ -679,7 +680,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
         let erc1155_decoder_id = DecoderId::new("erc1155");
         for address in &all_erc1155_addresses {
-            torii_config = torii_config.map_contract(*address, vec![erc1155_decoder_id]);
+            torii_config = torii_config.map_contract((*address).into(), vec![erc1155_decoder_id]);
         }
 
         if all_erc1155_addresses.is_empty() {
