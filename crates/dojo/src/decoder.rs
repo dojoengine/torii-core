@@ -17,15 +17,15 @@ use introspect_types::{
     SliceFeltSource,
 };
 use itertools::Itertools;
-use starknet_types_raw::event::EmittedEvent;
 use starknet_types_raw::Felt;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::RwLock;
 use torii::etl::{Decoder, Envelope, EventMsg};
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
-use torii_introspect::schema::{TableMetadata, TableSchema};
+use torii_introspect::schema::TableSchema;
 use torii_introspect::{CreateTable, EventId};
+use torii_types::event::EventContext;
 
 pub const DOJO_ID_FIELD_NAME: &str = "entity_id";
 
@@ -53,7 +53,7 @@ pub trait DojoTableEvent<Store, F>: Sized + CairoEventInfo + Debug {
     type Msg: EventId;
     async fn event_to_msg(
         self,
-        raw: &EmittedEvent,
+        context: EventContext,
         decoder: &DojoDecoder<Store, F>,
     ) -> DojoToriiResult<Self::Msg>;
 }
@@ -74,9 +74,9 @@ where
     }
     async fn save_table(
         &self,
-        owner: &Felt,
+        owner: Felt,
         table: &DojoTable,
-        tx_hash: &Felt,
+        tx_hash: Felt,
         block_number: u64,
     ) -> DojoToriiResult<()> {
         self.store
@@ -100,13 +100,13 @@ pub fn primary_field_def() -> PrimaryDef {
 impl<Store, F> DojoDecoder<Store, F> {
     pub fn with_table<R>(
         &self,
-        id: &Felt,
+        id: Felt,
         f: impl FnOnce(&DojoTableInfo) -> DojoToriiResult<R>,
     ) -> DojoToriiResult<R> {
         let tables = self.tables.read()?;
         let table = tables
-            .get(id)
-            .ok_or_else(|| DojoToriiError::TableNotFoundById(*id))?;
+            .get(&id)
+            .ok_or_else(|| DojoToriiError::TableNotFoundById(id))?;
         f(table)
     }
 }
@@ -163,18 +163,17 @@ where
 
     pub async fn register_table(
         &self,
-        owner: &Felt,
         namespace: &str,
         name: &str,
         schema: DojoSchema,
-        metadata: &impl TableMetadata,
+        context: EventContext,
     ) -> DojoToriiResult<CreateTable> {
         let full_table = DojoTable::from_schema(schema, namespace, name, dojo_primary_def());
         self.save_table(
-            owner,
+            context.from_address,
             &full_table,
-            metadata.tx_hash(),
-            metadata.block_number(),
+            context.transaction_hash,
+            context.block_number,
         )
         .await?;
         let (id, table) = full_table.clone().into();
@@ -190,16 +189,15 @@ where
         self.tables.write()?.insert(id, table);
         Ok(CreateTable::from_schema(
             full_table.into(),
-            self.append_only.contains(&(*owner, id)),
+            self.append_only.contains(&(context.from_address, id)),
         ))
     }
 
     pub async fn update_table(
         &self,
-        owner: &Felt,
         id: Felt,
         schema: DojoSchema,
-        meta_data: &impl TableMetadata,
+        context: EventContext,
     ) -> DojoToriiResult<TableSchema> {
         let mut info = {
             let mut tables = self.tables.write()?;
@@ -213,8 +211,13 @@ where
         info.key_fields = key_fields;
         info.value_fields = value_fields;
         let table = (id, info).into();
-        self.save_table(owner, &table, meta_data.tx_hash(), meta_data.block_number())
-            .await?;
+        self.save_table(
+            context.from_address,
+            &table,
+            context.transaction_hash,
+            context.block_number,
+        )
+        .await?;
         let (_, info) = table.clone().into();
         self.tables.write()?.insert(id, info);
         Ok(table.to_schema())
@@ -222,16 +225,16 @@ where
 
     async fn process_table_event<'a, E>(
         &self,
-        raw: &EmittedEvent,
         keys: &'a [Felt],
-        values: &'a [Felt],
+        data: &'a [Felt],
+        context: EventContext,
     ) -> DojoToriiResult<IntrospectMsg>
     where
         E: DojoTableEvent<Store, F> + CairoEvent<CairoSerde<SliceFeltSource<'a>>> + Send,
         E::Msg: Into<IntrospectMsg>,
     {
-        deserialize_data::<E>(keys, values)?
-            .event_to_msg(raw, self)
+        deserialize_data::<E>(keys, data)?
+            .event_to_msg(context, self)
             .await
             .ok_into()
     }
@@ -239,13 +242,13 @@ where
     fn process_record_event<'a, E>(
         &self,
         keys: &'a [Felt],
-        values: &'a [Felt],
+        data: &'a [Felt],
     ) -> DojoToriiResult<IntrospectMsg>
     where
         E: DojoRecordEvent<Store, F> + CairoEvent<CairoSerde<SliceFeltSource<'a>>> + Send,
         E::Msg: Into<IntrospectMsg>,
     {
-        deserialize_data::<E>(keys, values)?
+        deserialize_data::<E>(keys, data)?
             .event_to_msg(self)
             .ok_into()
     }
@@ -258,59 +261,81 @@ where
         deserialize_data::<ExternalContractRegisteredEvent>(keys, values).map(Into::into)
     }
 
-    pub async fn decode_event_data(
+    pub async fn event_with_selector_to_msg(
         &self,
-        raw: &EmittedEvent,
-        selector: &Felt,
+        selector: Felt,
         keys: &[Felt],
-        values: &[Felt],
+        data: &[Felt],
+        context: EventContext,
     ) -> DojoToriiResult<IntrospectMsg> {
-        match *selector {
+        match selector {
             ModelRegistered::SELECTOR => {
-                self.process_table_event::<ModelRegistered>(raw, keys, values)
+                self.process_table_event::<ModelRegistered>(keys, data, context)
                     .await
             }
             ModelWithSchemaRegistered::SELECTOR => {
-                self.process_table_event::<ModelWithSchemaRegistered>(raw, keys, values)
+                self.process_table_event::<ModelWithSchemaRegistered>(keys, data, context)
                     .await
             }
             ModelUpgraded::SELECTOR => {
-                self.process_table_event::<ModelUpgraded>(raw, keys, values)
+                self.process_table_event::<ModelUpgraded>(keys, data, context)
                     .await
             }
             EventRegistered::SELECTOR => {
-                self.process_table_event::<EventRegistered>(raw, keys, values)
+                self.process_table_event::<EventRegistered>(keys, data, context)
                     .await
             }
             EventUpgraded::SELECTOR => {
-                self.process_table_event::<EventUpgraded>(raw, keys, values)
+                self.process_table_event::<EventUpgraded>(keys, data, context)
                     .await
             }
-            StoreSetRecord::SELECTOR => self.process_record_event::<StoreSetRecord>(keys, values),
+            StoreSetRecord::SELECTOR => self.process_record_event::<StoreSetRecord>(keys, data),
             StoreUpdateRecord::SELECTOR => {
-                self.process_record_event::<StoreUpdateRecord>(keys, values)
+                self.process_record_event::<StoreUpdateRecord>(keys, data)
             }
             StoreUpdateMember::SELECTOR => {
-                self.process_record_event::<StoreUpdateMember>(keys, values)
+                self.process_record_event::<StoreUpdateMember>(keys, data)
             }
-            StoreDelRecord::SELECTOR => self.process_record_event::<StoreDelRecord>(keys, values),
-            EventEmitted::SELECTOR => self.process_record_event::<EventEmitted>(keys, values),
-            _ => Err(DojoToriiError::UnknownDojoEventSelector(*selector)),
+            StoreDelRecord::SELECTOR => self.process_record_event::<StoreDelRecord>(keys, data),
+            EventEmitted::SELECTOR => self.process_record_event::<EventEmitted>(keys, data),
+            _ => Err(DojoToriiError::UnknownDojoEventSelector(selector)),
         }
     }
 
-    pub async fn decode_raw_event_msg(&self, raw: &EmittedEvent) -> DojoToriiResult<IntrospectMsg> {
-        let (selector, keys) = raw
-            .keys
-            .split_first()
-            .ok_or(DojoToriiError::MissingEventSelector)?;
-        self.decode_event_data(raw, selector, keys, &raw.data).await
+    pub async fn event_with_selector_to_body(
+        &self,
+        selector: Felt,
+        keys: &[Felt],
+        data: &[Felt],
+        context: EventContext,
+    ) -> DojoToriiResult<IntrospectBody> {
+        self.event_with_selector_to_msg(selector, keys, data, context)
+            .await
+            .map(|msg| msg.to_body(context))
     }
 
-    pub async fn decode_raw_event(&self, raw: &EmittedEvent) -> DojoToriiResult<IntrospectBody> {
-        self.decode_raw_event_msg(raw)
+    pub async fn event_to_msg(
+        &self,
+        keys: &[Felt],
+        data: &[Felt],
+        context: EventContext,
+    ) -> DojoToriiResult<IntrospectMsg> {
+        let (selector, keys) = keys
+            .split_first()
+            .ok_or(DojoToriiError::MissingEventSelector)?;
+        self.event_with_selector_to_msg(*selector, keys, data, context)
             .await
-            .map(|msg| msg.to_body(raw))
+    }
+
+    pub async fn event_to_body(
+        &self,
+        keys: &[Felt],
+        data: &[Felt],
+        context: EventContext,
+    ) -> DojoToriiResult<IntrospectBody> {
+        self.event_to_msg(keys, data, context)
+            .await
+            .map(|msg| msg.to_body(context))
     }
 }
 
@@ -324,24 +349,28 @@ where
         "dojo-introspect"
     }
 
-    async fn decode_event(&self, event: &EmittedEvent) -> AnyResult<Vec<Envelope>> {
-        let (selector, keys) = event
-            .keys
+    async fn decode(
+        &self,
+        keys: &[Felt],
+        data: &[Felt],
+        context: EventContext,
+    ) -> AnyResult<Vec<Envelope>> {
+        let (&selector, keys) = keys
             .split_first()
             .ok_or(DojoToriiError::MissingEventSelector)?;
 
-        if *selector == ExternalContractRegisteredEvent::SELECTOR {
+        if selector == ExternalContractRegisteredEvent::SELECTOR {
             return self
-                .process_external_contract_event(keys, &event.data)
-                .map(|msg| vec![msg.to_envelope(event)])
+                .process_external_contract_event(keys, data)
+                .map(|msg| msg.to_envelopes(context))
                 .err_into();
         }
 
         match self
-            .decode_event_data(event, selector, keys, &event.data)
+            .event_with_selector_to_msg(selector, keys, data, context)
             .await
         {
-            Ok(msg) => Ok(vec![msg.to_envelope(event)]),
+            Ok(msg) => msg.to_ok_envelopes(context),
             Err(DojoToriiError::UnknownDojoEventSelector(_)) => Ok(Vec::new()),
             Err(e) => Err(e.into()),
         }
@@ -357,6 +386,7 @@ mod tests {
     use introspect_types::utils::string_to_cairo_serialize_byte_array;
     use introspect_types::{Attribute, ColumnDef, TypeDef};
     use std::sync::Mutex;
+    use torii::etl::StarknetEvent;
 
     #[derive(Default)]
     struct FakeStore {
@@ -370,9 +400,9 @@ mod tests {
         }
         async fn save_table(
             &self,
-            _owner: &Felt,
+            _owner: Felt,
             _table: &DojoTable,
-            _tx_hash: &Felt,
+            _tx_hash: Felt,
             block_number: u64,
         ) -> DojoToriiResult {
             self.saved_blocks.lock().unwrap().push(block_number);
@@ -430,20 +460,23 @@ mod tests {
 
         decoder
             .update_table(
-                &owner,
                 table_id,
                 schema(&[
                     (1, "entity_id", true),
                     (2, "health", false),
                     (3, "armor", false),
                 ]),
-                &(42, Felt::ZERO),
+                EventContext {
+                    from_address: owner,
+                    transaction_hash: Felt::ZERO,
+                    block_number: 42,
+                },
             )
             .await
             .unwrap();
 
         let parsed = decoder
-            .with_table(&table_id, |table| Ok(table.columns.len()))
+            .with_table(table_id, |table| Ok(table.columns.len()))
             .unwrap();
         assert_eq!(parsed, 3);
         assert_eq!(*decoder.store.saved_blocks.lock().unwrap(), vec![42]);
@@ -460,7 +493,7 @@ mod tests {
         keys.extend(string_to_cairo_serialize_byte_array("eth"));
         keys.push(Felt::from_hex("0x99").unwrap());
 
-        let event = EmittedEvent {
+        let event = StarknetEvent {
             from_address: Felt::from_hex("0x1").unwrap(),
             keys,
             data: vec![
@@ -468,8 +501,7 @@ mod tests {
                 Felt::from_hex("0x1234").unwrap(),
                 Felt::from(42_u64),
             ],
-            block_hash: None,
-            block_number: Some(42),
+            block_number: 42,
             transaction_hash: Felt::from_hex("0xbeef").unwrap(),
         };
 
@@ -486,6 +518,6 @@ mod tests {
         assert_eq!(body.msg.class_hash, Felt::from_hex("0xabc").unwrap());
         assert_eq!(body.msg.contract_address, Felt::from_hex("0x1234").unwrap());
         assert_eq!(body.msg.registration_block, 42);
-        assert_eq!(body.metadata.from_address, Felt::from_hex("0x1").unwrap());
+        assert_eq!(body.context.from_address, Felt::from_hex("0x1").unwrap());
     }
 }

@@ -20,9 +20,9 @@ pub trait DojoStoreTrait {
     async fn initialize(&self) -> DojoToriiResult;
     async fn save_table(
         &self,
-        owner: &Felt,
+        owner: Felt,
         table: &DojoTable,
-        tx_hash: &Felt,
+        tx_hash: Felt,
         block_number: u64,
     ) -> DojoToriiResult;
     async fn read_tables(&self, owners: &[Felt]) -> DojoToriiResult<Vec<DojoTable>>;

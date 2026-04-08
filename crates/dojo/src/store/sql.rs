@@ -15,9 +15,9 @@ impl DojoStoreTrait for DbPool {
 
     async fn save_table(
         &self,
-        owner: &Felt,
+        owner: Felt,
         table: &DojoTable,
-        tx_hash: &Felt,
+        tx_hash: Felt,
         block_number: u64,
     ) -> DojoToriiResult {
         match self {

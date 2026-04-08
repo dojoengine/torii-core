@@ -11,8 +11,6 @@ serde.workspace = true
 starknet-types-core.workspace = true
 starknet.workspace = true
 tokio.workspace = true
-torii-common.workspace = true
-torii.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
@@ -30,6 +28,9 @@ introspect-types.workspace = true
 
 torii-introspect.workspace = true
 torii-sql.workspace = true
+torii-types.workspace = true
+torii-common.workspace = true
+torii.workspace = true
 
 
 [features]

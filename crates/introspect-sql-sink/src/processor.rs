@@ -213,7 +213,7 @@ pub fn messages_to_queries<DB: IntrospectQueryMaker>(
             tables,
             msg,
             &metadata.from_address,
-            metadata.block_number.unwrap_or(u64::MAX),
+            metadata.block_number,
             &metadata.transaction_hash,
             queries,
         ));

@@ -54,10 +54,10 @@ use starknet::core::types::requests::GetEventsRequest;
 use starknet::core::types::{BlockId, EventFilter, EventFilterWithPage, ResultPageRequest};
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
 use starknet::providers::{Provider, ProviderRequestData, ProviderResponseData};
-use starknet_types_raw::event::EmittedEvent;
 use starknet_types_raw::Felt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use torii_types::event::StarknetEvent;
 
 const EXTRACTOR_TYPE: &str = "event";
 
@@ -498,16 +498,16 @@ impl EventExtractor {
     }
 
     fn filter_events_by_tx_hashes(
-        events: Vec<EmittedEvent>,
+        events: Vec<StarknetEvent>,
         successful_transaction_hashes: &HashSet<Felt>,
-    ) -> Vec<EmittedEvent> {
+    ) -> Vec<StarknetEvent> {
         event_common::filter_events_by_tx_hashes(events, successful_transaction_hashes)
     }
 
     /// Build ExtractionBatch from events with block context.
     async fn build_batch(
         &self,
-        events: Vec<EmittedEvent>,
+        events: Vec<StarknetEvent>,
         engine_db: &EngineDb,
     ) -> Result<ExtractionBatch> {
         event_common::build_batch(
@@ -620,7 +620,7 @@ impl Extractor for EventExtractor {
         );
 
         // Process responses and update state
-        let mut all_events: Vec<EmittedEvent> = Vec::new();
+        let mut all_events: Vec<StarknetEvent> = Vec::new();
         let mut any_advanced = false;
 
         for (address, response) in addresses.iter().zip(responses) {
@@ -631,7 +631,7 @@ impl Extractor for EventExtractor {
 
             if let ProviderResponseData::GetEvents(events_page) = response {
                 let event_count = events_page.events.len();
-                all_events.extend(events_page.events.into_iter().map(Into::into));
+                all_events.extend(StarknetEvent::filter_pending(events_page.events));
 
                 tracing::debug!(
                     target: "torii::etl::event",

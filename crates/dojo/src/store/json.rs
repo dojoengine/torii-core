@@ -78,9 +78,9 @@ impl DojoStoreTrait for JsonStore {
     }
     async fn save_table(
         &self,
-        _owner: &Felt,
+        _owner: Felt,
         table: &DojoTable,
-        _tx_hash: &Felt,
+        _tx_hash: Felt,
         _block_number: u64,
     ) -> DojoToriiResult {
         self.dump_table(table).err_into()

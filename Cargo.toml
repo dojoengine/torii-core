@@ -18,6 +18,7 @@ members = [
   "crates/introspect-sql-sink",
   "crates/testing",
   "crates/pathfinder",
+  "crates/types",
   "bins/torii-erc20",
   "bins/torii-erc20-synth",
   "bins/torii-introspect-bin",
@@ -143,6 +144,7 @@ torii-introspect.path = "crates/introspect"
 torii-introspect-sql-sink.path = "./crates/introspect-sql-sink"
 torii-test-utils.path = "crates/testing"
 torii-pathfinder.path = "crates/pathfinder"
+torii-types.path = "crates/types"
 
 [lib]
 name = "torii"
@@ -206,6 +208,7 @@ tonic-reflection.workspace = true
 tonic-web.workspace = true
 tonic.workspace = true
 torii-common.workspace = true
+torii-types = { workspace = true, features = ["field"] }
 tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true

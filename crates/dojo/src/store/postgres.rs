@@ -187,36 +187,36 @@ where
 }
 
 pub fn table_insert_query(
-    owner: &Felt,
-    id: &Felt,
+    owner: Felt,
+    id: Felt,
     block_number: u64,
     name: &str,
     attributes: &[String],
     keys: &[Felt],
     values: &[Felt],
     legacy: bool,
-    created_tx: &Felt,
+    created_tx: Felt,
 ) -> Query<'static, Postgres, PgArguments> {
     sqlx::query::<Postgres>(INSERT_TABLE_QUERY)
-        .bind(PgFelt::from(*owner))
-        .bind(PgFelt::from(*id))
+        .bind(PgFelt::from(owner))
+        .bind(PgFelt::from(id))
         .bind(block_number.to_string())
         .bind(name.to_owned())
         .bind(attributes.to_owned())
         .bind(keys.iter().copied().map(PgFelt::from).collect_vec())
         .bind(values.iter().copied().map(PgFelt::from).collect_vec())
         .bind(legacy)
-        .bind(PgFelt::from(*created_tx))
+        .bind(PgFelt::from(created_tx))
 }
 
 pub fn column_info_insert_query(
     query: &'static str,
-    owner: &Felt,
-    table: &Felt,
-    id: &Felt,
+    owner: Felt,
+    table: Felt,
+    id: Felt,
     block_number: u64,
     info: &ColumnInfo,
-    created_tx: &Felt,
+    created_tx: Felt,
 ) -> Query<'static, Postgres, PgArguments> {
     column_insert_query(
         query,
@@ -233,36 +233,36 @@ pub fn column_info_insert_query(
 
 pub fn column_insert_query(
     query: &'static str,
-    owner: &Felt,
-    table: &Felt,
-    id: &Felt,
+    owner: Felt,
+    table: Felt,
+    id: Felt,
     block_number: u64,
     name: &str,
     attributes: Vec<String>,
     type_def: &TypeDef,
-    created_tx: &Felt,
+    created_tx: Felt,
 ) -> Query<'static, Postgres, PgArguments> {
     sqlx::query::<Postgres>(query)
-        .bind(PgFelt::from(*owner))
-        .bind(PgFelt::from(*table))
-        .bind(PgFelt::from(*id))
+        .bind(PgFelt::from(owner))
+        .bind(PgFelt::from(table))
+        .bind(PgFelt::from(id))
         .bind(block_number.to_string())
         .bind(name.to_owned())
         .bind(attributes)
         .bind(Json(type_def.clone()))
-        .bind(PgFelt::from(*created_tx))
+        .bind(PgFelt::from(created_tx))
 }
 
 impl DojoTable {
     pub fn insert_query(
         &self,
-        owner: &Felt,
-        tx_hash: &Felt,
+        owner: Felt,
+        tx_hash: Felt,
         block_number: u64,
     ) -> Query<'static, Postgres, PgArguments> {
         table_insert_query(
             owner,
-            &self.id,
+            self.id,
             block_number,
             &self.name,
             &self.attributes,
@@ -303,9 +303,9 @@ impl DojoStoreTrait for PgPool {
     }
     async fn save_table(
         &self,
-        owner: &Felt,
+        owner: Felt,
         table: &DojoTable,
-        tx_hash: &Felt,
+        tx_hash: Felt,
         block_number: u64,
     ) -> DojoToriiResult {
         let mut transaction = self.begin().await.map_err(DojoToriiError::store_error)?;
@@ -314,11 +314,11 @@ impl DojoStoreTrait for PgPool {
             .execute(&mut *transaction)
             .await
             .map_err(DojoToriiError::store_error)?;
-        for (id, info) in &table.columns {
+        for (&id, info) in &table.columns {
             column_info_insert_query(
                 INSERT_COLUMN_QUERY,
                 owner,
-                &table.id,
+                table.id,
                 id,
                 block_number,
                 info,

@@ -12,14 +12,15 @@ bincode = { workspace = true, features = ["serde"] }
 thiserror.workspace = true
 rand = "0.8.5"
 starknet-types-raw = { workspace = true, features = ["serde"] }
+torii-types.workspace = true
 
 # Etl dependencies
-torii = { workspace = true, optional = true }
-async-trait = { workspace = true, optional = true }
 anyhow = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+torii = { workspace = true, optional = true }
 
 [lints]
 workspace = true
 
 [features]
-etl = ["torii", "async-trait", "anyhow"]
+etl = ["dep:async-trait", "dep:anyhow", "dep:torii"]

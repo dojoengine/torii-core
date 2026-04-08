@@ -98,7 +98,7 @@ impl Decoder for SqlDecoder {
         "sql"
     }
 
-    async fn decode_event(&self, event: &EmittedEvent) -> anyhow::Result<Vec<Envelope>> {
+    async fn decode(&self, event: &EmittedEvent) -> anyhow::Result<Vec<Envelope>> {
         if !self.is_interested(event) {
             return Ok(Vec::new());
         }
