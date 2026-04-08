@@ -33,7 +33,7 @@ pub enum U256ParseError {
     PairHighNonZero(Felt, Felt),
 }
 
-impl Display for U256ParseError {
+impl std::fmt::Display for U256ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             U256ParseError::MoreThanTwo(len) => write!(f, "Expected at most 2 felts for U256, got {}", len),
@@ -46,34 +46,38 @@ impl Display for U256ParseError {
     }
 }
 
-impl Error for U256ParseError {}
+impl std::error::Error for U256ParseError {}
 
 /// Parse a U256 result from balance_of return value
 ///
 /// ERC20 balance_of typically returns:
 /// - Cairo 0: A single felt (fits in 252 bits, usually enough for balances)
 /// - Cairo 1 with u256: Two felts [low, high] representing a 256-bit value
-pub fn felts_to_u256(result: &[Felt]) -> U256 {
+pub fn felts_to_u256<F: AsRef<[Felt]>>(result: F) -> Result<U256, U256ParseError> {
+    let result = result.as_ref();
     match result.len() {
-        0 => U256::from(0u64),
+        0 => Ok(U256::from(0u64)),
         1 => {
             // Single felt - convert to U256
             // Felt is 252 bits max, so it fits in the low part
             // Take the lower 16 bytes for u128 (fits any felt value)
-            felt_to_u256(result[0])
+            Ok(felt_to_u256(result[0]))
         }
-        _ => {
+        2 => {
             // Two felts: [low, high] for u256
-            let mut iter = result.into_iter();
-            felt_pair_to_u256(iter.next().unwrap(), iter.next().unwrap())
+            felt_pair_to_u256(result[0], result[1])
         }
+        len => Err(U256ParseError::MoreThanTwo(len)),
     }
 }
 
-pub fn felt_pair_to_u256(low: Felt, high: Felt) -> U256 {
-    let [l0, l1, _, _] = low.to_le_words();
-    let [h0, h1, _, _] = high.to_le_words();
-    U256([l0, l1, h0, h1])
+pub fn felt_pair_to_u256(low: Felt, high: Felt) -> Result<U256, U256ParseError> {
+    let [l0, l1, d0, d1] = low.to_le_words();
+    let [h0, h1, d2, d3] = high.to_le_words();
+    match [d0, d1, d2, d3] {
+        [0, 0, 0, 0] => Ok(U256([l0, l1, h0, h1])),
+        _ => Err(U256ParseError::PairHighNonZero(low, high)),
+    }
 }
 
 pub fn felt_to_u256(value: Felt) -> U256 {
@@ -86,14 +90,14 @@ mod tests {
 
     #[test]
     fn test_parse_u256_empty() {
-        let result = felts_to_u256(vec![]);
-        assert_eq!(result, U256::from(0u64));
+        let result = felts_to_u256(&[]).unwrap();
+        assert_eq!(result, U256::zero());
     }
 
     #[test]
     fn test_parse_u256_single_felt() {
         let felt = Felt::from(1000u64);
-        let result = felts_to_u256(vec![felt]);
+        let result = felts_to_u256(&[felt]).unwrap();
         assert_eq!(result, U256::from(1000u64));
     }
 
@@ -102,13 +106,13 @@ mod tests {
         // low = 100, high = 0
         let low = Felt::from(100u64);
         let high = Felt::from(0u64);
-        let result = felts_to_u256(vec![low, high]);
+        let result = felts_to_u256(&[low, high]).unwrap();
         assert_eq!(result, U256::from(100u64));
 
         // Test with high value
         let low = Felt::from(0u64);
         let high = Felt::from(1u64);
-        let result = felts_to_u256(vec![low, high]);
+        let result = felts_to_u256(&[low, high]).unwrap();
         // high = 1 means value = 1 * 2^128
         let expected = U256::from(1u64) << 128;
         assert_eq!(result, expected);

@@ -5017,6 +5017,7 @@ dependencies = [
  "serde_json",
  "starknet",
  "starknet-types-raw",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
  "tonic",

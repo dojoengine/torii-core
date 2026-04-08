@@ -298,9 +298,7 @@ impl MetadataFetcher {
                     continue;
                 }
                 // U256 return: [low, high] or single felt
-                return Some(felts_to_u256(
-                    result.into_iter().map(Into::into).collect(),
-                ));
+                return felts_to_u256(&result.into_iter().map(Into::into).collect::<Vec<_>>()).ok();
             }
         }
 

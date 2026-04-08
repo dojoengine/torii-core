@@ -63,7 +63,9 @@ impl BalanceFetcher {
         let block_id = BlockId::Number(block_number);
 
         match self.provider.call(call, block_id).await {
-            Ok(result) => Ok(felts_to_u256(result.into_iter().map(Into::into).collect())),
+            Ok(result) => Ok(felts_to_u256(
+                &result.into_iter().map(Into::into).collect::<Vec<_>>(),
+            )?),
             Err(e) => {
                 tracing::warn!(
                     target: "torii_erc20::balance_fetcher",
@@ -125,7 +127,7 @@ impl BalanceFetcher {
             for (idx, response) in responses.into_iter().enumerate() {
                 let req = &chunk[idx];
                 let balance = if let ProviderResponseData::Call(felts) = response {
-                    felts_to_u256(felts.into_iter().map(Into::into).collect())
+                    felts_to_u256(felts.into_iter().map(Into::into).collect::<Vec<_>>())
                 } else {
                     tracing::warn!(
                         target: "torii_erc20::balance_fetcher",

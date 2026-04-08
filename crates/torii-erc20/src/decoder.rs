@@ -2,19 +2,13 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
-use primitive_types::U256;
-use starknet_types_raw::event::EmittedEvent;
 use starknet_types_raw::Felt;
-use std::any::Any;
-use std::collections::HashMap;
-use torii::etl::{Decoder, Envelope, TypeId, TypedBody};
-use torii_common::utils::{felt_pair_to_u256, felt_to_u256};
+use torii::etl::{Decoder, Envelope, EventMsg, TypeId};
+use torii_common::utils::U256ParseError;
 use torii_types::event::EventContext;
 
-use crate::event::Transfer;
+use crate::event::{Erc20Event, Erc20Msg, Transfer};
 
-const ERC20_TRANSFER_SELECTOR_TYPE_ID: TypeId = torii::etl::envelope::TypeId::new("erc20.transfer");
-const ERC20_APPROVAL_SELECTOR_TYPE_ID: TypeId = torii::etl::envelope::TypeId::new("erc20.approval");
 pub const TRANSFER_SELECTOR: Felt = Felt::selector("Transfer");
 pub const APPROVAL_SELECTOR: Felt = Felt::selector("Approval");
 
@@ -25,9 +19,34 @@ pub enum TransferFormat {
     Legacy,    // from, to, amount_low, amount_high all in data
 }
 
-pub enum Erc20DecoderError {
-    InvalidTransferFormat,
-    InvalidApprovalFormat,
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum Erc20DecodeError {
+    #[error("Invalid format: keys_len = {0}, data_len = {1}")]
+    InvalidFormat(usize, usize), // keys_len, data_len
+    #[error(transparent)]
+    U256ParseError(#[from] U256ParseError),
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum Erc20EventError {
+    #[error("Failed to decode Transfer event: {0}")]
+    Transfer(Erc20DecodeError),
+    #[error("Failed to decode Approval event: {0}")]
+    Approval(Erc20DecodeError),
+    #[error("Selector does not match Transfer or Approval: {0:#x}")]
+    InvalidSelector(Felt),
+    #[error("Selector Missing: Event keys are empty")]
+    MissingSelector,
+}
+
+impl Erc20EventError {
+    pub fn transfer(err: Erc20DecodeError) -> Self {
+        Erc20EventError::Transfer(err)
+    }
+
+    pub fn approval(err: Erc20DecodeError) -> Self {
+        Erc20EventError::Approval(err)
+    }
 }
 
 /// ERC20 event decoder
@@ -45,346 +64,52 @@ pub enum Erc20DecoderError {
 /// 4. Main decode_event() collects results
 ///
 /// This pattern scales cleanly to many event types without complex branching.
-pub struct Erc20Decoder;
 
-// Helper function to decode Transfer event based on format variants, keys DOES NOT include selector (already stripped)
-pub fn decode_transfer_event(keys: &[Felt], data: &[Felt]) -> Transfer {
-    match keys.len() {
-        0 => Transfer {
-            from: keys[0],
-            to: keys[1],
-            amount: felt_pair_to_u256(data[0], data[1]),
-        },
-        2 => {}
-        3 | 4 => {}
+// Helper function to decode Events event based on format variants, keys DOES NOT include selector (already stripped)
+impl Erc20Event {
+    pub fn decode(keys: &[Felt], data: &[Felt]) -> Result<Self, Erc20DecodeError> {
+        match keys.len() {
+            0 => Erc20Event::new_from_felts(data[0], data[1], &data[2..]).map_err(Into::into),
+            2 => Erc20Event::new_from_felts(keys[0], keys[1], data).map_err(Into::into),
+            3 | 4 => Erc20Event::new_from_felts(keys[0], keys[1], &keys[2..]).map_err(Into::into),
+            _ => Err(Erc20DecodeError::InvalidFormat(keys.len(), data.len())),
+        }
     }
 }
+
+impl Erc20Msg {
+    pub fn decode(keys: &[Felt], data: &[Felt]) -> Result<Self, Erc20EventError> {
+        match keys.get(0) {
+            Some(&TRANSFER_SELECTOR) => Self::decode_transfer(&keys[1..], data),
+            Some(&APPROVAL_SELECTOR) => Self::decode_approval(&keys[1..], data),
+            Some(selector) => Err(Erc20EventError::InvalidSelector(*selector)),
+            None => Err(Erc20EventError::MissingSelector),
+        }
+    }
+    pub fn decode_approval(keys: &[Felt], data: &[Felt]) -> Result<Self, Erc20EventError> {
+        Erc20Event::decode(keys, data)
+            .map_err(Erc20EventError::approval)
+            .map(Erc20Event::approval)
+    }
+
+    pub fn decode_transfer(keys: &[Felt], data: &[Felt]) -> Result<Self, Erc20EventError> {
+        Erc20Event::decode(keys, data)
+            .map_err(Erc20EventError::transfer)
+            .map(Erc20Event::transfer)
+    }
+}
+
+pub struct Erc20Decoder;
 
 impl Erc20Decoder {
     pub fn new() -> Self {
         Self
     }
-
-    /// Transfer event selector: sn_keccak("Transfer")
-    fn transfer_selector() -> Felt {
-        TRANSFER_SELECTOR
-    }
-
-    /// Approval event selector: sn_keccak("Approval")
-    fn approval_selector() -> Felt {
-        APPROVAL_SELECTOR
-    }
-
-    /// Decode Transfer event into envelope
-    ///
-    /// Transfer event signatures (supports multiple formats):
-    ///
-    /// Modern ERC20 (standard):
-    /// - keys[0]: Transfer selector
-    /// - keys[1]: from address
-    /// - keys[2]: to address
-    /// - data[0]: amount_low (u128)
-    /// - data[1]: amount_high (u128)
-    ///
-    /// All-in-keys format (some tokens put everything in keys):
-    /// - keys[0]: Transfer selector
-    /// - keys[1]: from address
-    /// - keys[2]: to address
-    /// - keys[3]: amount_low (u128)
-    /// - keys[4]: amount_high (u128)
-    /// - data: empty
-    ///
-    /// Legacy ERC20 (pre-keys era):
-    /// - keys[0]: Transfer selector
-    /// - data[0]: from address
-    /// - data[1]: to address
-    /// - data[2]: amount_low (u128)
-    /// - data[3]: amount_high (u128)
-    ///
-    /// Felt-based variants use single felt for amount instead of U256.
-    async fn decode_transfer(&self, keys: &[Felt], data: &[Felt]) -> Result<Option<Envelope>> {
-        let from;
-        let to;
-        let amount: U256;
-
-        if event.keys.len() == 5 && event.data.is_empty() {
-            // All-in-keys format: selector, from, to, amount_low, amount_high all in keys
-            from = event.keys[1];
-            to = event.keys[2];
-            let low: Felt = event.keys[3];
-            let high: Felt = event.keys[4];
-            amount = felt_pair_to_u256(low, high);
-            tracing::debug!(
-                target: "torii_erc20::decoder",
-                token = %format!("{:#x}", event.from_address),
-                from = %format!("{:#x}", from),
-                to = %format!("{:#x}", to),
-                amount = %amount,
-                "Decoded all-in-keys transfer (U256)"
-            );
-        } else if event.keys.len() == 4 && event.data.is_empty() {
-            // All-in-keys format with felt amount: selector, from, to, amount in keys
-            from = event.keys[1];
-            to = event.keys[2];
-            amount = felt_to_u256(event.keys[3]);
-            tracing::debug!(
-                target: "torii_erc20::decoder",
-                token = %format!("{:#x}", event.from_address),
-                from = %format!("{:#x}", from),
-                to = %format!("{:#x}", to),
-                amount = %amount,
-                "Decoded all-in-keys transfer (felt)"
-            );
-        } else if event.keys.len() == 1 && event.data.len() == 4 {
-            // Legacy ERC20: from, to, amount_low, amount_high in data
-            from = event.data[0];
-            to = event.data[1];
-            amount = felt_pair_to_u256(event.data[2], event.data[3]);
-        } else if event.keys.len() == 3 && event.data.len() == 2 {
-            // Modern ERC20: from, to in keys; amount_low, amount_high in data
-            from = event.keys[1];
-            to = event.keys[2];
-            amount = felt_pair_to_u256(event.data[0], event.data[1]);
-        } else if event.keys.len() == 3 && event.data.len() == 1 {
-            // Felt-based modern format: from, to in keys; amount as single felt (fits in u128)
-            from = event.keys[1];
-            to = event.keys[2];
-            amount = felt_to_u256(event.data[0]);
-            tracing::debug!(
-                target: "torii_erc20::decoder",
-                token = %format!("{:#x}", event.from_address),
-                from = %format!("{:#x}", from),
-                to = %format!("{:#x}", to),
-                amount = %amount,
-                "Decoded felt-based modern transfer"
-            );
-        } else if event.keys.len() == 1 && event.data.len() == 3 {
-            // Felt-based legacy format: from, to, amount in data
-            from = event.data[0];
-            to = event.data[1];
-            amount = felt_to_u256(event.data[2]);
-            tracing::debug!(
-                target: "torii_erc20::decoder",
-                token = %format!("{:#x}", event.from_address),
-                from = %format!("{:#x}", from),
-                to = %format!("{:#x}", to),
-                amount = %amount,
-                "Decoded felt-based legacy transfer"
-            );
-        } else if event.keys.len() == 3 && event.data.is_empty() {
-            // All-in-keys format with zero amount (or amount omitted): from, to in keys, no data
-            from = event.keys[1];
-            to = event.keys[2];
-            amount = U256::zero();
-            tracing::debug!(
-                target: "torii_erc20::decoder",
-                token = %format!("{:#x}", event.from_address),
-                from = %format!("{:#x}", from),
-                to = %format!("{:#x}", to),
-                "Decoded transfer with zero/omitted amount"
-            );
-        } else {
-            tracing::warn!(
-                target: "torii_erc20::decoder",
-                token = %format!("{:#x}", event.from_address),
-                tx_hash = %format!("{:#x}", event.transaction_hash),
-                block_number = event.block_number.unwrap_or(0),
-                keys_len = event.keys.len(),
-                data_len = event.data.len(),
-                "Malformed Transfer event"
-            );
-            return Ok(None);
-        }
-
-        let transfer = Transfer {
-            from,
-            to,
-            amount,
-            token: event.from_address,
-            block_number: event.block_number.unwrap_or(0),
-            transaction_hash: event.transaction_hash,
-        };
-
-        let mut metadata = HashMap::new();
-        metadata.insert("token".to_string(), format!("{:#x}", event.from_address));
-        metadata.insert(
-            "block_number".to_string(),
-            event.block_number.unwrap_or(0).to_string(),
-        );
-        metadata.insert(
-            "tx_hash".to_string(),
-            format!("{:#x}", event.transaction_hash),
-        );
-
-        let envelope_id = format!(
-            "erc20_transfer_{}_{}",
-            event.block_number.unwrap_or(0),
-            format!("{:#x}", event.transaction_hash)
-        );
-
-        Ok(Some(Envelope::new(
-            envelope_id,
-            Box::new(transfer),
-            metadata,
-        )))
-    }
-
-    /// Decode Approval event into envelope
-    ///
-    /// Approval event signatures (supports multiple formats):
-    ///
-    /// Modern ERC20 (standard):
-    /// - keys[0]: Approval selector
-    /// - keys[1]: owner address
-    /// - keys[2]: spender address
-    /// - data[0]: amount_low (u128)
-    /// - data[1]: amount_high (u128)
-    ///
-    /// All-in-keys format (some tokens put everything in keys):
-    /// - keys[0]: Approval selector
-    /// - keys[1]: owner address
-    /// - keys[2]: spender address
-    /// - keys[3]: amount_low (u128)
-    /// - keys[4]: amount_high (u128)
-    /// - data: empty
-    ///
-    /// Legacy ERC20 (pre-keys era):
-    /// - keys[0]: Approval selector
-    /// - data[0]: owner address
-    /// - data[1]: spender address
-    /// - data[2]: amount_low (u128)
-    /// - data[3]: amount_high (u128)
-    ///
-    /// Felt-based variants use single felt for amount instead of U256.
-    async fn decode_approval(&self, event: &EmittedEvent) -> Result<Option<Envelope>> {
-        let owner;
-        let spender;
-        let amount: U256;
-
-        if event.keys.len() == 5 && event.data.is_empty() {
-            // All-in-keys format: selector, owner, spender, amount_low, amount_high all in keys
-            owner = event.keys[1];
-            spender = event.keys[2];
-            amount = felt_pair_to_u256(event.keys[3], event.keys[4]);
-            tracing::debug!(
-                target: "torii_erc20::decoder",
-                token = %format!("{:#x}", event.from_address),
-                owner = %format!("{:#x}", owner),
-                spender = %format!("{:#x}", spender),
-                amount = %amount,
-                "Decoded all-in-keys approval (U256)"
-            );
-        } else if event.keys.len() == 4 && event.data.is_empty() {
-            // All-in-keys format with felt amount: selector, owner, spender, amount in keys
-            owner = event.keys[1];
-            spender = event.keys[2];
-            amount = felt_to_u256(event.keys[3]);
-            tracing::debug!(
-                target: "torii_erc20::decoder",
-                token = %format!("{:#x}", event.from_address),
-                owner = %format!("{:#x}", owner),
-                spender = %format!("{:#x}", spender),
-                amount = %amount,
-                "Decoded all-in-keys approval (felt)"
-            );
-        } else if event.keys.len() == 1 && event.data.len() == 4 {
-            // Legacy ERC20: owner, spender, amount_low, amount_high in data
-            owner = event.data[0];
-            spender = event.data[1];
-            amount = felt_pair_to_u256(event.data[2], event.data[3]);
-        } else if event.keys.len() == 3 && event.data.len() == 2 {
-            // Modern ERC20: owner, spender in keys; amount_low, amount_high in data
-            owner = event.keys[1];
-            spender = event.keys[2];
-            amount = felt_pair_to_u256(event.data[0], event.data[1]);
-        } else if event.keys.len() == 3 && event.data.len() == 1 {
-            // Felt-based modern format: owner, spender in keys; amount as single felt
-            owner = event.keys[1];
-            spender = event.keys[2];
-            amount = felt_to_u256(event.data[0]);
-            tracing::debug!(
-                target: "torii_erc20::decoder",
-                token = %format!("{:#x}", event.from_address),
-                owner = %format!("{:#x}", owner),
-                spender = %format!("{:#x}", spender),
-                amount = %amount,
-                "Decoded felt-based modern approval"
-            );
-        } else if event.keys.len() == 1 && event.data.len() == 3 {
-            // Felt-based legacy format: owner, spender, amount in data
-            owner = event.data[0];
-            spender = event.data[1];
-            amount = felt_to_u256(event.data[2]);
-            tracing::debug!(
-                target: "torii_erc20::decoder",
-                token = %format!("{:#x}", event.from_address),
-                owner = %format!("{:#x}", owner),
-                spender = %format!("{:#x}", spender),
-                amount = %amount,
-                "Decoded felt-based legacy approval"
-            );
-        } else if event.keys.len() == 3 && event.data.is_empty() {
-            // All-in-keys format with zero amount (or amount omitted)
-            owner = event.keys[1];
-            spender = event.keys[2];
-            amount = U256::zero();
-            tracing::debug!(
-                target: "torii_erc20::decoder",
-                token = %format!("{:#x}", event.from_address),
-                owner = %format!("{:#x}", owner),
-                spender = %format!("{:#x}", spender),
-                "Decoded approval with zero/omitted amount"
-            );
-        } else {
-            tracing::warn!(
-                target: "torii_erc20::decoder",
-                token = %format!("{:#x}", event.from_address),
-                tx_hash = %format!("{:#x}", event.transaction_hash),
-                block_number = event.block_number.unwrap_or(0),
-                keys_len = event.keys.len(),
-                data_len = event.data.len(),
-                "Malformed Approval event"
-            );
-            return Ok(None);
-        }
-
-        let approval = Approval {
-            owner,
-            spender,
-            amount,
-            token: event.from_address,
-            block_number: event.block_number.unwrap_or(0),
-            transaction_hash: event.transaction_hash,
-        };
-
-        let mut metadata = HashMap::new();
-        metadata.insert("token".to_string(), format!("{:#x}", event.from_address));
-        metadata.insert(
-            "block_number".to_string(),
-            event.block_number.unwrap_or(0).to_string(),
-        );
-        metadata.insert(
-            "tx_hash".to_string(),
-            format!("{:#x}", event.transaction_hash),
-        );
-
-        let envelope_id = format!(
-            "erc20_approval_{}_{}",
-            event.block_number.unwrap_or(0),
-            format!("{:#x}", event.transaction_hash)
-        );
-
-        Ok(Some(Envelope::new(
-            envelope_id,
-            Box::new(approval),
-            metadata,
-        )))
-    }
 }
 
 impl Default for Erc20Decoder {
     fn default() -> Self {
-        Self::new()
+        Self
     }
 }
 
@@ -400,51 +125,52 @@ impl Decoder for Erc20Decoder {
         data: &[Felt],
         context: EventContext,
     ) -> Result<Vec<Envelope>> {
-        if keys.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let selector = keys[0];
-
-        if selector == Self::transfer_selector() {
-            if let Some(envelope) = self.decode_transfer(event).await? {
-                return Ok(vec![envelope]);
+        match Erc20Msg::decode(keys, data) {
+            Ok(msg) => msg.to_ok_envelopes(context),
+            Err(Erc20EventError::InvalidSelector(_) | Erc20EventError::MissingSelector) => {
+                Ok(vec![])
             }
-        } else if selector == Self::approval_selector() {
-            if let Some(envelope) = self.decode_approval(event).await? {
-                return Ok(vec![envelope]);
-            }
-        } else {
-            // Log unhandled selectors to help identify missing event types.
-            // This is expected for contracts that emit other events besides ERC20 Transfer/Approval.
-            tracing::trace!(
-                target: "torii_erc20::decoder",
-                token = %format!("{:#x}", event.from_address),
-                selector = %format!("{:#x}", selector),
-                keys_len = event.keys.len(),
-                data_len = event.data.len(),
-                block_number = event.block_number.unwrap_or(0),
-                tx_hash = %format!("{:#x}", event.transaction_hash),
-                "Unhandled event selector"
-            );
+            Err(err) => Err(err.into()),
         }
-
-        Ok(Vec::new())
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    impl Erc20Msg {
+        fn unwrap_transfer(self) -> Transfer {
+            match self {
+                Erc20Msg::Transfer(transfer) => transfer,
+                _ => panic!("Expected Transfer message"),
+            }
+        }
+
+        fn unwrap_approval(self) -> Approval {
+            match self {
+                Erc20Msg::Approval(approval) => approval,
+                _ => panic!("Expected Approval message"),
+            }
+        }
+    }
+
+    use primitive_types::U256;
+    use torii::etl::StarknetEvent;
+
+    use crate::event::{Approval, Erc20Body};
+
     use super::*;
 
     #[tokio::test]
     async fn test_decode_transfer() {
         let decoder = Erc20Decoder::new();
 
-        let event = EmittedEvent {
+        let event = StarknetEvent {
             from_address: Felt::from(0x123u64), // Token contract
             keys: vec![
-                Erc20Decoder::transfer_selector(),
+                TRANSFER_SELECTOR,
+                Felt::from(0x1u64), // from
+                Felt::from(0x2u64), // to
                 Felt::from(0x1u64), // from
                 Felt::from(0x2u64), // to
             ],
@@ -452,34 +178,35 @@ mod tests {
                 Felt::from(1000u64), // amount_low
                 Felt::ZERO,          // amount_high
             ],
-            block_hash: None,
-            block_number: Some(100),
+            block_number: 100,
             transaction_hash: Felt::from(0xabcdu64),
         };
 
-        let envelopes = decoder.decode(&event).await.unwrap();
+        let envelopes = decoder.decode_event(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let transfer = envelopes[0]
+        let (msg, context) = envelopes[0]
             .body
             .as_any()
-            .downcast_ref::<Transfer>()
-            .unwrap();
+            .downcast_ref::<Erc20Body>()
+            .unwrap()
+            .into();
+        let transfer = msg.unwrap_transfer();
 
         assert_eq!(transfer.from, Felt::from(0x1u64));
         assert_eq!(transfer.to, Felt::from(0x2u64));
         assert_eq!(transfer.amount, U256::from(1000u64));
-        assert_eq!(transfer.token, Felt::from(0x123u64));
+        assert_eq!(context.from_address, Felt::from(0x123u64));
     }
 
     #[tokio::test]
     async fn test_decode_approval() {
         let decoder = Erc20Decoder::new();
 
-        let event = EmittedEvent {
+        let event = StarknetEvent {
             from_address: Felt::from(0x456u64), // Token contract
             keys: vec![
-                Erc20Decoder::approval_selector(),
+                APPROVAL_SELECTOR,
                 Felt::from(0xau64), // owner
                 Felt::from(0xbu64), // spender
             ],
@@ -487,24 +214,25 @@ mod tests {
                 Felt::from(5000u64), // amount_low
                 Felt::ZERO,          // amount_high
             ],
-            block_hash: None,
-            block_number: Some(200),
+            block_number: 200,
             transaction_hash: Felt::from(0xdef0u64),
         };
 
-        let envelopes = decoder.decode(&event).await.unwrap();
+        let envelopes = decoder.decode_event(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let approval = envelopes[0]
+        let (msg, context) = envelopes[0]
             .body
             .as_any()
-            .downcast_ref::<Approval>()
-            .unwrap();
+            .downcast_ref::<Erc20Body>()
+            .unwrap()
+            .into();
+        let approval = msg.unwrap_approval();
 
         assert_eq!(approval.owner, Felt::from(0xau64));
         assert_eq!(approval.spender, Felt::from(0xbu64));
         assert_eq!(approval.amount, U256::from(5000u64));
-        assert_eq!(approval.token, Felt::from(0x456u64));
+        assert_eq!(context.from_address, Felt::from(0x456u64));
     }
 
     #[tokio::test]
@@ -512,18 +240,17 @@ mod tests {
         let decoder = Erc20Decoder::new();
 
         // Event with unknown selector
-        let event = EmittedEvent {
+        let event = StarknetEvent {
             from_address: Felt::from(0x789u64),
             keys: vec![
                 Felt::from(0xdeadbeef_u64), // Unknown selector
             ],
             data: vec![],
-            block_hash: None,
-            block_number: Some(300),
+            block_number: 300,
             transaction_hash: Felt::from(0x1234u64),
         };
 
-        let envelopes = decoder.decode(&event).await.unwrap();
+        let envelopes = decoder.decode_event(&event).await.unwrap();
         assert_eq!(envelopes.len(), 0); // Should return empty vec for unknown events
     }
 
@@ -532,34 +259,35 @@ mod tests {
         let decoder = Erc20Decoder::new();
 
         // Felt-based modern format: keys=3 (selector, from, to), data=1 (amount as felt)
-        let event = EmittedEvent {
+        let event = StarknetEvent {
             from_address: Felt::from(0x123u64), // Token contract
             keys: vec![
-                Erc20Decoder::transfer_selector(),
+                TRANSFER_SELECTOR,
                 Felt::from(0x1u64), // from
                 Felt::from(0x2u64), // to
             ],
             data: vec![
                 Felt::from(5000u64), // amount as single felt
             ],
-            block_hash: None,
-            block_number: Some(100),
+            block_number: 100,
             transaction_hash: Felt::from(0xabcdu64),
         };
 
-        let envelopes = decoder.decode(&event).await.unwrap();
+        let envelopes = decoder.decode_event(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let transfer = envelopes[0]
+        let (msg, context) = envelopes[0]
             .body
             .as_any()
-            .downcast_ref::<Transfer>()
-            .unwrap();
+            .downcast_ref::<Erc20Body>()
+            .unwrap()
+            .into();
+        let transfer = msg.unwrap_transfer();
 
         assert_eq!(transfer.from, Felt::from(0x1u64));
         assert_eq!(transfer.to, Felt::from(0x2u64));
         assert_eq!(transfer.amount, U256::from(5000u64));
-        assert_eq!(transfer.token, Felt::from(0x123u64));
+        assert_eq!(context.from_address, Felt::from(0x123u64));
     }
 
     #[tokio::test]
@@ -567,32 +295,33 @@ mod tests {
         let decoder = Erc20Decoder::new();
 
         // Felt-based legacy format: keys=1 (selector), data=3 (from, to, amount)
-        let event = EmittedEvent {
+        let event = StarknetEvent {
             from_address: Felt::from(0x456u64), // Token contract
-            keys: vec![Erc20Decoder::transfer_selector()],
+            keys: vec![TRANSFER_SELECTOR],
             data: vec![
                 Felt::from(0xau64),  // from
                 Felt::from(0xbu64),  // to
                 Felt::from(7500u64), // amount as single felt
             ],
-            block_hash: None,
-            block_number: Some(50),
+            block_number: 50,
             transaction_hash: Felt::from(0xef01u64),
         };
 
-        let envelopes = decoder.decode(&event).await.unwrap();
+        let envelopes = decoder.decode_event(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let transfer = envelopes[0]
+        let (msg, context) = envelopes[0]
             .body
             .as_any()
-            .downcast_ref::<Transfer>()
-            .unwrap();
+            .downcast_ref::<Erc20Body>()
+            .unwrap()
+            .into();
+        let transfer = msg.unwrap_transfer();
 
         assert_eq!(transfer.from, Felt::from(0xau64));
         assert_eq!(transfer.to, Felt::from(0xbu64));
         assert_eq!(transfer.amount, U256::from(7500u64));
-        assert_eq!(transfer.token, Felt::from(0x456u64));
+        assert_eq!(context.from_address, Felt::from(0x456u64));
     }
 
     #[tokio::test]
@@ -600,7 +329,7 @@ mod tests {
         let decoder = Erc20Decoder::new();
 
         // Legacy format: keys=1 (selector), data=4 (owner, spender, amount_low, amount_high)
-        let event = EmittedEvent {
+        let event = StarknetEvent {
             from_address: Felt::from(0x789u64), // Token contract
             keys: vec![Erc20Decoder::approval_selector()],
             data: vec![
@@ -609,24 +338,25 @@ mod tests {
                 Felt::from(10000u64), // amount_low
                 Felt::ZERO,           // amount_high
             ],
-            block_hash: None,
-            block_number: Some(150),
+            block_number: 150,
             transaction_hash: Felt::from(0xabc1u64),
         };
 
-        let envelopes = decoder.decode(&event).await.unwrap();
+        let envelopes = decoder.decode_event(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let approval = envelopes[0]
+        let (msg, context) = envelopes[0]
             .body
             .as_any()
-            .downcast_ref::<Approval>()
-            .unwrap();
+            .downcast_ref::<Erc20Body>()
+            .unwrap()
+            .into();
+        let approval = msg.unwrap_approval();
 
         assert_eq!(approval.owner, Felt::from(0xcu64));
         assert_eq!(approval.spender, Felt::from(0xdu64));
         assert_eq!(approval.amount, U256::from(10000u64));
-        assert_eq!(approval.token, Felt::from(0x789u64));
+        assert_eq!(context.from_address, Felt::from(0x789u64));
     }
 
     #[tokio::test]
@@ -634,34 +364,35 @@ mod tests {
         let decoder = Erc20Decoder::new();
 
         // Felt-based modern format: keys=3 (selector, owner, spender), data=1 (amount as felt)
-        let event = EmittedEvent {
+        let event = StarknetEvent {
             from_address: Felt::from(0xaaau64), // Token contract
             keys: vec![
-                Erc20Decoder::approval_selector(),
+                APPROVAL_SELECTOR,
                 Felt::from(0xeu64), // owner
                 Felt::from(0xfu64), // spender
             ],
             data: vec![
                 Felt::from(8000u64), // amount as single felt
             ],
-            block_hash: None,
-            block_number: Some(175),
+            block_number: 175,
             transaction_hash: Felt::from(0xdef2u64),
         };
 
-        let envelopes = decoder.decode(&event).await.unwrap();
+        let envelopes = decoder.decode_event(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let approval = envelopes[0]
+        let (msg, context) = envelopes[0]
             .body
             .as_any()
-            .downcast_ref::<Approval>()
-            .unwrap();
+            .downcast_ref::<Erc20Body>()
+            .unwrap()
+            .into();
+        let approval = msg.unwrap_approval();
 
         assert_eq!(approval.owner, Felt::from(0xeu64));
         assert_eq!(approval.spender, Felt::from(0xfu64));
         assert_eq!(approval.amount, U256::from(8000u64));
-        assert_eq!(approval.token, Felt::from(0xaaau64));
+        assert_eq!(context.from_address, Felt::from(0xaaau64));
     }
 
     #[tokio::test]
@@ -669,7 +400,7 @@ mod tests {
         let decoder = Erc20Decoder::new();
 
         // Felt-based legacy format: keys=1 (selector), data=3 (owner, spender, amount)
-        let event = EmittedEvent {
+        let event = StarknetEvent {
             from_address: Felt::from(0xbbbu64), // Token contract
             keys: vec![Erc20Decoder::approval_selector()],
             data: vec![
@@ -677,24 +408,25 @@ mod tests {
                 Felt::from(0x11u64),  // spender
                 Felt::from(12000u64), // amount as single felt
             ],
-            block_hash: None,
-            block_number: Some(180),
+            block_number: 180,
             transaction_hash: Felt::from(0xef03u64),
         };
 
-        let envelopes = decoder.decode(&event).await.unwrap();
+        let envelopes = decoder.decode_event(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let approval = envelopes[0]
+        let (msg, context) = envelopes[0]
             .body
             .as_any()
-            .downcast_ref::<Approval>()
-            .unwrap();
+            .downcast_ref::<Erc20Body>()
+            .unwrap()
+            .into();
+        let approval = msg.unwrap_approval();
 
         assert_eq!(approval.owner, Felt::from(0x10u64));
         assert_eq!(approval.spender, Felt::from(0x11u64));
         assert_eq!(approval.amount, U256::from(12000u64));
-        assert_eq!(approval.token, Felt::from(0xbbbu64));
+        assert_eq!(context.from_address, Felt::from(0xbbbu64));
     }
 
     #[tokio::test]
@@ -702,34 +434,35 @@ mod tests {
         let decoder = Erc20Decoder::new();
 
         // All-in-keys format: keys=5 (selector, from, to, amount_low, amount_high), data=empty
-        let event = EmittedEvent {
+        let event = StarknetEvent {
             from_address: Felt::from(0x999u64), // Token contract
             keys: vec![
-                Erc20Decoder::transfer_selector(),
+                TRANSFER_SELECTOR,
                 Felt::from(0x20u64),  // from
                 Felt::from(0x21u64),  // to
                 Felt::from(50000u64), // amount_low
                 Felt::ZERO,           // amount_high
             ],
             data: vec![],
-            block_hash: None,
-            block_number: Some(500),
+            block_number: 500,
             transaction_hash: Felt::from(0xfff1u64),
         };
 
-        let envelopes = decoder.decode(&event).await.unwrap();
+        let envelopes = decoder.decode_event(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let transfer = envelopes[0]
+        let (msg, context) = envelopes[0]
             .body
             .as_any()
-            .downcast_ref::<Transfer>()
-            .unwrap();
+            .downcast_ref::<Erc20Body>()
+            .unwrap()
+            .into();
+        let transfer = msg.unwrap_transfer();
 
         assert_eq!(transfer.from, Felt::from(0x20u64));
         assert_eq!(transfer.to, Felt::from(0x21u64));
         assert_eq!(transfer.amount, U256::from(50000u64));
-        assert_eq!(transfer.token, Felt::from(0x999u64));
+        assert_eq!(context.from_address, Felt::from(0x999u64));
     }
 
     #[tokio::test]
@@ -737,33 +470,34 @@ mod tests {
         let decoder = Erc20Decoder::new();
 
         // All-in-keys format with felt amount: keys=4 (selector, from, to, amount), data=empty
-        let event = EmittedEvent {
+        let event = StarknetEvent {
             from_address: Felt::from(0xaaau64), // Token contract
             keys: vec![
-                Erc20Decoder::transfer_selector(),
+                TRANSFER_SELECTOR,
                 Felt::from(0x30u64),  // from
                 Felt::from(0x31u64),  // to
                 Felt::from(75000u64), // amount as felt
             ],
             data: vec![],
-            block_hash: None,
-            block_number: Some(600),
+            block_number: 600,
             transaction_hash: Felt::from(0xfff2u64),
         };
 
-        let envelopes = decoder.decode(&event).await.unwrap();
+        let envelopes = decoder.decode_event(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let transfer = envelopes[0]
+        let (msg, context) = envelopes[0]
             .body
             .as_any()
-            .downcast_ref::<Transfer>()
-            .unwrap();
+            .downcast_ref::<Erc20Body>()
+            .unwrap()
+            .into();
+        let transfer = msg.unwrap_transfer();
 
         assert_eq!(transfer.from, Felt::from(0x30u64));
         assert_eq!(transfer.to, Felt::from(0x31u64));
         assert_eq!(transfer.amount, U256::from(75000u64));
-        assert_eq!(transfer.token, Felt::from(0xaaau64));
+        assert_eq!(context.from_address, Felt::from(0xaaau64));
     }
 
     #[tokio::test]
@@ -771,34 +505,35 @@ mod tests {
         let decoder = Erc20Decoder::new();
 
         // All-in-keys format: keys=5 (selector, owner, spender, amount_low, amount_high), data=empty
-        let event = EmittedEvent {
+        let event = StarknetEvent {
             from_address: Felt::from(0xcccu64), // Token contract
             keys: vec![
-                Erc20Decoder::approval_selector(),
+                APPROVAL_SELECTOR,
                 Felt::from(0x40u64),   // owner
                 Felt::from(0x41u64),   // spender
                 Felt::from(100000u64), // amount_low
                 Felt::ZERO,            // amount_high
             ],
             data: vec![],
-            block_hash: None,
-            block_number: Some(700),
+            block_number: 700,
             transaction_hash: Felt::from(0xfff3u64),
         };
 
-        let envelopes = decoder.decode(&event).await.unwrap();
+        let envelopes = decoder.decode_event(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let approval = envelopes[0]
+        let (msg, context) = envelopes[0]
             .body
             .as_any()
-            .downcast_ref::<Approval>()
-            .unwrap();
+            .downcast_ref::<Erc20Body>()
+            .unwrap()
+            .into();
+        let approval = msg.unwrap_approval();
 
         assert_eq!(approval.owner, Felt::from(0x40u64));
         assert_eq!(approval.spender, Felt::from(0x41u64));
         assert_eq!(approval.amount, U256::from(100000u64));
-        assert_eq!(approval.token, Felt::from(0xcccu64));
+        assert_eq!(context.from_address, Felt::from(0xcccu64));
     }
 
     #[tokio::test]
@@ -806,32 +541,33 @@ mod tests {
         let decoder = Erc20Decoder::new();
 
         // All-in-keys format with felt amount: keys=4 (selector, owner, spender, amount), data=empty
-        let event = EmittedEvent {
+        let event = StarknetEvent {
             from_address: Felt::from(0xdddu64), // Token contract
             keys: vec![
-                Erc20Decoder::approval_selector(),
+                APPROVAL_SELECTOR,
                 Felt::from(0x50u64),   // owner
                 Felt::from(0x51u64),   // spender
                 Felt::from(125000u64), // amount as felt
             ],
             data: vec![],
-            block_hash: None,
-            block_number: Some(800),
+            block_number: 800,
             transaction_hash: Felt::from(0xfff4u64),
         };
 
-        let envelopes = decoder.decode(&event).await.unwrap();
+        let envelopes = decoder.decode_event(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let approval = envelopes[0]
+        let (msg, context) = envelopes[0]
             .body
             .as_any()
-            .downcast_ref::<Approval>()
-            .unwrap();
+            .downcast_ref::<Erc20Body>()
+            .unwrap()
+            .into();
+        let approval = msg.unwrap_approval();
 
         assert_eq!(approval.owner, Felt::from(0x50u64));
         assert_eq!(approval.spender, Felt::from(0x51u64));
         assert_eq!(approval.amount, U256::from(125000u64));
-        assert_eq!(approval.token, Felt::from(0xdddu64));
+        assert_eq!(context.from_address, Felt::from(0xdddu64));
     }
 }
