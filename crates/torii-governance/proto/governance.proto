@@ -1,0 +1,199 @@
+syntax = "proto3";
+
+package torii.sinks.governance;
+
+message Cursor {
+    int64 id = 1;
+}
+
+enum VotingPowerSource {
+    VOTING_POWER_SOURCE_UNSPECIFIED = 0;
+    VOTING_POWER_SOURCE_DELEGATE_VOTES_CHANGED = 1;
+    VOTING_POWER_SOURCE_RPC_GET_VOTES = 2;
+    VOTING_POWER_SOURCE_ERC20_BALANCE = 3;
+}
+
+message Governor {
+    bytes address = 1;
+    optional bytes votes_token = 2;
+    optional string name = 3;
+    optional string version = 4;
+    bool src5_supported = 5;
+    bool governor_interface_supported = 6;
+}
+
+message Proposal {
+    bytes governor = 1;
+    bytes proposal_id = 2;
+    optional bytes proposer = 3;
+    optional string description = 4;
+    uint64 snapshot = 5;
+    uint64 deadline = 6;
+    string status = 7;
+    uint64 created_block = 8;
+    bytes created_tx_hash = 9;
+    int64 created_timestamp = 10;
+    optional uint64 queued_block = 11;
+    optional uint64 executed_block = 12;
+    optional uint64 canceled_block = 13;
+}
+
+message Vote {
+    bytes governor = 1;
+    bytes proposal_id = 2;
+    bytes voter = 3;
+    uint32 support = 4;
+    bytes weight = 5;
+    optional string reason = 6;
+    bytes params = 7;
+    uint64 block_number = 8;
+    bytes tx_hash = 9;
+    int64 timestamp = 10;
+}
+
+message Delegation {
+    bytes votes_token = 1;
+    bytes delegator = 2;
+    bytes from_delegate = 3;
+    bytes to_delegate = 4;
+    uint64 block_number = 5;
+    bytes tx_hash = 6;
+    int64 timestamp = 7;
+}
+
+message VotingPower {
+    bytes votes_token = 1;
+    bytes account = 2;
+    optional bytes delegate = 3;
+    bytes voting_power = 4;
+    VotingPowerSource source = 5;
+    uint64 last_block = 6;
+    bytes last_tx_hash = 7;
+}
+
+message GovernorFilter {
+    repeated bytes addresses = 1;
+}
+
+message ProposalFilter {
+    optional bytes governor = 1;
+    optional bytes proposer = 2;
+    optional string status = 3;
+}
+
+message VoteFilter {
+    optional bytes governor = 1;
+    optional bytes proposal_id = 2;
+    optional bytes voter = 3;
+}
+
+message DelegationFilter {
+    optional bytes votes_token = 1;
+    optional bytes delegator = 2;
+    optional bytes delegatee = 3;
+}
+
+message VotingPowerFilter {
+    optional bytes votes_token = 1;
+    optional bytes account = 2;
+}
+
+message GetGovernorsRequest {
+    GovernorFilter filter = 1;
+}
+
+message GetGovernorsResponse {
+    repeated Governor governors = 1;
+}
+
+message GetProposalsRequest {
+    ProposalFilter filter = 1;
+    optional Cursor cursor = 2;
+    uint32 limit = 3;
+}
+
+message GetProposalsResponse {
+    repeated Proposal proposals = 1;
+    optional Cursor next_cursor = 2;
+}
+
+message GetProposalRequest {
+    bytes governor = 1;
+    bytes proposal_id = 2;
+}
+
+message GetProposalResponse {
+    optional Proposal proposal = 1;
+}
+
+message GetVotesRequest {
+    VoteFilter filter = 1;
+    optional Cursor cursor = 2;
+    uint32 limit = 3;
+}
+
+message GetVotesResponse {
+    repeated Vote votes = 1;
+    optional Cursor next_cursor = 2;
+}
+
+message GetDelegationsRequest {
+    DelegationFilter filter = 1;
+    optional Cursor cursor = 2;
+    uint32 limit = 3;
+}
+
+message GetDelegationsResponse {
+    repeated Delegation delegations = 1;
+    optional Cursor next_cursor = 2;
+}
+
+message GetVotingPowerRequest {
+    VotingPowerFilter filter = 1;
+}
+
+message GetVotingPowerResponse {
+    repeated VotingPower entries = 1;
+}
+
+message SubscribeProposalsRequest {
+    string client_id = 1;
+    ProposalFilter filter = 2;
+}
+
+message SubscribeVotesRequest {
+    string client_id = 1;
+    VoteFilter filter = 2;
+}
+
+message SubscribeDelegationsRequest {
+    string client_id = 1;
+    DelegationFilter filter = 2;
+}
+
+message ProposalUpdate {
+    Proposal proposal = 1;
+    int64 timestamp = 2;
+}
+
+message VoteUpdate {
+    Vote vote = 1;
+    int64 timestamp = 2;
+}
+
+message DelegationUpdate {
+    Delegation delegation = 1;
+    int64 timestamp = 2;
+}
+
+service Governance {
+    rpc GetGovernors(GetGovernorsRequest) returns (GetGovernorsResponse);
+    rpc GetProposals(GetProposalsRequest) returns (GetProposalsResponse);
+    rpc GetProposal(GetProposalRequest) returns (GetProposalResponse);
+    rpc GetVotes(GetVotesRequest) returns (GetVotesResponse);
+    rpc GetDelegations(GetDelegationsRequest) returns (GetDelegationsResponse);
+    rpc GetVotingPower(GetVotingPowerRequest) returns (GetVotingPowerResponse);
+    rpc SubscribeProposals(SubscribeProposalsRequest) returns (stream ProposalUpdate);
+    rpc SubscribeVotes(SubscribeVotesRequest) returns (stream VoteUpdate);
+    rpc SubscribeDelegations(SubscribeDelegationsRequest) returns (stream DelegationUpdate);
+}

@@ -1070,10 +1070,12 @@ mod tests {
         TokenDbSetup {
             engine_url: "./torii-data/engine.db".to_string(),
             erc20_url: "./torii-data/erc20.db".to_string(),
+            governance_url: "./torii-data/governance.db".to_string(),
             erc721_url: "./torii-data/erc721.db".to_string(),
             erc1155_url: "./torii-data/erc1155.db".to_string(),
             engine_backend: DatabaseBackend::Sqlite,
             erc20_backend: DatabaseBackend::Sqlite,
+            governance_backend: DatabaseBackend::Sqlite,
             erc721_backend: DatabaseBackend::Sqlite,
             erc1155_backend: DatabaseBackend::Sqlite,
         }

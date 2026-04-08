@@ -76,10 +76,12 @@ pub fn resolve_single_db_setup(db_path: &str, database_url: Option<&str>) -> Sin
 pub struct TokenDbSetup {
     pub engine_url: String,
     pub erc20_url: String,
+    pub governance_url: String,
     pub erc721_url: String,
     pub erc1155_url: String,
     pub engine_backend: DatabaseBackend,
     pub erc20_backend: DatabaseBackend,
+    pub governance_backend: DatabaseBackend,
     pub erc721_backend: DatabaseBackend,
     pub erc1155_backend: DatabaseBackend,
 }
@@ -99,6 +101,12 @@ pub fn resolve_token_db_setup(
         db_dir,
         "erc20.db",
     );
+    let governance_url = resolve_storage_url(
+        storage_database_url,
+        engine_database_url,
+        db_dir,
+        "governance.db",
+    );
     let erc721_url = resolve_storage_url(
         storage_database_url,
         engine_database_url,
@@ -114,6 +122,7 @@ pub fn resolve_token_db_setup(
 
     let engine_backend = backend_from_url_or_path(&engine_url);
     let erc20_backend = backend_from_url_or_path(&erc20_url);
+    let governance_backend = backend_from_url_or_path(&governance_url);
     let erc721_backend = backend_from_url_or_path(&erc721_url);
     let erc1155_backend = backend_from_url_or_path(&erc1155_url);
 
@@ -121,6 +130,7 @@ pub fn resolve_token_db_setup(
         .map(backend_from_url_or_path)
         .is_some_and(|backend| backend == DatabaseBackend::Postgres)
         && (erc20_backend != DatabaseBackend::Postgres
+            || governance_backend != DatabaseBackend::Postgres
             || erc721_backend != DatabaseBackend::Postgres
             || erc1155_backend != DatabaseBackend::Postgres)
     {
@@ -132,10 +142,12 @@ pub fn resolve_token_db_setup(
     Ok(TokenDbSetup {
         engine_url,
         erc20_url,
+        governance_url,
         erc721_url,
         erc1155_url,
         engine_backend,
         erc20_backend,
+        governance_backend,
         erc721_backend,
         erc1155_backend,
     })
@@ -165,6 +177,7 @@ mod tests {
         assert_eq!(setup.erc20_backend, DatabaseBackend::Sqlite);
         assert!(setup.engine_url.ends_with("engine.db"));
         assert!(setup.erc20_url.ends_with("erc20.db"));
+        assert!(setup.governance_url.ends_with("governance.db"));
     }
 
     #[test]
@@ -191,6 +204,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(setup.engine_backend, DatabaseBackend::Postgres);
+        assert_eq!(setup.governance_backend, DatabaseBackend::Postgres);
         assert_eq!(setup.erc721_backend, DatabaseBackend::Postgres);
     }
 

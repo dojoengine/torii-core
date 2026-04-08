@@ -5178,6 +5178,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "torii-governance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum",
+ "chrono",
+ "futures",
+ "metrics",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "starknet",
+ "tokio",
+ "tonic",
+ "tonic-build",
+ "torii",
+ "torii-common",
+ "torii-erc20",
+ "tracing",
+]
+
+[[package]]
 name = "torii-introspect"
 version = "0.1.0"
 dependencies = [
@@ -5452,6 +5478,7 @@ dependencies = [
  "torii-erc1155",
  "torii-erc20",
  "torii-erc721",
+ "torii-governance",
  "torii-runtime-common",
  "tracing",
  "tracing-subscriber",

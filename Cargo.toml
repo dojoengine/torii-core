@@ -11,6 +11,7 @@ members = [
   "crates/torii-ecs-sink",
   "crates/torii-entities-historical-sink",
   "crates/torii-erc20",
+  "crates/torii-governance",
   "crates/torii-erc721",
   "crates/torii-erc1155",
   "crates/introspect",
@@ -140,6 +141,7 @@ torii-arcade-sink.path = "crates/arcade-sink"
 torii-ecs-sink.path = "crates/torii-ecs-sink"
 torii-entities-historical-sink.path = "crates/torii-entities-historical-sink"
 torii-erc20.path = "crates/torii-erc20"
+torii-governance.path = "crates/torii-governance"
 torii-erc721.path = "crates/torii-erc721"
 torii-erc1155.path = "crates/torii-erc1155"
 torii-dojo.path = "./crates/dojo"
