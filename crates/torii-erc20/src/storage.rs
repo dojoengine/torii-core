@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_postgres::types::ToSql as PgToSql;
 use tokio_postgres::{Client, NoTls};
-use torii_common::{blob_to_felt, blob_to_u256, felt_to_blob, u256_to_blob};
+use torii_common::{blob_to_u256, u256_to_blob};
 
 use crate::balance_fetcher::BalanceFetchRequest;
 
@@ -170,11 +170,6 @@ pub enum TransferDirection {
     Sent,
     /// Only received transfers (wallet is receiver)
     Received,
-}
-
-/// Storage for ERC20 transfers and approvals
-pub struct Erc20Storage<Backend> {
-    backend: Backend, //TODO: abstract over SQLite vs Postgres backends
 }
 
 /// Transfer data for batch insertion

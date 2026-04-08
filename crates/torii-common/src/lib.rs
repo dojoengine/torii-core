@@ -21,19 +21,14 @@ pub use token_uri::{
 ///
 /// Compression strategy:
 /// - Zero value: 1 byte (0x00)
-///
-/// - Values < 2^128: 1-16 bytes (minimal encoding of low word)
-/// - Values >= 2^128: Full encoding (17-32 bytes)
+/// - Non-zero values: Trim leading zero bytes, store remaining bytes
 pub fn u256_to_blob(value: U256) -> Vec<u8> {
-    match value.0 {
-        [0, 0, 0, 0] => vec![0u8], // zero value
-        [_, _, 0, 0] => {
-            let val = value.low_u128().to_be_bytes();
-            let start = val.iter().position(|&b| b != 0).unwrap_or(15);
-            val[start..].to_vec() // compact encoding for < 2^128
-        }
-        _ => value.to_big_endian().to_vec(), // full encoding for >= 2^128
+    if value.is_zero() {
+        return vec![0];
     }
+    let bytes = value.to_big_endian();
+    let start = bytes.iter().position(|&b| b != 0).unwrap_or(31);
+    bytes[start..].to_vec()
 }
 
 /// Convert BLOB back to U256 (big-endian)
