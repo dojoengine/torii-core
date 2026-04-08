@@ -1,0 +1,21 @@
+[package]
+name = "torii-provider"
+version = "0.1.0"
+edition = "2021"
+description = "Provider for Torii"
+
+[dependencies]
+serde.workspace = true
+serde_with = { version = "3.9.0", default-features = false, features = [
+    "alloc",
+    "macros",
+] }
+thiserror.workspace = true
+starknet-types-raw = { workspace = true, features = ["serde"] }
+url.workspace = true
+auto_impl.workspace = true
+async-trait.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true

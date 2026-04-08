@@ -5224,6 +5224,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "torii-provider"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "auto_impl",
+ "log",
+ "serde",
+ "serde_with",
+ "starknet-types-raw",
+ "thiserror 2.0.18",
+ "url",
+]
+
+[[package]]
 name = "torii-runtime-common"
 version = "0.1.0"
 dependencies = [

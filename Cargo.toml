@@ -18,6 +18,7 @@ members = [
   "crates/introspect-sql-sink",
   "crates/testing",
   "crates/pathfinder",
+  "crates/provider",
   "bins/torii-erc20",
   "bins/torii-erc20-synth",
   "bins/torii-introspect-bin",
@@ -106,6 +107,7 @@ primitive-types = { version = "0.14.0", features = ["serde"] }
 starknet-types-core = "0.2.0"
 bigdecimal = "0.4.10"
 starknet-types-raw = { git = "https://github.com/cartridge-gg/starknet-types-raw", branch = "main" }
+url = "2.5"
 
 # Build
 tonic-build = "0.12"
@@ -121,6 +123,7 @@ dojo-introspect = { git = "https://github.com/dojoengine/dojo-introspect", rev =
 resolve-path = "0.1.0"
 itertools = "0.14.0"
 bincode = { version = "2.0.0" }
+auto_impl = "1.3.0"
 
 # Torii core
 torii.path = "."
