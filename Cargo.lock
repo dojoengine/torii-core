@@ -4984,6 +4984,7 @@ dependencies = [
  "chrono",
  "futures",
  "hex",
+ "primitive-types 0.14.0",
  "prost 0.13.5",
  "prost-types 0.13.5",
  "rusqlite",
@@ -4991,12 +4992,15 @@ dependencies = [
  "serde_json",
  "starknet",
  "starknet-types-raw",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
  "tonic",
  "tonic-build",
  "torii",
  "torii-common",
+ "torii-sql",
+ "torii-types",
  "tracing",
 ]
 
@@ -5344,6 +5348,7 @@ dependencies = [
  "torii-erc20",
  "torii-erc721",
  "torii-runtime-common",
+ "torii-sql",
  "tracing",
  "tracing-subscriber",
 ]
