@@ -127,7 +127,7 @@ impl BalanceFetcher {
             for (idx, response) in responses.into_iter().enumerate() {
                 let req = &chunk[idx];
                 let balance = if let ProviderResponseData::Call(felts) = response {
-                    felts_to_u256(felts.into_iter().map(Into::into).collect::<Vec<_>>())
+                    felts_to_u256(felts.into_iter().map(Into::into).collect::<Vec<_>>())?
                 } else {
                     tracing::warn!(
                         target: "torii_erc20::balance_fetcher",

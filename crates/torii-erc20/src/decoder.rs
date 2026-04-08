@@ -3,11 +3,11 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use starknet_types_raw::Felt;
-use torii::etl::{Decoder, Envelope, EventMsg, TypeId};
+use torii::etl::{Decoder, Envelope, EventMsg};
 use torii_common::utils::U256ParseError;
 use torii_types::event::EventContext;
 
-use crate::event::{Erc20Event, Erc20Msg, Transfer};
+use crate::event::{Erc20Event, Erc20Msg};
 
 pub const TRANSFER_SELECTOR: Felt = Felt::selector("Transfer");
 pub const APPROVAL_SELECTOR: Felt = Felt::selector("Approval");
@@ -68,10 +68,16 @@ impl Erc20EventError {
 // Helper function to decode Events event based on format variants, keys DOES NOT include selector (already stripped)
 impl Erc20Event {
     pub fn decode(keys: &[Felt], data: &[Felt]) -> Result<Self, Erc20DecodeError> {
-        match keys.len() {
-            0 => Erc20Event::new_from_felts(data[0], data[1], &data[2..]).map_err(Into::into),
-            2 => Erc20Event::new_from_felts(keys[0], keys[1], data).map_err(Into::into),
-            3 | 4 => Erc20Event::new_from_felts(keys[0], keys[1], &keys[2..]).map_err(Into::into),
+        match (keys.len(), data.len()) {
+            (2, 0 | 1 | 2) => {
+                Erc20Event::new_from_felts(keys[0], keys[1], data).map_err(Into::into)
+            }
+            (3 | 4, 0) => {
+                Erc20Event::new_from_felts(keys[0], keys[1], &keys[2..]).map_err(Into::into)
+            }
+            (0, 2 | 3 | 4) => {
+                Erc20Event::new_from_felts(data[0], data[1], &data[2..]).map_err(Into::into)
+            }
             _ => Err(Erc20DecodeError::InvalidFormat(keys.len(), data.len())),
         }
     }
@@ -157,7 +163,7 @@ mod tests {
     use primitive_types::U256;
     use torii::etl::StarknetEvent;
 
-    use crate::event::{Approval, Erc20Body};
+    use crate::event::{Approval, Erc20Body, Transfer};
 
     use super::*;
 
@@ -169,8 +175,6 @@ mod tests {
             from_address: Felt::from(0x123u64), // Token contract
             keys: vec![
                 TRANSFER_SELECTOR,
-                Felt::from(0x1u64), // from
-                Felt::from(0x2u64), // to
                 Felt::from(0x1u64), // from
                 Felt::from(0x2u64), // to
             ],
@@ -331,7 +335,7 @@ mod tests {
         // Legacy format: keys=1 (selector), data=4 (owner, spender, amount_low, amount_high)
         let event = StarknetEvent {
             from_address: Felt::from(0x789u64), // Token contract
-            keys: vec![Erc20Decoder::approval_selector()],
+            keys: vec![APPROVAL_SELECTOR],
             data: vec![
                 Felt::from(0xcu64),   // owner
                 Felt::from(0xdu64),   // spender
@@ -402,7 +406,7 @@ mod tests {
         // Felt-based legacy format: keys=1 (selector), data=3 (owner, spender, amount)
         let event = StarknetEvent {
             from_address: Felt::from(0xbbbu64), // Token contract
-            keys: vec![Erc20Decoder::approval_selector()],
+            keys: vec![APPROVAL_SELECTOR],
             data: vec![
                 Felt::from(0x10u64),  // owner
                 Felt::from(0x11u64),  // spender
