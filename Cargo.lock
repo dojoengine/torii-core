@@ -5022,6 +5022,7 @@ dependencies = [
  "tonic-build",
  "torii",
  "torii-common",
+ "torii-types",
  "tracing",
 ]
 

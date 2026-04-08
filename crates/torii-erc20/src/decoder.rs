@@ -9,6 +9,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use torii::etl::{Decoder, Envelope, TypeId, TypedBody};
 use torii_common::utils::{felt_pair_to_u256, felt_to_u256};
+use torii_types::event::EventContext;
 
 const ERC20_TRANSFER_SELECTOR_TYPE_ID: TypeId = torii::etl::envelope::TypeId::new("erc20.transfer");
 const ERC20_APPROVAL_SELECTOR_TYPE_ID: TypeId = torii::etl::envelope::TypeId::new("erc20.approval");
@@ -417,12 +418,17 @@ impl Decoder for Erc20Decoder {
         "erc20"
     }
 
-    async fn decode(&self, event: &EmittedEvent) -> Result<Vec<Envelope>> {
-        if event.keys.is_empty() {
+    async fn decode(
+        &self,
+        keys: &[Felt],
+        data: &[Felt],
+        context: EventContext,
+    ) -> Result<Vec<Envelope>> {
+        if keys.is_empty() {
             return Ok(Vec::new());
         }
 
-        let selector = event.keys[0];
+        let selector = keys[0];
 
         if selector == Self::transfer_selector() {
             if let Some(envelope) = self.decode_transfer(event).await? {

@@ -8,6 +8,7 @@ description = "ERC20 token indexer library for Torii"
 # Torii core
 torii.workspace = true
 torii-common.workspace = true
+torii-types.workspace = true
 
 # Async
 tokio = { workspace = true, features = ["full"] }
