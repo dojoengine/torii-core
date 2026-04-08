@@ -4804,6 +4804,7 @@ dependencies = [
  "torii-sql",
  "torii-sql-sink",
  "torii-test-utils",
+ "torii-types",
  "tower 0.5.3",
  "tower-http 0.5.2",
  "tracing",
@@ -4932,6 +4933,7 @@ dependencies = [
  "torii-common",
  "torii-introspect",
  "torii-sql",
+ "torii-types",
  "tracing",
 ]
 
@@ -5178,11 +5180,12 @@ dependencies = [
  "serde_json",
  "sqlx",
  "starknet",
- "starknet-types-core",
+ "starknet-types-raw",
  "tokio",
  "torii",
  "torii-dojo",
  "torii-introspect-sql-sink",
+ "torii-types",
  "tracing",
  "tracing-subscriber",
 ]
@@ -5220,6 +5223,7 @@ dependencies = [
  "starknet-types-raw",
  "thiserror 2.0.18",
  "torii",
+ "torii-types",
  "zstd",
 ]
 
@@ -5331,6 +5335,15 @@ dependencies = [
  "torii-runtime-common",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "torii-types"
+version = "0.1.0"
+dependencies = [
+ "starknet",
+ "starknet-types-raw",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

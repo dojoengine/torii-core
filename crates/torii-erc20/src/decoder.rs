@@ -417,7 +417,7 @@ impl Decoder for Erc20Decoder {
         "erc20"
     }
 
-    async fn decode_event(&self, event: &EmittedEvent) -> Result<Vec<Envelope>> {
+    async fn decode(&self, event: &EmittedEvent) -> Result<Vec<Envelope>> {
         if event.keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -475,7 +475,7 @@ mod tests {
             transaction_hash: Felt::from(0xabcdu64),
         };
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
+        let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
         let transfer = envelopes[0]
@@ -510,7 +510,7 @@ mod tests {
             transaction_hash: Felt::from(0xdef0u64),
         };
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
+        let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
         let approval = envelopes[0]
@@ -541,7 +541,7 @@ mod tests {
             transaction_hash: Felt::from(0x1234u64),
         };
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
+        let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 0); // Should return empty vec for unknown events
     }
 
@@ -565,7 +565,7 @@ mod tests {
             transaction_hash: Felt::from(0xabcdu64),
         };
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
+        let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
         let transfer = envelopes[0]
@@ -598,7 +598,7 @@ mod tests {
             transaction_hash: Felt::from(0xef01u64),
         };
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
+        let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
         let transfer = envelopes[0]
@@ -632,7 +632,7 @@ mod tests {
             transaction_hash: Felt::from(0xabc1u64),
         };
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
+        let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
         let approval = envelopes[0]
@@ -667,7 +667,7 @@ mod tests {
             transaction_hash: Felt::from(0xdef2u64),
         };
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
+        let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
         let approval = envelopes[0]
@@ -700,7 +700,7 @@ mod tests {
             transaction_hash: Felt::from(0xef03u64),
         };
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
+        let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
         let approval = envelopes[0]
@@ -735,7 +735,7 @@ mod tests {
             transaction_hash: Felt::from(0xfff1u64),
         };
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
+        let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
         let transfer = envelopes[0]
@@ -769,7 +769,7 @@ mod tests {
             transaction_hash: Felt::from(0xfff2u64),
         };
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
+        let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
         let transfer = envelopes[0]
@@ -804,7 +804,7 @@ mod tests {
             transaction_hash: Felt::from(0xfff3u64),
         };
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
+        let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
         let approval = envelopes[0]
@@ -838,7 +838,7 @@ mod tests {
             transaction_hash: Felt::from(0xfff4u64),
         };
 
-        let envelopes = decoder.decode_event(&event).await.unwrap();
+        let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
         let approval = envelopes[0]

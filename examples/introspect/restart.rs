@@ -58,7 +58,7 @@ async fn run_events(
             this_run += 1;
             match decoder.decode_raw_event(&event).await {
                 Ok(IntrospectBody {
-                    metadata,
+                    context: metadata,
                     msg: IntrospectMsg::CreateTable(mut msg),
                 }) => {
                     msg.append_only = true;

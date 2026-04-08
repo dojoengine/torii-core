@@ -188,9 +188,9 @@ impl DojoStoreTrait for SqlitePool {
     }
     async fn save_table(
         &self,
-        owner: &Felt,
+        owner: Felt,
         table: &DojoTable,
-        tx_hash: &Felt,
+        tx_hash: Felt,
         block_number: u64,
     ) -> DojoToriiResult {
         let mut transaction = self.begin().await.map_err(DojoToriiError::store_error)?;

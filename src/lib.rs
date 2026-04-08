@@ -17,7 +17,9 @@ pub mod proto {
 }
 
 // Re-export commonly used types for external sink authors
+use crate::etl::StarknetEvent;
 pub use async_trait::async_trait;
+
 pub use {axum, tokio, tonic};
 
 // Re-export UpdateType for sink implementations
@@ -45,7 +47,6 @@ use etl::sink::{EventBus, Sink};
 use etl::{Decoder, DecoderContext, MultiSink, SampleExtractor};
 use grpc::{create_grpc_service, GrpcState, SubscriptionManager};
 use http::create_http_router;
-use starknet_types_raw::event::EmittedEvent;
 use starknet_types_raw::Felt;
 
 // Include the file descriptor set generated at build time.
@@ -126,7 +127,7 @@ pub struct ToriiConfig {
     pub events_per_cycle: usize,
 
     /// Sample events for testing (provided by sinks).
-    pub sample_events: Vec<EmittedEvent>,
+    pub sample_events: Vec<StarknetEvent>,
 
     /// Extractor for fetching blockchain events.
     ///
@@ -238,7 +239,7 @@ pub struct ToriiConfigBuilder {
     custom_reflection: bool,
     cycle_interval: Option<u64>,
     events_per_cycle: Option<usize>,
-    sample_events: Vec<EmittedEvent>,
+    sample_events: Vec<StarknetEvent>,
     extractor: Option<Box<dyn Extractor>>,
     database_root: Option<PathBuf>,
     engine_database_url: Option<String>,
@@ -354,7 +355,7 @@ impl ToriiConfigBuilder {
     }
 
     /// Adds sample events for testing.
-    pub fn with_sample_events(mut self, events: Vec<EmittedEvent>) -> Self {
+    pub fn with_sample_events(mut self, events: Vec<StarknetEvent>) -> Self {
         self.sample_events.extend(events);
         self
     }
@@ -1076,7 +1077,7 @@ pub async fn run(config: ToriiConfig) -> Result<(), Box<dyn std::error::Error>> 
             }
 
             // Transform the events into envelopes.
-            let envelopes = match etl_decoder_context.decode(&batch.events).await {
+            let envelopes = match etl_decoder_context.decode_events(&batch.events).await {
                 Ok(envelopes) => envelopes,
                 Err(e) => {
                     tracing::error!(target: "torii::etl", "Decode failed: {}", e);
