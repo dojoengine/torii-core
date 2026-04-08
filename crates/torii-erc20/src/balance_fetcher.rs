@@ -28,6 +28,22 @@ pub struct BalanceFetchRequest {
     pub block_number: u64,
 }
 
+pub struct Balance {
+    pub token: Felt,
+    pub wallet: Felt,
+    pub balance: U256,
+}
+
+impl Balance {
+    pub fn new(token: Felt, wallet: Felt, balance: U256) -> Self {
+        Self {
+            token,
+            wallet,
+            balance,
+        }
+    }
+}
+
 /// Balance fetcher for ERC20 tokens
 ///
 /// Makes starknet_call requests to fetch balance_of at specific block heights.
@@ -90,7 +106,7 @@ impl BalanceFetcher {
     pub async fn fetch_balances_batch(
         &self,
         requests: &[BalanceFetchRequest],
-    ) -> Result<Vec<(Felt, Felt, U256)>> {
+    ) -> Result<Vec<Balance>> {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
@@ -138,7 +154,7 @@ impl BalanceFetcher {
                     );
                     U256::from(0u64)
                 };
-                all_results.push((req.token, req.wallet, balance));
+                all_results.push(Balance::new(req.token, req.wallet, balance));
             }
         }
 

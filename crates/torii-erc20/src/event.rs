@@ -10,8 +10,8 @@ pub const ERC20_TYPE_ID: TypeId = TypeId::new("erc20");
 
 #[derive(Debug, Clone, Copy)]
 pub enum Erc20Msg {
-    Transfer(Transfer),
-    Approval(Approval),
+    Transfer(TransferInfo),
+    Approval(ApprovalMsg),
 }
 
 impl EventMsg for Erc20Msg {
@@ -31,21 +31,21 @@ typed_body_impl!(Erc20Msg, "erc20");
 
 pub type Erc20Body = EventBody<Erc20Msg>;
 
-impl From<Transfer> for Erc20Msg {
-    fn from(value: Transfer) -> Self {
+impl From<TransferInfo> for Erc20Msg {
+    fn from(value: TransferInfo) -> Self {
         Erc20Msg::Transfer(value)
     }
 }
 
-impl From<Approval> for Erc20Msg {
-    fn from(value: Approval) -> Self {
+impl From<ApprovalMsg> for Erc20Msg {
+    fn from(value: ApprovalMsg) -> Self {
         Erc20Msg::Approval(value)
     }
 }
 
 /// Transfer event from ERC20 token
 #[derive(Debug, Clone, Copy)]
-pub struct Transfer {
+pub struct TransferInfo {
     pub from: Felt,
     pub to: Felt,
     /// Amount as U256 (256-bit), properly representing ERC20 token amounts
@@ -54,7 +54,7 @@ pub struct Transfer {
 
 /// Approval event from ERC20 token
 #[derive(Debug, Clone, Copy)]
-pub struct Approval {
+pub struct ApprovalInfo {
     pub owner: Felt,
     pub spender: Felt,
     /// Amount as U256 (256-bit), properly representing ERC20 token amounts
@@ -62,6 +62,10 @@ pub struct Approval {
 }
 
 pub struct Erc20Event(Felt, Felt, U256);
+
+impl Erc20Event{
+    fn transfer(self, event)
+}
 
 impl Erc20Event {
     pub fn new_from_felts(from: Felt, to: Felt, amount: &[Felt]) -> Result<Self, U256ParseError> {
@@ -77,9 +81,9 @@ impl Erc20Event {
     }
 }
 
-impl From<Erc20Event> for Transfer {
+impl From<Erc20Event> for TransferInfo {
     fn from(value: Erc20Event) -> Self {
-        Transfer {
+        TransferInfo {
             from: value.0,
             to: value.1,
             amount: value.2,
@@ -87,9 +91,9 @@ impl From<Erc20Event> for Transfer {
     }
 }
 
-impl From<Erc20Event> for Approval {
+impl From<Erc20Event> for ApprovalMsg {
     fn from(value: Erc20Event) -> Self {
-        Approval {
+        ApprovalMsg {
             owner: value.0,
             spender: value.1,
             amount: value.2,

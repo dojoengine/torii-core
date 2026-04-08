@@ -145,14 +145,14 @@ impl Decoder for Erc20Decoder {
 mod tests {
 
     impl Erc20Msg {
-        fn unwrap_transfer(self) -> Transfer {
+        fn unwrap_transfer(self) -> TransferInfo {
             match self {
                 Erc20Msg::Transfer(transfer) => transfer,
                 _ => panic!("Expected Transfer message"),
             }
         }
 
-        fn unwrap_approval(self) -> Approval {
+        fn unwrap_approval(self) -> ApprovalMsg {
             match self {
                 Erc20Msg::Approval(approval) => approval,
                 _ => panic!("Expected Approval message"),
@@ -163,7 +163,7 @@ mod tests {
     use primitive_types::U256;
     use torii::etl::StarknetEvent;
 
-    use crate::event::{Approval, Erc20Body, Transfer};
+    use crate::event::{ApprovalMsg, Erc20Body, TransferInfo};
 
     use super::*;
 

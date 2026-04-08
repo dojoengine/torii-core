@@ -42,7 +42,8 @@ pub mod event;
 // pub mod handlers;
 // pub mod identification;
 // pub mod sink;
-// pub mod storage;
+pub mod sink;
+pub mod storage;
 // pub mod synthetic;
 
 // Include generated protobuf code
