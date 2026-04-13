@@ -51,7 +51,7 @@ use torii_runtime_common::database::{
     resolve_token_db_setup, TokenDbSetup, DEFAULT_SQLITE_MAX_CONNECTIONS,
 };
 use torii_runtime_common::token_support::{resolve_installed_token_support, InstalledTokenSupport};
-use torii_sql::DbBackend;
+use torii_sql::{DbBackend, DbPoolOptions};
 
 use crate::config::parse_historical_models;
 
@@ -419,7 +419,10 @@ async fn configure_token_support(
     }
 
     if installed_token_support.erc1155 {
-        let storage = Arc::new(Erc1155Storage::new(&db_setup.erc1155_url).await?);
+        let erc1155_pool = DbPoolOptions::new()
+            .connect_any(&db_setup.erc1155_url)
+            .await?;
+        let storage = Arc::new(Erc1155Storage::new(erc1155_pool, &db_setup.erc1155_url).await?);
         tracing::info!("ERC1155 database initialized: {}", db_setup.erc1155_url);
 
         let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(Erc1155Decoder::new());

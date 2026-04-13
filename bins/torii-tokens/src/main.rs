@@ -62,6 +62,7 @@ use torii_config_common::apply_observability_env;
 use torii_runtime_common::database::resolve_token_db_setup;
 #[cfg(feature = "profiling")]
 use torii_sql::DbBackend;
+use torii_sql::DbPoolOptions;
 
 // Import from ERC20 library crate
 use torii_erc20::proto::erc20_server::Erc20Server;
@@ -642,7 +643,10 @@ async fn run_indexer(config: Config) -> Result<()> {
     if create_erc1155 {
         enabled_types.push("ERC1155");
 
-        let storage = Arc::new(Erc1155Storage::new(&db_setup.erc1155_url).await?);
+        let erc1155_pool = DbPoolOptions::new()
+            .connect_any(&db_setup.erc1155_url)
+            .await?;
+        let storage = Arc::new(Erc1155Storage::new(erc1155_pool, &db_setup.erc1155_url).await?);
         tracing::info!("ERC1155 database initialized: {}", db_setup.erc1155_url);
 
         let decoder = Arc::new(Erc1155Decoder::new());

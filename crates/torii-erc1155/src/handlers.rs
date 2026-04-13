@@ -1,9 +1,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use primitive_types::U256;
 use prost::Message;
 use prost_types::Any;
-use starknet::core::types::Felt;
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
+use starknet_types_raw::Felt;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -25,7 +26,7 @@ pub struct FetchErc1155MetadataCommand {
 #[derive(Debug, Clone)]
 pub struct RefreshErc1155TokenUriCommand {
     pub contract: Felt,
-    pub token_id: starknet::core::types::U256,
+    pub token_id: U256,
 }
 
 pub struct Erc1155MetadataCommandHandler {
@@ -93,10 +94,7 @@ impl CommandHandler for Erc1155MetadataCommandHandler {
             }
         }
 
-        let meta = self
-            .fetcher
-            .fetch_erc1155_metadata(command.token.into())
-            .await;
+        let meta = self.fetcher.fetch_erc1155_metadata(command.token).await;
         let result: Result<()> = async {
             self.storage
                 .upsert_token_metadata(
@@ -111,7 +109,7 @@ impl CommandHandler for Erc1155MetadataCommandHandler {
             let event_bus = self.event_bus.lock().unwrap().clone();
             if let Some(event_bus) = event_bus {
                 let meta_entry = proto::TokenMetadataEntry {
-                    token: command.token.to_bytes_be().to_vec(),
+                    token: command.token.to_be_bytes_vec(),
                     name: meta.name,
                     symbol: meta.symbol,
                     total_supply: meta.total_supply.map(u256_to_bytes),
@@ -148,7 +146,7 @@ pub struct Erc1155TokenUriCommandHandler {
     fetcher: Arc<MetadataFetcher>,
     storage: Arc<Erc1155Storage>,
     image_cache_dir: Option<PathBuf>,
-    in_flight: Mutex<HashSet<(Felt, starknet::core::types::U256)>>,
+    in_flight: Mutex<HashSet<(Felt, U256)>>,
 }
 
 impl Erc1155TokenUriCommandHandler {
@@ -198,7 +196,7 @@ impl CommandHandler for Erc1155TokenUriCommandHandler {
             self.fetcher.as_ref(),
             self.storage.as_ref(),
             &TokenUriRequest {
-                contract: command.contract.into(),
+                contract: command.contract,
                 token_id: bytes_to_u256(&u256_to_bytes(command.token_id)),
                 standard: torii_common::TokenStandard::Erc1155,
             },

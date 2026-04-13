@@ -573,7 +573,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     }
 
     if install_erc1155 {
-        let storage = Arc::new(Erc1155Storage::new(&erc1155_db_url).await?);
+        let erc1155_pool = DbPoolOptions::new().connect_any(&erc1155_db_url).await?;
+        let storage = Arc::new(Erc1155Storage::new(erc1155_pool, &erc1155_db_url).await?);
         let grpc_service = Erc1155Service::new(storage.clone());
         let mut sink = Erc1155Sink::new(storage.clone())
             .with_grpc_service(grpc_service.clone())
