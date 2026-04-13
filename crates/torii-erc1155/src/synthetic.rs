@@ -5,9 +5,10 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use starknet::core::types::{EmittedEvent, Felt, U256};
-use starknet::macros::selector;
+use starknet::core::types::U256;
+use starknet_types_raw::Felt;
 use torii::etl::extractor::{ExtractionBatch, SyntheticExtractor};
+use torii::etl::StarknetEvent;
 
 const EXTRACTOR_NAME: &str = "synthetic_erc1155";
 
@@ -240,19 +241,18 @@ impl SyntheticErc1155Extractor {
                         let id = self.token_id_for(block_number, tx_index, 0);
                         let value = self.value_for(block_number, tx_index, 0);
 
-                        EmittedEvent {
-                            from_address: token,
-                            keys: vec![selector!("TransferSingle"), operator, from, to],
-                            data: vec![
+                        StarknetEvent::new(
+                            token,
+                            vec![Felt::selector("TransferSingle"), operator, from, to],
+                            vec![
                                 Felt::from(id.low()),
                                 Felt::from(id.high()),
                                 Felt::from(value.low()),
                                 Felt::from(value.high()),
                             ],
-                            block_hash: Some(Felt::from(0x0300_0000_u64 + block_number)),
-                            block_number: Some(block_number),
-                            transaction_hash: tx_hash,
-                        }
+                            block_number,
+                            tx_hash,
+                        )
                     }
                     Erc1155EventType::TransferBatch => {
                         let batch_size = self.batch_size_for(tx_index);
@@ -274,34 +274,31 @@ impl SyntheticErc1155Extractor {
 
                         ids_data.extend(values_data);
 
-                        EmittedEvent {
-                            from_address: token,
-                            keys: vec![selector!("TransferBatch"), operator, from, to],
-                            data: ids_data,
-                            block_hash: Some(Felt::from(0x0300_0000_u64 + block_number)),
-                            block_number: Some(block_number),
-                            transaction_hash: tx_hash,
-                        }
+                        StarknetEvent::new(
+                            token,
+                            vec![Felt::selector("TransferBatch"), operator, from, to],
+                            ids_data,
+                            block_number,
+                            tx_hash,
+                        )
                     }
-                    Erc1155EventType::ApprovalForAll => EmittedEvent {
-                        from_address: token,
-                        keys: vec![selector!("ApprovalForAll"), from, to],
-                        data: vec![Felt::from(1u64)],
-                        block_hash: Some(Felt::from(0x0300_0000_u64 + block_number)),
-                        block_number: Some(block_number),
-                        transaction_hash: tx_hash,
-                    },
+                    Erc1155EventType::ApprovalForAll => StarknetEvent::new(
+                        token,
+                        vec![Felt::selector("ApprovalForAll"), from, to],
+                        vec![Felt::from(1u64)],
+                        block_number,
+                        tx_hash,
+                    ),
                     Erc1155EventType::Uri => {
                         let id = self.token_id_for(block_number, tx_index, 0);
                         let uri_felt = Felt::from(0x69706673u64);
-                        EmittedEvent {
-                            from_address: token,
-                            keys: vec![selector!("URI"), Felt::from(id.low())],
-                            data: vec![uri_felt],
-                            block_hash: Some(Felt::from(0x0300_0000_u64 + block_number)),
-                            block_number: Some(block_number),
-                            transaction_hash: tx_hash,
-                        }
+                        StarknetEvent::new(
+                            token,
+                            vec![Felt::selector("URI"), Felt::from(id.low())],
+                            vec![uri_felt],
+                            block_number,
+                            tx_hash,
+                        )
                     }
                 };
                 batch.add_event_with_tx_context(event, Some(operator), vec![token, from, to]);
@@ -407,10 +404,10 @@ mod tests {
         let mut extractor = SyntheticErc1155Extractor::new(cfg).unwrap();
         let batch = extractor.extract(None).await.unwrap();
 
-        let transfer_single_selector = selector!("TransferSingle");
-        let transfer_batch_selector = selector!("TransferBatch");
-        let approval_for_all_selector = selector!("ApprovalForAll");
-        let uri_selector = selector!("URI");
+        let transfer_single_selector = Felt::selector("TransferSingle");
+        let transfer_batch_selector = Felt::selector("TransferBatch");
+        let approval_for_all_selector = Felt::selector("ApprovalForAll");
+        let uri_selector = Felt::selector("URI");
 
         let mut has_transfer_single = false;
         let mut has_transfer_batch = false;
@@ -451,12 +448,12 @@ mod tests {
         let mut extractor = SyntheticErc1155Extractor::new(cfg).unwrap();
         let batch = extractor.extract(None).await.unwrap();
 
-        let transfer_batch_selector = selector!("TransferBatch");
+        let transfer_batch_selector = Felt::selector("TransferBatch");
         let mut batch_sizes = Vec::new();
 
         for event in &batch.events {
             if event.keys[0] == transfer_batch_selector {
-                let batch_size: usize = event.data[0].try_into().unwrap_or(0);
+                let batch_size = u64::try_from(event.data[0]).unwrap_or(0) as usize;
                 batch_sizes.push(batch_size);
             }
         }

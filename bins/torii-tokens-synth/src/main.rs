@@ -16,7 +16,7 @@ use torii::etl::engine_db::{EngineDb, EngineDbConfig};
 use torii::etl::extractor::SyntheticExtractor;
 use torii::etl::sink::Sink;
 use torii::etl::{Decoder, DecoderContext};
-use torii_common::{TokenUriResult, TokenUriStore};
+use torii_common::{bytes_to_u256, u256_to_bytes, TokenUriResult, TokenUriStore};
 use torii_erc1155::handlers::{FetchErc1155MetadataCommand, RefreshErc1155TokenUriCommand};
 use torii_erc1155::{
     Erc1155Decoder, Erc1155Sink, Erc1155Storage, SyntheticErc1155Config, SyntheticErc1155Extractor,
@@ -162,8 +162,8 @@ impl CommandHandler for SyntheticErc721TokenUriCommandHandler {
 
         self.storage
             .store_token_uri(&TokenUriResult {
-                contract: command.contract,
-                token_id: command.token_id,
+                contract: command.contract.into(),
+                token_id: bytes_to_u256(&u256_to_bytes(command.token_id)),
                 uri: Some(format!(
                     "synthetic://erc721/{:#x}/{}",
                     command.contract, command.token_id
@@ -219,8 +219,8 @@ impl CommandHandler for SyntheticErc1155TokenUriCommandHandler {
 
         self.storage
             .store_token_uri(&TokenUriResult {
-                contract: command.contract,
-                token_id: command.token_id,
+                contract: command.contract.into(),
+                token_id: bytes_to_u256(&u256_to_bytes(command.token_id)),
                 uri: Some(format!(
                     "synthetic://erc1155/{:#x}/{}",
                     command.contract, command.token_id
@@ -642,7 +642,8 @@ async fn run_erc721_profile(config: Erc721ProfileConfig) -> Result<()> {
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create output dir {}", output_dir.display()))?;
 
-    let storage = Arc::new(Erc721Storage::new(&config.common.db_url).await?);
+    let erc721_pool = Erc721Storage::connect_pool(&config.common.db_url).await?;
+    let storage = Arc::new(Erc721Storage::from_pool(&config.common.db_url, erc721_pool).await?);
 
     let mut sink = Erc721Sink::new(storage.clone())
         .with_metadata_commands()

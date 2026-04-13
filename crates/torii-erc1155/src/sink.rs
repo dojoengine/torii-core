@@ -34,7 +34,7 @@ use torii::command::CommandBusSender;
 use torii::etl::sink::{EventBus, TopicInfo};
 use torii::etl::{Envelope, ExtractionBatch, Sink, TypeId};
 use torii::grpc::UpdateType;
-use torii_common::{u256_to_bytes, TokenStandard, TokenUriRequest, TokenUriSender};
+use torii_common::{bytes_to_u256, u256_to_bytes, TokenStandard, TokenUriRequest, TokenUriSender};
 
 /// Default threshold for "live" detection: 100 blocks from chain head.
 /// Events from blocks older than this won't be broadcast to real-time subscribers.
@@ -192,8 +192,8 @@ impl Erc1155Sink {
     fn enqueue_token_uri_request(&self, contract: Felt, token_id: U256) -> bool {
         if let Some(sender) = &self.token_uri_sender {
             return sender.request_update(TokenUriRequest {
-                contract,
-                token_id,
+                contract: contract.into(),
+                token_id: bytes_to_u256(&u256_to_bytes(token_id)),
                 standard: TokenStandard::Erc1155,
             });
         }

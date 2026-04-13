@@ -6,9 +6,10 @@ use starknet::core::codec::Decode;
 use starknet::core::types::{ByteArray, EmittedEvent, Felt, U256};
 use starknet::core::utils::parse_cairo_short_string;
 use starknet::macros::selector;
+use starknet_types_raw::Felt as RawFelt;
 use std::any::Any;
 use std::collections::HashMap;
-use torii::etl::{Decoder, Envelope, TypedBody};
+use torii::etl::{Decoder, Envelope, EventContext, TypedBody};
 use torii_common::bytes_to_u256;
 
 /// TransferSingle event from ERC1155 token
@@ -133,6 +134,10 @@ pub struct Erc1155Decoder;
 impl Erc1155Decoder {
     pub fn new() -> Self {
         Self
+    }
+
+    fn raw_to_core(raw: RawFelt) -> Felt {
+        raw.into()
     }
 
     fn felt_to_u256(felt: Felt) -> U256 {
@@ -583,7 +588,27 @@ impl Decoder for Erc1155Decoder {
         "erc1155"
     }
 
-    async fn decode(&self, event: &EmittedEvent) -> Result<Vec<Envelope>> {
+    async fn decode(
+        &self,
+        keys: &[RawFelt],
+        data: &[RawFelt],
+        context: EventContext,
+    ) -> Result<Vec<Envelope>> {
+        let event = EmittedEvent {
+            from_address: Self::raw_to_core(context.from_address),
+            keys: keys.iter().copied().map(Self::raw_to_core).collect(),
+            data: data.iter().copied().map(Self::raw_to_core).collect(),
+            block_hash: None,
+            block_number: Some(context.block_number),
+            transaction_hash: Self::raw_to_core(context.transaction_hash),
+        };
+
+        Erc1155Decoder::decode(self, &event).await
+    }
+}
+
+impl Erc1155Decoder {
+    pub async fn decode(&self, event: &EmittedEvent) -> Result<Vec<Envelope>> {
         if event.keys.is_empty() {
             return Ok(Vec::new());
         }

@@ -3090,7 +3090,13 @@ impl TokenUriStore for Erc1155Storage {
                     .await?;
                 }
 
-                pg_sync_facets_for_token(&tx, result.contract, result.token_id, attrs).await?;
+                pg_sync_facets_for_token(
+                    &tx,
+                    result.contract.into(),
+                    blob_to_u256(&u256_to_blob(result.token_id)),
+                    attrs,
+                )
+                .await?;
             }
 
             tx.commit().await?;
@@ -3145,7 +3151,12 @@ impl TokenUriStore for Erc1155Storage {
                     insert_attr_stmt.execute(params![&token_blob, &token_id_blob, key, value])?;
                 }
 
-                sqlite_sync_facets_for_token(&tx, result.contract, result.token_id, attrs)?;
+                sqlite_sync_facets_for_token(
+                    &tx,
+                    result.contract.into(),
+                    blob_to_u256(&u256_to_blob(result.token_id)),
+                    attrs,
+                )?;
             }
         }
 
