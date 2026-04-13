@@ -353,7 +353,8 @@ async fn configure_token_support(
         token_db_setup.expect("token DB setup must exist when token support is configured");
 
     if installed_token_support.erc20 {
-        let storage = Arc::new(Erc20Storage::new(&db_setup.erc20_url).await?);
+        let erc20_pool = Erc20Storage::connect_pool(&db_setup.erc20_url).await?;
+        let storage = Arc::new(Erc20Storage::from_pool(&db_setup.erc20_url, erc20_pool).await?);
         tracing::info!("ERC20 database initialized: {}", db_setup.erc20_url);
 
         let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(Erc20Decoder::new());

@@ -20,6 +20,7 @@ starknet.workspace = true
 # Storage
 rusqlite = { workspace = true }
 tokio-postgres = "0.7"
+torii-sql = { workspace = true, features = ["postgres", "sqlite"] }
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }

@@ -154,7 +154,6 @@ struct ConfigSnapshot {
     seed: u64,
     db_url_redacted: String,
     reset_schema: bool,
-    pg_pool_size_env: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -246,7 +245,8 @@ async fn main() -> Result<()> {
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create output dir {}", output_dir.display()))?;
 
-    let storage = Arc::new(Erc20Storage::new(&cfg.db_url).await?);
+    let erc20_pool = Erc20Storage::connect_pool(&cfg.db_url).await?;
+    let storage = Arc::new(Erc20Storage::from_pool(&cfg.db_url, erc20_pool).await?);
 
     let mut sink = Erc20Sink::new(storage.clone()).with_metadata_pipeline(
         SYNTH_METADATA_COMMAND_PARALLELISM,
@@ -486,7 +486,6 @@ async fn build_report(
             seed: cfg.seed,
             db_url_redacted: redact_db_url(&cfg.db_url),
             reset_schema: cfg.reset_schema,
-            pg_pool_size_env: std::env::var("TORII_ERC20_PG_POOL_SIZE").ok(),
         },
         totals: Totals {
             cycles: samples.len(),

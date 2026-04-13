@@ -12,7 +12,7 @@
 //!   fetches the actual balance from the chain and adjusts
 
 use crate::balance_fetcher::BalanceFetcher;
-use crate::decoder::{Approval as DecodedApproval, Transfer as DecodedTransfer};
+use crate::decoder::{Erc20Event, ERC20_TYPE_ID};
 use crate::grpc_service::Erc20Service;
 use crate::handlers::FetchErc20MetadataCommand;
 use crate::proto;
@@ -218,7 +218,7 @@ impl Sink for Erc20Sink {
     }
 
     fn interested_types(&self) -> Vec<TypeId> {
-        vec![TypeId::new("erc20.transfer"), TypeId::new("erc20.approval")]
+        vec![ERC20_TYPE_ID]
     }
 
     async fn initialize(
@@ -246,36 +246,38 @@ impl Sink for Erc20Sink {
             .collect();
 
         for envelope in envelopes {
-            // Handle transfers
-            if envelope.type_id == TypeId::new("erc20.transfer") {
-                if let Some(transfer) = envelope.body.as_any().downcast_ref::<DecodedTransfer>() {
-                    let timestamp = block_timestamps.get(&transfer.block_number).copied();
-                    transfers.push(TransferData {
-                        id: None,
-                        token: transfer.token,
-                        from: transfer.from,
-                        to: transfer.to,
-                        amount: transfer.amount,
-                        block_number: transfer.block_number,
-                        tx_hash: transfer.transaction_hash,
-                        timestamp,
-                    });
-                }
+            if envelope.type_id != ERC20_TYPE_ID {
+                continue;
             }
-            // Handle approvals
-            else if envelope.type_id == TypeId::new("erc20.approval") {
-                if let Some(approval) = envelope.body.as_any().downcast_ref::<DecodedApproval>() {
-                    let timestamp = block_timestamps.get(&approval.block_number).copied();
-                    approvals.push(ApprovalData {
-                        id: None,
-                        token: approval.token,
-                        owner: approval.owner,
-                        spender: approval.spender,
-                        amount: approval.amount,
-                        block_number: approval.block_number,
-                        tx_hash: approval.transaction_hash,
-                        timestamp,
-                    });
+
+            if let Some(event) = envelope.body.as_any().downcast_ref::<Erc20Event>() {
+                match event {
+                    Erc20Event::Transfer(transfer) => {
+                        let timestamp = block_timestamps.get(&transfer.block_number).copied();
+                        transfers.push(TransferData {
+                            id: None,
+                            token: transfer.token,
+                            from: transfer.from,
+                            to: transfer.to,
+                            amount: transfer.amount,
+                            block_number: transfer.block_number,
+                            tx_hash: transfer.transaction_hash,
+                            timestamp,
+                        });
+                    }
+                    Erc20Event::Approval(approval) => {
+                        let timestamp = block_timestamps.get(&approval.block_number).copied();
+                        approvals.push(ApprovalData {
+                            id: None,
+                            token: approval.token,
+                            owner: approval.owner,
+                            spender: approval.spender,
+                            amount: approval.amount,
+                            block_number: approval.block_number,
+                            tx_hash: approval.transaction_hash,
+                            timestamp,
+                        });
+                    }
                 }
             }
         }

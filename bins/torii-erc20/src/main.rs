@@ -89,7 +89,8 @@ async fn main() -> Result<()> {
 
     // Create storage
     let db_setup = resolve_single_db_setup(&config.db_path, config.database_url.as_deref());
-    let storage = Arc::new(Erc20Storage::new(&db_setup.storage_url).await?);
+    let erc20_pool = Erc20Storage::connect_pool(&db_setup.storage_url).await?;
+    let storage = Arc::new(Erc20Storage::from_pool(&db_setup.storage_url, erc20_pool).await?);
     tracing::info!("Database initialized");
 
     // Create Starknet provider
