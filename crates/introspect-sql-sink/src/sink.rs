@@ -5,13 +5,12 @@ use torii::axum::Router;
 use torii::etl::envelope::{Envelope, TypeId};
 use torii::etl::extractor::ExtractionBatch;
 use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
+use torii_dojo::{DojoBody, DojoEvent, DOJO_TYPE_ID};
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 
 use crate::{IntrospectDb, IntrospectInitialize, IntrospectProcessor};
 
 pub const LOGGING_TARGET: &str = "torii::sinks::introspect-sql";
-const INTROSPECT_TYPE: TypeId = TypeId::new("introspect");
-
 pub trait IntrospectSqlSink {
     const NAME: &'static str;
 }
@@ -25,7 +24,7 @@ impl<Backend: Send + Sync + IntrospectProcessor + IntrospectSqlSink + Introspect
     }
 
     fn interested_types(&self) -> Vec<TypeId> {
-        vec![INTROSPECT_TYPE]
+        vec![DOJO_TYPE_ID]
     }
 
     async fn process(&self, envelopes: &[Envelope], _batch: &ExtractionBatch) -> Result<()> {
@@ -37,26 +36,32 @@ impl<Backend: Send + Sync + IntrospectProcessor + IntrospectSqlSink + Introspect
         let mut delete_records = 0usize;
         let mut msgs = Vec::with_capacity(envelopes.len());
         for envelope in envelopes {
-            if envelope.type_id == INTROSPECT_TYPE {
-                if let Some(body) = envelope.downcast_ref::<IntrospectBody>() {
-                    match &body.msg {
-                        IntrospectMsg::CreateTable(_) => create_tables += 1,
-                        IntrospectMsg::UpdateTable(_) => update_tables += 1,
-                        IntrospectMsg::InsertsFields(event) => {
-                            inserts_fields += 1;
-                            inserted_records += event.records.len();
+            if envelope.type_id == DOJO_TYPE_ID {
+                if let Some(body) = envelope.downcast_ref::<DojoBody>() {
+                    if let DojoEvent::Introspect(msg) = &body.msg {
+                        match msg {
+                            IntrospectMsg::CreateTable(_) => create_tables += 1,
+                            IntrospectMsg::UpdateTable(_) => update_tables += 1,
+                            IntrospectMsg::InsertsFields(event) => {
+                                inserts_fields += 1;
+                                inserted_records += event.records.len();
+                            }
+                            IntrospectMsg::DeleteRecords(event) => {
+                                delete_records += event.rows.len();
+                            }
+                            _ => {}
                         }
-                        IntrospectMsg::DeleteRecords(event) => {
-                            delete_records += event.rows.len();
-                        }
-                        _ => {}
+                        processed += 1;
+                        msgs.push(IntrospectBody {
+                            context: body.context,
+                            msg: msg.clone(),
+                        });
                     }
-                    processed += 1;
-                    msgs.push(body);
                 }
             }
         }
-        let results = self.process_messages(msgs).await?;
+        let msg_refs = msgs.iter().collect::<Vec<_>>();
+        let results = self.process_messages(msg_refs).await?;
         let failed = results.iter().filter(|r| r.is_err()).count();
         if failed > 0 {
             tracing::error!(

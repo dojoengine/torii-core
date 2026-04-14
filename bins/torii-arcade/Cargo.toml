@@ -12,6 +12,7 @@ path = "src/main.rs"
 torii.workspace = true
 torii-common.workspace = true
 torii-config-common.workspace = true
+torii-controllers-sink.workspace = true
 torii-arcade-sink.workspace = true
 torii-dojo.workspace = true
 torii-ecs-sink.workspace = true

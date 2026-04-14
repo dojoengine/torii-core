@@ -22,13 +22,35 @@ use starknet_types_raw::Felt as RawFelt;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::RwLock;
-use torii::etl::{Decoder, Envelope, EventMsg};
+use torii::etl::{Decoder, Envelope, EventBody, EventMsg, TypeId};
 use torii_introspect::events::{IntrospectBody, IntrospectMsg};
 use torii_introspect::schema::TableSchema;
 use torii_introspect::{CreateTable, EventId};
 use torii_types::event::EventContext;
 
 pub const DOJO_ID_FIELD_NAME: &str = "entity_id";
+pub const DOJO_TYPE_ID: TypeId = TypeId::new("dojo");
+
+#[derive(Debug, Clone)]
+pub enum DojoEvent {
+    Introspect(IntrospectMsg),
+    ExternalContractRegistered(ExternalContractRegistered),
+}
+
+pub type DojoBody = EventBody<DojoEvent>;
+
+impl EventMsg for DojoEvent {
+    fn event_id(&self) -> String {
+        match self {
+            Self::Introspect(msg) => msg.event_id(),
+            Self::ExternalContractRegistered(msg) => msg.event_id(),
+        }
+    }
+
+    fn envelope_type_id(&self) -> TypeId {
+        DOJO_TYPE_ID
+    }
+}
 
 pub struct DojoDecoder<Store, F> {
     pub tables: RwLock<HashMap<Felt, DojoTableInfo>>,
@@ -365,7 +387,7 @@ where
         if selector == ExternalContractRegisteredEvent::SELECTOR {
             return self
                 .process_external_contract_event(&keys, &data)
-                .map(|msg| msg.to_envelopes(context))
+                .map(|msg| DojoEvent::ExternalContractRegistered(msg).to_envelopes(context))
                 .err_into();
         }
 
@@ -373,7 +395,7 @@ where
             .event_with_selector_to_msg(selector, &keys, &data, context)
             .await
         {
-            Ok(msg) => msg.to_ok_envelopes(context),
+            Ok(msg) => DojoEvent::Introspect(msg).to_ok_envelopes(context),
             Err(DojoToriiError::UnknownDojoEventSelector(_)) => Ok(Vec::new()),
             Err(e) => Err(e.into()),
         }
@@ -383,7 +405,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ExternalContractRegisteredBody;
     use async_trait::async_trait;
     use dojo_introspect::DojoIntrospectError;
     use introspect_types::utils::string_to_cairo_serialize_byte_array;
@@ -510,17 +531,19 @@ mod tests {
 
         let envelopes = decoder.decode_event(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
-        let body = envelopes[0]
-            .downcast_ref::<ExternalContractRegisteredBody>()
-            .unwrap();
+        let body = envelopes[0].downcast_ref::<DojoBody>().unwrap();
+        assert_eq!(envelopes[0].type_id, DOJO_TYPE_ID);
+        let DojoEvent::ExternalContractRegistered(msg) = &body.msg else {
+            panic!("expected external contract registered event");
+        };
 
-        assert_eq!(body.msg.namespace, "tokens");
-        assert_eq!(body.msg.contract_name, "ERC20");
-        assert_eq!(body.msg.instance_name, "eth");
-        assert_eq!(body.msg.contract_selector, Felt::from_hex("0x99").unwrap());
-        assert_eq!(body.msg.class_hash, Felt::from_hex("0xabc").unwrap());
-        assert_eq!(body.msg.contract_address, Felt::from_hex("0x1234").unwrap());
-        assert_eq!(body.msg.registration_block, 42);
+        assert_eq!(msg.namespace, "tokens");
+        assert_eq!(msg.contract_name, "ERC20");
+        assert_eq!(msg.instance_name, "eth");
+        assert_eq!(msg.contract_selector, Felt::from_hex("0x99").unwrap());
+        assert_eq!(msg.class_hash, Felt::from_hex("0xabc").unwrap());
+        assert_eq!(msg.contract_address, Felt::from_hex("0x1234").unwrap());
+        assert_eq!(msg.registration_block, 42);
         assert_eq!(
             body.context.from_address,
             Felt::from_hex("0x1").unwrap().into()

@@ -3,6 +3,7 @@ mod config;
 use anyhow::{Error, Result};
 use clap::Parser;
 use config::{Config, MetadataMode};
+use sqlx::{sqlite::SqliteConnectOptions, Executor};
 use starknet::core::types::Felt;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -23,6 +24,7 @@ use torii_arcade_sink::proto::arcade::arcade_server::ArcadeServer;
 use torii_arcade_sink::{ArcadeSink, FILE_DESCRIPTOR_SET as ARCADE_DESCRIPTOR_SET};
 use torii_common::{MetadataFetcher, TokenUriService};
 use torii_config_common::apply_observability_env;
+use torii_controllers_sink::ControllersSink;
 use torii_dojo::decoder::DojoDecoder;
 use torii_dojo::external_contract::{
     contract_type_from_decoder_ids, RegisterExternalContractCommandHandler, RegisteredContractType,
@@ -50,7 +52,7 @@ use torii_introspect_sql_sink::{IntrospectDb, NamespaceMode};
 use torii_pathfinder::extractor::PathfinderCombinedExtractor;
 use torii_runtime_common::database::{validate_uniform_backends, DEFAULT_SQLITE_MAX_CONNECTIONS};
 use torii_runtime_common::token_support::{resolve_installed_token_support, InstalledTokenSupport};
-use torii_sql::{DbConnectionOptions, DbPool, DbPoolOptions, PoolExt};
+use torii_sql::{DbConnectionOptions, DbPool, DbPoolOptions, SqlitePool};
 
 type StarknetProvider =
     starknet::providers::jsonrpc::JsonRpcClient<starknet::providers::jsonrpc::HttpTransport>;
@@ -218,6 +220,37 @@ fn advertised_token_services(installed_token_support: InstalledTokenSupport) -> 
     services
 }
 
+fn database_connection_options(database_url: &str) -> Result<DbConnectionOptions> {
+    if database_url.starts_with("postgres://") || database_url.starts_with("postgresql://") {
+        return DbConnectionOptions::from_str(database_url).map_err(anyhow::Error::msg);
+    }
+
+    if database_url == ":memory:" || database_url == "sqlite::memory:" {
+        return Ok(DbConnectionOptions::Sqlite(SqliteConnectOptions::from_str(
+            "sqlite::memory:",
+        )?));
+    }
+
+    let options = if database_url.starts_with("sqlite:") {
+        SqliteConnectOptions::from_str(database_url)?
+    } else {
+        SqliteConnectOptions::new().filename(database_url)
+    };
+
+    if database_url.starts_with("sqlite:") && database_url.contains("mode=") {
+        Ok(DbConnectionOptions::Sqlite(options))
+    } else {
+        Ok(DbConnectionOptions::Sqlite(options.create_if_missing(true)))
+    }
+}
+
+async fn configure_sqlite_pool(pool: &SqlitePool) -> Result<()> {
+    pool.execute("PRAGMA journal_mode=WAL").await?;
+    pool.execute("PRAGMA synchronous=NORMAL").await?;
+    pool.execute("PRAGMA foreign_keys=ON").await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -326,6 +359,17 @@ async fn run_indexer(config: Config) -> Result<()> {
         }
     );
     tracing::info!(
+        "Controllers sync: {}",
+        if config.controllers {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    if config.controllers {
+        tracing::info!("Controllers API URL: {}", config.controllers_api_url);
+    }
+    tracing::info!(
         "External contract indexing: {}",
         if config.index_external_contracts {
             "enabled"
@@ -387,8 +431,7 @@ async fn run_indexer(config: Config) -> Result<()> {
         &erc1155_addresses,
         &config,
     )?;
-    let conn_options =
-        DbConnectionOptions::from_str(&engine_database_url).map_err(anyhow::Error::msg)?;
+    let conn_options = database_connection_options(&engine_database_url)?;
     let max_connections = match config.max_db_connections {
         Some(n) => n,
         None => match &conn_options {
@@ -400,12 +443,7 @@ async fn run_indexer(config: Config) -> Result<()> {
     let pool_options = DbPoolOptions::new().max_connections(max_connections);
     let pool = pool_options.connect_any_with(conn_options).await?;
     if let DbPool::Sqlite(pool) = &pool {
-        pool.execute_queries([
-            "PRAGMA journal_mode=WAL",
-            "PRAGMA synchronous=NORMAL",
-            "PRAGMA foreign_keys=ON",
-        ])
-        .await?;
+        configure_sqlite_pool(pool).await?;
     }
     let dojo_decoder = DojoDecoder::new(pool.clone(), provider.clone());
     let introspect_sink = IntrospectDb::new(pool, NamespaceMode::Address);
@@ -476,6 +514,17 @@ async fn run_indexer(config: Config) -> Result<()> {
                 decoder_registry.clone(),
                 contract_type_registry.clone(),
             )));
+    }
+
+    if config.controllers {
+        torii_config = torii_config.add_sink_boxed(Box::new(
+            ControllersSink::new(
+                &storage_database_url,
+                config.max_db_connections,
+                Some(config.controllers_api_url.clone()),
+            )
+            .await?,
+        ));
     }
 
     if !excluded_dojo_contracts.is_empty() {
@@ -574,7 +623,9 @@ async fn run_indexer(config: Config) -> Result<()> {
     }
 
     if install_erc1155 {
-        let erc1155_pool = DbPoolOptions::new().connect_any(&erc1155_db_url).await?;
+        let erc1155_pool = DbPoolOptions::new()
+            .connect_any_with(database_connection_options(&erc1155_db_url)?)
+            .await?;
         let storage = Arc::new(Erc1155Storage::new(erc1155_pool, &erc1155_db_url).await?);
         let grpc_service = Erc1155Service::new(storage.clone());
         let mut sink = Erc1155Sink::new(storage.clone())
@@ -792,8 +843,10 @@ fn append_unique_contract_configs(
 
 #[cfg(test)]
 mod tests {
-    use super::advertised_token_services;
+    use super::{advertised_token_services, configure_sqlite_pool, database_connection_options};
+    use std::path::Path;
     use torii_runtime_common::token_support::InstalledTokenSupport;
+    use torii_sql::{DbConnectionOptions, SqlitePool};
 
     #[test]
     fn advertised_token_services_include_installed_services_without_explicit_targets() {
@@ -822,5 +875,43 @@ mod tests {
         });
 
         assert_eq!(services, vec!["torii.sinks.erc721.Erc721"]);
+    }
+
+    #[test]
+    fn database_connection_options_accepts_plain_sqlite_path() {
+        let options = database_connection_options("./torii-data/arcade-engine.db").unwrap();
+
+        let DbConnectionOptions::Sqlite(options) = options else {
+            panic!("expected sqlite connection options");
+        };
+        assert_eq!(
+            options.get_filename(),
+            Path::new("./torii-data/arcade-engine.db")
+        );
+    }
+
+    #[test]
+    fn database_connection_options_accepts_in_memory_sqlite() {
+        let options = database_connection_options(":memory:").unwrap();
+
+        let DbConnectionOptions::Sqlite(options) = options else {
+            panic!("expected sqlite connection options");
+        };
+        assert!(options.is_in_memory());
+    }
+
+    #[test]
+    fn database_connection_options_preserves_postgres_urls() {
+        let options =
+            database_connection_options("postgres://torii:torii@localhost:5432/torii").unwrap();
+
+        assert!(matches!(options, DbConnectionOptions::Postgres(_)));
+    }
+
+    #[tokio::test]
+    async fn configure_sqlite_pool_applies_pragmas_outside_transaction() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+
+        configure_sqlite_pool(&pool).await.unwrap();
     }
 }

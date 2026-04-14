@@ -10,11 +10,13 @@ use torii::etl::decoder::DecoderId;
 use torii::etl::envelope::{Envelope, TypeId};
 use torii::etl::extractor::ExtractionBatch;
 use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
+use torii::etl::EventContext;
 use torii_dojo::external_contract::{
-    resolve_external_contract, ExternalContractRegisteredBody, RegisterExternalContractCommand,
+    resolve_external_contract, ExternalContractRegistered, RegisterExternalContractCommand,
     RegisteredContractType, SharedContractTypeRegistry,
 };
-use torii_introspect::events::{IntrospectBody, IntrospectMsg};
+use torii_dojo::{DojoBody, DojoEvent, DOJO_TYPE_ID};
+use torii_introspect::events::IntrospectMsg;
 
 use crate::grpc_service::{EcsService, TableKind};
 
@@ -80,22 +82,26 @@ impl EcsSink {
         }
     }
 
-    async fn handle_external_contract_registered(&self, body: &ExternalContractRegisteredBody) {
+    async fn handle_external_contract_registered(
+        &self,
+        context: &EventContext,
+        msg: &ExternalContractRegistered,
+    ) {
         if !self.external_contract_indexing {
             tracing::debug!(
                 target: "torii::ecs_sink",
-                contract = format!("{:#x}", body.msg.contract_address),
+                contract = format!("{:#x}", msg.contract_address),
                 "External contract registration ignored because runtime indexing is disabled"
             );
             return;
         }
 
-        let Some(resolved) = resolve_external_contract(&body.msg.contract_name) else {
+        let Some(resolved) = resolve_external_contract(&msg.contract_name) else {
             tracing::warn!(
                 target: "torii::ecs_sink",
-                world = format!("{:#x}", body.context.from_address),
-                contract = format!("{:#x}", body.msg.contract_address),
-                contract_name = %body.msg.contract_name,
+                world = format!("{:#x}", context.from_address),
+                contract = format!("{:#x}", msg.contract_address),
+                contract_name = %msg.contract_name,
                 "Unsupported external contract registration; skipping runtime indexing"
             );
             return;
@@ -110,9 +116,9 @@ impl EcsSink {
         if !missing_decoders.is_empty() {
             tracing::warn!(
                 target: "torii::ecs_sink",
-                world = format!("{:#x}", body.context.from_address),
-                contract = format!("{:#x}", body.msg.contract_address),
-                contract_name = %body.msg.contract_name,
+                world = format!("{:#x}", context.from_address),
+                contract = format!("{:#x}", msg.contract_address),
+                contract_name = %msg.contract_name,
                 missing_decoders = ?missing_decoders,
                 "External contract registration skipped because matching decoders are not installed"
             );
@@ -127,27 +133,27 @@ impl EcsSink {
         let Some(command_bus) = command_bus else {
             tracing::warn!(
                 target: "torii::ecs_sink",
-                contract = format!("{:#x}", body.msg.contract_address),
+                contract = format!("{:#x}", msg.contract_address),
                 "External contract registration dropped because the command bus is unavailable"
             );
             return;
         };
 
         if let Err(error) = command_bus.dispatch(RegisterExternalContractCommand {
-            world_address: body.context.from_address.into(),
-            contract_address: body.msg.contract_address,
-            contract_name: body.msg.contract_name.clone(),
-            namespace: body.msg.namespace.clone(),
-            instance_name: body.msg.instance_name.clone(),
+            world_address: context.from_address.into(),
+            contract_address: msg.contract_address,
+            contract_name: msg.contract_name.clone(),
+            namespace: msg.namespace.clone(),
+            instance_name: msg.instance_name.clone(),
             from_block: self.external_contract_from_block,
-            registration_block: body.msg.registration_block,
+            registration_block: msg.registration_block,
             contract_type: resolved.contract_type,
             decoder_ids: resolved.decoder_ids,
         }) {
             tracing::warn!(
                 target: "torii::ecs_sink",
-                world = format!("{:#x}", body.context.from_address),
-                contract = format!("{:#x}", body.msg.contract_address),
+                world = format!("{:#x}", context.from_address),
+                contract = format!("{:#x}", msg.contract_address),
                 error = %error,
                 "Failed to enqueue external contract registration command"
             );
@@ -162,10 +168,7 @@ impl Sink for EcsSink {
     }
 
     fn interested_types(&self) -> Vec<TypeId> {
-        vec![
-            TypeId::new("introspect"),
-            TypeId::new("dojo.external_contract_registered"),
-        ]
+        vec![DOJO_TYPE_ID]
     }
 
     async fn process(&self, envelopes: &[Envelope], batch: &ExtractionBatch) -> Result<()> {
@@ -234,27 +237,28 @@ impl Sink for EcsSink {
         }
 
         for envelope in envelopes {
-            if envelope.type_id == TypeId::new("dojo.external_contract_registered") {
-                if let Some(body) = envelope.downcast_ref::<ExternalContractRegisteredBody>() {
-                    self.handle_external_contract_registered(body).await;
-                }
+            if envelope.type_id != DOJO_TYPE_ID {
                 continue;
             }
 
-            if envelope.type_id != TypeId::new("introspect") {
-                continue;
-            }
-
-            let Some(body) = envelope.downcast_ref::<IntrospectBody>() else {
+            let Some(body) = envelope.downcast_ref::<DojoBody>() else {
                 continue;
             };
+            let DojoEvent::Introspect(msg) = &body.msg else {
+                if let DojoEvent::ExternalContractRegistered(msg) = &body.msg {
+                    self.handle_external_contract_registered(&body.context, msg)
+                        .await;
+                }
+                continue;
+            };
+
             let timestamp = batch
                 .transactions
                 .get(&body.context.transaction_hash)
                 .and_then(|tx| batch.blocks.get(&tx.block_number))
                 .map_or(0, |block| block.timestamp);
 
-            match &body.msg {
+            match msg {
                 IntrospectMsg::CreateTable(table) => {
                     self.service
                         .cache_created_table(body.context.from_address, table)
