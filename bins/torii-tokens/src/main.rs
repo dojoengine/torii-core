@@ -540,7 +540,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     if create_erc20 {
         enabled_types.push("ERC20");
 
-        let storage = Arc::new(Erc20Storage::new(&db_setup.erc20_url).await?);
+        let erc20_pool = Erc20Storage::connect_pool(&db_setup.erc20_url).await?;
+        let storage = Arc::new(Erc20Storage::from_pool(&db_setup.erc20_url, erc20_pool).await?);
         tracing::info!("ERC20 database initialized: {}", db_setup.erc20_url);
 
         let decoder = Arc::new(Erc20Decoder::new());

@@ -507,7 +507,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     let mut token_uri_services = Vec::new();
 
     if install_erc20 {
-        let storage = Arc::new(Erc20Storage::new(&erc20_db_url).await?);
+        let erc20_pool = Erc20Storage::connect_pool(&erc20_db_url).await?;
+        let storage = Arc::new(Erc20Storage::from_pool(&erc20_db_url, erc20_pool).await?);
         let grpc_service = Erc20Service::new(storage.clone());
         let sink = Box::new(
             Erc20Sink::new(storage.clone())

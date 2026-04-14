@@ -11,8 +11,7 @@ use torii::etl::{Decoder, Envelope, TypeId, TypedBody};
 use torii_common::utils::{felt_pair_to_u256, felt_to_u256};
 use torii_types::event::EventContext;
 
-const ERC20_TRANSFER_SELECTOR_TYPE_ID: TypeId = torii::etl::envelope::TypeId::new("erc20.transfer");
-const ERC20_APPROVAL_SELECTOR_TYPE_ID: TypeId = torii::etl::envelope::TypeId::new("erc20.approval");
+pub const ERC20_TYPE_ID: TypeId = torii::etl::envelope::TypeId::new("erc20");
 pub const TRANSFER_SELECTOR: Felt = Felt::selector("Transfer");
 pub const APPROVAL_SELECTOR: Felt = Felt::selector("Approval");
 /// Transfer event from ERC20 token
@@ -27,20 +26,6 @@ pub struct Transfer {
     pub transaction_hash: Felt,
 }
 
-impl TypedBody for Transfer {
-    fn envelope_type_id(&self) -> torii::etl::envelope::TypeId {
-        ERC20_TRANSFER_SELECTOR_TYPE_ID
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
-
 /// Approval event from ERC20 token
 #[derive(Debug, Clone)]
 pub struct Approval {
@@ -53,9 +38,15 @@ pub struct Approval {
     pub transaction_hash: Felt,
 }
 
-impl TypedBody for Approval {
-    fn envelope_type_id(&self) -> torii::etl::envelope::TypeId {
-        ERC20_APPROVAL_SELECTOR_TYPE_ID
+#[derive(Debug, Clone)]
+pub enum Erc20Event {
+    Transfer(Transfer),
+    Approval(Approval),
+}
+
+impl TypedBody for Erc20Event {
+    fn envelope_type_id(&self) -> TypeId {
+        ERC20_TYPE_ID
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -64,6 +55,37 @@ impl TypedBody for Approval {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+}
+
+impl Erc20Event {
+    fn event_id(&self) -> String {
+        match self {
+            Self::Transfer(transfer) => format!(
+                "erc20_transfer_{}_{:#x}",
+                transfer.block_number, transfer.transaction_hash
+            ),
+            Self::Approval(approval) => format!(
+                "erc20_approval_{}_{:#x}",
+                approval.block_number, approval.transaction_hash
+            ),
+        }
+    }
+
+    fn into_envelope(self, event: &EmittedEvent) -> Envelope {
+        let envelope_id = self.event_id();
+        let mut metadata = HashMap::new();
+        metadata.insert("token".to_string(), format!("{:#x}", event.from_address));
+        metadata.insert(
+            "block_number".to_string(),
+            event.block_number.unwrap_or(0).to_string(),
+        );
+        metadata.insert(
+            "tx_hash".to_string(),
+            format!("{:#x}", event.transaction_hash),
+        );
+
+        Envelope::new(envelope_id, Box::new(self), metadata)
     }
 }
 
@@ -78,7 +100,7 @@ impl TypedBody for Approval {
 /// This decoder showcases the recommended pattern for handling multiple event types:
 /// 1. Check selector first (fast O(1) comparison)
 /// 2. Dispatch to specific decode_X() method
-/// 3. Each method returns Result<Option<Envelope>> (None if not interested/malformed)
+/// 3. Each method returns Result<Option<Erc20Event>> (None if malformed)
 /// 4. Main decode_event() collects results
 ///
 /// This pattern scales cleanly to many event types without complex branching.
@@ -107,12 +129,12 @@ impl Erc20Decoder {
         let selector = event.keys[0];
 
         if selector == Self::transfer_selector() {
-            if let Some(envelope) = self.decode_transfer(event).await? {
-                return Ok(vec![envelope]);
+            if let Some(event_body) = self.decode_transfer(event).await? {
+                return Ok(vec![event_body.into_envelope(event)]);
             }
         } else if selector == Self::approval_selector() {
-            if let Some(envelope) = self.decode_approval(event).await? {
-                return Ok(vec![envelope]);
+            if let Some(event_body) = self.decode_approval(event).await? {
+                return Ok(vec![event_body.into_envelope(event)]);
             }
         } else {
             tracing::trace!(
@@ -157,7 +179,7 @@ impl Erc20Decoder {
     /// - data[3]: amount_high (u128)
     ///
     /// Felt-based variants use single felt for amount instead of U256.
-    async fn decode_transfer(&self, event: &EmittedEvent) -> Result<Option<Envelope>> {
+    async fn decode_transfer(&self, event: &EmittedEvent) -> Result<Option<Erc20Event>> {
         let from;
         let to;
         let amount: U256;
@@ -260,28 +282,7 @@ impl Erc20Decoder {
             transaction_hash: event.transaction_hash,
         };
 
-        let mut metadata = HashMap::new();
-        metadata.insert("token".to_string(), format!("{:#x}", event.from_address));
-        metadata.insert(
-            "block_number".to_string(),
-            event.block_number.unwrap_or(0).to_string(),
-        );
-        metadata.insert(
-            "tx_hash".to_string(),
-            format!("{:#x}", event.transaction_hash),
-        );
-
-        let envelope_id = format!(
-            "erc20_transfer_{}_{}",
-            event.block_number.unwrap_or(0),
-            format!("{:#x}", event.transaction_hash)
-        );
-
-        Ok(Some(Envelope::new(
-            envelope_id,
-            Box::new(transfer),
-            metadata,
-        )))
+        Ok(Some(Erc20Event::Transfer(transfer)))
     }
 
     /// Decode Approval event into envelope
@@ -311,7 +312,7 @@ impl Erc20Decoder {
     /// - data[3]: amount_high (u128)
     ///
     /// Felt-based variants use single felt for amount instead of U256.
-    async fn decode_approval(&self, event: &EmittedEvent) -> Result<Option<Envelope>> {
+    async fn decode_approval(&self, event: &EmittedEvent) -> Result<Option<Erc20Event>> {
         let owner;
         let spender;
         let amount: U256;
@@ -412,28 +413,7 @@ impl Erc20Decoder {
             transaction_hash: event.transaction_hash,
         };
 
-        let mut metadata = HashMap::new();
-        metadata.insert("token".to_string(), format!("{:#x}", event.from_address));
-        metadata.insert(
-            "block_number".to_string(),
-            event.block_number.unwrap_or(0).to_string(),
-        );
-        metadata.insert(
-            "tx_hash".to_string(),
-            format!("{:#x}", event.transaction_hash),
-        );
-
-        let envelope_id = format!(
-            "erc20_approval_{}_{}",
-            event.block_number.unwrap_or(0),
-            format!("{:#x}", event.transaction_hash)
-        );
-
-        Ok(Some(Envelope::new(
-            envelope_id,
-            Box::new(approval),
-            metadata,
-        )))
+        Ok(Some(Erc20Event::Approval(approval)))
     }
 }
 
@@ -472,6 +452,22 @@ impl Decoder for Erc20Decoder {
 mod tests {
     use super::*;
 
+    fn transfer(envelope: &Envelope) -> &Transfer {
+        assert_eq!(envelope.type_id, ERC20_TYPE_ID);
+        match envelope.body.as_any().downcast_ref::<Erc20Event>().unwrap() {
+            Erc20Event::Transfer(transfer) => transfer,
+            Erc20Event::Approval(_) => panic!("expected transfer event"),
+        }
+    }
+
+    fn approval(envelope: &Envelope) -> &Approval {
+        assert_eq!(envelope.type_id, ERC20_TYPE_ID);
+        match envelope.body.as_any().downcast_ref::<Erc20Event>().unwrap() {
+            Erc20Event::Approval(approval) => approval,
+            Erc20Event::Transfer(_) => panic!("expected approval event"),
+        }
+    }
+
     #[tokio::test]
     async fn test_decode_transfer() {
         let decoder = Erc20Decoder::new();
@@ -495,11 +491,7 @@ mod tests {
         let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let transfer = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<Transfer>()
-            .unwrap();
+        let transfer = transfer(&envelopes[0]);
 
         assert_eq!(transfer.from, Felt::from(0x1u64));
         assert_eq!(transfer.to, Felt::from(0x2u64));
@@ -530,11 +522,7 @@ mod tests {
         let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let approval = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<Approval>()
-            .unwrap();
+        let approval = approval(&envelopes[0]);
 
         assert_eq!(approval.owner, Felt::from(0xau64));
         assert_eq!(approval.spender, Felt::from(0xbu64));
@@ -585,11 +573,7 @@ mod tests {
         let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let transfer = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<Transfer>()
-            .unwrap();
+        let transfer = transfer(&envelopes[0]);
 
         assert_eq!(transfer.from, Felt::from(0x1u64));
         assert_eq!(transfer.to, Felt::from(0x2u64));
@@ -618,11 +602,7 @@ mod tests {
         let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let transfer = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<Transfer>()
-            .unwrap();
+        let transfer = transfer(&envelopes[0]);
 
         assert_eq!(transfer.from, Felt::from(0xau64));
         assert_eq!(transfer.to, Felt::from(0xbu64));
@@ -652,11 +632,7 @@ mod tests {
         let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let approval = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<Approval>()
-            .unwrap();
+        let approval = approval(&envelopes[0]);
 
         assert_eq!(approval.owner, Felt::from(0xcu64));
         assert_eq!(approval.spender, Felt::from(0xdu64));
@@ -687,11 +663,7 @@ mod tests {
         let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let approval = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<Approval>()
-            .unwrap();
+        let approval = approval(&envelopes[0]);
 
         assert_eq!(approval.owner, Felt::from(0xeu64));
         assert_eq!(approval.spender, Felt::from(0xfu64));
@@ -720,11 +692,7 @@ mod tests {
         let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let approval = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<Approval>()
-            .unwrap();
+        let approval = approval(&envelopes[0]);
 
         assert_eq!(approval.owner, Felt::from(0x10u64));
         assert_eq!(approval.spender, Felt::from(0x11u64));
@@ -755,11 +723,7 @@ mod tests {
         let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let transfer = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<Transfer>()
-            .unwrap();
+        let transfer = transfer(&envelopes[0]);
 
         assert_eq!(transfer.from, Felt::from(0x20u64));
         assert_eq!(transfer.to, Felt::from(0x21u64));
@@ -789,11 +753,7 @@ mod tests {
         let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let transfer = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<Transfer>()
-            .unwrap();
+        let transfer = transfer(&envelopes[0]);
 
         assert_eq!(transfer.from, Felt::from(0x30u64));
         assert_eq!(transfer.to, Felt::from(0x31u64));
@@ -824,11 +784,7 @@ mod tests {
         let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let approval = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<Approval>()
-            .unwrap();
+        let approval = approval(&envelopes[0]);
 
         assert_eq!(approval.owner, Felt::from(0x40u64));
         assert_eq!(approval.spender, Felt::from(0x41u64));
@@ -858,11 +814,7 @@ mod tests {
         let envelopes = decoder.decode(&event).await.unwrap();
         assert_eq!(envelopes.len(), 1);
 
-        let approval = envelopes[0]
-            .body
-            .as_any()
-            .downcast_ref::<Approval>()
-            .unwrap();
+        let approval = approval(&envelopes[0]);
 
         assert_eq!(approval.owner, Felt::from(0x50u64));
         assert_eq!(approval.spender, Felt::from(0x51u64));

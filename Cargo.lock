@@ -5030,6 +5030,7 @@ dependencies = [
  "tonic-build",
  "torii",
  "torii-common",
+ "torii-sql",
  "torii-types",
  "tracing",
 ]
@@ -5069,6 +5070,7 @@ dependencies = [
  "torii",
  "torii-erc20",
  "torii-runtime-common",
+ "torii-sql",
  "tracing",
  "tracing-subscriber",
 ]
