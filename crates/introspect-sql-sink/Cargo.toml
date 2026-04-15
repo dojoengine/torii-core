@@ -25,6 +25,7 @@ itertools.workspace = true
 primitive-types.workspace = true
 
 # Local crates
+torii-dojo.workspace = true
 torii-introspect.workspace = true
 torii-sql.workspace = true
 

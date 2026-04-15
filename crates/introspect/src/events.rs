@@ -12,7 +12,7 @@ use torii::etl::{EventBody, TypeId};
 
 use crate::schema::TableSchema;
 
-#[derive(EnumFrom, Debug)]
+#[derive(EnumFrom, Debug, Clone)]
 pub enum IntrospectMsg {
     CreateTable(CreateTable),
     UpdateTable(UpdateTable),

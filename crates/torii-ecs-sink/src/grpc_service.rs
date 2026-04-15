@@ -37,7 +37,7 @@ use sqlx::any::AnyPoolOptions;
 use sqlx::pool::PoolConnection;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Any, AnyConnection, Column, ConnectOptions, Pool, QueryBuilder, Row};
+use sqlx::{Any, AnyConnection, Column, Pool, QueryBuilder, Row};
 use starknet_types_raw::Felt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -631,9 +631,9 @@ impl EcsService {
         let has_erc20 = erc20_url.is_some();
         let has_erc721 = erc721_url.is_some();
         let has_erc1155 = erc1155_url.is_some();
-        let erc20_url = erc20_url.map(std::string::ToString::to_string);
-        let erc721_url = erc721_url.map(std::string::ToString::to_string);
-        let erc1155_url = erc1155_url.map(std::string::ToString::to_string);
+        let erc20_url = normalize_attached_database_url(backend, erc20_url)?;
+        let erc721_url = normalize_attached_database_url(backend, erc721_url)?;
+        let erc1155_url = normalize_attached_database_url(backend, erc1155_url)?;
 
         let pool_options = AnyPoolOptions::new().max_connections(max_connections.unwrap_or(
             if backend == DbBackend::Sqlite {
@@ -4883,6 +4883,17 @@ async fn attach_sqlite_databases(
     Ok(())
 }
 
+fn normalize_attached_database_url(
+    backend: DbBackend,
+    url: Option<&str>,
+) -> Result<Option<String>> {
+    url.map(|url| match backend {
+        DbBackend::Postgres => Ok(url.to_string()),
+        DbBackend::Sqlite => sqlite_url(url),
+    })
+    .transpose()
+}
+
 async fn attach_sqlite_database(
     conn: &mut AnyConnection,
     schema: &str,
@@ -4937,16 +4948,14 @@ fn sqlite_url(path: &str) -> Result<String> {
     if path.starts_with("sqlite:") {
         return Ok(path.to_string());
     }
-    let options = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))
-        .or_else(|_| Ok::<_, sqlx::Error>(SqliteConnectOptions::new().filename(path)))?;
-    if let Some(parent) = options
-        .get_filename()
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-    {
+    let path = std::path::Path::new(path);
+    if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
-    Ok(options.to_url_lossy().to_string())
+    if !path.exists() {
+        std::fs::File::create(path)?;
+    }
+    Ok(format!("sqlite://{}", path.display()))
 }
 
 impl CairoTypeSerialization for SnapshotJsonSerializer {
@@ -6307,6 +6316,17 @@ mod tests {
         format!("sqlite://{}", path.display())
     }
 
+    fn temp_sqlite_path(name: &str) -> String {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("torii-ecs-sink-{name}-{nonce}.db"))
+            .to_string_lossy()
+            .to_string()
+    }
+
     fn sql_rows_to_maps(rows: &[types::SqlRow]) -> Vec<BTreeMap<String, String>> {
         rows.iter()
             .map(|row| {
@@ -6816,6 +6836,43 @@ mod tests {
         .execute(&service.state.pool)
         .await
         .expect("insert entity model");
+    }
+
+    #[tokio::test]
+    async fn service_accepts_plain_sqlite_paths_for_attached_token_databases() {
+        let db_path = temp_sqlite_path("ecs-main-plain");
+        let erc20_url = temp_sqlite_path("erc20-plain");
+        let erc721_url = temp_sqlite_path("erc721-plain");
+        let erc1155_url = temp_sqlite_path("erc1155-plain");
+
+        let service = EcsService::new(
+            &db_path,
+            Some(1),
+            Some(&erc20_url),
+            Some(&erc721_url),
+            Some(&erc1155_url),
+        )
+        .await
+        .expect("service init");
+
+        assert!(service.state.has_erc20);
+        assert!(service.state.has_erc721);
+        assert!(service.state.has_erc1155);
+        assert!(service
+            .state
+            .erc20_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("sqlite:")));
+        assert!(service
+            .state
+            .erc721_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("sqlite:")));
+        assert!(service
+            .state
+            .erc1155_url
+            .as_deref()
+            .is_some_and(|url| url.starts_with("sqlite:")));
     }
 
     #[tokio::test]

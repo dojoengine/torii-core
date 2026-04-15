@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
-use sqlx::{
-    any::AnyPoolOptions, sqlite::SqliteConnectOptions, Any, ConnectOptions, Pool, QueryBuilder, Row,
-};
+use sqlx::{any::AnyPoolOptions, Any, Pool, QueryBuilder, Row};
 use starknet::core::types::{Felt, U256};
 use tonic::{Request, Response, Status};
 use torii_common::{blob_to_u256, u256_to_blob};
@@ -1939,16 +1937,14 @@ fn sqlite_url(path: &str) -> Result<String> {
     if path.starts_with("sqlite:") {
         return Ok(path.to_string());
     }
-    let options = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))
-        .or_else(|_| Ok::<_, sqlx::Error>(SqliteConnectOptions::new().filename(path)))?;
-    if let Some(parent) = options
-        .get_filename()
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-    {
+    let path = std::path::Path::new(path);
+    if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
-    Ok(options.to_url_lossy().to_string())
+    if !path.exists() {
+        std::fs::File::create(path)?;
+    }
+    Ok(format!("sqlite://{}", path.display()))
 }
 
 fn internal_status(error: impl std::fmt::Display) -> Status {

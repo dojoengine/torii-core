@@ -6,6 +6,7 @@
 - `world.World` ECS gRPC reads
 - `arcade.v1.Arcade` low-latency marketplace and inventory reads
 - ERC20 / ERC721 / ERC1155 token indexing and gRPC reads
+- optional controller username synchronization
 - Core `torii.Torii` subscriptions and metrics endpoint
 
 ## Defaults
@@ -20,6 +21,7 @@
 - Well-known ERC20s: enabled by default
 - Token URI + image cache: enabled by default in inline metadata mode, with images cached under
   `./data/image-cache`
+- Controller sync: disabled by default, using `https://api.cartridge.gg/query` when enabled
 - DB directory: `./torii-data`
 
 SQLite local defaults:
@@ -68,6 +70,17 @@ cargo run --bin torii-arcade -- \
   --storage-database-url postgres://torii:torii@localhost:5432/torii \
   --from-block 0
 ```
+
+Controller sync:
+
+```bash
+cargo run --bin torii-arcade -- \
+  --from-block 0 \
+  --controllers
+```
+
+Use `--controllers-api-url <URL>` to point controller sync at a different Cartridge-compatible
+GraphQL endpoint.
 
 ## Local TLS + ALPN
 

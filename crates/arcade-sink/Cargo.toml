@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 torii = { path = "../.." }
 torii-common = { path = "../torii-common" }
+torii-dojo = { workspace = true }
 torii-introspect = { path = "../introspect" }
 torii-erc721 = { path = "../torii-erc721" }
 torii-sql = { path = "../sql", features = ["postgres", "sqlite"] }

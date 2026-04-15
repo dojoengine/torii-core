@@ -5,8 +5,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::any::AnyPoolOptions;
-use sqlx::sqlite::SqliteConnectOptions;
-use sqlx::{Any, ConnectOptions, Pool, QueryBuilder, Row};
+use sqlx::{Any, Pool, QueryBuilder, Row};
 use starknet_types_raw::Felt;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -15,7 +14,7 @@ use torii::axum::Router;
 use torii::etl::extractor::ExtractionBatch;
 use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
 use torii::etl::TypeId;
-use torii_runtime_common::database::DEFAULT_SQLITE_MAX_CONNECTIONS;
+use torii_runtime_common::database::{backend_from_url_or_path, DEFAULT_SQLITE_MAX_CONNECTIONS};
 use torii_sql::DbBackend;
 
 pub const DEFAULT_API_QUERY_URL: &str = "https://api.cartridge.gg/query";
@@ -114,7 +113,7 @@ impl ControllersStore {
     async fn new(database_url: &str, max_connections: Option<u32>) -> Result<Self> {
         sqlx::any::install_default_drivers();
 
-        let backend = DbBackend::from_str(database_url).map_err(|e| anyhow!(e))?;
+        let backend = backend_from_url_or_path(database_url);
         let database_url = match backend {
             DbBackend::Postgres => database_url.to_string(),
             DbBackend::Sqlite => sqlite_url(database_url)?,
@@ -520,16 +519,17 @@ fn sqlite_url(path: &str) -> Result<String> {
     if path.starts_with("sqlite:") {
         return Ok(path.to_string());
     }
-    let options = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))
-        .or_else(|_| Ok::<_, sqlx::Error>(SqliteConnectOptions::new().filename(path)))?;
-    if let Some(parent) = options
-        .get_filename()
+    let path = std::path::Path::new(path);
+    if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
         std::fs::create_dir_all(parent)?;
     }
-    Ok(options.to_url_lossy().to_string())
+    if !path.exists() {
+        std::fs::File::create(path)?;
+    }
+    Ok(format!("sqlite://{}", path.display()))
 }
 
 #[cfg(test)]
@@ -586,6 +586,26 @@ mod tests {
         batch.add_block_context(1, Felt::ONE, Felt::ZERO, from_ts);
         batch.add_block_context(2, Felt::TWO, Felt::ONE, to_ts);
         batch
+    }
+
+    fn temp_sqlite_path(name: &str) -> String {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("torii-controllers-sink-{name}-{nonce}.db"))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn store_accepts_plain_sqlite_path() {
+        let path = temp_sqlite_path("plain-path");
+        let store = ControllersStore::new(&path, Some(1)).await.unwrap();
+
+        store.initialize().await.unwrap();
+        assert!(std::path::Path::new(&path).exists());
     }
 
     #[tokio::test]
