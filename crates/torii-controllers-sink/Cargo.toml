@@ -11,6 +11,7 @@ torii-sql.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+hex.workspace = true
 metrics.workspace = true
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 serde.workspace = true
