@@ -1,155 +1,122 @@
-# torii-arcade
+# torii-arcade (binary)
 
-`torii-arcade` is a Cartridge Arcade metatorii backend that runs the following in one process:
+**Cartridge Arcade backend.** Combines Dojo introspect indexing, the
+`world.World` ECS gRPC, the `arcade.v1.Arcade` projection gRPC, token
+indexers (ERC20/721/1155), controller sync, and core `torii.Torii`
+subscriptions into one process with sensible Arcade-specific defaults.
 
-- Dojo introspect indexing for the Arcade world
-- `world.World` ECS gRPC reads
-- `arcade.v1.Arcade` low-latency marketplace and inventory reads
-- ERC20 / ERC721 / ERC1155 token indexing and gRPC reads
-- Core `torii.Torii` subscriptions and metrics endpoint
+## Role in Torii
 
-## Defaults
+Production binary for the Cartridge Arcade UI. Pre-ships a curated list
+of world contracts + token contracts in its CLI defaults, so operators
+usually run it with `cargo run --bin torii-arcade` and override only the
+backend URLs. Compared to `bins/torii-introspect-bin` it adds the
+`arcade-sink` projection layer.
 
-- RPC: `https://api.cartridge.gg/x/starknet/mainnet`
-- Primary world: `0x2d26295d6c541d64740e1ae56abc079b82b22c35ab83985ef8bd15dc0f9edfb`
-- Default indexing seed set: upstream `torii-arcade-metatorii.toml` worlds and token contracts
-- Default Dojo introspect set: upstream `WORLD:*` contracts except the primary world contract
-  `0x2d26295d6c541d64740e1ae56abc079b82b22c35ab83985ef8bd15dc0f9edfb`, which is excluded from
-  introspect decoding by default because it currently emits incompatible historical Dojo record events
-- Metadata mode: `inline`
-- Well-known ERC20s: enabled by default
-- Token URI + image cache: enabled by default in inline metadata mode, with images cached under
-  `./data/image-cache`
-- DB directory: `./torii-data`
+## Architecture
 
-SQLite local defaults:
-
-- engine: `./torii-data/arcade-engine.db`
-- dojo / ecs: `./torii-data/arcade-introspect.db`
-- erc20: `./torii-data/arcade-erc20.db`
-- erc721: `./torii-data/arcade-erc721.db`
-- erc1155: `./torii-data/arcade-erc1155.db`
-
-If `--database-url` or `--storage-database-url` is PostgreSQL and `--token-storage-database-url` is omitted, token storage defaults to the same PostgreSQL database.
-
-`torii-arcade` requires one backend per runtime. Mixed SQLite/PostgreSQL configurations are rejected at startup.
-
-## Start
-
-From the repository root:
-
-```bash
-cargo run --bin torii-arcade -- --from-block 0
+```text
++-----------------------------+
+|  clap::Parser Config        |  defaults: Arcade world
+|  (src/config.rs)            |    0x07a0…04ff7 + 9 more Dojo contracts,
+|                             |    17 ERC721, 46 ERC20, 1 ERC1155
+|                             |  --introspect-contracts override possible
+|                             |  --controllers / --observability
+|                             |  --pathfinder-path for bulk backfill
++-------------+---------------+
+              |
+              v
++------------------------------------------------------+
+|                       main()                         |
+|                                                      |
+| Backend URL resolution (config.engine_database_url,  |
+|   storage_database_url, token_storage_urls):         |
+|   - single --database-url (postgres): shared pool    |
+|   - --storage-database-url overrides just storage    |
+|   - SQLite defaults under --db-dir:                  |
+|       arcade-engine.db, arcade-introspect.db,        |
+|       arcade-erc20.db, arcade-erc721.db,             |
+|       arcade-erc1155.db                              |
+|                                                      |
+| Extractor: EventExtractor (optionally backed by      |
+|   torii-pathfinder for backfill when                 |
+|   --pathfinder-path is set)                          |
+|                                                      |
+| Decoders:                                            |
+|   DojoDecoder, Erc20Decoder, Erc721Decoder,          |
+|   Erc1155Decoder                                     |
+|                                                      |
+| Sinks (ordered — arcade projections depend on        |
+|   introspect tables already being up to date):       |
+|   1. IntrospectDb<Backend> (introspect-sql-sink)     |
+|   2. EcsSink          (legacy world.World)           |
+|   3. ArcadeSink       (Arcade projections +          |
+|                          arcade.v1 gRPC)             |
+|   4. ControllersSink (--controllers)                 |
+|   5. Erc20Sink / Erc721Sink / Erc1155Sink            |
+|                                                      |
+| Contract identification:                             |
+|   explicit mappings for every contract in defaults   |
+|   ContractRegistry + Erc*Rule (load_from_db on       |
+|   startup)                                           |
+|                                                      |
+| EtlConcurrencyConfig                                 |
+|   max_prefetch_batches = --max-prefetch-batches      |
+|                                                      |
+| grpc_router: WorldServer + ArcadeServer +            |
+|   Erc20Server + Erc721Server + Erc1155Server +       |
+|   composed reflection over five descriptor sets      |
+|                                                      |
+| optional TLS                                         |
+| torii::run(config)                                   |
++------------------------------------------------------+
 ```
 
-Useful overrides:
+## Deep Dive
 
-```bash
-cargo run --bin torii-arcade -- \
-  --from-block 0 \
-  --port 3000 \
-  --erc721 0x1e1c477f2ef896fd638b50caa31e3aa8f504d5c6cb3c09c99cd0b72523f07f7 \
-  --erc20 0x049D36570D4e46f48e99674bd3fcc84644DdD6b96F7C741B1562B82f9e004dC7,0x04718f5a0Fc34cC1AF16A1cdee98fFB20C31f5cD61D6Ab07201858f4287c938D
-```
+### CLI highlights (most flags have Arcade-specific defaults)
 
-If you need to opt a world back into Dojo introspect explicitly for investigation:
+| Flag | Default | Purpose |
+|---|---|---|
+| `--rpc-url` (env `STARKNET_RPC_URL`) | Cartridge mainnet | RPC |
+| `--world-address` (env `ARCADE_WORLD_ADDRESS`) | `0x07a079…04ff7` | Primary Arcade world |
+| `--dojo-contracts` | 10 curated Arcade-related worlds | Event source Dojo contracts |
+| `--introspect-contracts` | falls back to `--dojo-contracts` | Override which contracts feed introspect decoding |
+| `--erc20` / `--erc721` / `--erc1155` | baked-in defaults (46 / 17 / 1) | Token contracts |
+| `--include-well-known` | `true` | Pre-map ETH + STRK |
+| `--from-block`, `--to-block` | `0` / none | Range |
+| `--db-dir` | `./torii-data` | SQLite root; files prefixed with `arcade-` |
+| `--database-url` (env `DATABASE_URL`) | — | Engine DB URL (Postgres or SQLite) |
+| `--storage-database-url` (env `STORAGE_DATABASE_URL`) | — | Introspect storage URL |
+| `--token-storage-database-url` (env `TOKEN_STORAGE_DATABASE_URL`) | — | Per-token URL override |
+| `--port` | `3000` | gRPC + HTTP |
+| `--tls-cert`, `--tls-key` | — | PEM pair |
+| `--controllers`, `--controllers-api-url` | off / `https://api.cartridge.gg/query` | Opt-in Cartridge controller sync |
+| `--observability` | off | Metrics |
+| `--event-chunk-size`, `--event-block-batch-size` | `1000` / `10000` | `starknet_getEvents` tuning |
+| `--max-prefetch-batches` | `2` | ETL prefetch queue depth |
+| `--rpc-parallelism` | `0` (auto) | Chunked-RPC parallelism |
+| `--max-db-connections` | auto | Pool ceiling |
+| `--ignore-saved-state` | off | Force reprocessing |
+| `--index-external-contracts` | `true` | React to Dojo `ExternalContractRegistered` events |
+| `--allow-unsafe-latest-schema-bootstrap` | off | Dev-only schema bootstrap |
+| `--metadata-mode` | `inline` | `inline` or `deferred` |
+| `--historical` | `[]` | `ModelName` or `0xAddr:ModelName` for `_historical` tables |
+| `--pathfinder-path` | — | Optional Pathfinder SQLite DB for bulk backfill |
 
-```bash
-cargo run --bin torii-arcade -- \
-  --from-block 0 \
-  --introspect-contracts 0x2d26295d6c541d64740e1ae56abc079b82b22c35ab83985ef8bd15dc0f9edfb,0x8b4838140a3cbd36ebe64d4b5aaf56a30cc3753c928a79338bf56c53f506c5
-```
+### Sink ordering
 
-PostgreSQL:
+Arcade relies on the introspect tables being populated before the
+projection step runs, so the sink pipeline is ordered (see
+`src/main.rs`). A failure in an earlier sink aborts the batch; the
+cursor is not committed and the batch replays on the next cycle.
 
-```bash
-cargo run --bin torii-arcade -- \
-  --database-url postgres://torii:torii@localhost:5432/torii \
-  --storage-database-url postgres://torii:torii@localhost:5432/torii \
-  --from-block 0
-```
+### Workspace dependencies
 
-## Local TLS + ALPN
+`torii`, `torii-dojo`, `torii-introspect`, `torii-introspect-sql-sink`, `torii-ecs-sink`, `torii-arcade-sink`, `torii-erc20`, `torii-erc721`, `torii-erc1155`, `torii-controllers-sink`, `torii-common`, `torii-runtime-common`, `torii-config-common`, `torii-sql`, `torii-pathfinder` (feature `etl`), `torii-types`, plus `clap`, `tonic`, `tonic-reflection`, `tokio`, `tracing`, `starknet`, `anyhow`, `url`.
 
-For browser-compatible local HTTPS, use `mkcert` instead of a raw self-signed certificate.
-Modern browsers require a trusted local CA and `subjectAltName` entries for `localhost`.
+### Extension Points
 
-Install and trust the local development CA:
-
-```bash
-brew install mkcert nss
-mkcert -install
-mkdir -p certs
-mkcert -cert-file certs/dev-cert.pem -key-file certs/dev-key.pem localhost 127.0.0.1 ::1
-```
-
-Start `torii-arcade` with TLS enabled:
-
-```bash
-cargo run --bin torii-arcade -- \
-  --from-block 0 \
-  --tls-cert ./certs/dev-cert.pem \
-  --tls-key ./certs/dev-key.pem
-```
-
-The local listener advertises ALPN for `h2` and `http/1.1`. Native gRPC clients will negotiate
-HTTP/2 automatically; HTTPS health and metrics endpoints remain available on the same port.
-
-Verify the local HTTPS listener:
-
-```bash
-curl https://localhost:3000/health
-grpcurl -insecure localhost:3000 list
-```
-
-## Operational validation
-
-The mixed backend can be checked end-to-end from the repository root:
-
-```bash
-./scripts/test-arcade-backend-e2e.sh
-```
-
-The script verifies:
-
-- gRPC reflection
-- `world.World`
-- `arcade.v1.Arcade`
-- `torii.sinks.erc20.Erc20`
-- `torii.sinks.erc721.Erc721`
-- `Worlds`, `RetrieveEntities`, `RetrieveEventMessages`, `RetrieveEvents`
-- `ListGames`, `ListEditions`, `ListCollections`, `ListListings`, `ListSales`
-- token service stats for the mixed runtime
-
-## Exposed gRPC services
-
-- `torii.Torii`
-- `world.World`
-- `arcade.v1.Arcade`
-- `torii.sinks.erc20.Erc20` when ERC20 contracts are configured
-- `torii.sinks.erc721.Erc721` when ERC721 contracts are configured
-- `torii.sinks.erc1155.Erc1155` when ERC1155 contracts are configured
-
-## Arcade service surface
-
-`arcade.v1.Arcade` is backed by projection tables maintained in the introspect storage database:
-
-- `ListGames`
-- `ListEditions`
-- `ListCollections`
-- `ListListings`
-- `ListSales`
-- `GetPlayerInventory`
-
-The service bootstraps its projections from existing `ARCADE-*` introspect tables on startup and then incrementally refreshes them from live introspect envelopes, so it works both on a warm database and during active indexing.
-
-## Current scope
-
-This binary is the mixed indexing/runtime entrypoint. It intentionally keeps the extraction model explicit and event-based for throughput:
-
-- Dojo indexing defaults to the upstream `torii-arcade-metatorii.toml` `WORLD:*` contracts
-- Dojo introspect decoding defaults to the compatible subset of those contracts; excluded contracts are blacklisted before decode so they do not trigger decoder fallback
-- token indexing defaults to the upstream `torii-arcade-metatorii.toml` ERC20 / ERC721 / ERC1155 contracts
-- `--include-well-known` is opt-in and disabled by default so the runtime matches the upstream seed config unless explicitly extended
-
-Dynamic token enrollment is not part of this first cut.
+- Add a new Arcade projection → extend `ArcadeSink` / `ArcadeService`, not this binary.
+- Swap to Pathfinder backfill → pass `--pathfinder-path`; the extractor is swapped to `PathfinderCombinedExtractor` so it streams archival data then flips to the live RPC extractor.
+- Private Arcade namespace → point `--database-url` at a dedicated Postgres + keep storage URL at the same target; `resolve_token_db_setup` will keep everything on one backend.

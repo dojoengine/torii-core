@@ -1,17 +1,15 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use starknet::core::types::Felt;
 use torii::axum::Router;
-use torii::etl::{
-    envelope::{Envelope, TypeId},
-    extractor::ExtractionBatch,
-    sink::{EventBus, Sink, SinkContext, TopicInfo},
-};
-use torii_introspect::events::{IntrospectBody, IntrospectMsg};
+use torii::etl::envelope::{Envelope, TypeId};
+use torii::etl::extractor::ExtractionBatch;
+use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
+use torii_dojo::{DojoBody, DojoEvent, DOJO_TYPE_ID};
+use torii_introspect::events::IntrospectMsg;
 
 use crate::grpc_service::ArcadeService;
 
@@ -237,19 +235,22 @@ impl ArcadeSink {
         };
 
         for envelope in envelopes {
-            if envelope.type_id != TypeId::new("introspect") {
+            if envelope.type_id != DOJO_TYPE_ID {
                 continue;
             }
 
-            let Some(body) = envelope.downcast_ref::<IntrospectBody>() else {
+            let Some(body) = envelope.downcast_ref::<DojoBody>() else {
+                continue;
+            };
+            let DojoEvent::Introspect(msg) = &body.msg else {
                 continue;
             };
 
-            if Self::is_schema_rebuild_msg(&plan.tracked_tables, &body.msg) {
+            if Self::is_schema_rebuild_msg(&plan.tracked_tables, msg) {
                 plan.requires_full_rebuild = true;
             }
 
-            match &body.msg {
+            match msg {
                 IntrospectMsg::CreateTable(table) => {
                     Self::update_tracked_table(&mut plan.tracked_tables, table.id, &table.name);
                     plan.reload_tracked_tables = true;
@@ -271,7 +272,15 @@ impl ArcadeSink {
                         Self::tracked_table_for_id(&plan.tracked_tables, insert.table)
                     {
                         for record in &insert.records {
-                            let entity_id = Felt::from_bytes_be_slice(&record.id);
+                            let entity_id = Felt::from_bytes_be(&record.id);
+                            if entity_id == Felt::ZERO && record.id.iter().any(|byte| *byte != 0) {
+                                tracing::warn!(
+                                    target: "torii_arcade_sink::sink",
+                                    tracked_table = ?tracked_table,
+                                    "Skipping malformed entity id in introspect insert record"
+                                );
+                                continue;
+                            }
                             plan.projection_ops
                                 .push(ProjectionOp::Refresh(tracked_table, entity_id));
                         }
@@ -314,7 +323,7 @@ impl Sink for ArcadeSink {
     }
 
     fn interested_types(&self) -> Vec<TypeId> {
-        vec![TypeId::new("introspect")]
+        vec![DOJO_TYPE_ID]
     }
 
     async fn process(&self, envelopes: &[Envelope], _batch: &ExtractionBatch) -> Result<()> {
@@ -372,17 +381,14 @@ mod tests {
     use std::str::FromStr;
 
     use anyhow::Result;
-    use sqlx::{
-        sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-        Row,
-    };
+    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use sqlx::Row;
     use starknet::core::types::Felt;
     use tempfile::tempdir;
     use torii::etl::extractor::ExtractionBatch;
-    use torii::etl::{Envelope, MetaData};
-    use torii_introspect::events::{
-        InsertsFields, IntrospectBody, IntrospectMsg, Record, RenamePrimary,
-    };
+    use torii::etl::{Envelope, EventContext, EventMsg};
+    use torii_dojo::DojoEvent;
+    use torii_introspect::events::{InsertsFields, IntrospectMsg, Record, RenamePrimary};
 
     use super::*;
 
@@ -391,14 +397,11 @@ mod tests {
         "0x8c6f6a3efadfd0f4a8408d7ad1b4e37f4f733fe10b8a5ef9a76fd4d8be3b5b";
 
     fn introspect_envelope(msg: IntrospectMsg) -> Envelope {
-        Envelope::from(IntrospectBody {
-            metadata: MetaData {
-                block_number: Some(1),
-                transaction_hash: Felt::ZERO,
-                from_address: Felt::ZERO,
-            },
-            msg,
-        })
+        Envelope::from(DojoEvent::Introspect(msg).to_body(EventContext {
+            block_number: 1,
+            transaction_hash: Felt::ZERO.into(),
+            from_address: Felt::ZERO.into(),
+        }))
     }
 
     fn tracked_tables() -> HashMap<String, TrackedTable> {

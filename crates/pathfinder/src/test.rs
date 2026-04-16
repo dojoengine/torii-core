@@ -1,8 +1,12 @@
-use crate::{connect, extractor::PathfinderExtractor, fetcher::EventFetcher};
+use crate::connect;
+#[cfg(feature = "etl")]
+use crate::extractor::PathfinderExtractor;
+use crate::fetcher::EventFetcher;
 
 const DB_PATH: &str = "/mnt/store/mainnet.sqlite";
 
 #[test]
+#[cfg(feature = "etl")]
 #[ignore = "requires /mnt/store/mainnet.sqlite snapshot"]
 fn test_emitted_events() {
     let mut extractor =
@@ -25,7 +29,7 @@ fn test_emitted_events() {
 fn test_get_emitted_events_with_context() {
     let conn = connect(DB_PATH).unwrap();
     let (blocks, events) = conn
-        .get_emitted_events_with_context(3000000, 3000010)
+        .get_events_with_context(3000000, 3000010)
         .expect("failed to fetch events with context");
     println!(
         "Fetched {} blocks and {} events",

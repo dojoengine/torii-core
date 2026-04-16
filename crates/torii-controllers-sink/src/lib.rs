@@ -1,22 +1,21 @@
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Duration;
-
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, TimeZone, Utc};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::{
-    any::AnyPoolOptions, sqlite::SqliteConnectOptions, Any, ConnectOptions, Pool, QueryBuilder, Row,
-};
-use starknet::core::types::Felt;
+use sqlx::any::AnyPoolOptions;
+use sqlx::{Any, Pool, QueryBuilder, Row};
+use starknet_types_raw::Felt;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
 use torii::axum::Router;
 use torii::etl::extractor::ExtractionBatch;
 use torii::etl::sink::{EventBus, Sink, SinkContext, TopicInfo};
 use torii::etl::TypeId;
-use torii_runtime_common::database::DEFAULT_SQLITE_MAX_CONNECTIONS;
+use torii_runtime_common::database::{backend_from_url_or_path, DEFAULT_SQLITE_MAX_CONNECTIONS};
+use torii_sql::DbBackend;
 
 pub const DEFAULT_API_QUERY_URL: &str = "https://api.cartridge.gg/query";
 pub const CONTROLLERS_TABLE: &str = "controllers";
@@ -28,23 +27,6 @@ const CONTROLLERS_TYPE: TypeId = TypeId::new("controllers.sync");
 const CONTROLLER_PROCESSING_BATCH_SIZE: usize = 10_000;
 const SQLITE_CONTROLLER_UPSERT_BATCH_SIZE: usize = 199;
 const POSTGRES_CONTROLLER_UPSERT_BATCH_SIZE: usize = 10_000;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DbBackend {
-    Sqlite,
-    Postgres,
-}
-
-impl DbBackend {
-    fn detect(database_url: &str) -> Self {
-        if database_url.starts_with("postgres://") || database_url.starts_with("postgresql://") {
-            Self::Postgres
-        } else {
-            Self::Sqlite
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 struct ControllerAccount {
     username: String,
@@ -111,7 +93,7 @@ impl TryFrom<ControllerNode> for StoredController {
                 value.address
             )
         })?;
-        let normalized = format!("{felt_addr:#066x}");
+        let normalized = normalize_controller_address(&felt_addr);
         Ok(Self {
             id: normalized.clone(),
             address: normalized,
@@ -120,6 +102,10 @@ impl TryFrom<ControllerNode> for StoredController {
             updated_at: Utc::now().timestamp(),
         })
     }
+}
+
+fn normalize_controller_address(address: &Felt) -> String {
+    format!("0x{}", hex::encode(address.to_be_bytes_vec()))
 }
 
 struct ControllersStore {
@@ -131,7 +117,7 @@ impl ControllersStore {
     async fn new(database_url: &str, max_connections: Option<u32>) -> Result<Self> {
         sqlx::any::install_default_drivers();
 
-        let backend = DbBackend::detect(database_url);
+        let backend = backend_from_url_or_path(database_url);
         let database_url = match backend {
             DbBackend::Postgres => database_url.to_string(),
             DbBackend::Sqlite => sqlite_url(database_url)?,
@@ -554,16 +540,17 @@ fn sqlite_url(path: &str) -> Result<String> {
     if path.starts_with("sqlite:") {
         return Ok(path.to_string());
     }
-    let options = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))
-        .or_else(|_| Ok::<_, sqlx::Error>(SqliteConnectOptions::new().filename(path)))?;
-    if let Some(parent) = options
-        .get_filename()
+    let path = std::path::Path::new(path);
+    if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
     {
         std::fs::create_dir_all(parent)?;
     }
-    Ok(options.to_url_lossy().to_string())
+    if !path.exists() {
+        std::fs::File::create(path)?;
+    }
+    Ok(format!("sqlite://{}", path.display()))
 }
 
 #[cfg(test)]
@@ -572,7 +559,9 @@ mod tests {
     use serde_json::Value;
     use sqlx::query_scalar;
     use tokio::net::TcpListener;
-    use torii::axum::{extract::State, routing::post, Json, Router};
+    use torii::axum::extract::State;
+    use torii::axum::routing::post;
+    use torii::axum::{Json, Router};
     use torii::command::CommandBus;
     use torii::grpc::SubscriptionManager;
 
@@ -620,6 +609,26 @@ mod tests {
         batch
     }
 
+    fn temp_sqlite_path(name: &str) -> String {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock before epoch")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("torii-controllers-sink-{name}-{nonce}.db"))
+            .to_string_lossy()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn store_accepts_plain_sqlite_path() {
+        let path = temp_sqlite_path("plain-path");
+        let store = ControllersStore::new(&path, Some(1)).await.unwrap();
+
+        store.initialize().await.unwrap();
+        assert!(std::path::Path::new(&path).exists());
+    }
+
     #[tokio::test]
     async fn controllers_sink_persists_rows_and_progress() {
         let api_url = spawn_graphql_server(json!({
@@ -649,13 +658,18 @@ mod tests {
             .await
             .unwrap();
 
-        let username: String = query_scalar(&format!(
-            "SELECT username FROM {CONTROLLERS_TABLE} WHERE address = ?1"
-        ))
-        .bind("0x0000000000000000000000000000000000000000000000000000000000000123")
-        .fetch_one(&sink.store.pool)
-        .await
-        .unwrap();
+        let controller_count: i64 =
+            query_scalar(&format!("SELECT COUNT(*) FROM {CONTROLLERS_TABLE}"))
+                .fetch_one(&sink.store.pool)
+                .await
+                .unwrap();
+        assert_eq!(controller_count, 1);
+
+        let username: String =
+            query_scalar(&format!("SELECT username FROM {CONTROLLERS_TABLE} LIMIT 1"))
+                .fetch_one(&sink.store.pool)
+                .await
+                .unwrap();
         assert_eq!(username, "test_user");
 
         let synced_until: i64 = query_scalar(&format!(
@@ -709,13 +723,18 @@ mod tests {
             .await
             .unwrap();
 
-        let username: String = query_scalar(&format!(
-            "SELECT username FROM {CONTROLLERS_TABLE} WHERE id = ?1"
-        ))
-        .bind("0x0000000000000000000000000000000000000000000000000000000000000123")
-        .fetch_one(&sink.store.pool)
-        .await
-        .unwrap();
+        let controller_count: i64 =
+            query_scalar(&format!("SELECT COUNT(*) FROM {CONTROLLERS_TABLE}"))
+                .fetch_one(&sink.store.pool)
+                .await
+                .unwrap();
+        assert_eq!(controller_count, 1);
+
+        let username: String =
+            query_scalar(&format!("SELECT username FROM {CONTROLLERS_TABLE} LIMIT 1"))
+                .fetch_one(&sink.store.pool)
+                .await
+                .unwrap();
         assert_eq!(username, "user_one");
     }
 
@@ -802,6 +821,24 @@ mod tests {
         assert_eq!(username, "test_user");
     }
 
+    #[test]
+    fn stored_controller_normalizes_addresses_to_fixed_hex() {
+        let controller = StoredController::try_from(ControllerNode {
+            address: "0x123".to_string(),
+            created_at: "2024-03-20T12:00:00Z".to_string(),
+            account: ControllerAccount {
+                username: "test_user".to_string(),
+            },
+        })
+        .unwrap();
+
+        assert_eq!(
+            controller.address,
+            "0x0000000000000000000000000000000000000000000000000000000000000123"
+        );
+        assert_eq!(controller.id, controller.address);
+    }
+
     #[tokio::test]
     async fn initialize_runs_full_sync_when_table_is_empty() {
         let api_url = spawn_graphql_server(json!({
@@ -827,13 +864,18 @@ mod tests {
             .unwrap();
         initialize_sink(&mut sink).await;
 
-        let username: String = query_scalar(&format!(
-            "SELECT username FROM {CONTROLLERS_TABLE} WHERE address = ?1"
-        ))
-        .bind("0x0000000000000000000000000000000000000000000000000000000000000456")
-        .fetch_one(&sink.store.pool)
-        .await
-        .unwrap();
+        let controller_count: i64 =
+            query_scalar(&format!("SELECT COUNT(*) FROM {CONTROLLERS_TABLE}"))
+                .fetch_one(&sink.store.pool)
+                .await
+                .unwrap();
+        assert_eq!(controller_count, 1);
+
+        let username: String =
+            query_scalar(&format!("SELECT username FROM {CONTROLLERS_TABLE} LIMIT 1"))
+                .fetch_one(&sink.store.pool)
+                .await
+                .unwrap();
         assert_eq!(username, "boot_user");
 
         let synced_until: i64 = query_scalar(&format!(

@@ -1,486 +1,119 @@
-# Torii Tokens
+# torii-tokens (binary)
 
-Unified Starknet token indexer for ERC20, ERC721, and ERC1155 tokens.
+Unified **ERC20 + ERC721 + ERC1155 indexer**. Combines all three token
+sinks behind one process, one port, one engine DB. Supports three
+extraction modes (`block-range`, `event`, `global-event`) so operators
+can pick full-chain indexing or per-contract cursors depending on their
+use case.
 
-## Quick Start
+## Role in Torii
 
-```bash
-# Block-range mode: auto-discovers all token contracts
-torii-tokens --from-block 100000
+The production-grade consolidation of `bins/torii-erc20` + equivalent
+ERC721/ERC1155 binaries. Most deployments want all three standards in
+one place; this is that binary. Every token sink is optional — omit the
+`--erc20` / `--erc721` / `--erc1155` / `--include-well-known` flags and
+that sink is not installed. See `torii-runtime-common::token_support` for
+the boolean trio that drives the install logic.
 
-# Enable observability (metrics endpoint + collection)
-torii-tokens --observability --from-block 100000
+## Architecture
 
-# Event mode: index specific contracts only
-torii-tokens --mode event --erc20 0x049D36570D4e46f48e99674bd3fcc84644DdD6b96F7C741B1562B82f9e004dC7 --from-block 100000
+```text
++---------------------------+
+|   clap::Parser  Config    |   --mode (block-range | event | global-event)
+|   (src/config.rs)         |   --erc20, --erc721, --erc1155 lists
+|                           |   --include-well-known (ETH/STRK)
+|                           |   --observability (Prometheus)
+|                           |   --database-url, --storage-database-url
++--------------+------------+
+               |
+               v
++---------------------------+
+| resolve_token_db_setup    |  engine.db + erc20.db + erc721.db + erc1155.db
+| (torii-runtime-common)    |  or single Postgres URL for all
++--------------+------------+
+               |
+               v
++------------------------------------------------+
+|                  main()                        |
+|                                                |
+| Extractor selected by --mode:                  |
+|   BlockRangeExtractor  (one global cursor)     |
+|   EventExtractor       (per-contract cursors)  |
+|   GlobalEventExtractor (one cursor via         |
+|                         starknet_getEvents)    |
+|                                                |
+| Decoders registered (all three always, but     |
+|   only sinks actually consuming are installed):|
+|   Erc20Decoder   → Erc20Sink + service         |
+|   Erc721Decoder  → Erc721Sink + service        |
+|   Erc1155Decoder → Erc1155Sink + service       |
+|                                                |
+| Contract identification:                       |
+|   - explicit mappings for each sink's list     |
+|   - well-known ETH + STRK (if requested)       |
+|   - ContractRegistry with Erc20Rule,           |
+|     Erc721Rule, Erc1155Rule                    |
+|   - rpc_parallelism = --rpc-parallelism        |
+|                                                |
+| Metadata pipelines:                            |
+|   N workers × queue_capacity × max_retries     |
+|   (parallelism=8, queue=2048, retries=5)       |
+|                                                |
+| EtlConcurrencyConfig {                         |
+|   max_prefetch_batches: --max-prefetch-batches |
+| }                                              |
+|                                                |
+| grpc_router = builder                          |
+|   .add_service(Erc20Server)                    |
+|   .add_service(Erc721Server)                   |
+|   .add_service(Erc1155Server)                  |
+|   + composed reflection (TORII + all 3 descr.) |
+|                                                |
+| torii::run(config).await                       |
++------------------------------------------------+
 ```
 
-## Features
-
-- **Multi-token support**: ERC20, ERC721, and ERC1155 in a single indexer
-- **Balance tracking**: Real-time balance computation with on-chain verification
-- **Auto-discovery**: Automatically identifies token contracts by ABI inspection (block-range mode)
-- **gRPC subscriptions**: Real-time streaming of token events
-- **Historical queries**: Paginated queries for transfers, approvals, and ownership
-- **Flexible extraction**: Block-range mode for full indexing, event mode for targeted contracts
-
-## Installation
-
-```bash
-# From the repository root
-cargo build --release -p torii-tokens
-
-# Binary will be at target/release/torii-tokens
-```
-
-## Usage
-
-### Block Range Mode (default)
-
-Fetches ALL events from each block. Best for full chain indexing with auto-discovery.
-
-```bash
-# Auto-discover all token contracts from block 100000
-torii-tokens --from-block 100000
-
-# Index with explicit contracts (will also auto-discover others)
-torii-tokens --erc20 0x049D36570D4e46f48e99674bd3fcc84644DdD6b96F7C741B1562B82f9e004dC7 --from-block 0
-
-# Index multiple token types
-torii-tokens \
-  --erc20 0x049D36570D4e46f48e99674bd3fcc84644DdD6b96F7C741B1562B82f9e004dC7 \
-  --erc721 0x...nft \
-  --erc1155 0x...game_items \
-  --from-block 0
-```
-
-### Event Mode
-
-Uses `starknet_getEvents` with per-contract cursors. Best for indexing specific contracts.
-
-```bash
-# Index specific ERC20 contracts
-torii-tokens --mode event \
-  --erc20 0x049D36570D4e46f48e99674bd3fcc84644DdD6b96F7C741B1562B82f9e004dC7 \
-  --from-block 0
-
-# Index multiple contracts
-torii-tokens --mode event \
-  --erc20 0x049D36570D4e46f48e99674bd3fcc84644DdD6b96F7C741B1562B82f9e004dC7,0x04718f5a0Fc34cC1AF16A1cdee98fFB20C31f5cD61D6Ab07201858f4287c938D \
-  --from-block 0
-```
-
-### Custom Configuration
-
-```bash
-# Custom RPC and port
-torii-tokens \
-  --rpc-url https://your-rpc.example.com \
-  --port 8080 \
-  --from-block 0
-
-# Custom database directory
-torii-tokens --db-dir /path/to/data --from-block 0
-```
-
-### Throughput Tuning
-
-For large backfills, tune concurrency in this order: `--rpc-parallelism`, then queue depth.
-
-```bash
-# Conservative baseline
-torii-tokens --from-block 0 \
-  --batch-size 1000 \
-  --rpc-parallelism 4 \
-  --max-prefetch-batches 8 \
-  --metadata-mode deferred
-
-# More aggressive (if RPC endpoint can sustain it)
-torii-tokens --from-block 0 \
-  --batch-size 1000 \
-  --rpc-parallelism 6 \
-  --max-prefetch-batches 8 \
-  --metadata-mode deferred
-```
-
-Notes:
-
-- `--rpc-parallelism`: concurrent chunked RPC requests (`0` = auto).
-- `--max-prefetch-batches`: extracted batches buffered ahead of decode/store.
-- `--metadata-mode deferred`: reduce metadata-side RPC/load during backfill.
-- `--metadata-parallelism`, `--metadata-queue-capacity`, `--metadata-max-retries` control async metadata workers (ERC20), queue depth, and capped retry attempts.
-- `--metadata-queue-capacity` also controls the token-URI request queue for ERC721/ERC1155 in `inline` mode (increase this if you see `Dropping token URI requests: queue is full`).
-
-### CLI Options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--mode` | `block-range` | Extraction mode (`block-range` or `event`) |
-| `--rpc-url` | Cartridge mainnet | Starknet RPC endpoint |
-| `--from-block` | `0` | Starting block number |
-| `--to-block` | None | Ending block (None = follow chain head) |
-| `--db-dir` | `./torii-data` | Directory for database files |
-| `--database-url` | None | Engine DB URL/path (e.g. `postgres://...`) |
-| `--port` | `3000` | HTTP/gRPC server port |
-| `--observability` | `false` | Enable observability (Prometheus metrics endpoint + metric collection) |
-| `--erc20` | None | ERC20 contract addresses (comma-separated) |
-| `--erc721` | None | ERC721 contract addresses (comma-separated) |
-| `--erc1155` | None | ERC1155 contract addresses (comma-separated) |
-| `--batch-size` | `50` | Blocks per batch (block-range mode) |
-| `--event-chunk-size` | `1000` | Events per RPC request (event mode) |
-| `--event-block-batch-size` | `10000` | Block range per iteration (event mode) |
-| `--max-prefetch-batches` | `2` | Number of extracted batches prefetched ahead |
-| `--rpc-parallelism` | `0` | Concurrent chunked RPC requests (`0` = auto) |
-| `--metadata-mode` | `inline` | Metadata behavior (`inline` or `deferred`) |
-| `--metadata-parallelism` | `8` | Async metadata workers (ERC20 metadata pipeline) |
-| `--metadata-queue-capacity` | `2048` | Metadata queue size (ERC20 metadata jobs + ERC721/ERC1155 token-URI request queue in `inline` mode) |
-| `--metadata-max-retries` | `5` | Max metadata retry attempts (capped backoff) |
-
-### Metadata Mode
-
-- `inline` (default): metadata jobs run while indexing.
-- `deferred`: disables ERC721 metadata/token-URI fetch setup to maximize ingest throughput.
-
-Current behavior details:
-
-- ERC20 metadata is fetched asynchronously in background workers and is configured by metadata pipeline flags.
-- ERC721/ERC1155 token-URI fetch requests use `--metadata-queue-capacity` for queue depth in inline mode.
-- ERC1155 token-URI service is disabled in deferred mode; contract metadata fetch can still occur via sink metadata fetcher.
-
-## Extraction Modes
-
-### Block Range Mode
-
-- Fetches complete block data in batches
-- Inspects contract ABIs to identify token types automatically
-- Single cursor tracks overall progress
-- Best for full chain indexing
-
-### Event Mode
-
-- Each contract has its own cursor
-- Adding a new contract starts fresh from `--from-block`
-- Existing contracts resume from their saved position
-- Best for targeted indexing with lower resource usage
-
-**Adding contracts in event mode:**
-```bash
-# Initial run
-torii-tokens --mode event --erc20 0x...ETH,0x...STRK --from-block 0
-
-# Add USDC later - ETH and STRK resume from their cursors, USDC starts from block 0
-torii-tokens --mode event --erc20 0x...ETH,0x...STRK,0x...USDC --from-block 0
-```
-
-## Database and Cursors
-
-The indexer maintains internal cursors to track indexing progress. On restart, indexing resumes from the last processed position.
-
-**To reset and re-index from scratch, delete the database directory:**
-
-```bash
-rm -rf ./torii-data
-torii-tokens --from-block 0
-```
-
-The indexer creates separate SQLite databases for each component:
-
-```
-
-Set `--database-url` (or `DATABASE_URL`) to run engine + token storages on PostgreSQL. If unset, the local SQLite files below are used.
-./torii-data/
-  engine.db     # ETL state, cursors, statistics
-  erc20.db      # ERC20 transfers, approvals, balances
-  erc721.db     # ERC721 transfers, ownership
-  erc1155.db    # ERC1155 transfers, balances
-```
-
-Database resolution logic here is shared via `torii-runtime-common` (`resolve_token_db_setup`) to keep SQLite/PostgreSQL behavior consistent across binaries.
-
-Each database uses WAL mode for performance and crash safety.
-
-## gRPC API Reference
-
-### Available Services
-
-```bash
-# List all services
-grpcurl -plaintext localhost:3000 list
-
-# Services:
-# - grpc.reflection.v1.ServerReflection
-# - torii.Torii (EventBus subscriptions)
-# - torii.sinks.erc20.Erc20
-# - torii.sinks.erc721.Erc721
-# - torii.sinks.erc1155.Erc1155
-```
-
-### Address Encoding
-
-All addresses and U256 values are encoded as **base64-encoded big-endian bytes**.
-
-```bash
-# Convert hex address to base64
-printf '%s' "049D36570D4e46f48e99674bd3fcc84644DdD6b96F7C741B1562B82f9e004dC7" | xxd -r -p | base64
-# Output: BJ02Vw1ORvSOmWdL0/zIRkTd1rlvfHQbFWK4L54ATcc=
-
-# Convert base64 back to hex
-echo "BJ02Vw1ORvSOmWdL0/zIRkTd1rlvfHQbFWK4L54ATcc=" | base64 -d | xxd -p
-```
-
----
-
-### ERC20 Service
-
-**Service:** `torii.sinks.erc20.Erc20`
-
-#### GetStats
-
-```bash
-grpcurl -plaintext localhost:3000 torii.sinks.erc20.Erc20/GetStats
-```
-
-#### GetTransfers
-
-```bash
-# Get all transfers (first 100)
-grpcurl -plaintext -d '{}' localhost:3000 torii.sinks.erc20.Erc20/GetTransfers
-
-# Filter by wallet (matches from OR to)
-grpcurl -plaintext -d '{
-  "filter": {"wallet": "BJ02Vw1ORvSOmWdL0/zIRkTd1rlvfHQbFWK4L54ATcc="},
-  "limit": 10
-}' localhost:3000 torii.sinks.erc20.Erc20/GetTransfers
-
-# Filter by token contract
-grpcurl -plaintext -d '{
-  "filter": {"tokens": ["BJ02Vw1ORvSOmWdL0/zIRkTd1rlvfHQbFWK4L54ATcc="]},
-  "limit": 10
-}' localhost:3000 torii.sinks.erc20.Erc20/GetTransfers
-
-# Filter by block range
-grpcurl -plaintext -d '{
-  "filter": {"blockFrom": "100000", "blockTo": "200000"},
-  "limit": 10
-}' localhost:3000 torii.sinks.erc20.Erc20/GetTransfers
-
-# Pagination
-grpcurl -plaintext -d '{
-  "cursor": {"blockNumber": "150000", "id": "42"},
-  "limit": 10
-}' localhost:3000 torii.sinks.erc20.Erc20/GetTransfers
-```
-
-#### GetApprovals
-
-```bash
-# Filter by account (matches owner OR spender)
-grpcurl -plaintext -d '{
-  "filter": {"account": "BJ02Vw1ORvSOmWdL0/zIRkTd1rlvfHQbFWK4L54ATcc="},
-  "limit": 10
-}' localhost:3000 torii.sinks.erc20.Erc20/GetApprovals
-```
-
-#### SubscribeTransfers
-
-```bash
-# Subscribe to all transfers
-grpcurl -plaintext -d '{"clientId": "my-client"}' \
-  localhost:3000 torii.sinks.erc20.Erc20/SubscribeTransfers
-
-# Subscribe with wallet filter
-grpcurl -plaintext -d '{
-  "clientId": "my-client",
-  "filter": {"wallet": "BJ02Vw1ORvSOmWdL0/zIRkTd1rlvfHQbFWK4L54ATcc="}
-}' localhost:3000 torii.sinks.erc20.Erc20/SubscribeTransfers
-```
-
-#### SubscribeApprovals
-
-```bash
-grpcurl -plaintext -d '{"clientId": "my-client"}' \
-  localhost:3000 torii.sinks.erc20.Erc20/SubscribeApprovals
-```
-
-**ERC20 Filter Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `wallet` | bytes | Matches `from` OR `to` |
-| `from` | bytes | Exact sender address |
-| `to` | bytes | Exact receiver address |
-| `tokens` | bytes[] | Token contract whitelist |
-| `direction` | enum | `DIRECTION_ALL`, `DIRECTION_SENT`, `DIRECTION_RECEIVED` |
-| `blockFrom` | uint64 | Minimum block number |
-| `blockTo` | uint64 | Maximum block number |
-
----
-
-### ERC721 Service
-
-**Service:** `torii.sinks.erc721.Erc721`
-
-#### GetStats
-
-```bash
-grpcurl -plaintext localhost:3000 torii.sinks.erc721.Erc721/GetStats
-```
-
-#### GetTransfers
-
-```bash
-# Filter by wallet
-grpcurl -plaintext -d '{
-  "filter": {"wallet": "...base64..."},
-  "limit": 10
-}' localhost:3000 torii.sinks.erc721.Erc721/GetTransfers
-
-# Filter by specific NFT token IDs
-grpcurl -plaintext -d '{
-  "filter": {"tokenIds": ["AQ==", "Ag==", "Aw=="]},
-  "limit": 10
-}' localhost:3000 torii.sinks.erc721.Erc721/GetTransfers
-```
-
-#### GetOwnership
-
-```bash
-# Get all NFTs owned by an address
-grpcurl -plaintext -d '{
-  "filter": {"owner": "...base64..."},
-  "limit": 100
-}' localhost:3000 torii.sinks.erc721.Erc721/GetOwnership
-```
-
-#### GetOwner
-
-```bash
-# Get owner of a specific NFT
-grpcurl -plaintext -d '{
-  "token": "...nft_contract_base64...",
-  "tokenId": "AQ=="
-}' localhost:3000 torii.sinks.erc721.Erc721/GetOwner
-```
-
-#### SubscribeTransfers
-
-```bash
-grpcurl -plaintext -d '{
-  "clientId": "my-client",
-  "filter": {"tokenIds": ["AQ==", "Ag=="]}
-}' localhost:3000 torii.sinks.erc721.Erc721/SubscribeTransfers
-```
-
-**ERC721 Filter Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `wallet` | bytes | Matches `from` OR `to` |
-| `from` | bytes | Exact sender address |
-| `to` | bytes | Exact receiver address |
-| `tokens` | bytes[] | NFT contract whitelist |
-| `tokenIds` | bytes[] | Specific NFT token IDs |
-| `blockFrom` | uint64 | Minimum block number |
-| `blockTo` | uint64 | Maximum block number |
-
----
-
-### ERC1155 Service
-
-**Service:** `torii.sinks.erc1155.Erc1155`
-
-#### GetStats
-
-```bash
-grpcurl -plaintext localhost:3000 torii.sinks.erc1155.Erc1155/GetStats
-```
-
-#### GetTransfers
-
-```bash
-# Filter by wallet
-grpcurl -plaintext -d '{
-  "filter": {"wallet": "...base64..."},
-  "limit": 10
-}' localhost:3000 torii.sinks.erc1155.Erc1155/GetTransfers
-
-# Filter by operator
-grpcurl -plaintext -d '{
-  "filter": {"operator": "...base64..."},
-  "limit": 10
-}' localhost:3000 torii.sinks.erc1155.Erc1155/GetTransfers
-
-# Filter by specific token IDs
-grpcurl -plaintext -d '{
-  "filter": {"tokenIds": ["AQ==", "Ag=="]},
-  "limit": 10
-}' localhost:3000 torii.sinks.erc1155.Erc1155/GetTransfers
-```
-
-#### SubscribeTransfers
-
-```bash
-grpcurl -plaintext -d '{
-  "clientId": "my-client",
-  "filter": {"tokens": ["...game_items_contract..."]}
-}' localhost:3000 torii.sinks.erc1155.Erc1155/SubscribeTransfers
-```
-
-**ERC1155 Filter Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `wallet` | bytes | Matches `from` OR `to` |
-| `from` | bytes | Exact sender address |
-| `to` | bytes | Exact receiver address |
-| `operator` | bytes | Exact operator address |
-| `tokens` | bytes[] | Token contract whitelist |
-| `tokenIds` | bytes[] | Specific token IDs |
-| `blockFrom` | uint64 | Minimum block number |
-| `blockTo` | uint64 | Maximum block number |
-
----
-
-### Core Torii Service
-
-**Service:** `torii.Torii`
-
-EventBus-based subscriptions that work across all sinks.
-
-#### ListTopics
-
-```bash
-grpcurl -plaintext localhost:3000 torii.Torii/ListTopics
-```
-
-#### SubscribeToTopicsStream
-
-```bash
-# Subscribe to ERC20 transfers via EventBus
-grpcurl -plaintext -d '{
-  "clientId": "my-client",
-  "topics": [{"topic": "erc20.transfer"}]
-}' localhost:3000 torii.Torii/SubscribeToTopicsStream
-```
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `STARKNET_RPC_URL` | Default RPC URL (overridden by `--rpc-url`) |
-| `RUST_LOG` | Log level (e.g., `info`, `debug`, `torii=debug`) |
-
-## Logging
-
-Control log verbosity with `RUST_LOG`:
-
-```bash
-# Default info level
-torii-tokens --from-block 0
-
-# Debug logging for torii components
-RUST_LOG=torii=debug torii-tokens --from-block 0
-
-# Trace all SQL queries
-RUST_LOG=torii=debug,sqlx=trace torii-tokens --from-block 0
-```
+## Deep Dive
+
+### CLI highlights (full list in `src/config.rs`)
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--mode` | `block-range` | Extraction mode: `block-range` / `event` / `global-event` |
+| `--rpc-url` (env `STARKNET_RPC_URL`) | Cartridge mainnet | JSON-RPC endpoint |
+| `--from-block`, `--to-block` | `0` / none | Range bounds |
+| `--db-dir` | `./torii-data` | Root when using SQLite (`engine.db`, `erc20.db`, `erc721.db`, `erc1155.db`) |
+| `--database-url` (env `DATABASE_URL`) | — | Postgres URL or SQLite override for the engine DB |
+| `--storage-database-url` (env `STORAGE_DATABASE_URL`) | — | Token-storage override (else uses `--database-url`, else `--db-dir`) |
+| `--port` | `3000` | gRPC + HTTP port |
+| `--observability` | off | Sets `TORII_METRICS_ENABLED=true` via `torii-config-common` |
+| `--erc20` / `--erc721` / `--erc1155` | `[]` | Comma-separated contract lists |
+| `--include-well-known` | off | Pre-map ETH + STRK |
+| `--batch-size` | `50` | Blocks per `BlockRangeExtractor` batch |
+| `--event-chunk-size` | `1000` | Events per `starknet_getEvents` page |
+| `--event-block-batch-size` | `10000` | Blocks per event-mode iteration |
+| `--event-bootstrap-blocks` | `20000` | Scan depth for auto-discovery in event mode |
+| `--max-prefetch-batches` | `2` | ETL prefetch queue depth |
+| `--cycle-interval` | `3` | Idle retry seconds |
+| `--rpc-parallelism` | `0` (auto) | Max concurrent chunked RPC requests |
+| `--metadata-parallelism` | `8` | Async metadata fetcher workers |
+| `--metadata-queue-capacity` | `2048` | Metadata command queue |
+| `--metadata-max-retries` | `5` | Metadata fetch retries |
+| `--metadata-mode` | `inline` | `inline` or `deferred` |
+| `--metadata-backfill-only` | off | Reserved for future metadata-only workflows |
+
+### Internal modules
+
+- `config.rs` — `Config`, `ExtractionMode`, `MetadataMode`, `well_known_erc20_contracts`, `has_tokens`, unit tests for flag parsing.
+- `main.rs` — `resolve_token_db_setup` → per-standard storage + sink + decoder + rule → `ContractRegistry.load_from_db` → `ToriiConfig` build → `torii::run`. Composes gRPC reflection from four descriptor sets.
+
+### Workspace dependencies
+
+`torii`, `torii-erc20`, `torii-erc721`, `torii-erc1155`, `torii-runtime-common`, `torii-config-common`, `torii-sql` (postgres + sqlite), `starknet`, `tonic`, `tonic-reflection`, `clap`, `tokio`, `tracing`, `anyhow`, `url`.
+
+### Extension Points
+
+- Add another token standard → register its decoder + rule + sink + gRPC service + descriptor set; extend `InstalledTokenSupport` in `torii-runtime-common` if the install matrix gets more complex.
+- Change the balance model for a single standard → modify the corresponding sink; this binary is pure wiring.
+
+Paired profiler: `bins/torii-tokens-synth`.

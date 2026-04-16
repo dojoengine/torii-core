@@ -1,86 +1,126 @@
-# Torii Server
+# torii-introspect-bin (binary `torii-server`)
 
-Dojo introspect and token indexer backed by PostgreSQL or SQLite.
+**Canonical full-stack Torii binary.** Indexes Dojo introspect events,
+optional token transfers (ERC20/721/1155), and optional controller
+usernames into a shared SQL backend. Exposes the legacy `world.World`
+gRPC API plus every token gRPC service on one port. The most complete
+example of how the pipeline fits together.
 
-## Run
+## Role in Torii
 
-```bash
-cargo run --bin torii-server -- \
-  --contract 0x123...,0x456... \
-  --storage-database-url postgres://torii:torii@localhost:5432/torii
+Production deployments of Dojo worlds point at this binary. It combines:
+
+1. `torii-dojo::DojoDecoder` consuming the world contract's events,
+2. `introspect-sql-sink` materialising schema + records,
+3. `torii-ecs-sink` serving the legacy `world.World` gRPC,
+4. Optional `torii-erc20/721/1155` sinks + decoders + rules for token
+   data referenced by models,
+5. Optional `torii-controllers-sink` for Cartridge controller metadata,
+6. Optional TLS for the listener.
+
+Read `bins/torii-erc20` first — this binary is the same pattern scaled
+up.
+
+## Architecture
+
+```text
++-----------------------------+
+|  clap::Parser  Config       |  argument group: --contract + --erc20 +
+|  (src/config.rs)            |    --erc721 + --erc1155 (at least one)
+|                             |  --database-url / --storage-database-url
+|                             |  --historical (for _historical tables)
+|                             |  --tls-cert / --tls-key
+|                             |  --controllers (enable sync)
+|                             |  --observability / --ignore-saved-state
+|                             |  --index-external-contracts (default on)
++-------------+---------------+
+              |
+              v
++--------------------------------------------------------+
+|                     main()                             |
+|                                                        |
+| resolve engine + storage URLs                          |
+|   (Postgres uniform or SQLite under --db-dir)          |
+|                                                        |
+| EventExtractor over --rpc-url                          |
+|   chunk=1000, block-batch=10000                        |
+|   cursor-resume unless --ignore-saved-state            |
+|                                                        |
+| Decoders:                                              |
+|   DojoDecoder (over dojo-introspect schema fetcher)    |
+|   + optional Erc20Decoder / Erc721Decoder /            |
+|     Erc1155Decoder                                     |
+|                                                        |
+| Sinks (installed by config):                           |
+|   - IntrospectDb<Backend>                              |
+|     (IntrospectPgDb or IntrospectSqliteDb)             |
+|   - EcsSink (reads the introspect tables; serves       |
+|      legacy world.World gRPC)                          |
+|   - ControllersSink           (--controllers)          |
+|   - Erc20Sink/Erc721Sink/Erc1155Sink + services        |
+|                                                        |
+| ContractRegistry with Erc*Rule registered;             |
+|   load_from_db() on startup;                           |
+|   handles Dojo ExternalContractRegistered via          |
+|   RegisterExternalContractCommand (index_external_     |
+|   contracts flag)                                      |
+|                                                        |
+| EtlConcurrencyConfig                                   |
+|   max_prefetch_batches = --max-prefetch-batches        |
+|                                                        |
+| grpc_router adds all token servers + WorldServer (ECS) |
+|   + reflection composing TORII + token + ecs + arcade  |
+|   descriptor sets                                      |
+|                                                        |
+| optional TLS listener (both --tls-cert and --tls-key)  |
+|                                                        |
+| torii::run(config).await                               |
++--------------------------------------------------------+
 ```
 
-## Mixed Dojo + Token Indexing
+## Deep Dive
 
-```bash
-cargo run --bin torii-server -- \
-  --from-block 0 \
-  --contract 0x0000 \
-  --erc20 0x001,0x002 \
-  --erc721 0x003,0x0045 \
-  --chunk-size 1000 \
-  --batch-size 10000
-```
+### CLI highlights
 
-Use `--contract`/`--contracts` for Dojo introspect targets and `--erc20`, `--erc721`, `--erc1155`
-for token contracts. The extractor deduplicates overlapping addresses and runs them in one ETL
-pipeline.
+| Flag | Default | Purpose |
+|---|---|---|
+| `--contract` / `--contracts` | required* | Dojo world contract addresses (`*` required if no token list) |
+| `--erc20`, `--erc721`, `--erc1155` | `[]` | Token contracts to pin |
+| `--rpc-url` (env `STARKNET_RPC_URL`) | Cartridge mainnet | JSON-RPC endpoint |
+| `--from-block`, `--to-block` | `0` / none | Range |
+| `--db-dir` | `./torii-data` | SQLite root |
+| `--database-url` (env `DATABASE_URL`) | — | Engine DB URL |
+| `--storage-database-url` (env `STORAGE_DATABASE_URL`) | — | Storage DB URL (**Postgres only** for introspect-pg path) |
+| `--port` | `3000` | gRPC + HTTP |
+| `--tls-cert`, `--tls-key` | — | PEM files; must come as a pair |
+| `--controllers` | off | Install `torii-controllers-sink` |
+| `--controllers-api-url` | `https://api.cartridge.gg/query` | GraphQL URL for controllers sink |
+| `--observability` | off | Sets `TORII_METRICS_ENABLED` |
+| `--event-chunk-size` / `--event-block-batch-size` | `1000` / `10000` | `starknet_getEvents` tuning |
+| `--max-prefetch-batches` | `2` | ETL prefetch queue depth |
+| `--cycle-interval` | `3` | Idle retry seconds |
+| `--rpc-parallelism` | `0` (auto) | Chunked-RPC parallelism |
+| `--max-db-connections` | auto | Pool size ceiling |
+| `--ignore-saved-state` | off | Force reprocessing from `--from-block` |
+| `--index-external-contracts` | `true` | React to Dojo `ExternalContractRegistered` events at runtime |
+| `--historical` | `[]` | `ModelName` or `0xAddr:ModelName` entries to mirror into append-only `_historical` tables |
 
-## Throughput Tuning
+Argument group enforces that **at least one** of `--contract`,
+`--erc20`, `--erc721`, `--erc1155` is provided.
 
-The introspect indexer now exposes the same core ETL parallelism knobs as `torii-tokens`.
+### Internal modules
 
-```bash
-cargo run --bin torii-server -- \
-  --contract 0x123...,0x456... \
-  --storage-database-url postgres://torii:torii@localhost:5432/torii \
-  --rpc-parallelism 4 \
-  --max-prefetch-batches 8
-```
+- `config.rs` — `Config`, `parse_historical_models`, backend resolution (`storage_backend`, `engine_database_url`, `storage_database_url`), TLS pair validation.
+- `main.rs` — sink assembly, registry wiring, optional TLS, gRPC reflection composition, cursor-resume logic.
 
-Notes:
+### Workspace dependencies
 
-- `--rpc-parallelism`: concurrent chunked RPC requests (`0` = auto).
-- `--chunk-size`: events per `starknet_getEvents` request.
-- `--batch-size`: block range queried per iteration.
-- `--max-prefetch-batches`: extracted batches buffered ahead of decode/store.
+`torii`, `torii-dojo`, `torii-introspect`, `torii-introspect-sql-sink` (postgres + sqlite), `torii-ecs-sink`, `torii-controllers-sink`, `torii-erc20` / `torii-erc721` / `torii-erc1155`, `torii-arcade-sink` (for its descriptor set — the `ArcadeServer` is only mounted if enabled in custom builds), `torii-common`, `torii-runtime-common`, `torii-config-common`, `torii-sql` (postgres + sqlite). Plus `clap`, `tonic`, `tonic-reflection`, `tokio`, `tracing`, `starknet`, `anyhow`, `url`.
 
-## Local TLS + ALPN
+### Extension Points
 
-For browser-compatible local HTTPS, use `mkcert` instead of a raw self-signed certificate.
-Modern browsers require a trusted local CA and `subjectAltName` entries for `localhost`.
+- Add another sink → build it, push `Box<dyn Sink>` into the builder, add its descriptor set to the reflection composition.
+- Change extractor → replace `EventExtractor` with `BlockRangeExtractor` or a custom one; the rest of the pipeline doesn't care.
+- Add Postgres schemas → `introspect-sql-sink::NamespaceMode` decides the layout; flip at binary level.
 
-Install and trust the local development CA:
-
-```bash
-brew install mkcert nss
-mkcert -install
-mkdir -p certs
-mkcert -cert-file certs/dev-cert.pem -key-file certs/dev-key.pem localhost 127.0.0.1 ::1
-```
-
-Start `torii-server` with TLS enabled:
-
-```bash
-cargo run --bin torii-server -- \
-  --contract 0x123...,0x456... \
-  --tls-cert ./certs/dev-cert.pem \
-  --tls-key ./certs/dev-key.pem
-```
-
-The local listener advertises ALPN for `h2` and `http/1.1`. Native gRPC clients will negotiate
-HTTP/2 automatically; HTTPS health and metrics endpoints remain available on the same port.
-
-Verify the local HTTPS listener:
-
-```bash
-curl https://localhost:3000/health
-grpcurl -insecure localhost:3000 list
-```
-
-## Notes
-
-- `--storage-database-url` must be PostgreSQL when provided.
-- If `--storage-database-url` is omitted, SQLite files are created under `--db-dir` for introspect and token storages.
-- `--observability` controls `TORII_METRICS_ENABLED` through shared helpers.
-- Config validation and observability wiring are shared through `torii-config-common`.
+Paired profiler: `bins/torii-introspect-synth`.

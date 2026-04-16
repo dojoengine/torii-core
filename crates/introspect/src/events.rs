@@ -12,7 +12,7 @@ use torii::etl::{EventBody, TypeId};
 
 use crate::schema::TableSchema;
 
-#[derive(EnumFrom, Debug)]
+#[derive(EnumFrom, Debug, Clone)]
 pub enum IntrospectMsg {
     CreateTable(CreateTable),
     UpdateTable(UpdateTable),
@@ -72,6 +72,7 @@ pub struct CreateTable {
     pub attributes: Vec<Attribute>,
     pub primary: PrimaryDef,
     pub columns: Vec<ColumnDef>,
+    pub append_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -288,6 +289,7 @@ impl From<TableSchema> for CreateTable {
             attributes: schema.attributes,
             primary: schema.primary,
             columns: schema.columns,
+            append_only: false,
         }
     }
 }
@@ -351,6 +353,19 @@ impl InsertsFields {
     }
 }
 
+impl CreateTable {
+    pub fn from_schema(schema: TableSchema, append_only: bool) -> Self {
+        Self {
+            id: schema.id,
+            name: schema.name,
+            attributes: schema.attributes,
+            primary: schema.primary,
+            columns: schema.columns,
+            append_only,
+        }
+    }
+}
+
 impl DeleteRecords {
     pub fn new(table: Felt, rows: Vec<PrimaryValue>) -> Self {
         Self { table, rows }
@@ -380,5 +395,11 @@ trait ToKeyBytes {
 impl ToKeyBytes for Felt {
     fn to_key_bytes(&self) -> [u8; 32] {
         self.to_bytes_be()
+    }
+}
+
+impl ToKeyBytes for [u8; 32] {
+    fn to_key_bytes(&self) -> [u8; 32] {
+        *self
     }
 }

@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use clap::{Parser, ValueEnum};
 use starknet::core::types::Felt;
 use std::path::{Path, PathBuf};
+use torii_controllers_sink::DEFAULT_API_QUERY_URL as DEFAULT_CONTROLLERS_API_URL;
 
 const DEFAULT_RPC_URL: &str = "https://api.cartridge.gg/x/starknet/mainnet";
 const DEFAULT_WORLD_ADDRESS: &str =
@@ -146,6 +147,14 @@ pub struct Config {
     /// PEM-encoded TLS private key for the local HTTP/gRPC listener.
     #[arg(long, env = "TORII_TLS_KEY")]
     pub tls_key: Option<PathBuf>,
+
+    /// Cartridge-compatible GraphQL API used to fetch controller usernames.
+    #[arg(long, default_value = DEFAULT_CONTROLLERS_API_URL)]
+    pub controllers_api_url: String,
+
+    /// Enable controller synchronization into the arcade storage database.
+    #[arg(long)]
+    pub controllers: bool,
 
     #[arg(long)]
     pub observability: bool,
@@ -469,6 +478,32 @@ mod tests {
         let cfg = Config::parse_from(["torii-arcade", "--tls-cert", "./certs/dev-cert.pem"]);
 
         assert!(cfg.tls_config().is_err());
+    }
+
+    #[test]
+    fn controllers_sync_defaults_to_disabled() {
+        let cfg = Config::parse_from(["torii-arcade"]);
+
+        assert_eq!(cfg.controllers_api_url, DEFAULT_CONTROLLERS_API_URL);
+        assert!(!cfg.controllers);
+    }
+
+    #[test]
+    fn controllers_flag_enables_sync() {
+        let cfg = Config::parse_from(["torii-arcade", "--controllers"]);
+
+        assert!(cfg.controllers);
+    }
+
+    #[test]
+    fn controllers_api_url_overrides_default() {
+        let cfg = Config::parse_from([
+            "torii-arcade",
+            "--controllers-api-url",
+            "https://example.com/query",
+        ]);
+
+        assert_eq!(cfg.controllers_api_url, "https://example.com/query");
     }
 
     #[test]

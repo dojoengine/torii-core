@@ -4,12 +4,13 @@ mod config;
 
 use anyhow::Result;
 use clap::Parser;
-use config::{Config, StorageBackend};
+use config::Config;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use starknet::core::types::Felt;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tonic::codec::CompressionEncoding;
@@ -27,11 +28,9 @@ use torii_dojo::external_contract::{
     contract_type_from_decoder_ids, RegisterExternalContractCommandHandler, RegisteredContractType,
     SharedContractTypeRegistry, SharedDecoderRegistry,
 };
-use torii_dojo::store::postgres::PgStore;
-use torii_dojo::store::sqlite::SqliteStore;
+use torii_dojo::store::DojoStoreTrait;
 use torii_ecs_sink::proto::world::world_server::WorldServer;
 use torii_ecs_sink::{EcsSink, FILE_DESCRIPTOR_SET as ECS_DESCRIPTOR_SET};
-use torii_entities_historical_sink::EntitiesHistoricalSink;
 use torii_erc1155::proto::erc1155_server::Erc1155Server;
 use torii_erc1155::{
     Erc1155Decoder, Erc1155MetadataCommandHandler, Erc1155Service, Erc1155Sink, Erc1155Storage,
@@ -47,13 +46,14 @@ use torii_erc721::{
     Erc721Decoder, Erc721MetadataCommandHandler, Erc721Service, Erc721Sink, Erc721Storage,
     FILE_DESCRIPTOR_SET as ERC721_DESCRIPTOR_SET,
 };
-use torii_introspect_postgres_sink::processor::IntrospectPgDb;
-use torii_introspect_sqlite_sink::processor::IntrospectSqliteDb;
+use torii_introspect_sql_sink::{IntrospectPgDb, IntrospectSqliteDb, NamespaceMode};
 use torii_runtime_common::database::{
     resolve_token_db_setup, TokenDbSetup, DEFAULT_SQLITE_MAX_CONNECTIONS,
 };
 use torii_runtime_common::token_support::{resolve_installed_token_support, InstalledTokenSupport};
-use torii_sqlite::{is_sqlite_memory_path, sqlite_connect_options};
+use torii_sql::{DbBackend, DbPoolOptions};
+
+use crate::config::parse_historical_models;
 
 type StarknetProvider =
     starknet::providers::jsonrpc::JsonRpcClient<starknet::providers::jsonrpc::HttpTransport>;
@@ -201,9 +201,9 @@ async fn load_persisted_contract_registries(
     let mut contract_types = contract_type_registry.write().await;
 
     for (contract, decoder_ids, _) in mappings {
-        decoders.insert(contract, decoder_ids.clone());
+        decoders.insert(contract.into(), decoder_ids.clone());
         if let Some(contract_type) = contract_type_from_decoder_ids(&decoder_ids) {
-            contract_types.insert(contract, contract_type);
+            contract_types.insert(contract.into(), contract_type);
         }
     }
 
@@ -233,7 +233,7 @@ fn append_unique_contract_configs(
     for &address in addresses {
         if seen.insert(address) {
             configs.push(ContractEventConfig {
-                address,
+                address: address.into(),
                 from_block,
                 to_block,
             });
@@ -283,7 +283,7 @@ fn apply_contract_mappings(
             contract,
             decoder_ids
         );
-        torii_config = torii_config.map_contract(contract, decoder_ids);
+        torii_config = torii_config.map_contract(contract.into(), decoder_ids);
     }
 
     torii_config
@@ -353,7 +353,8 @@ async fn configure_token_support(
         token_db_setup.expect("token DB setup must exist when token support is configured");
 
     if installed_token_support.erc20 {
-        let storage = Arc::new(Erc20Storage::new(&db_setup.erc20_url).await?);
+        let erc20_pool = Erc20Storage::connect_pool(&db_setup.erc20_url).await?;
+        let storage = Arc::new(Erc20Storage::from_pool(&db_setup.erc20_url, erc20_pool).await?);
         tracing::info!("ERC20 database initialized: {}", db_setup.erc20_url);
 
         let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(Erc20Decoder::new());
@@ -383,7 +384,8 @@ async fn configure_token_support(
     }
 
     if installed_token_support.erc721 {
-        let storage = Arc::new(Erc721Storage::new(&db_setup.erc721_url).await?);
+        let erc721_pool = Erc721Storage::connect_pool(&db_setup.erc721_url).await?;
+        let storage = Arc::new(Erc721Storage::from_pool(&db_setup.erc721_url, erc721_pool).await?);
         tracing::info!("ERC721 database initialized: {}", db_setup.erc721_url);
 
         let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(Erc721Decoder::new());
@@ -418,7 +420,10 @@ async fn configure_token_support(
     }
 
     if installed_token_support.erc1155 {
-        let storage = Arc::new(Erc1155Storage::new(&db_setup.erc1155_url).await?);
+        let erc1155_pool = DbPoolOptions::new()
+            .connect_any(&db_setup.erc1155_url)
+            .await?;
+        let storage = Arc::new(Erc1155Storage::new(erc1155_pool, &db_setup.erc1155_url).await?);
         tracing::info!("ERC1155 database initialized: {}", db_setup.erc1155_url);
 
         let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(Erc1155Decoder::new());
@@ -492,7 +497,8 @@ async fn run_indexer(config: Config) -> Result<()> {
             erc1155: !token_targets.erc1155.is_empty(),
         },
     );
-    let historical_models = config.historical_models();
+    let historical_model_names = config.historical_models();
+    let historical_models = parse_historical_models(&historical_model_names, &contracts)?;
     let token_db_setup = if installed_token_support.any() {
         Some(resolve_token_db_setup(
             db_dir,
@@ -638,12 +644,12 @@ async fn run_indexer(config: Config) -> Result<()> {
         },
     ));
 
-    if matches!(backend, StorageBackend::Sqlite) {
+    if matches!(backend, DbBackend::Sqlite) {
         tokio::fs::create_dir_all(db_dir).await?;
     }
 
     match backend {
-        StorageBackend::Postgres => {
+        DbBackend::Postgres => {
             run_with_postgres(
                 &config,
                 &storage_database_url,
@@ -656,13 +662,13 @@ async fn run_indexer(config: Config) -> Result<()> {
                 decoder_registry.clone(),
                 contract_type_registry.clone(),
                 installed_external_decoders.clone(),
-                historical_models.clone(),
+                historical_models,
                 provider,
                 extractor,
             )
             .await?;
         }
-        StorageBackend::Sqlite => {
+        DbBackend::Sqlite => {
             run_with_sqlite(
                 &config,
                 &storage_database_url,
@@ -675,7 +681,7 @@ async fn run_indexer(config: Config) -> Result<()> {
                 decoder_registry.clone(),
                 contract_type_registry.clone(),
                 installed_external_decoders.clone(),
-                historical_models.clone(),
+                historical_models,
                 provider,
                 extractor,
             )
@@ -699,22 +705,23 @@ async fn run_with_postgres(
     decoder_registry: SharedDecoderRegistry,
     contract_type_registry: SharedContractTypeRegistry,
     installed_external_decoders: HashSet<DecoderId>,
-    historical_models: Vec<String>,
+    historical_models: HashSet<(Felt, String)>,
     provider: StarknetProvider,
     extractor: Box<dyn Extractor>,
 ) -> Result<()> {
     let token_provider = Arc::new(provider.clone());
     let max_db_connections = config.max_db_connections.unwrap_or(5);
-    let pool = Arc::new(
-        PgPoolOptions::new()
-            .max_connections(max_db_connections)
-            .connect(storage_database_url)
-            .await?,
-    );
+    let pool = PgPoolOptions::new()
+        .max_connections(max_db_connections)
+        .connect(storage_database_url)
+        .await?;
 
-    let decoder = DojoDecoder::<PgStore<_>, _>::new(pool.clone(), provider);
-    let introspect_sink = IntrospectPgDb::new(pool.clone(), ());
-    decoder.store.initialize().await?;
+    let mut decoder = DojoDecoder::new(pool.clone(), provider);
+    let introspect_sink = IntrospectPgDb::new(pool.clone(), NamespaceMode::Address);
+
+    decoder.append_historical(historical_models);
+    decoder.initialize().await?;
+    introspect_sink.initialize_introspect_sql_sink().await?;
     decoder.load_tables(&[]).await?;
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
@@ -736,23 +743,21 @@ async fn run_with_postgres(
         .add_decoder(decoder)
         .add_sink_boxed(Box::new(
             OrderedSinkPipeline::new("introspect-projection-pipeline")
-                .push(Box::new(introspect_sink))
-                .push(Box::new(
-                    EntitiesHistoricalSink::new(
-                        storage_database_url,
-                        config.max_db_connections,
-                        (),
-                        historical_models,
-                    )
-                    .await?,
-                )),
+                .push(Box::new(introspect_sink)),
         ));
     if let Some(tls) = config.tls_config()? {
         torii_config = torii_config.with_tls(tls);
     }
     if config.index_external_contracts {
         torii_config = torii_config
-            .with_registry_cache(decoder_registry.clone())
+            .with_registry_cache(Arc::new(RwLock::new(
+                decoder_registry
+                    .read()
+                    .await
+                    .iter()
+                    .map(|(contract, decoder_ids)| ((*contract).into(), decoder_ids.clone()))
+                    .collect(),
+            )))
             .with_command_handler(Box::new(RegisterExternalContractCommandHandler::new(
                 registry_engine_db.clone(),
                 decoder_registry.clone(),
@@ -879,36 +884,33 @@ async fn run_with_sqlite(
     decoder_registry: SharedDecoderRegistry,
     contract_type_registry: SharedContractTypeRegistry,
     installed_external_decoders: HashSet<DecoderId>,
-    historical_models: Vec<String>,
+    historical_models: HashSet<(Felt, String)>,
     provider: StarknetProvider,
     extractor: Box<dyn Extractor>,
 ) -> Result<()> {
     let token_provider = Arc::new(provider.clone());
-    let options = sqlite_connect_options(storage_database_url)?;
+    let options = SqliteConnectOptions::from_str(storage_database_url)?.create_if_missing(true);
     let max_db_connections = match config.max_db_connections {
         Some(limit) => limit.max(1),
-        None if is_sqlite_memory_path(storage_database_url) => 1,
+        None if options.is_in_memory() => 1,
         None => DEFAULT_SQLITE_MAX_CONNECTIONS,
     };
-    let pool = Arc::new(
-        SqlitePoolOptions::new()
-            .max_connections(max_db_connections)
-            .connect_with(options)
-            .await?,
-    );
+    let pool = SqlitePoolOptions::new()
+        .max_connections(max_db_connections)
+        .connect_with(options)
+        .await?;
 
     sqlx::query("PRAGMA journal_mode=WAL")
-        .execute(pool.as_ref())
+        .execute(&pool)
         .await?;
     sqlx::query("PRAGMA synchronous=NORMAL")
-        .execute(pool.as_ref())
+        .execute(&pool)
         .await?;
-    sqlx::query("PRAGMA foreign_keys=ON")
-        .execute(pool.as_ref())
-        .await?;
+    sqlx::query("PRAGMA foreign_keys=ON").execute(&pool).await?;
 
-    let decoder = DojoDecoder::<SqliteStore<_>, _>::new(pool.clone(), provider);
-    decoder.store.initialize().await?;
+    let mut decoder = DojoDecoder::new(pool.clone(), provider);
+    decoder.append_historical(historical_models);
+    decoder.initialize().await?;
     decoder.load_tables(&[]).await?;
 
     let decoder: Arc<dyn torii::etl::Decoder> = Arc::new(decoder);
@@ -929,24 +931,23 @@ async fn run_with_sqlite(
         .with_extractor(extractor)
         .add_decoder(decoder)
         .add_sink_boxed(Box::new(
-            OrderedSinkPipeline::new("introspect-projection-pipeline")
-                .push(Box::new(IntrospectSqliteDb::new(pool.clone(), ())))
-                .push(Box::new(
-                    EntitiesHistoricalSink::new(
-                        storage_database_url,
-                        config.max_db_connections,
-                        (),
-                        historical_models,
-                    )
-                    .await?,
-                )),
+            OrderedSinkPipeline::new("introspect-projection-pipeline").push(Box::new(
+                IntrospectSqliteDb::new(pool.clone(), NamespaceMode::Address),
+            )),
         ));
     if let Some(tls) = config.tls_config()? {
         torii_config = torii_config.with_tls(tls);
     }
     if config.index_external_contracts {
         torii_config = torii_config
-            .with_registry_cache(decoder_registry.clone())
+            .with_registry_cache(Arc::new(RwLock::new(
+                decoder_registry
+                    .read()
+                    .await
+                    .iter()
+                    .map(|(contract, decoder_ids)| ((*contract).into(), decoder_ids.clone()))
+                    .collect(),
+            )))
             .with_command_handler(Box::new(RegisterExternalContractCommandHandler::new(
                 registry_engine_db.clone(),
                 decoder_registry.clone(),
@@ -1064,7 +1065,8 @@ async fn run_with_sqlite(
 #[cfg(test)]
 mod tests {
     use super::{ecs_token_storage_urls, InstalledTokenSupport};
-    use torii_runtime_common::database::{DatabaseBackend, TokenDbSetup};
+    use torii_runtime_common::database::TokenDbSetup;
+    use torii_sql::DbBackend;
 
     fn token_db_setup() -> TokenDbSetup {
         TokenDbSetup {
@@ -1072,10 +1074,10 @@ mod tests {
             erc20_url: "./torii-data/erc20.db".to_string(),
             erc721_url: "./torii-data/erc721.db".to_string(),
             erc1155_url: "./torii-data/erc1155.db".to_string(),
-            engine_backend: DatabaseBackend::Sqlite,
-            erc20_backend: DatabaseBackend::Sqlite,
-            erc721_backend: DatabaseBackend::Sqlite,
-            erc1155_backend: DatabaseBackend::Sqlite,
+            engine_backend: DbBackend::Sqlite,
+            erc20_backend: DbBackend::Sqlite,
+            erc721_backend: DbBackend::Sqlite,
+            erc1155_backend: DbBackend::Sqlite,
         }
     }
 

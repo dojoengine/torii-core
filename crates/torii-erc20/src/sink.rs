@@ -12,7 +12,7 @@
 //!   fetches the actual balance from the chain and adjusts
 
 use crate::balance_fetcher::BalanceFetcher;
-use crate::decoder::{Approval as DecodedApproval, Transfer as DecodedTransfer};
+use crate::decoder::{Erc20Event, ERC20_TYPE_ID};
 use crate::grpc_service::Erc20Service;
 use crate::handlers::FetchErc20MetadataCommand;
 use crate::proto;
@@ -20,10 +20,11 @@ use crate::storage::{ApprovalData, Erc20Storage, TransferData};
 use anyhow::Result;
 use async_trait::async_trait;
 use axum::Router;
+use primitive_types::U256;
 use prost::Message;
 use prost_types::Any;
-use starknet::core::types::{Felt, U256};
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
+use starknet_types_raw::Felt;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -217,7 +218,7 @@ impl Sink for Erc20Sink {
     }
 
     fn interested_types(&self) -> Vec<TypeId> {
-        vec![TypeId::new("erc20.transfer"), TypeId::new("erc20.approval")]
+        vec![ERC20_TYPE_ID]
     }
 
     async fn initialize(
@@ -245,36 +246,38 @@ impl Sink for Erc20Sink {
             .collect();
 
         for envelope in envelopes {
-            // Handle transfers
-            if envelope.type_id == TypeId::new("erc20.transfer") {
-                if let Some(transfer) = envelope.body.as_any().downcast_ref::<DecodedTransfer>() {
-                    let timestamp = block_timestamps.get(&transfer.block_number).copied();
-                    transfers.push(TransferData {
-                        id: None,
-                        token: transfer.token,
-                        from: transfer.from,
-                        to: transfer.to,
-                        amount: transfer.amount,
-                        block_number: transfer.block_number,
-                        tx_hash: transfer.transaction_hash,
-                        timestamp,
-                    });
-                }
+            if envelope.type_id != ERC20_TYPE_ID {
+                continue;
             }
-            // Handle approvals
-            else if envelope.type_id == TypeId::new("erc20.approval") {
-                if let Some(approval) = envelope.body.as_any().downcast_ref::<DecodedApproval>() {
-                    let timestamp = block_timestamps.get(&approval.block_number).copied();
-                    approvals.push(ApprovalData {
-                        id: None,
-                        token: approval.token,
-                        owner: approval.owner,
-                        spender: approval.spender,
-                        amount: approval.amount,
-                        block_number: approval.block_number,
-                        tx_hash: approval.transaction_hash,
-                        timestamp,
-                    });
+
+            if let Some(event) = envelope.body.as_any().downcast_ref::<Erc20Event>() {
+                match event {
+                    Erc20Event::Transfer(transfer) => {
+                        let timestamp = block_timestamps.get(&transfer.block_number).copied();
+                        transfers.push(TransferData {
+                            id: None,
+                            token: transfer.token,
+                            from: transfer.from,
+                            to: transfer.to,
+                            amount: transfer.amount,
+                            block_number: transfer.block_number,
+                            tx_hash: transfer.transaction_hash,
+                            timestamp,
+                        });
+                    }
+                    Erc20Event::Approval(approval) => {
+                        let timestamp = block_timestamps.get(&approval.block_number).copied();
+                        approvals.push(ApprovalData {
+                            id: None,
+                            token: approval.token,
+                            owner: approval.owner,
+                            spender: approval.spender,
+                            amount: approval.amount,
+                            block_number: approval.block_number,
+                            tx_hash: approval.transaction_hash,
+                            timestamp,
+                        });
+                    }
                 }
             }
         }
@@ -449,12 +452,12 @@ impl Sink for Erc20Sink {
                     // Publish transfer events
                     for transfer in &transfers {
                         let proto_transfer = proto::Transfer {
-                            token: transfer.token.to_bytes_be().to_vec(),
-                            from: transfer.from.to_bytes_be().to_vec(),
-                            to: transfer.to.to_bytes_be().to_vec(),
+                            token: transfer.token.to_be_bytes_vec(),
+                            from: transfer.from.to_be_bytes_vec(),
+                            to: transfer.to.to_be_bytes_vec(),
                             amount: u256_to_bytes(transfer.amount),
                             block_number: transfer.block_number,
-                            tx_hash: transfer.tx_hash.to_bytes_be().to_vec(),
+                            tx_hash: transfer.tx_hash.to_be_bytes_vec(),
                             timestamp: transfer.timestamp.unwrap_or(0),
                         };
 
@@ -522,12 +525,12 @@ impl Sink for Erc20Sink {
                     // Publish approval events
                     for approval in &approvals {
                         let proto_approval = proto::Approval {
-                            token: approval.token.to_bytes_be().to_vec(),
-                            owner: approval.owner.to_bytes_be().to_vec(),
-                            spender: approval.spender.to_bytes_be().to_vec(),
+                            token: approval.token.to_be_bytes_vec(),
+                            owner: approval.owner.to_be_bytes_vec(),
+                            spender: approval.spender.to_be_bytes_vec(),
                             amount: u256_to_bytes(approval.amount),
                             block_number: approval.block_number,
-                            tx_hash: approval.tx_hash.to_bytes_be().to_vec(),
+                            tx_hash: approval.tx_hash.to_be_bytes_vec(),
                             timestamp: approval.timestamp.unwrap_or(0),
                         };
 

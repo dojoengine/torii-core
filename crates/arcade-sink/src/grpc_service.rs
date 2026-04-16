@@ -4,14 +4,13 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;
-use sqlx::{
-    any::AnyPoolOptions, sqlite::SqliteConnectOptions, Any, ConnectOptions, Pool, QueryBuilder, Row,
-};
+use sqlx::{any::AnyPoolOptions, Any, Pool, QueryBuilder, Row};
 use starknet::core::types::{Felt, U256};
 use tonic::{Request, Response, Status};
 use torii_common::{blob_to_u256, u256_to_blob};
 use torii_erc721::{storage::OwnershipCursor, Erc721Storage};
 use torii_runtime_common::database::DEFAULT_SQLITE_MAX_CONNECTIONS;
+use torii_sql::DbPool;
 
 use crate::proto::arcade::{
     arcade_server::Arcade, Collection, Edition, Game, GetPlayerInventoryRequest,
@@ -119,11 +118,14 @@ impl ArcadeService {
             .connect(&database_url)
             .await?;
 
+        let erc721_pool: DbPool = Erc721Storage::connect_pool(erc721_database_url).await?;
+        let erc721 = Arc::new(Erc721Storage::from_pool(erc721_database_url, erc721_pool).await?);
+
         let service = Self {
             state: Arc::new(ArcadeState {
                 pool,
                 backend,
-                erc721: Arc::new(Erc721Storage::new(erc721_database_url).await?),
+                erc721,
             }),
         };
 
@@ -1754,7 +1756,7 @@ fn row_string(row: &sqlx::any::AnyRow, column: &str) -> Result<String> {
 
 fn row_felt_hex(row: &sqlx::any::AnyRow, column: &str) -> Result<String> {
     if let Ok(bytes) = row.try_get::<Vec<u8>, _>(column) {
-        return Ok(felt_hex(Felt::from_bytes_be_slice(&bytes)));
+        return Ok(felt_hex(felt_from_bytes(&bytes)?));
     }
 
     let value = row
@@ -1887,7 +1889,13 @@ fn felt_from_hex(value: &str) -> Result<Felt> {
 }
 
 fn felt_from_bytes(value: &[u8]) -> Result<Felt> {
-    Ok(Felt::from_bytes_be_slice(value))
+    if value.len() > 32 {
+        return Err(anyhow!("felt bytes exceed 32 bytes"));
+    }
+
+    let mut padded = [0u8; 32];
+    padded[32 - value.len()..].copy_from_slice(value);
+    Ok(Felt::from_bytes_be(&padded))
 }
 
 fn decimal_to_bytes(value: &str) -> Result<Vec<u8>> {
@@ -1914,7 +1922,8 @@ fn decimal_to_bytes(value: &str) -> Result<Vec<u8>> {
         }
     }
 
-    Ok(u256_to_blob(blob_to_u256(&bytes)))
+    let value: U256 = blob_to_u256(&bytes);
+    Ok(u256_to_blob(value))
 }
 
 fn u256_to_bytes(value: U256) -> Vec<u8> {
@@ -1928,16 +1937,14 @@ fn sqlite_url(path: &str) -> Result<String> {
     if path.starts_with("sqlite:") {
         return Ok(path.to_string());
     }
-    let options = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))
-        .or_else(|_| Ok::<_, sqlx::Error>(SqliteConnectOptions::new().filename(path)))?;
-    if let Some(parent) = options
-        .get_filename()
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-    {
+    let path = std::path::Path::new(path);
+    if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent)?;
     }
-    Ok(options.to_url_lossy().to_string())
+    if !path.exists() {
+        std::fs::File::create(path)?;
+    }
+    Ok(format!("sqlite://{}", path.display()))
 }
 
 fn internal_status(error: impl std::fmt::Display) -> Status {

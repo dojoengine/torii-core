@@ -5,7 +5,7 @@ use introspect_types::{
     DecodeResult, FeltSource,
 };
 use serde::{Deserialize, Serialize};
-use starknet::core::types::Felt;
+use starknet_types_core::felt::Felt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -210,7 +210,7 @@ impl CommandHandler for RegisterExternalContractCommandHandler {
         let command = *command;
 
         self.engine_db
-            .set_contract_decoders(command.contract_address, &command.decoder_ids)
+            .set_contract_decoders(command.contract_address.into(), &command.decoder_ids)
             .await
             .with_context(|| {
                 format!(
@@ -379,7 +379,7 @@ mod tests {
         );
         assert_eq!(
             engine_db
-                .get_contract_decoders(contract_address)
+                .get_contract_decoders(contract_address.into())
                 .await
                 .unwrap()
                 .unwrap(),

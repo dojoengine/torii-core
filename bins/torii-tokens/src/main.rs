@@ -61,7 +61,8 @@ use torii_common::{MetadataFetcher, TokenUriService};
 use torii_config_common::apply_observability_env;
 use torii_runtime_common::database::resolve_token_db_setup;
 #[cfg(feature = "profiling")]
-use torii_runtime_common::database::DatabaseBackend;
+use torii_sql::DbBackend;
+use torii_sql::DbPoolOptions;
 
 // Import from ERC20 library crate
 use torii_erc20::proto::erc20_server::Erc20Server;
@@ -97,13 +98,13 @@ async fn contracts_from_registry(
 
     for (contract, decoder_ids, _) in mappings {
         if decoder_ids.contains(&erc20_id) {
-            erc20.push(contract);
+            erc20.push(contract.into());
         }
         if decoder_ids.contains(&erc721_id) {
-            erc721.push(contract);
+            erc721.push(contract.into());
         }
         if decoder_ids.contains(&erc1155_id) {
-            erc1155.push(contract);
+            erc1155.push(contract.into());
         }
     }
 
@@ -188,7 +189,7 @@ async fn bootstrap_registry_for_event_mode(
             continue;
         }
 
-        let contract_addresses: Vec<Felt> = batch
+        let contract_addresses: Vec<_> = batch
             .events
             .iter()
             .map(|event| event.from_address)
@@ -445,7 +446,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
             for addr in &all_erc20_addresses {
                 event_configs.push(ContractEventConfig {
-                    address: *addr,
+                    address: (*addr).into(),
                     from_block: config.from_block,
                     to_block,
                 });
@@ -453,7 +454,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
             for addr in &all_erc721_addresses {
                 event_configs.push(ContractEventConfig {
-                    address: *addr,
+                    address: (*addr).into(),
                     from_block: config.from_block,
                     to_block,
                 });
@@ -461,7 +462,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
             for addr in &all_erc1155_addresses {
                 event_configs.push(ContractEventConfig {
-                    address: *addr,
+                    address: (*addr).into(),
                     from_block: config.from_block,
                     to_block,
                 });
@@ -539,7 +540,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     if create_erc20 {
         enabled_types.push("ERC20");
 
-        let storage = Arc::new(Erc20Storage::new(&db_setup.erc20_url).await?);
+        let erc20_pool = Erc20Storage::connect_pool(&db_setup.erc20_url).await?;
+        let storage = Arc::new(Erc20Storage::from_pool(&db_setup.erc20_url, erc20_pool).await?);
         tracing::info!("ERC20 database initialized: {}", db_setup.erc20_url);
 
         let decoder = Arc::new(Erc20Decoder::new());
@@ -570,7 +572,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
         let erc20_decoder_id = DecoderId::new("erc20");
         for address in &all_erc20_addresses {
-            torii_config = torii_config.map_contract(*address, vec![erc20_decoder_id]);
+            torii_config = torii_config.map_contract((*address).into(), vec![erc20_decoder_id]);
         }
 
         if all_erc20_addresses.is_empty() {
@@ -586,7 +588,8 @@ async fn run_indexer(config: Config) -> Result<()> {
     if create_erc721 {
         enabled_types.push("ERC721");
 
-        let storage = Arc::new(Erc721Storage::new(&db_setup.erc721_url).await?);
+        let erc721_pool = Erc721Storage::connect_pool(&db_setup.erc721_url).await?;
+        let storage = Arc::new(Erc721Storage::from_pool(&db_setup.erc721_url, erc721_pool).await?);
         tracing::info!("ERC721 database initialized: {}", db_setup.erc721_url);
 
         let decoder = Arc::new(Erc721Decoder::new());
@@ -625,7 +628,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
         let erc721_decoder_id = DecoderId::new("erc721");
         for address in &all_erc721_addresses {
-            torii_config = torii_config.map_contract(*address, vec![erc721_decoder_id]);
+            torii_config = torii_config.map_contract((*address).into(), vec![erc721_decoder_id]);
         }
 
         if all_erc721_addresses.is_empty() {
@@ -641,7 +644,10 @@ async fn run_indexer(config: Config) -> Result<()> {
     if create_erc1155 {
         enabled_types.push("ERC1155");
 
-        let storage = Arc::new(Erc1155Storage::new(&db_setup.erc1155_url).await?);
+        let erc1155_pool = DbPoolOptions::new()
+            .connect_any(&db_setup.erc1155_url)
+            .await?;
+        let storage = Arc::new(Erc1155Storage::new(erc1155_pool, &db_setup.erc1155_url).await?);
         tracing::info!("ERC1155 database initialized: {}", db_setup.erc1155_url);
 
         let decoder = Arc::new(Erc1155Decoder::new());
@@ -679,7 +685,7 @@ async fn run_indexer(config: Config) -> Result<()> {
 
         let erc1155_decoder_id = DecoderId::new("erc1155");
         for address in &all_erc1155_addresses {
-            torii_config = torii_config.map_contract(*address, vec![erc1155_decoder_id]);
+            torii_config = torii_config.map_contract((*address).into(), vec![erc1155_decoder_id]);
         }
 
         if all_erc1155_addresses.is_empty() {
@@ -782,7 +788,7 @@ async fn run_indexer(config: Config) -> Result<()> {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let db_backend = if db_setup.erc20_backend == DatabaseBackend::Postgres {
+            let db_backend = if db_setup.erc20_backend == DbBackend::Postgres {
                 "postgres"
             } else {
                 "sqlite"

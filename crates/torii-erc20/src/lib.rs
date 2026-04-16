@@ -19,7 +19,7 @@
 //! use torii_erc20::proto::erc20_server::Erc20Server;
 //!
 //! // Create storage
-//! let storage = Arc::new(Erc20Storage::new("./erc20.db")?);
+//! let storage = Arc::new(Erc20Storage::new("./erc20.db").await?);
 //!
 //! // Create gRPC service
 //! let grpc_service = Erc20Service::new(storage.clone());
@@ -54,7 +54,7 @@ pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/erc20_descripto
 
 // Re-export main types for convenience
 pub use balance_fetcher::{BalanceFetchRequest, BalanceFetcher};
-pub use decoder::{Approval, Erc20Decoder, Transfer};
+pub use decoder::{Approval, Erc20Decoder, Erc20Event, Transfer, ERC20_TYPE_ID};
 pub use grpc_service::Erc20Service;
 pub use handlers::Erc20MetadataCommandHandler;
 pub use identification::Erc20Rule;

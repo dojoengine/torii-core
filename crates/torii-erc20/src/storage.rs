@@ -10,25 +10,40 @@
 //! - Records all adjustments in an audit table for debugging
 
 use anyhow::Result;
+use primitive_types::U256;
 use rusqlite::{params, params_from_iter, Connection, ToSql};
-use starknet::core::types::{Felt, U256};
+use starknet_types_raw::Felt;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio_postgres::types::ToSql as PgToSql;
 use tokio_postgres::{Client, NoTls};
 use torii_common::{blob_to_felt, blob_to_u256, felt_to_blob, u256_to_blob};
+use torii_sql::{DbPool, DbPoolOptions};
 
 use crate::balance_fetcher::BalanceFetchRequest;
 
 /// Maximum value for U256 (2^256 - 1)
-const U256_MAX: U256 = U256::from_words(u128::MAX, u128::MAX);
 const SQLITE_MAX_BIND_VARS: usize = 900;
 const SQLITE_TOKEN_WALLET_QUERY_CHUNK: usize = SQLITE_MAX_BIND_VARS - 1;
 const SQLITE_ACTIVITY_INSERT_CHUNK: usize = SQLITE_MAX_BIND_VARS / 5;
 const SQLITE_BALANCE_UPSERT_CHUNK: usize = SQLITE_MAX_BIND_VARS / 5;
 const SQLITE_ADJUSTMENT_INSERT_CHUNK: usize = SQLITE_MAX_BIND_VARS / 6;
 const DEFAULT_BALANCE_CACHE_CAPACITY: usize = 300_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StorageBackend {
+    Sqlite,
+    Postgres,
+}
+
+/// Storage for ERC20 token data.
+pub struct Erc20Storage {
+    pool: DbPool,
+    backend: StorageBackend,
+    conn: Arc<Mutex<Connection>>,
+    balance_cache: Arc<Mutex<BalanceCacheState>>,
+    pg_conn: Option<Arc<tokio::sync::Mutex<Client>>>,
+}
 
 #[derive(Debug)]
 struct BalanceCacheState {
@@ -108,6 +123,21 @@ impl BalanceCacheState {
     }
 }
 
+fn db_pool_url(db_path: &str) -> String {
+    if db_path == ":memory:" || db_path == "sqlite::memory:" {
+        return "sqlite::memory:".to_owned();
+    }
+
+    if db_path.starts_with("postgres://")
+        || db_path.starts_with("postgresql://")
+        || db_path.starts_with("sqlite:")
+    {
+        return db_path.to_owned();
+    }
+
+    format!("sqlite://{db_path}?mode=rwc")
+}
+
 struct ActivityInsertRow {
     account: Vec<u8>,
     token: Vec<u8>,
@@ -146,15 +176,15 @@ struct AdjustmentInsertRow {
 /// - Accumulation of many transfers to the same address
 fn safe_u256_add(a: U256, b: U256) -> U256 {
     // Check if addition would overflow
-    // If a > U256_MAX - b, then a + b would overflow
-    let max_minus_b = U256_MAX - b;
+    // If a > U256::MAX - b, then a + b would overflow
+    let max_minus_b = U256::MAX - b;
     if a > max_minus_b {
         tracing::warn!(
             "U256 addition overflow detected: {} + {} would exceed U256::MAX, capping at maximum",
             a,
             b
         );
-        U256_MAX
+        U256::MAX
     } else {
         a + b
     }
@@ -170,21 +200,6 @@ pub enum TransferDirection {
     Sent,
     /// Only received transfers (wallet is receiver)
     Received,
-}
-
-/// Storage for ERC20 transfers and approvals
-pub struct Erc20Storage {
-    backend: StorageBackend,
-    conn: Arc<Mutex<Connection>>,
-    balance_cache: Arc<Mutex<BalanceCacheState>>,
-    pg_conns: Option<Vec<Arc<tokio::sync::Mutex<Client>>>>,
-    pg_rr: AtomicUsize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StorageBackend {
-    Sqlite,
-    Postgres,
 }
 
 /// Transfer data for batch insertion
@@ -319,33 +334,32 @@ impl Erc20Storage {
         ::metrics::gauge!("torii_erc20_balance_cache_size").set(cache.size() as f64);
     }
 
+    pub fn pool(&self) -> &DbPool {
+        &self.pool
+    }
+
+    pub async fn connect_pool(db_path: &str) -> Result<DbPool> {
+        Ok(DbPoolOptions::new()
+            .connect_any(&db_pool_url(db_path))
+            .await?)
+    }
+
     /// Create or open the database
     pub async fn new(db_path: &str) -> Result<Self> {
+        let pool = Self::connect_pool(db_path).await?;
+        Self::from_pool(db_path, pool).await
+    }
+
+    pub async fn from_pool(db_path: &str, pool: DbPool) -> Result<Self> {
         let balance_cache = Self::build_balance_cache();
-        if db_path.starts_with("postgres://") || db_path.starts_with("postgresql://") {
-            let pool_size = std::env::var("TORII_ERC20_PG_POOL_SIZE")
-                .ok()
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(8)
-                .max(1);
+        if matches!(&pool, DbPool::Postgres(_)) {
+            let (client, connection) = tokio_postgres::connect(db_path, NoTls).await?;
+            tokio::spawn(async move {
+                if let Err(e) = connection.await {
+                    tracing::error!(target: "torii_erc20::storage", error = %e, "PostgreSQL connection task failed");
+                }
+            });
 
-            let mut pg_conns = Vec::with_capacity(pool_size);
-
-            for _ in 0..pool_size {
-                let (client, connection) = tokio_postgres::connect(db_path, NoTls).await?;
-                tokio::spawn(async move {
-                    if let Err(e) = connection.await {
-                        tracing::error!(target: "torii_erc20::storage", error = %e, "PostgreSQL connection task failed");
-                    }
-                });
-                pg_conns.push(Arc::new(tokio::sync::Mutex::new(client)));
-            }
-
-            let schema_client = pg_conns
-                .first()
-                .expect("PostgreSQL connection pool must contain at least one client")
-                .clone();
-            let client = schema_client.lock().await;
             client
                 .batch_execute(
                     r"
@@ -446,13 +460,13 @@ impl Erc20Storage {
                 )
                 .await?;
 
-            tracing::info!(target: "torii_erc20::storage", pool_size, "PostgreSQL storage initialized");
+            tracing::info!(target: "torii_erc20::storage", "PostgreSQL storage initialized");
             return Ok(Self {
+                pool,
                 backend: StorageBackend::Postgres,
                 conn: Arc::new(Mutex::new(Connection::open_in_memory()?)),
                 balance_cache,
-                pg_conns: Some(pg_conns),
-                pg_rr: AtomicUsize::new(0),
+                pg_conn: Some(Arc::new(tokio::sync::Mutex::new(client))),
             });
         }
 
@@ -737,11 +751,11 @@ impl Erc20Storage {
         tracing::info!(target: "torii_erc20::storage", db_path = %db_path, "Database initialized");
 
         Ok(Self {
+            pool,
             backend: StorageBackend::Sqlite,
             conn: Arc::new(Mutex::new(conn)),
             balance_cache,
-            pg_conns: None,
-            pg_rr: AtomicUsize::new(0),
+            pg_conn: None,
         })
     }
 
@@ -2181,12 +2195,11 @@ impl Erc20Storage {
     }
 
     async fn pg_client(&self) -> Result<tokio::sync::MutexGuard<'_, Client>> {
-        let conns = self
-            .pg_conns
+        let conn = self
+            .pg_conn
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("PostgreSQL connections not initialized"))?;
-        let idx = self.pg_rr.fetch_add(1, Ordering::Relaxed) % conns.len();
-        Ok(conns[idx].lock().await)
+            .ok_or_else(|| anyhow::anyhow!("PostgreSQL connection not initialized"))?;
+        Ok(conn.lock().await)
     }
 
     fn pg_next_param(
