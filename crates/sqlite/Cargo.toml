@@ -7,6 +7,7 @@ description = "SQLite connection helpers for Torii storage crates"
 [dependencies]
 async-trait.workspace = true
 futures.workspace = true
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 sqlx = { workspace = true, features = [
     "sqlite",
     "runtime-tokio-rustls",
@@ -14,6 +15,9 @@ sqlx = { workspace = true, features = [
 ] }
 
 torii-common.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
 
 [lints]
 workspace = true

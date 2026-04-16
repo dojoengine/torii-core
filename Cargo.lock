@@ -5403,7 +5403,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "libsqlite3-sys",
  "sqlx",
+ "tokio",
  "torii-common",
 ]
 
