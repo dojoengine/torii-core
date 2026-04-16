@@ -5,6 +5,7 @@
 use sqlx::postgres::PgPoolOptions;
 use sqlx::Row;
 use torii_introspect_postgres_sink::INTROSPECT_PG_SINK_MIGRATIONS;
+use torii_postgres::migration::SchemaMigrator;
 
 async fn get_pool() -> Option<sqlx::PgPool> {
     let url = std::env::var("DATABASE_URL").ok()?;
@@ -13,7 +14,7 @@ async fn get_pool() -> Option<sqlx::PgPool> {
         .connect(&url)
         .await
         .expect("failed to connect to DATABASE_URL");
-    INTROSPECT_PG_SINK_MIGRATIONS
+    SchemaMigrator::new("introspect", INTROSPECT_PG_SINK_MIGRATIONS)
         .run(&pool)
         .await
         .expect("failed to run migrations");
