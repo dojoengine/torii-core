@@ -5038,6 +5038,7 @@ dependencies = [
  "torii-dojo",
  "torii-introspect",
  "torii-runtime-common",
+ "torii-sqlite",
  "tracing",
 ]
 
@@ -5403,7 +5404,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures",
+ "libsqlite3-sys",
  "sqlx",
+ "tokio",
  "torii-common",
 ]
 
