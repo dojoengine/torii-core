@@ -90,7 +90,7 @@ unsafe extern "C" fn hex2int_fn(
         return;
     }
 
-    let text = std::ffi::CStr::from_ptr(text_ptr as *const _)
+    let text = std::ffi::CStr::from_ptr(text_ptr.cast::<c_char>())
         .to_str()
         .unwrap_or("");
     let stripped = text
@@ -104,12 +104,11 @@ unsafe extern "C" fn hex2int_fn(
         .get(stripped.len().saturating_sub(16)..)
         .unwrap_or(stripped);
 
-    match u64::from_str_radix(lower, 16) {
-        Ok(n) => sqlite3_result_int64(ctx, n as i64),
-        Err(_) => {
-            let msg = CString::new(format!("hex2int: invalid hex string '{text}'")).unwrap();
-            sqlite3_result_error(ctx, msg.as_ptr(), -1);
-        }
+    if let Ok(n) = u64::from_str_radix(lower, 16) {
+        sqlite3_result_int64(ctx, n as i64);
+    } else {
+        let msg = CString::new(format!("hex2int: invalid hex string '{text}'")).unwrap();
+        sqlite3_result_error(ctx, msg.as_ptr(), -1);
     }
 }
 
