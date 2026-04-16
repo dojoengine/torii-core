@@ -24,6 +24,7 @@ pub trait EventFetcher {
         to_block: u64,
     ) -> PFResult<(Vec<BlockContext>, Vec<StarknetEvent>)>;
 }
+
 impl EventFetcher for Connection {
     fn get_events(&self, from_block: u64, to_block: u64) -> PFResult<Vec<StarknetEvent>> {
         let total_events = self.get_number_of_events_for_blocks(from_block, to_block)?;
@@ -50,6 +51,7 @@ impl EventFetcher for Connection {
                 }
             }
         }
+
         Ok(events)
     }
 

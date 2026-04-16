@@ -4902,6 +4902,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "hex",
  "metrics",
  "reqwest",
  "serde",
@@ -5132,7 +5133,7 @@ dependencies = [
 
 [[package]]
 name = "torii-introspect-bin"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",

@@ -1,10 +1,12 @@
 use crate::connect;
+#[cfg(feature = "etl")]
 use crate::extractor::PathfinderExtractor;
 use crate::fetcher::EventFetcher;
 
 const DB_PATH: &str = "/mnt/store/mainnet.sqlite";
 
 #[test]
+#[cfg(feature = "etl")]
 #[ignore = "requires /mnt/store/mainnet.sqlite snapshot"]
 fn test_emitted_events() {
     let mut extractor =
