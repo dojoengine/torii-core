@@ -645,6 +645,7 @@ impl EcsService {
         erc1155_url: Option<&str>,
     ) -> Result<Self> {
         sqlx::any::install_default_drivers();
+        torii_sqlite::install_udfs();
 
         let backend = DbBackend::detect(database_url);
         let database_url = match backend {
