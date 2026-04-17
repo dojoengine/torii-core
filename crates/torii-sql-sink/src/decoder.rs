@@ -2,15 +2,17 @@
 //!
 //! It demonstrate how to decode Starknet events into envelopes based on the event content.
 use async_trait::async_trait;
-use starknet::core::types::{EmittedEvent, Felt};
-use starknet::core::utils::parse_cairo_short_string;
-use starknet::macros::selector;
+use starknet_types_raw::event::EmittedEvent;
+use starknet_types_raw::Felt;
 use std::any::Any;
 use std::collections::HashMap;
 
 use torii::etl::decoder::Decoder;
 use torii::etl::envelope::{Envelope, TypeId, TypedBody};
+use torii::etl::EventContext;
 
+const INSERT_SELECTOR: Felt = Felt::selector("insert");
+const UPDATE_SELECTOR: Felt = Felt::selector("update");
 /// SqlInsert event type - represents a SQL insert operation.
 /// By deriving TypedBody, it allows the envelope to be downcast to this type.
 #[derive(Debug, Clone)]
@@ -88,35 +90,18 @@ impl SqlDecoder {
 
         self.contract_filters.contains(&event.from_address)
     }
-}
 
-/// Implementation of the Decoder trait for generic usage (not specific to the SQL sink).
-#[async_trait]
-impl Decoder for SqlDecoder {
-    fn decoder_name(&self) -> &'static str {
-        "sql"
-    }
-
-    async fn decode_event(&self, event: &EmittedEvent) -> anyhow::Result<Vec<Envelope>> {
+    pub async fn decode(&self, event: &EmittedEvent) -> anyhow::Result<Vec<Envelope>> {
         if !self.is_interested(event) {
             return Ok(Vec::new());
         }
 
-        let insert_selector = selector!("insert");
-        let update_selector = selector!("update");
-
-        // We could add additional checks for example length of keys etc..
-        // In this case, we're going to assume they are present already.
         let selector = match event.keys.first() {
             Some(s) => s,
             None => return Ok(Vec::new()),
         };
 
-        let table_name = match event
-            .keys
-            .get(1)
-            .and_then(|k| parse_cairo_short_string(k).ok())
-        {
+        let table_name = match event.keys.get(1).and_then(|k| k.as_short_ascii_str().ok()) {
             Some(name) => name,
             None => return Ok(Vec::new()),
         };
@@ -126,18 +111,18 @@ impl Decoder for SqlDecoder {
             None => return Ok(Vec::new()),
         };
 
-        let (body, operation): (Box<dyn TypedBody>, &str) = if *selector == insert_selector {
+        let (body, operation): (Box<dyn TypedBody>, &str) = if *selector == INSERT_SELECTOR {
             (
                 Box::new(SqlInsert {
-                    table: table_name.clone(),
+                    table: table_name.to_string(),
                     value,
                 }),
                 "insert",
             )
-        } else if *selector == update_selector {
+        } else if *selector == UPDATE_SELECTOR {
             (
                 Box::new(SqlUpdate {
-                    table: table_name.clone(),
+                    table: table_name.to_string(),
                     value,
                 }),
                 "update",
@@ -151,12 +136,10 @@ impl Decoder for SqlDecoder {
             return Ok(Vec::new());
         };
 
-        // Create metadata, they are optional, but currently they can give more context to the envelope
-        // without adding this information to the envelope body.
         let mut metadata = HashMap::new();
         metadata.insert("source".to_string(), "starknet".to_string());
         metadata.insert("operation".to_string(), operation.to_string());
-        metadata.insert("table".to_string(), table_name.clone());
+        metadata.insert("table".to_string(), table_name.to_string());
         metadata.insert("value".to_string(), value.to_string());
         metadata.insert(
             "from_address".to_string(),
@@ -168,5 +151,31 @@ impl Decoder for SqlDecoder {
             body,
             metadata,
         )])
+    }
+}
+
+/// Implementation of the Decoder trait for generic usage (not specific to the SQL sink).
+#[async_trait]
+impl Decoder for SqlDecoder {
+    fn decoder_name(&self) -> &'static str {
+        "sql"
+    }
+
+    async fn decode(
+        &self,
+        keys: &[Felt],
+        data: &[Felt],
+        context: EventContext,
+    ) -> anyhow::Result<Vec<Envelope>> {
+        let event = EmittedEvent {
+            from_address: context.from_address,
+            keys: keys.to_vec(),
+            data: data.to_vec(),
+            block_hash: None,
+            block_number: Some(context.block_number),
+            transaction_hash: context.transaction_hash,
+        };
+
+        SqlDecoder::decode(self, &event).await
     }
 }

@@ -1,88 +1,129 @@
-# Torii ECS Sink
+# torii-ecs-sink
 
-`torii-ecs-sink` exposes the legacy `world.World` gRPC API on top of the data already indexed by `torii-introspect`.
+Serves the **legacy `world.World` gRPC API** on top of the data already
+persisted by `introspect-sql-sink`. It is the compatibility shim that lets
+existing Dojo clients (Cartridge UI, dojo.js SDK) talk to the refactored
+Torii pipeline.
 
-## What It Serves
+## Role in Torii
 
-The sink mounts these legacy RPCs into `torii-server` on the same gRPC port:
+Dojo worlds emit introspect events that `introspect-sql-sink` turns into
+relational rows. `torii-ecs-sink` consumes the same `DojoEvent` stream but
+only cares about two things: classifying each table as an *entity* or
+*event-message*, and handling runtime registration of external contracts
+(ERC20/ERC721/ERC1155) so the `EcsService` can enrich its responses. It
+does not write business data; it reads from the introspect tables populated
+earlier in the sink pipeline to answer `RetrieveEntities`,
+`RetrieveEventMessages`, `RetrieveEvents`, and the matching subscription
+streams.
 
-- `Worlds`
-- `RetrieveEntities`
-- `RetrieveEventMessages`
-- `RetrieveEvents`
-- `SubscribeContracts`
-- `SubscribeEntities`
-- `SubscribeEventMessages`
-- `SubscribeEvents`
-- `UpdateEntitiesSubscription`
-- `UpdateEventMessagesSubscription`
+## Architecture
 
-The read path is backed by:
-
-- `torii_dojo_manager_state` for Dojo table metadata
-- `torii_ecs_entity_meta` and `torii_ecs_entity_models` for entity and event-message snapshots
-- `torii_ecs_events` for raw events
-- `torii_ecs_table_kinds` for entity vs event-message classification
-
-## Manual Validation
-
-With `torii-server` running on the default port:
-
-```bash
-grpcurl -plaintext localhost:3000 list
-grpcurl -plaintext localhost:3000 describe world.World
-grpcurl -plaintext -d '{}' localhost:3000 world.World/Worlds
-grpcurl -max-time 10 -plaintext -d '{"query":{"pagination":{"limit":1,"direction":"FORWARD"}}}' localhost:3000 world.World/RetrieveEvents
+```text
+DojoDecoder (torii-dojo)
+        |
+        v  DojoBody { DojoEvent::Introspect(...) | DojoEvent::External(...) }
+        |
++----------------------------------------------+
+|                   EcsSink                    |
+|                                              |
+|  process(envelopes, batch):                  |
+|    - IntrospectMsg → update table_kind cache |
+|      (entity | event_message)                |
+|    - ExternalContractRegistered → dispatch   |
+|      RegisterExternalContractCommand on the  |
+|      command bus (if indexing enabled)       |
+|                                              |
+|  installed_external_decoders: HashSet<Id>    |
+|  contract_types: SharedContractTypeRegistry  |
++----------------------+-----------------------+
+                       |
+                       v
++----------------------------------------------+
+|                  EcsService                  |
+|                                              |
+|  sqlx pools: world + optional erc20/721/1155 |
+|  tables: torii_dojo_manager_state,           |
+|          torii_ecs_entity_meta,              |
+|          torii_ecs_entity_models,            |
+|          torii_ecs_events,                   |
+|          torii_ecs_table_kinds               |
+|                                              |
+|  gRPC server: world.World                    |
+|    - Worlds                                  |
+|    - RetrieveEntities                        |
+|    - RetrieveEventMessages                   |
+|    - RetrieveEvents                          |
+|    - SubscribeContracts                      |
+|    - SubscribeEntities                       |
+|    - SubscribeEventMessages                  |
+|    - SubscribeEvents                         |
+|    - UpdateEntitiesSubscription              |
+|    - UpdateEventMessagesSubscription         |
++----------------------------------------------+
 ```
 
-Important:
+## Deep Dive
 
-- `RetrieveEntities` only returns models classified as `entity`
-- `RetrieveEventMessages` only returns models classified as `event_message`
-- a model such as `ARCADE-Sale` can be valid for `RetrieveEventMessages` and intentionally return nothing from `RetrieveEntities`
+### Public API
 
-## End-to-End Test Script
+| Item | File | Line | Purpose |
+|---|---|---|---|
+| `EcsSink` | `src/sink.rs` | 23 | Sink wrapping `EcsService` + the shared contract-type registry |
+| `EcsSink::new(db_url, max_conns, erc20?, erc721?, erc1155?, types_registry, from_block, enable_indexing, installed_decoders)` | `src/sink.rs` | 33 | Multi-URL constructor |
+| `EcsSink::get_grpc_service_impl` | `src/sink.rs` | 63 | Returns `Arc<EcsService>` for `with_grpc_router` |
+| `EcsService` | `src/grpc_service.rs` | — | Tonic impl of `world.World` |
+| `TableKind` | `src/grpc_service.rs` | — | `Entity` / `EventMessage` classifier |
+| `FILE_DESCRIPTOR_SET` | `src/lib.rs` | — | `world.proto` + `types.proto` descriptor bytes |
 
-The repository ships a runnable script at `./scripts/test-ecs-grpc-e2e.sh`.
+### Internal Modules
 
-From the repository root:
+- `lib.rs` — re-exports + generated `world`, `types`, reflection bytes.
+- `sink.rs` — `Sink` impl; consumes `DojoEvent::Introspect` for `TableKind` classification, `DojoEvent::External` for external-contract registration (dispatched via `CommandBusSender` → `RegisterExternalContractCommand`).
+- `grpc_service.rs` — `EcsService`; pagination, subscription streams, cross-DB joins between introspect + token tables.
+
+### Sink trait wiring
+
+| Method | Behavior |
+|---|---|
+| `name` | `"ecs"` |
+| `interested_types` | `[DOJO_TYPE_ID]` |
+| `process(envelopes, batch)` | Downcasts each envelope to `DojoBody`; for `IntrospectMsg::CreateTable/RenameTable/DropTable` updates `torii_ecs_table_kinds`; for `ExternalContractRegistered` dispatches `RegisterExternalContractCommand` through the `CommandBusSender` captured at `initialize` |
+| `topics` | Empty — uses gRPC subscription streams directly, not the central EventBus |
+| `build_routes` | `Router::new()` — gRPC only |
+| `initialize(event_bus, ctx)` | Captures `ctx.command_bus` into its `RwLock<Option<CommandBusSender>>` so `process` can dispatch commands |
+
+### Storage (reads only — writes via introspect-sql-sink)
+
+- `torii_dojo_manager_state` — Dojo table metadata
+- `torii_ecs_entity_meta` — entity snapshots
+- `torii_ecs_entity_models` — per-entity model rows
+- `torii_ecs_events` — raw events
+- `torii_ecs_table_kinds` — `entity` vs `event_message` classification
+
+**Gotcha**: `RetrieveEntities` only returns tables classified as `entity`; `RetrieveEventMessages` only returns `event_message`. A model like `ARCADE-Sale` can be a valid `event_message` and intentionally return nothing from `RetrieveEntities`.
+
+### Interactions
+
+- **Upstream (consumers)**: `bins/torii-introspect-bin`, `bins/torii-arcade`.
+- **Downstream deps**: `torii`, `torii-dojo`, `torii-introspect`, `torii-runtime-common`, `torii-sql`, `sqlx`, `tonic`, `prost`, `starknet-types-raw`, `tokio`, `async-trait`, `tracing`, `metrics`, `hex`.
+
+### End-to-end validation
+
+Run the bundled script against a live `torii-server`:
 
 ```bash
-./scripts/test-ecs-grpc-e2e.sh
-```
-
-By default the script:
-
-- targets `localhost:3000`
-- reads sqlite state from `./torii-data/introspect.db`
-- autodiscovers one world that has both `entity` and `event_message` models
-- validates reflection, `Worlds`, `RetrieveEntities`, `RetrieveEventMessages`, and `RetrieveEvents`
-
-For Postgres-backed deployments, set `DB_URL` or `DATABASE_URL` to the same storage database used by `torii-server`. The script will use `psql` for metadata discovery instead of `sqlite3`.
-
-### Environment Overrides
-
-You can override discovery when needed:
-
-```bash
-GRPC_ADDR=localhost:3000 \
-DB_PATH=./torii-data/introspect.db \
-WORLD_ADDRESS=0x7a079295990e43441a7389fdc3b9ba063c6cd6aee16fb846f598c42a9f04ff7 \
-ENTITY_MODEL=ARCADE-Order \
-EVENT_MESSAGE_MODEL=ARCADE-Sale \
-./scripts/test-ecs-grpc-e2e.sh
-```
-
-If `WORLD_ADDRESS`, `ENTITY_MODEL`, and `EVENT_MESSAGE_MODEL` are provided, the script does not need sqlite introspection metadata to choose test cases.
-
-Postgres example:
-
-```bash
-GRPC_ADDR=localhost:3000 \
+./scripts/test-ecs-grpc-e2e.sh                     # auto-discovers via SQLite
 DB_URL=postgres://torii:torii@localhost:5432/torii \
-./scripts/test-ecs-grpc-e2e.sh
+  ./scripts/test-ecs-grpc-e2e.sh                    # Postgres-backed
 ```
 
-## Kulala
+Overrides: `GRPC_ADDR`, `DB_PATH`, `WORLD_ADDRESS`, `ENTITY_MODEL`, `EVENT_MESSAGE_MODEL`.
 
-For editor-driven checks, the crate also includes `./crates/torii-ecs-sink/ecs-grpc.http`.
+Editor-driven checks: `crates/torii-ecs-sink/ecs-grpc.http` (Kulala-compatible).
+
+### Extension Points
+
+- New RPCs → `proto/world.proto` + `EcsService`. Keep the stable `world.World` service name — dojo.js depends on it.
+- Cross-DB joins → widen `EcsService::new` with a new URL parameter and a new pool. The sink already uses one pool per token standard.
+- Avoid adding writes here. Writes belong in `introspect-sql-sink`; this sink is the *read* facade.

@@ -1,8 +1,10 @@
 use async_trait::async_trait;
-use axum::{body::Body, http::Request, Router};
+use axum::body::Body;
+use axum::http::Request;
+use axum::Router;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use starknet::core::types::{EmittedEvent, Felt, U256};
-use starknet::macros::selector;
+use primitive_types::U256;
+use starknet_types_raw::Felt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,16 +18,17 @@ use torii::etl::engine_db::{EngineDb, EngineDbConfig};
 use torii::etl::envelope::{Envelope, TypeId, TypedBody};
 use torii::etl::extractor::{ExtractionBatch, RetryPolicy};
 use torii::etl::sink::{EventBus, MultiSink, Sink, SinkContext, TopicInfo};
-use torii::etl::Decoder;
-use torii::grpc::{proto::TopicSubscription, SubscriptionManager};
+use torii::etl::{Decoder, StarknetEvent};
+use torii::grpc::proto::TopicSubscription;
+use torii::grpc::SubscriptionManager;
 use torii::http::create_http_router;
 use torii_common::{blob_to_felt, blob_to_u256, felt_to_blob, u256_to_blob};
 use torii_erc1155::decoder::Erc1155Decoder;
-use torii_erc20::{
-    decoder::Erc20Decoder,
-    storage::{Erc20Storage, TransferData, TransferDirection},
-};
+use torii_erc20::decoder::Erc20Decoder;
+use torii_erc20::storage::{Erc20Storage, TransferData, TransferDirection};
 use torii_erc721::decoder::Erc721Decoder;
+
+const TRANSFER_SELECTOR: Felt = Felt::selector("Transfer");
 
 #[derive(Debug)]
 struct BenchBody {
@@ -57,15 +60,20 @@ impl Decoder for MockDecoder {
         self.name
     }
 
-    async fn decode_event(&self, event: &EmittedEvent) -> anyhow::Result<Vec<Envelope>> {
-        if event.from_address != self.contract {
+    async fn decode(
+        &self,
+        _keys: &[Felt],
+        _data: &[Felt],
+        context: torii::etl::EventContext,
+    ) -> anyhow::Result<Vec<Envelope>> {
+        if context.from_address != self.contract {
             return Ok(Vec::new());
         }
 
         Ok(vec![Envelope::new(
-            format!("{}:{}", self.name, event.block_number.unwrap_or_default()),
+            format!("{}:{}", self.name, context.block_number),
             Box::new(BenchBody {
-                value: event.block_number.unwrap_or_default(),
+                value: context.block_number,
             }),
             HashMap::new(),
         )])
@@ -131,43 +139,41 @@ fn make_engine_db(rt: &Runtime) -> EngineDb {
     })
 }
 
-fn make_erc20_transfer_event(seed: u64) -> EmittedEvent {
-    EmittedEvent {
+fn make_erc20_transfer_event(seed: u64) -> StarknetEvent {
+    StarknetEvent {
         from_address: Felt::from(0x1000 + seed),
         keys: vec![
-            selector!("Transfer"),
+            TRANSFER_SELECTOR,
             Felt::from(0x2000 + seed),
             Felt::from(0x3000 + seed),
         ],
         data: vec![Felt::from(10_000 + seed), Felt::ZERO],
-        block_hash: None,
-        block_number: Some(1_000_000 + seed),
+        block_number: 1_000_000 + seed,
         transaction_hash: Felt::from(0x4000 + seed),
     }
 }
 
-fn make_erc721_transfer_event(seed: u64) -> EmittedEvent {
-    EmittedEvent {
+fn make_erc721_transfer_event(seed: u64) -> StarknetEvent {
+    StarknetEvent {
         from_address: Felt::from(0x1100 + seed),
         keys: vec![
-            selector!("Transfer"),
+            TRANSFER_SELECTOR,
             Felt::from(0x2200 + seed),
             Felt::from(0x3300 + seed),
             Felt::from(seed),
             Felt::ZERO,
         ],
         data: vec![],
-        block_hash: None,
-        block_number: Some(2_000_000 + seed),
+        block_number: 2_000_000 + seed,
         transaction_hash: Felt::from(0x4400 + seed),
     }
 }
 
-fn make_erc1155_transfer_single_event(seed: u64) -> EmittedEvent {
-    EmittedEvent {
+fn make_erc1155_transfer_single_event(seed: u64) -> StarknetEvent {
+    StarknetEvent {
         from_address: Felt::from(0x1200 + seed),
         keys: vec![
-            selector!("TransferSingle"),
+            TRANSFER_SELECTOR,
             Felt::from(0x2300 + seed),
             Felt::from(0x3400 + seed),
             Felt::from(0x4500 + seed),
@@ -178,21 +184,26 @@ fn make_erc1155_transfer_single_event(seed: u64) -> EmittedEvent {
             Felt::from(100 + seed),
             Felt::ZERO,
         ],
-        block_hash: None,
-        block_number: Some(3_000_000 + seed),
+        block_number: 3_000_000 + seed,
         transaction_hash: Felt::from(0x4600 + seed),
     }
 }
 
-fn make_context_event(contract: Felt, seed: u64) -> EmittedEvent {
-    EmittedEvent {
+fn make_context_event(contract: Felt, seed: u64) -> StarknetEvent {
+    StarknetEvent {
         from_address: contract,
-        keys: vec![selector!("Transfer")],
+        keys: vec![TRANSFER_SELECTOR],
         data: Vec::new(),
-        block_hash: None,
-        block_number: Some(10_000 + seed),
+        block_number: 10_000 + seed,
         transaction_hash: Felt::from(0x5000 + seed),
     }
+}
+
+fn primitive_u256_from_words(low: u128, high: u128) -> U256 {
+    let mut bytes = [0_u8; 32];
+    bytes[..16].copy_from_slice(&low.to_le_bytes());
+    bytes[16..].copy_from_slice(&high.to_le_bytes());
+    U256::from_little_endian(&bytes)
 }
 
 fn make_transfer_batch(size: usize, offset: u64) -> Vec<TransferData> {
@@ -204,7 +215,7 @@ fn make_transfer_batch(size: usize, offset: u64) -> Vec<TransferData> {
                 token: Felt::from(0x5000 + ((i + offset) % 4)),
                 from: Felt::from(0x6000 + ((i + offset) % 1024)),
                 to: Felt::from(0x7000 + ((i + offset + 7) % 1024)),
-                amount: U256::from_words((i + offset) as u128, 0),
+                amount: primitive_u256_from_words((i + offset) as u128, 0),
                 block_number: 4_000_000 + i + offset,
                 tx_hash: Felt::from(0x8000 + i + offset),
                 timestamp: None,
@@ -253,7 +264,7 @@ fn benchmark_common_conversions(c: &mut Criterion) {
     group.bench_function("felt_roundtrip", |b| {
         b.iter(|| {
             let blob = felt_to_blob(black_box(felt));
-            black_box(blob_to_felt(black_box(&blob)))
+            black_box(blob_to_felt::<Felt>(black_box(&blob)))
         });
     });
 
@@ -261,15 +272,15 @@ fn benchmark_common_conversions(c: &mut Criterion) {
     group.bench_function("u256_roundtrip_small", |b| {
         b.iter(|| {
             let blob = u256_to_blob(black_box(small));
-            black_box(blob_to_u256(black_box(&blob)))
+            black_box(blob_to_u256::<U256>(black_box(&blob)))
         });
     });
 
-    let large = U256::from_words(u128::MAX - 7, u128::MAX - 11);
+    let large = primitive_u256_from_words(u128::MAX - 7, u128::MAX - 11);
     group.bench_function("u256_roundtrip_large", |b| {
         b.iter(|| {
             let blob = u256_to_blob(black_box(large));
-            black_box(blob_to_u256(black_box(&blob)))
+            black_box(blob_to_u256::<U256>(black_box(&blob)))
         });
     });
 
@@ -325,7 +336,7 @@ fn benchmark_decoders(c: &mut Criterion) {
         b.to_async(&rt).iter(|| async {
             black_box(
                 erc20_decoder
-                    .decode(black_box(&batch_events))
+                    .decode_events(black_box(&batch_events))
                     .await
                     .expect("erc20 batch decode failed"),
             )
@@ -435,7 +446,7 @@ fn benchmark_decoder_context(c: &mut Criterion) {
         b.to_async(&rt).iter(|| async {
             black_box(
                 context_registry
-                    .decode(black_box(&batch_events))
+                    .decode_events(black_box(&batch_events))
                     .await
                     .expect("context batch decode failed"),
             )

@@ -2,13 +2,11 @@ use std::fmt::Display;
 
 use introspect_types::{Attribute, PrimaryDef, PrimaryTypeDef};
 use itertools::Itertools;
-use sqlx::{
-    encode::IsNull,
-    error::BoxDynError,
-    postgres::{PgArgumentBuffer, PgHasArrayType, PgTypeInfo, PgValueRef},
-    types::{BigDecimal, Json},
-    Decode, Encode, Postgres, Type,
-};
+use sqlx::encode::IsNull;
+use sqlx::error::BoxDynError;
+use sqlx::postgres::{PgArgumentBuffer, PgHasArrayType, PgTypeInfo, PgValueRef};
+use sqlx::types::{BigDecimal, Json};
+use sqlx::{Decode, Encode, Postgres, Type};
 use starknet_types_core::felt::Felt;
 
 #[derive(sqlx::Type, Debug)]

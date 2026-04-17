@@ -1,16 +1,19 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use primitive_types::U256;
 use prost::Message;
 use prost_types::Any;
-use starknet::core::types::Felt;
 use starknet::providers::jsonrpc::{HttpTransport, JsonRpcClient};
+use starknet_types_raw::Felt;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use torii::command::CommandHandler;
 use torii::etl::sink::EventBus;
 use torii::UpdateType;
-use torii_common::{process_token_uri_request, u256_to_bytes, MetadataFetcher, TokenUriRequest};
+use torii_common::{
+    bytes_to_u256, process_token_uri_request, u256_to_bytes, MetadataFetcher, TokenUriRequest,
+};
 
 use crate::proto;
 use crate::storage::Erc1155Storage;
@@ -23,7 +26,7 @@ pub struct FetchErc1155MetadataCommand {
 #[derive(Debug, Clone)]
 pub struct RefreshErc1155TokenUriCommand {
     pub contract: Felt,
-    pub token_id: starknet::core::types::U256,
+    pub token_id: U256,
 }
 
 pub struct Erc1155MetadataCommandHandler {
@@ -98,14 +101,15 @@ impl CommandHandler for Erc1155MetadataCommandHandler {
                     command.token,
                     meta.name.as_deref(),
                     meta.symbol.as_deref(),
-                    meta.total_supply,
+                    meta.total_supply
+                        .map(|value| bytes_to_u256(&u256_to_bytes(value))),
                 )
                 .await?;
 
             let event_bus = self.event_bus.lock().unwrap().clone();
             if let Some(event_bus) = event_bus {
                 let meta_entry = proto::TokenMetadataEntry {
-                    token: command.token.to_bytes_be().to_vec(),
+                    token: command.token.to_be_bytes_vec(),
                     name: meta.name,
                     symbol: meta.symbol,
                     total_supply: meta.total_supply.map(u256_to_bytes),
@@ -142,7 +146,7 @@ pub struct Erc1155TokenUriCommandHandler {
     fetcher: Arc<MetadataFetcher>,
     storage: Arc<Erc1155Storage>,
     image_cache_dir: Option<PathBuf>,
-    in_flight: Mutex<HashSet<(Felt, starknet::core::types::U256)>>,
+    in_flight: Mutex<HashSet<(Felt, U256)>>,
 }
 
 impl Erc1155TokenUriCommandHandler {
@@ -193,7 +197,7 @@ impl CommandHandler for Erc1155TokenUriCommandHandler {
             self.storage.as_ref(),
             &TokenUriRequest {
                 contract: command.contract,
-                token_id: command.token_id,
+                token_id: bytes_to_u256(&u256_to_bytes(command.token_id)),
                 standard: torii_common::TokenStandard::Erc1155,
             },
             self.image_cache_dir.as_deref(),

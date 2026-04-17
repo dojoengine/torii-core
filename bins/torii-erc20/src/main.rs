@@ -38,7 +38,7 @@ use torii::etl::decoder::DecoderId;
 use torii::etl::extractor::{BlockRangeConfig, BlockRangeExtractor};
 use torii_runtime_common::database::resolve_single_db_setup;
 #[cfg(feature = "profiling")]
-use torii_runtime_common::database::{backend_from_url_or_path, DatabaseBackend};
+use torii_sql::DbBackend;
 
 // Import from the library crate
 use torii_erc20::proto::erc20_server::Erc20Server;
@@ -89,7 +89,8 @@ async fn main() -> Result<()> {
 
     // Create storage
     let db_setup = resolve_single_db_setup(&config.db_path, config.database_url.as_deref());
-    let storage = Arc::new(Erc20Storage::new(&db_setup.storage_url).await?);
+    let erc20_pool = Erc20Storage::connect_pool(&db_setup.storage_url).await?;
+    let storage = Arc::new(Erc20Storage::from_pool(&db_setup.storage_url, erc20_pool).await?);
     tracing::info!("Database initialized");
 
     // Create Starknet provider
@@ -164,14 +165,14 @@ async fn main() -> Result<()> {
     let erc20_decoder_id = DecoderId::new("erc20");
     for (address, name) in config.well_known_contracts() {
         tracing::info!("Mapping {} at {:#x} to ERC20 decoder", name, address);
-        torii_config = torii_config.map_contract(address, vec![erc20_decoder_id]);
+        torii_config = torii_config.map_contract(address.into(), vec![erc20_decoder_id]);
     }
 
     // Add custom contracts with explicit mappings
     for contract_str in &config.contracts {
         let address = Felt::from_hex(contract_str)?;
         tracing::info!("Mapping custom contract {:#x} to ERC20 decoder", address);
-        torii_config = torii_config.map_contract(address, vec![erc20_decoder_id]);
+        torii_config = torii_config.map_contract(address.into(), vec![erc20_decoder_id]);
     }
 
     // Log mode: no_auto_discovery affects whether unmapped contracts are tried
@@ -219,10 +220,10 @@ async fn main() -> Result<()> {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let db_backend = match backend_from_url_or_path(&db_setup.storage_url) {
-                DatabaseBackend::Postgres => "postgres",
-                DatabaseBackend::Sqlite => "sqlite",
-            };
+            let db_backend = db_setup
+                .storage_url
+                .parse::<DbBackend>()
+                .map_err(anyhow::Error::new)?;
             let filename = format!("flamegraph-torii-erc20-block-range-{db_backend}-{ts}.svg");
             let file = std::fs::File::create(&filename).unwrap();
             report.flamegraph(file).unwrap();
