@@ -1671,38 +1671,43 @@ impl Erc20Storage {
         transfers: &[TransferData],
         current_balances: &HashMap<(Felt, Felt), U256>,
     ) -> Vec<BalanceFetchRequest> {
-        let mut pending_debits: HashMap<(Felt, Felt), U256> = HashMap::new();
+        let mut running_balances = current_balances.clone();
         let mut adjustment_requests = Vec::new();
         let mut requested_keys: HashSet<(Felt, Felt, u64)> = HashSet::new();
 
+        // Walk transfers in the provided batch order so credits earlier in the
+        // batch can fund debits later in the same batch.
         for transfer in transfers {
-            if transfer.from == Felt::ZERO {
-                continue;
+            if transfer.from != Felt::ZERO {
+                let key = (transfer.token, transfer.from);
+                let current = running_balances
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(U256::from(0u64));
+
+                if current >= transfer.amount {
+                    running_balances.insert(key, current - transfer.amount);
+                } else {
+                    let block_before = transfer.block_number.saturating_sub(1);
+                    let req_key = (transfer.token, transfer.from, block_before);
+                    if requested_keys.insert(req_key) {
+                        adjustment_requests.push(BalanceFetchRequest {
+                            token: transfer.token,
+                            wallet: transfer.from,
+                            block_number: block_before,
+                        });
+                    }
+                    running_balances.insert(key, U256::from(0u64));
+                }
             }
 
-            let key = (transfer.token, transfer.from);
-            let stored_balance = current_balances
-                .get(&key)
-                .copied()
-                .unwrap_or(U256::from(0u64));
-            let total_pending = pending_debits
-                .get(&key)
-                .copied()
-                .unwrap_or(U256::from(0u64));
-            let total_needed = total_pending + transfer.amount;
-
-            if stored_balance >= total_needed {
-                pending_debits.insert(key, total_needed);
-            } else {
-                let block_before = transfer.block_number.saturating_sub(1);
-                let req_key = (transfer.token, transfer.from, block_before);
-                if requested_keys.insert(req_key) {
-                    adjustment_requests.push(BalanceFetchRequest {
-                        token: transfer.token,
-                        wallet: transfer.from,
-                        block_number: block_before,
-                    });
-                }
+            if transfer.to != Felt::ZERO {
+                let key = (transfer.token, transfer.to);
+                let current = running_balances
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(U256::from(0u64));
+                running_balances.insert(key, safe_u256_add(current, transfer.amount));
             }
         }
 
@@ -3093,5 +3098,59 @@ impl Erc20Storage {
             None
         };
         Ok((out, next_cursor))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transfer(token: Felt, from: Felt, to: Felt, amount: u64, block_number: u64) -> TransferData {
+        TransferData {
+            id: None,
+            token,
+            from,
+            to,
+            amount: U256::from(amount),
+            block_number,
+            tx_hash: Felt::from(block_number),
+            timestamp: None,
+        }
+    }
+
+    #[test]
+    fn balance_adjustment_check_counts_in_batch_credits() {
+        let token = Felt::from(1u64);
+        let wallet = Felt::from(2u64);
+        let sender = Felt::from(3u64);
+        let receiver = Felt::from(4u64);
+
+        let transfers = vec![
+            transfer(token, sender, wallet, 100, 10),
+            transfer(token, wallet, receiver, 75, 11),
+        ];
+        let mut current_balances = HashMap::new();
+        current_balances.insert((token, sender), U256::from(100u64));
+
+        let requests = Erc20Storage::build_adjustment_requests(&transfers, &current_balances);
+
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn balance_adjustment_check_requests_when_sender_remains_underfunded() {
+        let token = Felt::from(1u64);
+        let wallet = Felt::from(2u64);
+        let receiver = Felt::from(3u64);
+
+        let transfers = vec![transfer(token, wallet, receiver, 75, 11)];
+        let current_balances = HashMap::new();
+
+        let requests = Erc20Storage::build_adjustment_requests(&transfers, &current_balances);
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].token, token);
+        assert_eq!(requests[0].wallet, wallet);
+        assert_eq!(requests[0].block_number, 10);
     }
 }

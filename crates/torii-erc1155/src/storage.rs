@@ -1115,6 +1115,59 @@ impl Erc1155Storage {
     ///
     /// For each transfer, checks if the sender's current balance would go negative.
     /// Returns Erc1155BalanceFetchRequests for wallets that need adjustment.
+    fn build_adjustment_requests(
+        transfers: &[TokenTransferData],
+        current_balances: HashMap<(Felt, Felt, U256), U256>,
+    ) -> Vec<Erc1155BalanceFetchRequest> {
+        let mut running_balances = current_balances;
+        let mut adjustment_requests = Vec::new();
+        let mut requested_keys: HashSet<(Felt, Felt, U256, u64)> = HashSet::new();
+
+        // Walk transfers in the provided batch order so credits earlier in the
+        // batch can fund debits later in the same batch.
+        for transfer in transfers {
+            if transfer.from != Felt::ZERO {
+                let key = (transfer.token, transfer.from, transfer.token_id);
+                let current = running_balances
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(U256::from(0u64));
+
+                if current >= transfer.amount {
+                    running_balances.insert(key, current - transfer.amount);
+                } else {
+                    let block_before = transfer.block_number.saturating_sub(1);
+                    let req_key = (
+                        transfer.token,
+                        transfer.from,
+                        transfer.token_id,
+                        block_before,
+                    );
+                    if requested_keys.insert(req_key) {
+                        adjustment_requests.push(Erc1155BalanceFetchRequest {
+                            contract: transfer.token,
+                            wallet: transfer.from,
+                            token_id: transfer.token_id,
+                            block_number: block_before,
+                        });
+                    }
+                    running_balances.insert(key, U256::from(0u64));
+                }
+            }
+
+            if transfer.to != Felt::ZERO {
+                let key = (transfer.token, transfer.to, transfer.token_id);
+                let current = running_balances
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(U256::from(0u64));
+                running_balances.insert(key, safe_u256_add(current, transfer.amount));
+            }
+        }
+
+        adjustment_requests
+    }
+
     pub async fn check_balances_batch(
         &self,
         transfers: &[TokenTransferData],
@@ -1136,59 +1189,7 @@ impl Erc1155Storage {
         // Get current balances for all senders
         let current_balances = self.get_balances_batch(&sender_tuples).await?;
 
-        // Track running balance changes within this batch
-        let mut pending_debits: HashMap<(Felt, Felt, U256), U256> = HashMap::new();
-
-        let mut adjustment_requests = Vec::new();
-
-        for transfer in transfers {
-            if transfer.from == Felt::ZERO {
-                continue; // Skip mints
-            }
-
-            let key = (transfer.token, transfer.from, transfer.token_id);
-
-            // Get current stored balance (default to 0)
-            let stored_balance = current_balances
-                .get(&key)
-                .copied()
-                .unwrap_or(U256::from(0u64));
-
-            // Add any pending debits from earlier in this batch
-            let total_pending = pending_debits
-                .get(&key)
-                .copied()
-                .unwrap_or(U256::from(0u64));
-
-            // Check if balance would go negative
-            let total_needed = total_pending + transfer.amount;
-
-            if stored_balance >= total_needed {
-                // Balance is sufficient, track the debit
-                pending_debits.insert(key, total_needed);
-            } else {
-                // Balance would go negative - need to fetch actual balance
-                let block_before = transfer.block_number.saturating_sub(1);
-                let already_requested =
-                    adjustment_requests
-                        .iter()
-                        .any(|r: &Erc1155BalanceFetchRequest| {
-                            r.contract == transfer.token
-                                && r.wallet == transfer.from
-                                && r.token_id == transfer.token_id
-                                && r.block_number == block_before
-                        });
-
-                if !already_requested {
-                    adjustment_requests.push(Erc1155BalanceFetchRequest {
-                        contract: transfer.token,
-                        wallet: transfer.from,
-                        token_id: transfer.token_id,
-                        block_number: block_before,
-                    });
-                }
-            }
-        }
+        let adjustment_requests = Self::build_adjustment_requests(transfers, current_balances);
 
         if !adjustment_requests.is_empty() {
             tracing::info!(
@@ -3432,5 +3433,72 @@ fn sanitize_metadata_text(input: &str) -> Option<String> {
         None
     } else {
         Some(sanitized)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transfer(
+        token: Felt,
+        from: Felt,
+        to: Felt,
+        token_id: u64,
+        amount: u64,
+        block_number: u64,
+    ) -> TokenTransferData {
+        TokenTransferData {
+            id: None,
+            token,
+            operator: Felt::from(99u64),
+            from,
+            to,
+            token_id: U256::from(token_id),
+            amount: U256::from(amount),
+            is_batch: false,
+            batch_index: 0,
+            block_number,
+            tx_hash: Felt::from(block_number),
+            timestamp: None,
+        }
+    }
+
+    #[test]
+    fn balance_adjustment_check_counts_in_batch_credits() {
+        let token = Felt::from(1u64);
+        let wallet = Felt::from(2u64);
+        let sender = Felt::from(3u64);
+        let receiver = Felt::from(4u64);
+        let token_id = U256::from(7u64);
+
+        let transfers = vec![
+            transfer(token, sender, wallet, 7, 100, 10),
+            transfer(token, wallet, receiver, 7, 75, 11),
+        ];
+        let mut current_balances = HashMap::new();
+        current_balances.insert((token, sender, token_id), U256::from(100u64));
+
+        let requests = Erc1155Storage::build_adjustment_requests(&transfers, current_balances);
+
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn balance_adjustment_check_requests_when_sender_remains_underfunded() {
+        let token = Felt::from(1u64);
+        let wallet = Felt::from(2u64);
+        let receiver = Felt::from(3u64);
+
+        let transfers = vec![transfer(token, wallet, receiver, 7, 75, 11)];
+        let current_balances = HashMap::new();
+
+        let requests = Erc1155Storage::build_adjustment_requests(&transfers, current_balances);
+
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].contract, token);
+        assert_eq!(requests[0].wallet, wallet);
+        assert_eq!(requests[0].token_id, U256::from(7u64));
+        assert_eq!(requests[0].block_number, 10);
     }
 }
