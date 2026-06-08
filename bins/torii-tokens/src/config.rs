@@ -190,6 +190,14 @@ pub struct Config {
     #[arg(long, default_value = "5")]
     pub metadata_max_retries: u8,
 
+    /// Disable ERC20/ERC1155 balance tracking and on-chain balance verification.
+    ///
+    /// Transfer and metadata indexing remain enabled. Use this for global
+    /// high-volume indexers where per-wallet balance correction RPC calls are
+    /// too expensive or unnecessary.
+    #[arg(long)]
+    pub disable_balance_tracking: bool,
+
     /// Metadata fetching mode.
     ///
     /// If omitted: defaults to `inline`.
@@ -267,12 +275,14 @@ mod tests {
             "4096",
             "--metadata-max-retries",
             "5",
+            "--disable-balance-tracking",
         ]);
         assert_eq!(cfg.max_prefetch_batches, 4);
         assert_eq!(cfg.rpc_parallelism, 6);
         assert_eq!(cfg.metadata_parallelism, 12);
         assert_eq!(cfg.metadata_queue_capacity, 4096);
         assert_eq!(cfg.metadata_max_retries, 5);
+        assert!(cfg.disable_balance_tracking);
     }
 
     #[test]
