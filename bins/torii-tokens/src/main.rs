@@ -552,16 +552,17 @@ async fn run_indexer(config: Config) -> Result<()> {
                 storage.clone(),
                 config.metadata_max_retries,
             )));
-        let sink = Box::new(
-            Erc20Sink::new(storage)
-                .with_grpc_service(grpc_service.clone())
-                .with_balance_tracking(provider.clone())
-                .with_metadata_pipeline(
-                    config.metadata_parallelism,
-                    config.metadata_queue_capacity,
-                    config.metadata_max_retries,
-                ),
-        );
+        let mut sink = Erc20Sink::new(storage).with_grpc_service(grpc_service.clone());
+        if config.disable_balance_tracking {
+            tracing::info!("ERC20 balance tracking disabled");
+        } else {
+            sink = sink.with_balance_tracking(provider.clone());
+        }
+        let sink = Box::new(sink.with_metadata_pipeline(
+            config.metadata_parallelism,
+            config.metadata_queue_capacity,
+            config.metadata_max_retries,
+        ));
         torii_config = torii_config.add_sink_boxed(sink);
 
         erc20_grpc_service = Some(grpc_service);
@@ -651,9 +652,12 @@ async fn run_indexer(config: Config) -> Result<()> {
         torii_config = torii_config.with_command_handler(Box::new(
             Erc1155MetadataCommandHandler::new(provider.clone(), storage.clone()),
         ));
-        let mut sink = Erc1155Sink::new(storage)
-            .with_grpc_service(grpc_service.clone())
-            .with_balance_tracking(provider.clone());
+        let mut sink = Erc1155Sink::new(storage).with_grpc_service(grpc_service.clone());
+        if config.disable_balance_tracking {
+            tracing::info!("ERC1155 balance tracking disabled");
+        } else {
+            sink = sink.with_balance_tracking(provider.clone());
+        }
         if effective_metadata_mode == MetadataMode::Inline {
             let (token_uri_sender, token_uri_service) = TokenUriService::spawn_with_image_cache(
                 Arc::new(MetadataFetcher::new(provider.clone())),

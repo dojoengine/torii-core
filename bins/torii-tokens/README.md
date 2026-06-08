@@ -107,6 +107,9 @@ Notes:
 
 - `--rpc-parallelism`: concurrent chunked RPC requests (`0` = auto).
 - `--max-prefetch-batches`: extracted batches buffered ahead of decode/store.
+- `--disable-balance-tracking`: skip ERC20/ERC1155 on-chain balance correction
+  calls while still indexing transfers, metadata, and ownership. Useful for
+  global high-volume indexers where balance tables are not required.
 - `--metadata-mode deferred`: reduce metadata-side RPC/load during backfill.
 - `--metadata-parallelism`, `--metadata-queue-capacity`, `--metadata-max-retries` control async metadata workers (ERC20), queue depth, and capped retry attempts.
 - `--metadata-queue-capacity` also controls the token-URI request queue for ERC721/ERC1155 in `inline` mode (increase this if you see `Dropping token URI requests: queue is full`).
@@ -131,6 +134,7 @@ Notes:
 | `--event-block-batch-size` | `10000` | Block range per iteration (event mode) |
 | `--max-prefetch-batches` | `2` | Number of extracted batches prefetched ahead |
 | `--rpc-parallelism` | `0` | Concurrent chunked RPC requests (`0` = auto) |
+| `--disable-balance-tracking` | `false` | Disable ERC20/ERC1155 balance tables and on-chain balance correction calls |
 | `--metadata-mode` | `inline` | Metadata behavior (`inline` or `deferred`) |
 | `--metadata-parallelism` | `8` | Async metadata workers (ERC20 metadata pipeline) |
 | `--metadata-queue-capacity` | `2048` | Metadata queue size (ERC20 metadata jobs + ERC721/ERC1155 token-URI request queue in `inline` mode) |
